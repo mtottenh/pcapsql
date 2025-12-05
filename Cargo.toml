@@ -1,0 +1,47 @@
+[package]
+name = "pcapsql"
+version = "0.1.0"
+edition = "2021"
+description = "Query PCAP files using SQL syntax"
+license = "MIT"
+authors = ["pcapsql contributors"]
+
+[dependencies]
+# PCAP file parsing
+pcap-parser = "0.15"
+
+# Packet protocol parsing
+etherparse = "0.15"
+
+# SQL engine (Arrow-native)
+datafusion = "43"
+arrow = "53"
+parquet = "53"
+
+# CLI and REPL
+clap = { version = "4", features = ["derive"] }
+rustyline = "14"
+
+# Output formatting
+comfy-table = "7"
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+
+# Async runtime (required by DataFusion)
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+# Error handling
+thiserror = "1"
+anyhow = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Misc
+dirs = "5"
+async-trait = "0.1"
+
+[dev-dependencies]
+tempfile = "3"
+hex = "0.4"
