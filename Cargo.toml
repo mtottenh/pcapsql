@@ -41,6 +41,13 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Misc
 dirs = "5"
 async-trait = "0.1"
+futures = "0.3"
+
+# Compression
+flate2 = "1"
+
+# Progress bar
+indicatif = "0.17"
 
 [dev-dependencies]
 tempfile = "3"

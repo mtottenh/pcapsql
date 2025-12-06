@@ -43,10 +43,16 @@ async fn main() -> Result<()> {
         .file
         .context("PCAP file required. Use --help for usage.")?;
 
-    // Create query engine
-    let engine = QueryEngine::new(&pcap_file, args.batch_size)
-        .await
-        .with_context(|| format!("Failed to open PCAP file: {}", pcap_file.display()))?;
+    // Create query engine - streaming mode or eager loading
+    let engine = if args.streaming {
+        QueryEngine::with_streaming(&pcap_file, args.batch_size)
+            .await
+            .with_context(|| format!("Failed to open PCAP file: {}", pcap_file.display()))?
+    } else {
+        QueryEngine::with_progress(&pcap_file, args.batch_size, args.progress)
+            .await
+            .with_context(|| format!("Failed to open PCAP file: {}", pcap_file.display()))?
+    };
 
     let formatter = OutputFormatter::new(args.format);
 
@@ -297,6 +303,7 @@ fn print_help() {
 fn print_tables() {
     println!("Tables:");
     println!("  packets - Unified packet view with common fields");
+    println!("  frames  - Raw frame data (frame_number, timestamp, length, original_length, link_type, raw_data)");
     println!();
     println!("Views (filtered subsets of packets):");
     println!("  tcp     - TCP packets only");
@@ -304,4 +311,8 @@ fn print_tables() {
     println!("  icmp    - ICMP packets only");
     println!("  arp     - ARP packets only");
     println!("  dns     - DNS packets (port 53)");
+    println!("  dhcp    - DHCP packets (ports 67, 68)");
+    println!("  ntp     - NTP packets (port 123)");
+    println!("  http    - HTTP packets (ports 80, 8080)");
+    println!("  tls     - TLS/HTTPS packets (port 443)");
 }

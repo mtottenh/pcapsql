@@ -75,6 +75,20 @@ pub struct Args {
     /// Enable verbose output
     #[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count)]
     pub verbose: u8,
+
+    /// Show progress bar when loading packets
+    #[arg(long = "progress")]
+    pub progress: bool,
+
+    /// Use streaming mode for large files (lower memory, supports filter/limit pushdown)
+    ///
+    /// In streaming mode, packets are read on-demand during query execution
+    /// rather than loading the entire file into memory. This allows querying
+    /// very large PCAP files (10GB+) with bounded memory usage.
+    ///
+    /// Note: The 'frames' table is not available in streaming mode.
+    #[arg(long = "streaming")]
+    pub streaming: bool,
 }
 
 impl Args {

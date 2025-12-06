@@ -11,12 +11,16 @@ mod registry;
 
 // Protocol implementations
 mod arp;
+mod dhcp;
 mod dns;
 mod ethernet;
+mod http;
 mod icmp;
 mod ipv4;
 mod ipv6;
+mod ntp;
 mod tcp;
+mod tls;
 mod udp;
 mod vlan;
 
@@ -30,12 +34,16 @@ pub use registry::{BuiltinProtocol, Protocol, ProtocolRegistry};
 
 // Re-export protocol implementations
 pub use arp::ArpProtocol;
+pub use dhcp::DhcpProtocol;
 pub use dns::DnsProtocol;
 pub use ethernet::EthernetProtocol;
+pub use http::HttpProtocol;
 pub use icmp::IcmpProtocol;
 pub use ipv4::Ipv4Protocol;
 pub use ipv6::Ipv6Protocol;
+pub use ntp::NtpProtocol;
 pub use tcp::TcpProtocol;
+pub use tls::TlsProtocol;
 pub use udp::UdpProtocol;
 pub use vlan::VlanProtocol;
 
@@ -59,6 +67,10 @@ pub fn default_registry() -> ProtocolRegistry {
 
     // Application layer
     registry.register(DnsProtocol);
+    registry.register(DhcpProtocol);
+    registry.register(NtpProtocol);
+    registry.register(HttpProtocol);
+    registry.register(TlsProtocol);
 
     registry
 }

@@ -3,8 +3,9 @@
 use arrow::datatypes::Field;
 
 use super::{
-    ArpProtocol, DnsProtocol, EthernetProtocol, IcmpProtocol, Ipv4Protocol, Ipv6Protocol,
-    ParseContext, ParseResult, TcpProtocol, UdpProtocol, VlanProtocol,
+    ArpProtocol, DhcpProtocol, DnsProtocol, EthernetProtocol, HttpProtocol, IcmpProtocol,
+    Ipv4Protocol, Ipv6Protocol, NtpProtocol, ParseContext, ParseResult, TcpProtocol, TlsProtocol,
+    UdpProtocol, VlanProtocol,
 };
 
 /// Core trait all protocol parsers must implement.
@@ -49,6 +50,10 @@ pub enum BuiltinProtocol {
     Udp(UdpProtocol),
     Icmp(IcmpProtocol),
     Dns(DnsProtocol),
+    Dhcp(DhcpProtocol),
+    Ntp(NtpProtocol),
+    Http(HttpProtocol),
+    Tls(TlsProtocol),
 }
 
 /// Macro to delegate Protocol trait methods to inner types.
@@ -64,6 +69,10 @@ macro_rules! delegate_protocol {
             BuiltinProtocol::Udp(p) => p.$method($($arg),*),
             BuiltinProtocol::Icmp(p) => p.$method($($arg),*),
             BuiltinProtocol::Dns(p) => p.$method($($arg),*),
+            BuiltinProtocol::Dhcp(p) => p.$method($($arg),*),
+            BuiltinProtocol::Ntp(p) => p.$method($($arg),*),
+            BuiltinProtocol::Http(p) => p.$method($($arg),*),
+            BuiltinProtocol::Tls(p) => p.$method($($arg),*),
         }
     };
 }
@@ -155,10 +164,35 @@ impl From<DnsProtocol> for BuiltinProtocol {
     }
 }
 
+impl From<DhcpProtocol> for BuiltinProtocol {
+    fn from(p: DhcpProtocol) -> Self {
+        BuiltinProtocol::Dhcp(p)
+    }
+}
+
+impl From<NtpProtocol> for BuiltinProtocol {
+    fn from(p: NtpProtocol) -> Self {
+        BuiltinProtocol::Ntp(p)
+    }
+}
+
+impl From<HttpProtocol> for BuiltinProtocol {
+    fn from(p: HttpProtocol) -> Self {
+        BuiltinProtocol::Http(p)
+    }
+}
+
+impl From<TlsProtocol> for BuiltinProtocol {
+    fn from(p: TlsProtocol) -> Self {
+        BuiltinProtocol::Tls(p)
+    }
+}
+
 /// Registry for protocol parsers with priority-based selection.
 ///
 /// Uses static dispatch via enum for all built-in protocols,
 /// avoiding vtable overhead and enabling compiler optimizations.
+#[derive(Debug, Clone)]
 pub struct ProtocolRegistry {
     parsers: Vec<BuiltinProtocol>,
 }
