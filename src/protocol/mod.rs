@@ -16,9 +16,12 @@ mod dns;
 mod ethernet;
 mod http;
 mod icmp;
+mod icmpv6;
 mod ipv4;
 mod ipv6;
 mod ntp;
+mod quic;
+mod ssh;
 mod tcp;
 mod tls;
 mod udp;
@@ -39,9 +42,12 @@ pub use dns::DnsProtocol;
 pub use ethernet::EthernetProtocol;
 pub use http::HttpProtocol;
 pub use icmp::IcmpProtocol;
+pub use icmpv6::Icmpv6Protocol;
 pub use ipv4::Ipv4Protocol;
 pub use ipv6::Ipv6Protocol;
 pub use ntp::NtpProtocol;
+pub use quic::QuicProtocol;
+pub use ssh::SshProtocol;
 pub use tcp::TcpProtocol;
 pub use tls::TlsProtocol;
 pub use udp::UdpProtocol;
@@ -64,6 +70,7 @@ pub fn default_registry() -> ProtocolRegistry {
     registry.register(TcpProtocol);
     registry.register(UdpProtocol);
     registry.register(IcmpProtocol);
+    registry.register(Icmpv6Protocol);
 
     // Application layer
     registry.register(DnsProtocol);
@@ -71,6 +78,8 @@ pub fn default_registry() -> ProtocolRegistry {
     registry.register(NtpProtocol);
     registry.register(HttpProtocol);
     registry.register(TlsProtocol);
+    registry.register(SshProtocol);
+    registry.register(QuicProtocol);
 
     registry
 }

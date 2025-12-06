@@ -85,10 +85,23 @@ pub struct Args {
     /// In streaming mode, packets are read on-demand during query execution
     /// rather than loading the entire file into memory. This allows querying
     /// very large PCAP files (10GB+) with bounded memory usage.
-    ///
-    /// Note: The 'frames' table is not available in streaming mode.
     #[arg(long = "streaming")]
     pub streaming: bool,
+
+    /// Cache size for streaming mode (number of parsed packets to cache).
+    ///
+    /// The parse cache reduces redundant parsing when multiple protocol
+    /// tables read the same PCAP file (e.g., during JOIN queries).
+    /// Set to 0 to disable caching.
+    #[arg(long = "cache-size", default_value = "10000")]
+    pub cache_size: usize,
+
+    /// Use memory-mapped I/O for reading PCAP files.
+    ///
+    /// Can improve performance for large files by letting the OS handle
+    /// caching and paging. Not supported for PCAPNG or compressed files.
+    #[arg(long = "mmap")]
+    pub mmap: bool,
 }
 
 impl Args {

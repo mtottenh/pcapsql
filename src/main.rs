@@ -9,7 +9,7 @@ use tracing_subscriber::EnvFilter;
 
 use pcapsql::cli::{Args, ExportFormat, Exporter, OutputFormatter, Repl, ReplCommand, ReplInput};
 use pcapsql::protocol::{default_registry, Protocol};
-use pcapsql::query::QueryEngine;
+use pcapsql::query::{tables, views, QueryEngine};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -43,12 +43,47 @@ async fn main() -> Result<()> {
         .file
         .context("PCAP file required. Use --help for usage.")?;
 
-    // Create query engine - streaming mode or eager loading
+    // Create query engine - choose mode based on flags
     let engine = if args.streaming {
-        QueryEngine::with_streaming(&pcap_file, args.batch_size)
-            .await
-            .with_context(|| format!("Failed to open PCAP file: {}", pcap_file.display()))?
+        // Explicit streaming mode with cache
+        if args.mmap {
+            // Try mmap first
+            use pcapsql::io::MmapPacketSource;
+            use std::sync::Arc;
+            match MmapPacketSource::open(&pcap_file) {
+                Ok(source) => {
+                    QueryEngine::with_streaming_source_cached(
+                        Arc::new(source),
+                        args.batch_size,
+                        args.cache_size,
+                    )
+                    .await
+                    .with_context(|| format!("Failed to open PCAP file: {}", pcap_file.display()))?
+                }
+                Err(e) => {
+                    eprintln!(
+                        "Warning: mmap not supported for this file ({}), falling back to file source",
+                        e
+                    );
+                    use pcapsql::io::FilePacketSource;
+                    let source = Arc::new(FilePacketSource::open(&pcap_file)
+                        .with_context(|| format!("Failed to open PCAP file: {}", pcap_file.display()))?);
+                    QueryEngine::with_streaming_source_cached(source, args.batch_size, args.cache_size)
+                        .await
+                        .with_context(|| format!("Failed to create engine"))?
+                }
+            }
+        } else {
+            use pcapsql::io::FilePacketSource;
+            use std::sync::Arc;
+            let source = Arc::new(FilePacketSource::open(&pcap_file)
+                .with_context(|| format!("Failed to open PCAP file: {}", pcap_file.display()))?);
+            QueryEngine::with_streaming_source_cached(source, args.batch_size, args.cache_size)
+                .await
+                .with_context(|| format!("Failed to create engine"))?
+        }
     } else {
+        // In-memory mode (default for small files)
         QueryEngine::with_progress(&pcap_file, args.batch_size, args.progress)
             .await
             .with_context(|| format!("Failed to open PCAP file: {}", pcap_file.display()))?
@@ -129,56 +164,38 @@ fn list_protocols() {
 }
 
 fn show_schema() {
-    let registry = default_registry();
+    println!("=== Protocol Tables ===");
+    println!();
+    println!("Each protocol has its own table with 'frame_number' as the linking key.");
+    println!("Use JOINs on frame_number to combine data across protocol layers.");
+    println!();
 
-    println!("Table: packets");
-    println!("{:-<60}", "");
-    println!("{:<30} {:<20} Nullable", "Column", "Type");
-    println!("{:-<60}", "");
+    // Show each protocol table
+    for (table_name, schema) in tables::all_table_schemas() {
+        println!("Table: {}", table_name);
+        println!("{:-<70}", "");
+        println!("{:<30} {:<30} Nullable", "Column", "Type");
+        println!("{:-<70}", "");
 
-    // Common fields
-    let common_fields = [
-        ("frame_number", "BIGINT", "NO"),
-        ("timestamp", "TIMESTAMP", "NO"),
-        ("length", "INT", "NO"),
-        ("original_length", "INT", "NO"),
-        ("eth_src", "VARCHAR", "YES"),
-        ("eth_dst", "VARCHAR", "YES"),
-        ("eth_type", "SMALLINT", "YES"),
-        ("src_ip", "VARCHAR", "YES"),
-        ("dst_ip", "VARCHAR", "YES"),
-        ("ip_version", "TINYINT", "YES"),
-        ("ip_ttl", "TINYINT", "YES"),
-        ("ip_protocol", "TINYINT", "YES"),
-        ("src_port", "SMALLINT", "YES"),
-        ("dst_port", "SMALLINT", "YES"),
-        ("protocol", "VARCHAR", "YES"),
-        ("tcp_flags", "SMALLINT", "YES"),
-        ("tcp_seq", "INT", "YES"),
-        ("tcp_ack", "INT", "YES"),
-        ("icmp_type", "TINYINT", "YES"),
-        ("icmp_code", "TINYINT", "YES"),
-        ("payload_length", "INT", "YES"),
-        ("_parse_error", "VARCHAR", "YES"),
-    ];
-
-    for (name, dtype, nullable) in &common_fields {
-        println!("{name:<30} {dtype:<20} {nullable}");
+        for field in schema.fields() {
+            let arrow_type = format!("{:?}", field.data_type());
+            let nullable = if field.is_nullable() { "YES" } else { "NO" };
+            println!("{:<30} {:<30} {}", field.name(), arrow_type, nullable);
+        }
+        println!();
     }
 
     println!();
-    println!("Protocol-specific fields available via registry:");
+    println!("=== Cross-Layer Views ===");
+    println!();
+    println!("Views provide convenient JOINed access to related protocol data.");
+    println!("The 'packets' view provides backward compatibility with the flat schema.");
+    println!();
 
-    for parser in registry.all_parsers() {
-        let fields = parser.schema_fields();
-        if !fields.is_empty() {
-            println!("\n  {} fields:", parser.display_name());
-            for field in fields {
-                let arrow_type = format!("{:?}", field.data_type());
-                let nullable = if field.is_nullable() { "YES" } else { "NO" };
-                println!("    {:<26} {:<20} {}", field.name(), arrow_type, nullable);
-            }
-        }
+    for view in views::all_views() {
+        println!("View: {}", view.name);
+        println!("  {}", view.description);
+        println!();
     }
 }
 
@@ -301,18 +318,14 @@ fn print_help() {
 }
 
 fn print_tables() {
-    println!("Tables:");
-    println!("  packets - Unified packet view with common fields");
-    println!("  frames  - Raw frame data (frame_number, timestamp, length, original_length, link_type, raw_data)");
+    println!("Protocol Tables (use frame_number for JOINs):");
+    for table_name in tables::all_table_names() {
+        println!("  {}", table_name);
+    }
+
     println!();
-    println!("Views (filtered subsets of packets):");
-    println!("  tcp     - TCP packets only");
-    println!("  udp     - UDP packets only");
-    println!("  icmp    - ICMP packets only");
-    println!("  arp     - ARP packets only");
-    println!("  dns     - DNS packets (port 53)");
-    println!("  dhcp    - DHCP packets (ports 67, 68)");
-    println!("  ntp     - NTP packets (port 123)");
-    println!("  http    - HTTP packets (ports 80, 8080)");
-    println!("  tls     - TLS/HTTPS packets (port 443)");
+    println!("Cross-Layer Views (JOINed protocol data):");
+    for view in views::all_views() {
+        println!("  {:20} - {}", view.name, view.description);
+    }
 }

@@ -1,60 +1,81 @@
 //! PCAP file reader.
 
 use std::fs::File;
-use std::io::{BufReader, Read};
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
-use flate2::read::GzDecoder;
 use pcap_parser::traits::PcapReaderIterator;
 use pcap_parser::{LegacyPcapReader, PcapBlockOwned, PcapError, PcapNGReader};
 
 use super::RawPacket;
 use crate::error::{Error, PcapError as OurPcapError};
+use crate::io::{Compression, FileDecoder};
 
 /// Buffer size for reading PCAP files (64KB).
 const BUFFER_SIZE: usize = 65536;
 
-/// Gzip magic bytes.
-const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
-
-/// Reader for PCAP and PCAPNG files, with optional gzip decompression.
+/// Reader for PCAP and PCAPNG files, with optional decompression.
+///
+/// Supports multiple compression formats:
+/// - Gzip (.gz) - always enabled
+/// - Zstd (.zst) - `compress-zstd` feature
+/// - LZ4 (.lz4) - `compress-lz4` feature
+/// - Bzip2 (.bz2) - `compress-bzip2` feature
+/// - XZ (.xz) - `compress-xz` feature
 pub struct PcapReader {
     inner: ReaderInner,
     frame_number: u64,
     link_type: u16,
 }
 
+/// Inner reader using enum dispatch for decompression (no Box allocation).
 enum ReaderInner {
-    Legacy(LegacyPcapReader<BufReader<Box<dyn Read + Send>>>),
-    Ng(PcapNGReader<BufReader<Box<dyn Read + Send>>>),
+    Legacy(LegacyPcapReader<BufReader<FileDecoder>>),
+    Ng(PcapNGReader<BufReader<FileDecoder>>),
 }
 
 impl PcapReader {
     /// Open a PCAP file for reading.
     ///
-    /// Automatically detects and decompresses gzipped files.
+    /// Automatically detects and handles compressed files.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
         let path = path.as_ref();
 
-        // Check if file is gzipped (by extension or magic bytes)
-        let is_gzipped = is_gzip_file(path)?;
-
-        // Open file and optionally wrap with gzip decoder
-        let file = File::open(path).map_err(|_| {
+        // Read first bytes to detect compression
+        let mut file = File::open(path).map_err(|_| {
             Error::Pcap(OurPcapError::FileNotFound {
                 path: path.display().to_string(),
             })
         })?;
 
-        let reader: Box<dyn Read + Send> = if is_gzipped {
-            Box::new(GzDecoder::new(file))
-        } else {
-            Box::new(file)
-        };
+        let mut header = [0u8; 6];
+        let bytes_read = file.read(&mut header).map_err(|_| {
+            Error::Pcap(OurPcapError::InvalidFormat {
+                reason: "File too short to read header".to_string(),
+            })
+        })?;
 
-        let mut buf_reader = BufReader::with_capacity(BUFFER_SIZE, reader);
+        if bytes_read < 4 {
+            return Err(Error::Pcap(OurPcapError::InvalidFormat {
+                reason: "File too short".to_string(),
+            }));
+        }
 
-        // Peek at magic number to determine PCAP format
+        // Detect compression format
+        let compression = Compression::detect(&header);
+
+        // Seek back to start
+        file.seek(SeekFrom::Start(0)).map_err(Error::Io)?;
+
+        // Create decoder using enum dispatch (no Box allocation)
+        let decoder = FileDecoder::new(file, compression).map_err(|e| {
+            Error::Pcap(OurPcapError::InvalidFormat {
+                reason: format!("Failed to create decoder: {}", e),
+            })
+        })?;
+        let mut buf_reader = BufReader::with_capacity(BUFFER_SIZE, decoder);
+
+        // Read PCAP magic (after decompression)
         let mut magic = [0u8; 4];
         buf_reader.read_exact(&mut magic).map_err(|_| {
             Error::Pcap(OurPcapError::InvalidFormat {
@@ -62,15 +83,15 @@ impl PcapReader {
             })
         })?;
 
-        // Re-open file since we consumed the magic bytes
+        // Re-open file and decoder since we consumed bytes
         drop(buf_reader);
         let file = File::open(path)?;
-        let reader: Box<dyn Read + Send> = if is_gzipped {
-            Box::new(GzDecoder::new(file))
-        } else {
-            Box::new(file)
-        };
-        let buf_reader = BufReader::with_capacity(BUFFER_SIZE, reader);
+        let decoder = FileDecoder::new(file, compression).map_err(|e| {
+            Error::Pcap(OurPcapError::InvalidFormat {
+                reason: format!("Failed to create decoder: {}", e),
+            })
+        })?;
+        let buf_reader = BufReader::with_capacity(BUFFER_SIZE, decoder);
 
         // Check magic number for PCAP format
         match &magic {
@@ -90,7 +111,7 @@ impl PcapReader {
         }
     }
 
-    fn open_legacy(reader: BufReader<Box<dyn Read + Send>>) -> Result<Self, Error> {
+    fn open_legacy(reader: BufReader<FileDecoder>) -> Result<Self, Error> {
         let pcap_reader = LegacyPcapReader::new(BUFFER_SIZE, reader).map_err(|e| {
             Error::Pcap(OurPcapError::InvalidFormat {
                 reason: format!("Failed to parse PCAP header: {e}"),
@@ -104,7 +125,7 @@ impl PcapReader {
         })
     }
 
-    fn open_ng(reader: BufReader<Box<dyn Read + Send>>) -> Result<Self, Error> {
+    fn open_ng(reader: BufReader<FileDecoder>) -> Result<Self, Error> {
         let pcap_reader = PcapNGReader::new(BUFFER_SIZE, reader).map_err(|e| {
             Error::Pcap(OurPcapError::InvalidFormat {
                 reason: format!("Failed to parse PCAPNG header: {e}"),
@@ -280,44 +301,6 @@ impl PcapReader {
     }
 }
 
-/// Check if a file is gzipped by extension or magic bytes.
-fn is_gzip_file<P: AsRef<Path>>(path: P) -> Result<bool, Error> {
-    let path = path.as_ref();
-
-    // Check by extension first
-    if let Some(filename) = path.file_name().and_then(|f| f.to_str()) {
-        let lower = filename.to_lowercase();
-        if lower.ends_with(".gz") {
-            return Ok(true);
-        }
-    }
-
-    // Check by magic bytes
-    let mut file = File::open(path).map_err(|_| {
-        Error::Pcap(OurPcapError::FileNotFound {
-            path: path.display().to_string(),
-        })
-    })?;
-
-    let mut magic = [0u8; 2];
-    match file.read_exact(&mut magic) {
-        Ok(()) => Ok(magic == GZIP_MAGIC),
-        Err(_) => Ok(false), // File too short to be gzipped
-    }
-}
-
-/// Check if a path appears to be a gzip file by extension only.
-/// Useful for quick checks without opening the file.
-pub fn is_gzip_extension<P: AsRef<Path>>(path: P) -> bool {
-    let path = path.as_ref();
-    if let Some(filename) = path.file_name().and_then(|f| f.to_str()) {
-        let lower = filename.to_lowercase();
-        lower.ends_with(".gz")
-    } else {
-        false
-    }
-}
-
 /// Iterator adapter for PcapReader.
 impl Iterator for PcapReader {
     type Item = Result<RawPacket, Error>;
@@ -337,36 +320,17 @@ mod tests {
     use std::io::Write;
     use tempfile::NamedTempFile;
     use flate2::write::GzEncoder;
-    use flate2::Compression;
+    use flate2::Compression as GzCompression;
 
     #[test]
-    fn test_detect_gzip_by_extension() {
-        assert!(is_gzip_extension("test.pcap.gz"));
-        assert!(is_gzip_extension("test.pcapng.gz"));
-        assert!(is_gzip_extension("TEST.PCAP.GZ"));
-        assert!(!is_gzip_extension("test.pcap"));
-        assert!(!is_gzip_extension("test.pcapng"));
-    }
+    fn test_compression_detection() {
+        // Gzip magic
+        let gzip_data = [0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00];
+        assert_eq!(Compression::detect(&gzip_data), Compression::Gzip);
 
-    #[test]
-    fn test_detect_gzip_by_magic_bytes() {
-        // Create a temp file with gzip magic bytes
-        let mut temp = NamedTempFile::new().unwrap();
-        temp.write_all(&GZIP_MAGIC).unwrap();
-        temp.write_all(&[0x00, 0x00]).unwrap();
-        temp.flush().unwrap();
-
-        assert!(is_gzip_file(temp.path()).unwrap());
-    }
-
-    #[test]
-    fn test_non_gzip_file() {
-        // Create a temp file without gzip magic
-        let mut temp = NamedTempFile::new().unwrap();
-        temp.write_all(&[0xd4, 0xc3, 0xb2, 0xa1]).unwrap(); // PCAP magic
-        temp.flush().unwrap();
-
-        assert!(!is_gzip_file(temp.path()).unwrap());
+        // PCAP magic (no compression)
+        let pcap_data = [0xd4, 0xc3, 0xb2, 0xa1, 0x00, 0x00];
+        assert_eq!(Compression::detect(&pcap_data), Compression::None);
     }
 
     #[test]
@@ -378,7 +342,7 @@ mod tests {
         let temp = NamedTempFile::with_suffix(".pcap.gz").unwrap();
         {
             let file = File::create(temp.path()).unwrap();
-            let mut encoder = GzEncoder::new(file, Compression::default());
+            let mut encoder = GzEncoder::new(file, GzCompression::default());
             encoder.write_all(&pcap_data).unwrap();
             encoder.finish().unwrap();
         }
@@ -386,6 +350,26 @@ mod tests {
         // Try to open it
         let reader = PcapReader::open(temp.path());
         assert!(reader.is_ok(), "Failed to open gzipped PCAP: {:?}", reader.err());
+    }
+
+    #[cfg(feature = "compress-zstd")]
+    #[test]
+    fn test_create_and_read_zstd_pcap() {
+        // Create a minimal valid PCAP file
+        let pcap_data = create_minimal_pcap();
+
+        // Compress it with zstd
+        let temp = NamedTempFile::with_suffix(".pcap.zst").unwrap();
+        {
+            let file = File::create(temp.path()).unwrap();
+            let mut encoder = zstd::Encoder::new(file, 3).unwrap();
+            encoder.write_all(&pcap_data).unwrap();
+            encoder.finish().unwrap();
+        }
+
+        // Try to open it
+        let reader = PcapReader::open(temp.path());
+        assert!(reader.is_ok(), "Failed to open zstd PCAP: {:?}", reader.err());
     }
 
     /// Create a minimal valid PCAP file with one empty packet.

@@ -17,8 +17,11 @@
 //! }
 //! ```
 
+pub mod cache;
 pub mod cli;
 pub mod error;
+pub mod format;
+pub mod io;
 pub mod pcap;
 pub mod protocol;
 pub mod query;

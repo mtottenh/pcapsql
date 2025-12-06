@@ -1,22 +1,39 @@
 //! SQL query engine module.
 //!
 //! This module provides DataFusion integration for querying packet data.
+//!
+//! ## Architecture
+//!
+//! The query module uses a normalized multi-table architecture:
+//!
+//! ### Normalized Schema (Phase 1)
+//! Per-protocol tables (`frames`, `ethernet`, `ipv4`, `tcp`, `dns`, etc.)
+//! with `frame_number` as the linking key. Cross-layer views provide
+//! convenient access patterns (e.g., `tcp_packets` joins frames + ipv4 + tcp).
+//!
+//! The `packets` view provides backward compatibility with the old flat schema.
+//!
+//! ### Streaming Mode (Phase 2)
+//! Streaming mode now uses the same normalized tables. Each protocol table
+//! has its own streaming provider that reads the PCAP file independently.
+//! JOINs work via sort-merge since all tables emit rows sorted by `frame_number`.
+//!
+//! See the `tables`, `views`, and `providers` submodules for details.
 
-mod batch;
+pub mod builders;
 mod filter;
 mod frames;
 mod provider;
-mod schema;
-mod stream_provider;
-mod streaming;
+pub mod providers;
+pub mod tables;
+pub mod udf;
+pub mod views;
 
-pub use batch::PacketBatchBuilder;
+pub use builders::NormalizedBatchSet;
 pub use filter::FilterEvaluator;
 pub use frames::{frames_schema, FramesBatchBuilder};
 pub use provider::PcapTableProvider;
-pub use schema::{build_common_schema, build_packets_schema};
-pub use stream_provider::StreamingPcapProvider;
-pub use streaming::PcapStreamingExec;
+pub use providers::{ProtocolBatchStream, ProtocolStreamExec, ProtocolTableProvider};
 
 use std::path::Path;
 use std::sync::Arc;
@@ -25,9 +42,18 @@ use arrow::array::RecordBatch;
 use datafusion::prelude::*;
 use indicatif::{ProgressBar, ProgressStyle};
 
+use crate::cache::{LruParseCache, NoCache, ParseCache};
 use crate::error::{Error, QueryError};
+use crate::io::{FilePacketSource, MmapPacketSource, PacketSource};
 use crate::pcap::PcapReader;
 use crate::protocol::{default_registry, parse_packet, ProtocolRegistry};
+
+/// File size threshold for automatic streaming mode selection.
+/// Files >= 100MB use streaming mode.
+const STREAMING_THRESHOLD_BYTES: u64 = 100 * 1024 * 1024;
+
+/// Default cache size for streaming mode (number of parsed packets to cache).
+pub const DEFAULT_CACHE_SIZE: usize = 10_000;
 
 /// Query engine for PCAP files.
 pub struct QueryEngine {
@@ -42,6 +68,8 @@ impl QueryEngine {
     }
 
     /// Create a new query engine for a PCAP file with optional progress bar.
+    ///
+    /// Uses the normalized schema with per-protocol tables.
     pub async fn with_progress<P: AsRef<Path>>(
         path: P,
         batch_size: usize,
@@ -50,88 +78,227 @@ impl QueryEngine {
         let registry = default_registry();
         let ctx = SessionContext::new();
 
-        // Load all packets into memory as Arrow batches
-        let (packet_batches, frames_batches) =
-            Self::load_packets(&path, &registry, batch_size, show_progress)?;
+        // Register all UDFs (network addresses, protocol names, utilities)
+        udf::register_all_udfs(&ctx)?;
 
-        if packet_batches.is_empty() {
+        // Load all packets into normalized per-protocol tables
+        let protocol_batches =
+            Self::load_normalized_packets(&path, &registry, batch_size, show_progress)?;
+
+        // Check if we got any frames
+        let frames_batches = protocol_batches
+            .get("frames")
+            .ok_or_else(|| Error::Query(QueryError::Execution("No frames table".to_string())))?;
+
+        if frames_batches.is_empty() {
             return Err(Error::Query(QueryError::Execution(
                 "No packets found in PCAP file".to_string(),
             )));
         }
 
-        // Register the packets table
-        let packets_schema = packet_batches[0].schema();
-        let packets_provider = provider::PcapTableProvider::new(packets_schema, packet_batches);
-        ctx.register_table("packets", Arc::new(packets_provider))
-            .map_err(|e| Error::Query(QueryError::Execution(e.to_string())))?;
+        // Register all protocol tables
+        for (table_name, batches) in &protocol_batches {
+            if batches.is_empty() {
+                // Register an empty table with the correct schema
+                if let Some(schema) = tables::get_table_schema(table_name) {
+                    let empty_provider =
+                        provider::PcapTableProvider::new(Arc::new(schema), vec![]);
+                    ctx.register_table(table_name.as_str(), Arc::new(empty_provider))
+                        .map_err(|e| Error::Query(QueryError::Execution(e.to_string())))?;
+                }
+            } else {
+                let schema = batches[0].schema();
+                let table_provider =
+                    provider::PcapTableProvider::new(schema, batches.clone());
+                ctx.register_table(table_name.as_str(), Arc::new(table_provider))
+                    .map_err(|e| Error::Query(QueryError::Execution(e.to_string())))?;
+            }
+        }
 
-        // Register the frames table
-        let frames_schema = frames_batches[0].schema();
-        let frames_provider = provider::PcapTableProvider::new(frames_schema, frames_batches);
-        ctx.register_table("frames", Arc::new(frames_provider))
-            .map_err(|e| Error::Query(QueryError::Execution(e.to_string())))?;
-
-        // Register per-protocol views
-        Self::register_protocol_views(&ctx).await?;
+        // Register cross-layer views (including backward-compatible packets view)
+        Self::register_cross_layer_views(&ctx).await?;
 
         Ok(Self { ctx, registry })
     }
 
-    /// Create a new query engine with streaming mode (for large files).
+    /// Create a QueryEngine in streaming mode for large files.
     ///
     /// In streaming mode, packets are read on-demand as DataFusion pulls batches,
     /// rather than loading the entire file into memory upfront. This allows
     /// querying very large PCAP files (10GB+) with bounded memory usage.
     ///
-    /// Filter and limit pushdown are supported to minimize the amount of data read.
+    /// Each protocol table gets its own streaming provider that reads
+    /// the PCAP file independently. JOINs work via sort-merge since
+    /// all tables emit rows sorted by frame_number.
     ///
-    /// Streaming mode now supports all protocol-specific fields from the registry,
-    /// including DNS, TLS, HTTP, and other application-layer protocol fields.
+    /// # Type Parameters
+    ///
+    /// This method is generic over the packet source, but defaults to
+    /// `FilePacketSource`. Future backends (mmap, S3) can use
+    /// `with_streaming_source()` directly.
     pub async fn with_streaming<P: AsRef<Path>>(
         path: P,
         batch_size: usize,
     ) -> Result<Self, Error> {
-        let registry = default_registry();
-        // Use full schema with protocol-specific fields
-        let schema = Arc::new(build_packets_schema(&registry));
-        let ctx = SessionContext::new();
-
-        // Register streaming provider for packets table
-        let packets_provider = StreamingPcapProvider::new(
-            path.as_ref().to_path_buf(),
-            schema,
-            Arc::new(registry.clone()),
-            batch_size,
-        );
-        ctx.register_table("packets", Arc::new(packets_provider))
-            .map_err(|e| Error::Query(QueryError::Execution(e.to_string())))?;
-
-        // Note: frames table is not available in streaming mode since it requires
-        // raw packet data which we don't want to duplicate
-
-        // Register per-protocol views
-        Self::register_protocol_views(&ctx).await?;
-
-        Ok(Self { ctx, registry })
+        let source = FilePacketSource::open(path)?;
+        Self::with_streaming_source(Arc::new(source), batch_size).await
     }
 
-    /// Load packets from a PCAP file into Arrow batches.
-    /// Returns (packet_batches, frames_batches).
-    fn load_packets<P: AsRef<Path>>(
+    /// Create a QueryEngine with a custom packet source.
+    ///
+    /// This is the generic entry point that works with any `PacketSource`
+    /// implementation (File, Mmap, S3, etc.).
+    pub async fn with_streaming_source<S: PacketSource + 'static>(
+        source: Arc<S>,
+        batch_size: usize,
+    ) -> Result<Self, Error> {
+        Self::with_streaming_source_and_cache::<S, NoCache>(source, batch_size, None).await
+    }
+
+    /// Create a QueryEngine with streaming and parse cache.
+    ///
+    /// The cache reduces redundant parsing when multiple protocol readers
+    /// traverse the same PCAP file (e.g., during JOIN queries).
+    ///
+    /// # Arguments
+    ///
+    /// * `source` - The packet source to read from
+    /// * `batch_size` - Number of packets per RecordBatch
+    /// * `cache_size` - Maximum number of parsed packets to cache (0 to disable)
+    pub async fn with_streaming_source_cached<S: PacketSource + 'static>(
+        source: Arc<S>,
+        batch_size: usize,
+        cache_size: usize,
+    ) -> Result<Self, Error> {
+        if cache_size > 0 {
+            let cache = Arc::new(LruParseCache::new(cache_size));
+            Self::with_streaming_source_and_cache(source, batch_size, Some(cache)).await
+        } else {
+            Self::with_streaming_source_and_cache::<S, NoCache>(source, batch_size, None).await
+        }
+    }
+
+    /// Internal method: Create a streaming QueryEngine with optional cache.
+    async fn with_streaming_source_and_cache<S: PacketSource + 'static, C: ParseCache + 'static>(
+        source: Arc<S>,
+        batch_size: usize,
+        cache: Option<Arc<C>>,
+    ) -> Result<Self, Error> {
+        let registry = Arc::new(default_registry());
+        let ctx = SessionContext::new();
+
+        // Register all UDFs (network addresses, protocol names, utilities)
+        udf::register_all_udfs(&ctx)?;
+
+        // Convert cache to trait object if present
+        let cache_dyn: Option<Arc<dyn ParseCache>> = cache.map(|c| c as Arc<dyn ParseCache>);
+
+        // Register streaming provider for each protocol table
+        for table_name in tables::all_table_names() {
+            let schema = Arc::new(
+                tables::get_table_schema(table_name).ok_or_else(|| {
+                    Error::Query(QueryError::Execution(format!(
+                        "Unknown table: {}",
+                        table_name
+                    )))
+                })?,
+            );
+
+            let provider = if let Some(ref cache) = cache_dyn {
+                providers::ProtocolTableProvider::<S>::streaming_cached(
+                    table_name.to_string(),
+                    schema,
+                    source.clone(),
+                    registry.clone(),
+                    batch_size,
+                    cache.clone(),
+                )
+            } else {
+                providers::ProtocolTableProvider::<S>::streaming(
+                    table_name.to_string(),
+                    schema,
+                    source.clone(),
+                    registry.clone(),
+                    batch_size,
+                )
+            };
+
+            ctx.register_table(table_name, Arc::new(provider))
+                .map_err(|e| Error::Query(QueryError::Execution(e.to_string())))?;
+        }
+
+        // Register cross-layer views (including backward-compatible packets view)
+        Self::register_cross_layer_views(&ctx).await?;
+
+        Ok(Self {
+            ctx,
+            registry: (*registry).clone(),
+        })
+    }
+
+    /// Create a QueryEngine with automatic mode selection.
+    ///
+    /// Mode is selected based on file size:
+    /// - Files < 100MB: In-memory mode (fastest for small files)
+    /// - Files >= 100MB: Streaming mode with cache (bounded memory)
+    ///
+    /// Use `new()` or `with_streaming()` to force a specific mode.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to the PCAP file
+    /// * `batch_size` - Number of packets per RecordBatch
+    /// * `cache_size` - Cache size for streaming mode (0 to disable)
+    /// * `use_mmap` - Use memory-mapped I/O for large files
+    pub async fn auto<P: AsRef<Path>>(
+        path: P,
+        batch_size: usize,
+        cache_size: usize,
+        use_mmap: bool,
+    ) -> Result<Self, Error> {
+        let file_size = std::fs::metadata(path.as_ref())
+            .map(|m| m.len())
+            .unwrap_or(0);
+
+        if file_size >= STREAMING_THRESHOLD_BYTES {
+            // Large file: use streaming mode
+            if use_mmap {
+                match MmapPacketSource::open(&path) {
+                    Ok(source) => {
+                        return Self::with_streaming_source_cached(
+                            Arc::new(source),
+                            batch_size,
+                            cache_size,
+                        )
+                        .await;
+                    }
+                    Err(_) => {
+                        // Fall back to file source if mmap fails (e.g., PCAPNG)
+                    }
+                }
+            }
+
+            let source = Arc::new(FilePacketSource::open(&path)?);
+            Self::with_streaming_source_cached(source, batch_size, cache_size).await
+        } else {
+            // Small file: use in-memory mode
+            Self::with_progress(path, batch_size, false).await
+        }
+    }
+
+    /// Load packets from a PCAP file into normalized per-protocol Arrow batches.
+    ///
+    /// Returns a HashMap mapping table names to vectors of RecordBatches.
+    fn load_normalized_packets<P: AsRef<Path>>(
         path: P,
         registry: &ProtocolRegistry,
         batch_size: usize,
         show_progress: bool,
-    ) -> Result<(Vec<RecordBatch>, Vec<RecordBatch>), Error> {
+    ) -> Result<builders::ProtocolBatches, Error> {
         let mut reader = PcapReader::open(path)?;
         let link_type = reader.link_type();
 
-        let schema = Arc::new(build_packets_schema(registry));
-        let mut packets_builder = PacketBatchBuilder::new(schema.clone(), batch_size);
-        let mut frames_builder = FramesBatchBuilder::new(batch_size);
-        let mut packet_batches = Vec::new();
-        let mut frames_batches = Vec::new();
+        let mut batch_set = builders::NormalizedBatchSet::new(batch_size);
 
         // Create progress bar if requested
         let progress = if show_progress {
@@ -155,11 +322,8 @@ impl QueryEngine {
             // Parse the packet through all protocol layers
             let parsed = parse_packet(registry, link_type, &raw_packet.data);
 
-            // Add to packets batch builder
-            packets_builder.add_packet(&raw_packet, &parsed)?;
-
-            // Add to frames batch builder
-            frames_builder.add_packet(&raw_packet);
+            // Add to normalized batch set (routes to appropriate protocol tables)
+            batch_set.add_packet(&raw_packet, &parsed)?;
 
             packet_count += 1;
 
@@ -170,24 +334,6 @@ impl QueryEngine {
                     pb.tick();
                 }
             }
-
-            // Check if packets batch is full
-            if let Some(batch) = packets_builder.try_build()? {
-                packet_batches.push(batch);
-            }
-
-            // Check if frames batch is full
-            if let Some(batch) = frames_builder.try_build()? {
-                frames_batches.push(batch);
-            }
-        }
-
-        // Build final partial batches
-        if let Some(batch) = packets_builder.finish()? {
-            packet_batches.push(batch);
-        }
-        if let Some(batch) = frames_builder.finish()? {
-            frames_batches.push(batch);
         }
 
         // Finish progress bar
@@ -195,7 +341,8 @@ impl QueryEngine {
             pb.finish_with_message(format!("{} packets loaded", packet_count));
         }
 
-        Ok((packet_batches, frames_batches))
+        // Finish and return all batches
+        batch_set.finish()
     }
 
     /// Execute a SQL query and return results.
@@ -224,52 +371,23 @@ impl QueryEngine {
         &self.ctx
     }
 
-    /// Register per-protocol views on top of the packets table.
-    async fn register_protocol_views(ctx: &SessionContext) -> Result<(), Error> {
-        // TCP view - packets where protocol is TCP
-        ctx.sql("CREATE VIEW tcp AS SELECT * FROM packets WHERE protocol = 'TCP'")
-            .await
-            .map_err(|e| Error::Query(QueryError::Execution(e.to_string())))?;
-
-        // UDP view - packets where protocol is UDP
-        ctx.sql("CREATE VIEW udp AS SELECT * FROM packets WHERE protocol = 'UDP'")
-            .await
-            .map_err(|e| Error::Query(QueryError::Execution(e.to_string())))?;
-
-        // ICMP view - packets where protocol is ICMP
-        ctx.sql("CREATE VIEW icmp AS SELECT * FROM packets WHERE protocol = 'ICMP'")
-            .await
-            .map_err(|e| Error::Query(QueryError::Execution(e.to_string())))?;
-
-        // ARP view - packets where eth_type is 0x0806 (ARP ethertype)
-        ctx.sql("CREATE VIEW arp AS SELECT * FROM packets WHERE eth_type = 2054")
-            .await
-            .map_err(|e| Error::Query(QueryError::Execution(e.to_string())))?;
-
-        // DNS view - packets where src_port or dst_port is 53
-        ctx.sql("CREATE VIEW dns AS SELECT * FROM packets WHERE src_port = 53 OR dst_port = 53")
-            .await
-            .map_err(|e| Error::Query(QueryError::Execution(e.to_string())))?;
-
-        // DHCP view - packets where src_port or dst_port is 67 or 68
-        ctx.sql("CREATE VIEW dhcp AS SELECT * FROM packets WHERE src_port = 67 OR dst_port = 67 OR src_port = 68 OR dst_port = 68")
-            .await
-            .map_err(|e| Error::Query(QueryError::Execution(e.to_string())))?;
-
-        // NTP view - packets where src_port or dst_port is 123
-        ctx.sql("CREATE VIEW ntp AS SELECT * FROM packets WHERE src_port = 123 OR dst_port = 123")
-            .await
-            .map_err(|e| Error::Query(QueryError::Execution(e.to_string())))?;
-
-        // HTTP view - packets where src_port or dst_port is 80 or 8080
-        ctx.sql("CREATE VIEW http AS SELECT * FROM packets WHERE src_port = 80 OR dst_port = 80 OR src_port = 8080 OR dst_port = 8080")
-            .await
-            .map_err(|e| Error::Query(QueryError::Execution(e.to_string())))?;
-
-        // TLS view - packets where src_port or dst_port is 443
-        ctx.sql("CREATE VIEW tls AS SELECT * FROM packets WHERE src_port = 443 OR dst_port = 443")
-            .await
-            .map_err(|e| Error::Query(QueryError::Execution(e.to_string())))?;
+    /// Register cross-layer views that JOIN normalized protocol tables.
+    ///
+    /// This creates views like `tcp_packets`, `dns_packets`, and the backward-compatible
+    /// `packets` view that JOINs all protocol tables together.
+    async fn register_cross_layer_views(ctx: &SessionContext) -> Result<(), Error> {
+        // Register all cross-layer views from the views module
+        for view_def in views::all_views() {
+            let sql = format!("CREATE VIEW {} AS {}", view_def.name, view_def.sql);
+            ctx.sql(&sql)
+                .await
+                .map_err(|e| {
+                    Error::Query(QueryError::Execution(format!(
+                        "Failed to create view '{}': {}",
+                        view_def.name, e
+                    )))
+                })?;
+        }
 
         Ok(())
     }

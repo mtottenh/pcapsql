@@ -4,8 +4,8 @@ use arrow::datatypes::Field;
 
 use super::{
     ArpProtocol, DhcpProtocol, DnsProtocol, EthernetProtocol, HttpProtocol, IcmpProtocol,
-    Ipv4Protocol, Ipv6Protocol, NtpProtocol, ParseContext, ParseResult, TcpProtocol, TlsProtocol,
-    UdpProtocol, VlanProtocol,
+    Icmpv6Protocol, Ipv4Protocol, Ipv6Protocol, NtpProtocol, ParseContext, ParseResult,
+    QuicProtocol, SshProtocol, TcpProtocol, TlsProtocol, UdpProtocol, VlanProtocol,
 };
 
 /// Core trait all protocol parsers must implement.
@@ -49,11 +49,14 @@ pub enum BuiltinProtocol {
     Tcp(TcpProtocol),
     Udp(UdpProtocol),
     Icmp(IcmpProtocol),
+    Icmpv6(Icmpv6Protocol),
     Dns(DnsProtocol),
     Dhcp(DhcpProtocol),
     Ntp(NtpProtocol),
     Http(HttpProtocol),
     Tls(TlsProtocol),
+    Ssh(SshProtocol),
+    Quic(QuicProtocol),
 }
 
 /// Macro to delegate Protocol trait methods to inner types.
@@ -68,11 +71,14 @@ macro_rules! delegate_protocol {
             BuiltinProtocol::Tcp(p) => p.$method($($arg),*),
             BuiltinProtocol::Udp(p) => p.$method($($arg),*),
             BuiltinProtocol::Icmp(p) => p.$method($($arg),*),
+            BuiltinProtocol::Icmpv6(p) => p.$method($($arg),*),
             BuiltinProtocol::Dns(p) => p.$method($($arg),*),
             BuiltinProtocol::Dhcp(p) => p.$method($($arg),*),
             BuiltinProtocol::Ntp(p) => p.$method($($arg),*),
             BuiltinProtocol::Http(p) => p.$method($($arg),*),
             BuiltinProtocol::Tls(p) => p.$method($($arg),*),
+            BuiltinProtocol::Ssh(p) => p.$method($($arg),*),
+            BuiltinProtocol::Quic(p) => p.$method($($arg),*),
         }
     };
 }
@@ -158,6 +164,12 @@ impl From<IcmpProtocol> for BuiltinProtocol {
     }
 }
 
+impl From<Icmpv6Protocol> for BuiltinProtocol {
+    fn from(p: Icmpv6Protocol) -> Self {
+        BuiltinProtocol::Icmpv6(p)
+    }
+}
+
 impl From<DnsProtocol> for BuiltinProtocol {
     fn from(p: DnsProtocol) -> Self {
         BuiltinProtocol::Dns(p)
@@ -185,6 +197,18 @@ impl From<HttpProtocol> for BuiltinProtocol {
 impl From<TlsProtocol> for BuiltinProtocol {
     fn from(p: TlsProtocol) -> Self {
         BuiltinProtocol::Tls(p)
+    }
+}
+
+impl From<SshProtocol> for BuiltinProtocol {
+    fn from(p: SshProtocol) -> Self {
+        BuiltinProtocol::Ssh(p)
+    }
+}
+
+impl From<QuicProtocol> for BuiltinProtocol {
+    fn from(p: QuicProtocol) -> Self {
+        BuiltinProtocol::Quic(p)
     }
 }
 

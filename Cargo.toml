@@ -6,6 +6,15 @@ description = "Query PCAP files using SQL syntax"
 license = "MIT"
 authors = ["pcapsql contributors"]
 
+[features]
+default = ["compress-gzip", "compress-zstd"]
+compress-gzip = []  # flate2 is always included (used by pcap reader)
+compress-zstd = ["zstd"]
+compress-lz4 = ["lz4_flex"]
+compress-bzip2 = ["bzip2"]
+compress-xz = ["xz2"]
+compress-all = ["compress-gzip", "compress-zstd", "compress-lz4", "compress-bzip2", "compress-xz"]
+
 [dependencies]
 # PCAP file parsing
 pcap-parser = "0.15"
@@ -42,13 +51,26 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dirs = "5"
 async-trait = "0.1"
 futures = "0.3"
+bytes = "1"
 
-# Compression
+# Compression (flate2 always included for gzip, others optional)
 flate2 = "1"
+zstd = { version = "0.13", optional = true }
+lz4_flex = { version = "0.11", optional = true }
+bzip2 = { version = "0.4", optional = true }
+xz2 = { version = "0.1", optional = true }
 
 # Progress bar
 indicatif = "0.17"
 
+# Memory-mapped I/O
+memmap2 = "0.9"
+
 [dev-dependencies]
 tempfile = "3"
 hex = "0.4"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "pcap_parsing"
+harness = false
