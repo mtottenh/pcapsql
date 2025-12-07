@@ -1,0 +1,60 @@
+[package]
+name = "pcapsql-datafusion"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "SQL interface for PCAP analysis using DataFusion"
+
+# This is the main CLI binary
+[[bin]]
+name = "pcapsql"
+path = "src/main.rs"
+
+[features]
+default = ["compress-gzip", "compress-zstd"]
+compress-gzip = ["pcapsql-core/compress-gzip"]
+compress-zstd = ["pcapsql-core/compress-zstd"]
+compress-lz4 = ["pcapsql-core/compress-lz4"]
+compress-bzip2 = ["pcapsql-core/compress-bzip2"]
+compress-xz = ["pcapsql-core/compress-xz"]
+compress-all = ["pcapsql-core/compress-all"]
+
+[dependencies]
+# Our core library
+pcapsql-core = { path = "../pcapsql-core" }
+
+# DataFusion ecosystem
+arrow.workspace = true
+datafusion.workspace = true
+parquet.workspace = true
+tokio.workspace = true
+futures.workspace = true
+async-trait.workspace = true
+
+# CLI
+clap.workspace = true
+rustyline.workspace = true
+comfy-table.workspace = true
+indicatif.workspace = true
+dirs.workspace = true
+
+# Shared
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# Needed for bytes in streaming
+bytes.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+tempfile.workspace = true
+hex.workspace = true
+
+[[bench]]
+name = "parsing"
+harness = false

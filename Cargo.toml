@@ -1,76 +1,61 @@
-[package]
-name = "pcapsql"
+[workspace]
+resolver = "2"
+members = [
+    "pcapsql-core",
+    "pcapsql-datafusion",
+    "pcapsql-duckdb",
+]
+
+# Default to building the CLI
+default-members = ["pcapsql-datafusion"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
-description = "Query PCAP files using SQL syntax"
-license = "MIT"
 authors = ["pcapsql contributors"]
+license = "MIT"
+repository = "https://github.com/your-org/pcapsql"
 
-[features]
-default = ["compress-gzip", "compress-zstd"]
-compress-gzip = []  # flate2 is always included (used by pcap reader)
-compress-zstd = ["zstd"]
-compress-lz4 = ["lz4_flex"]
-compress-bzip2 = ["bzip2"]
-compress-xz = ["xz2"]
-compress-all = ["compress-gzip", "compress-zstd", "compress-lz4", "compress-bzip2", "compress-xz"]
-
-[dependencies]
-# PCAP file parsing
-pcap-parser = "0.15"
-
-# Packet protocol parsing
+[workspace.dependencies]
+# Core dependencies (used by pcapsql-core)
+thiserror = "1.0"
+bytes = "1.0"
 etherparse = "0.15"
+pcap-parser = "0.15"
+flate2 = "1.0"
+zstd = "0.13"
+lz4_flex = "0.11"
+bzip2 = "0.4"
+xz2 = "0.1"
+memmap2 = "0.9"
+tracing = "0.1"
 
-# SQL engine (Arrow-native)
-datafusion = "43"
+# DataFusion dependencies (used by pcapsql-datafusion)
 arrow = "53"
+datafusion = "43"
 parquet = "53"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+futures = "0.3"
+async-trait = "0.1"
 
-# CLI and REPL
+# CLI dependencies
 clap = { version = "4", features = ["derive"] }
 rustyline = "14"
-
-# Output formatting
 comfy-table = "7"
-serde_json = "1"
-serde = { version = "1", features = ["derive"] }
+indicatif = "0.17"
+dirs = "5"
 
-# Async runtime (required by DataFusion)
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
-
-# Error handling
-thiserror = "1"
-anyhow = "1"
-
-# Logging
-tracing = "0.1"
+# Shared
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# Misc
-dirs = "5"
-async-trait = "0.1"
-futures = "0.3"
-bytes = "1"
-
-# Compression (flate2 always included for gzip, others optional)
-flate2 = "1"
-zstd = { version = "0.13", optional = true }
-lz4_flex = { version = "0.11", optional = true }
-bzip2 = { version = "0.4", optional = true }
-xz2 = { version = "0.1", optional = true }
-
-# Progress bar
-indicatif = "0.17"
-
-# Memory-mapped I/O
-memmap2 = "0.9"
-
-[dev-dependencies]
+# Dev dependencies
+criterion = { version = "0.5", features = ["html_reports"] }
 tempfile = "3"
 hex = "0.4"
-criterion = { version = "0.5", features = ["html_reports"] }
 
-[[bench]]
-name = "pcap_parsing"
-harness = false
+[profile.release]
+lto = true
+codegen-units = 1

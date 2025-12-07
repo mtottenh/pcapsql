@@ -1,0 +1,50 @@
+[package]
+name = "pcapsql-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Engine-agnostic PCAP protocol parsing library"
+keywords = ["pcap", "network", "protocol", "parser"]
+categories = ["network-programming", "parsing"]
+
+[features]
+default = ["mmap", "compress-gzip", "compress-zstd"]
+
+# Memory-mapped I/O for efficient large file reading
+mmap = ["dep:memmap2"]
+
+# Compression formats
+compress-gzip = []  # flate2 is always included (used by pcap reader)
+compress-zstd = ["dep:zstd"]
+compress-lz4 = ["dep:lz4_flex"]
+compress-bzip2 = ["dep:bzip2"]
+compress-xz = ["dep:xz2"]
+compress-all = ["compress-gzip", "compress-zstd", "compress-lz4", "compress-bzip2", "compress-xz"]
+
+[dependencies]
+# Parsing
+etherparse.workspace = true
+pcap-parser.workspace = true
+bytes.workspace = true
+
+# Compression (flate2 always included for gzip, others optional)
+flate2.workspace = true
+zstd = { workspace = true, optional = true }
+lz4_flex = { workspace = true, optional = true }
+bzip2 = { workspace = true, optional = true }
+xz2 = { workspace = true, optional = true }
+
+# Memory-mapped I/O (optional)
+memmap2 = { workspace = true, optional = true }
+
+# Error handling
+thiserror.workspace = true
+anyhow.workspace = true
+
+# Logging
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+hex.workspace = true
