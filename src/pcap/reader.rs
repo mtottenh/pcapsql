@@ -9,7 +9,7 @@ use pcap_parser::{LegacyPcapReader, PcapBlockOwned, PcapError, PcapNGReader};
 
 use super::RawPacket;
 use crate::error::{Error, PcapError as OurPcapError};
-use crate::io::{Compression, FileDecoder};
+use crate::io::{Compression, FileDecoder, PacketRef};
 
 /// Buffer size for reading PCAP files (64KB).
 const BUFFER_SIZE: usize = 65536;
@@ -298,6 +298,191 @@ impl PcapReader {
                 }
             }
         }
+    }
+
+    /// Process packets with zero-copy borrowed data.
+    ///
+    /// The callback receives borrowed packet data. The borrow is valid
+    /// only during the callback - data must be processed before returning.
+    /// This eliminates the `to_vec()` overhead of `next_packet()`.
+    ///
+    /// Returns the number of packets processed.
+    #[inline]
+    pub fn process_packets<F>(&mut self, max: usize, f: F) -> Result<usize, Error>
+    where
+        F: FnMut(PacketRef<'_>) -> Result<(), Error>,
+    {
+        let is_legacy = matches!(self.inner, ReaderInner::Legacy(_));
+
+        if is_legacy {
+            self.process_legacy_impl(max, f)
+        } else {
+            self.process_ng_impl(max, f)
+        }
+    }
+
+    fn process_legacy_impl<F>(&mut self, max: usize, mut f: F) -> Result<usize, Error>
+    where
+        F: FnMut(PacketRef<'_>) -> Result<(), Error>,
+    {
+        let reader = match &mut self.inner {
+            ReaderInner::Legacy(r) => r,
+            _ => unreachable!(),
+        };
+
+        let mut count = 0;
+        while count < max {
+            match reader.next() {
+                Ok((offset, block)) => {
+                    match block {
+                        PcapBlockOwned::Legacy(packet) => {
+                            self.frame_number += 1;
+
+                            let timestamp_us =
+                                (packet.ts_sec as i64) * 1_000_000 + (packet.ts_usec as i64);
+
+                            // Create borrowed packet reference - no copy!
+                            let packet_ref = PacketRef {
+                                frame_number: self.frame_number,
+                                timestamp_us,
+                                captured_len: packet.caplen,
+                                original_len: packet.origlen,
+                                link_type: self.link_type,
+                                data: packet.data, // Borrowed from pcap_parser buffer
+                            };
+
+                            // Call the callback with borrowed data
+                            f(packet_ref)?;
+
+                            // Only consume after callback completes
+                            reader.consume(offset);
+                            count += 1;
+                        }
+                        PcapBlockOwned::LegacyHeader(header) => {
+                            self.link_type = header.network.0 as u16;
+                            reader.consume(offset);
+                            continue;
+                        }
+                        _ => {
+                            reader.consume(offset);
+                            continue;
+                        }
+                    }
+                }
+                Err(PcapError::Eof) => break,
+                Err(PcapError::Incomplete(_)) => {
+                    reader.refill().map_err(|e| {
+                        Error::Pcap(OurPcapError::InvalidFormat {
+                            reason: format!("Refill error: {e}"),
+                        })
+                    })?;
+                    continue;
+                }
+                Err(e) => {
+                    return Err(Error::Pcap(OurPcapError::InvalidFormat {
+                        reason: format!("Parse error: {e}"),
+                    }))
+                }
+            }
+        }
+        Ok(count)
+    }
+
+    fn process_ng_impl<F>(&mut self, max: usize, mut f: F) -> Result<usize, Error>
+    where
+        F: FnMut(PacketRef<'_>) -> Result<(), Error>,
+    {
+        let reader = match &mut self.inner {
+            ReaderInner::Ng(r) => r,
+            _ => unreachable!(),
+        };
+
+        let mut count = 0;
+        while count < max {
+            match reader.next() {
+                Ok((offset, block)) => {
+                    match block {
+                        PcapBlockOwned::NG(ng_block) => {
+                            use pcap_parser::pcapng::*;
+
+                            match ng_block {
+                                Block::InterfaceDescription(idb) => {
+                                    self.link_type = idb.linktype.0 as u16;
+                                    reader.consume(offset);
+                                    continue;
+                                }
+                                Block::EnhancedPacket(epb) => {
+                                    self.frame_number += 1;
+
+                                    let timestamp_us =
+                                        ((epb.ts_high as i64) << 32) | (epb.ts_low as i64);
+
+                                    // Create borrowed packet reference - no copy!
+                                    let packet_ref = PacketRef {
+                                        frame_number: self.frame_number,
+                                        timestamp_us,
+                                        captured_len: epb.caplen,
+                                        original_len: epb.origlen,
+                                        link_type: self.link_type,
+                                        data: epb.data, // Borrowed from pcap_parser buffer
+                                    };
+
+                                    // Call the callback with borrowed data
+                                    f(packet_ref)?;
+
+                                    // Only consume after callback completes
+                                    reader.consume(offset);
+                                    count += 1;
+                                }
+                                Block::SimplePacket(spb) => {
+                                    self.frame_number += 1;
+
+                                    // Create borrowed packet reference - no copy!
+                                    let packet_ref = PacketRef {
+                                        frame_number: self.frame_number,
+                                        timestamp_us: 0,
+                                        captured_len: spb.data.len() as u32,
+                                        original_len: spb.origlen,
+                                        link_type: self.link_type,
+                                        data: spb.data, // Borrowed from pcap_parser buffer
+                                    };
+
+                                    // Call the callback with borrowed data
+                                    f(packet_ref)?;
+
+                                    // Only consume after callback completes
+                                    reader.consume(offset);
+                                    count += 1;
+                                }
+                                _ => {
+                                    reader.consume(offset);
+                                    continue;
+                                }
+                            }
+                        }
+                        _ => {
+                            reader.consume(offset);
+                            continue;
+                        }
+                    }
+                }
+                Err(PcapError::Eof) => break,
+                Err(PcapError::Incomplete(_)) => {
+                    reader.refill().map_err(|e| {
+                        Error::Pcap(OurPcapError::InvalidFormat {
+                            reason: format!("Refill error: {e}"),
+                        })
+                    })?;
+                    continue;
+                }
+                Err(e) => {
+                    return Err(Error::Pcap(OurPcapError::InvalidFormat {
+                        reason: format!("Parse error: {e}"),
+                    }))
+                }
+            }
+        }
+        Ok(count)
     }
 }
 

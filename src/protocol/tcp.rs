@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use arrow::datatypes::{DataType, Field};
 use etherparse::TcpHeaderSlice;
 
-use super::{FieldValue, ParseContext, ParseResult, Protocol};
+use super::{FieldValue, ParseContext, ParseResult, PayloadMode, Protocol};
 
 /// IP protocol number for TCP.
 pub const IP_PROTO_TCP: u8 = 6;
@@ -135,7 +135,11 @@ impl Protocol for TcpProtocol {
     }
 
     fn child_protocols(&self) -> &[&'static str] {
-        &["http", "tls", "dns"]
+        &[] // Application protocols handled by StreamManager
+    }
+
+    fn payload_mode(&self) -> PayloadMode {
+        PayloadMode::Stream
     }
 }
 

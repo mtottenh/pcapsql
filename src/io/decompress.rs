@@ -1,10 +1,14 @@
 //! Compression detection and decompression support.
 //!
-//! Provides a unified `AnyDecoder` that wraps various decompression formats
+//! Provides a unified `DecompressReader<R>` that wraps various decompression formats
 //! and implements `Read`. Uses enum dispatch for zero-allocation decompression.
+//!
+//! The reader is generic over any `R: Read`, allowing it to work with:
+//! - `File` for standard file I/O
+//! - `Cursor<MmapSlice>` for memory-mapped files
+//! - Any other `Read` source (e.g., network streams, S3)
 
-use std::fs::File;
-use std::io::{self, Cursor, Read};
+use std::io::{self, BufReader, Read};
 use std::sync::Arc;
 
 use flate2::read::GzDecoder;
@@ -128,218 +132,143 @@ impl AsRef<[u8]> for MmapSlice {
     }
 }
 
-/// Unified decoder that wraps various decompression formats.
+/// Unified decompression reader that wraps various decompression formats.
+///
+/// Generic over any `R: Read`, enabling composition with:
+/// - `File` for standard file I/O
+/// - `Cursor<MmapSlice>` for memory-mapped files
+/// - Any other `Read` source
 ///
 /// Uses enum dispatch rather than trait objects to avoid allocation
 /// and enable potential inlining. The `Read` implementation simply
 /// delegates to the inner decoder.
-pub enum AnyDecoder {
-    /// No compression - direct cursor over mmap'd data
-    None(Cursor<MmapSlice>),
+pub enum DecompressReader<R: Read> {
+    /// No compression - pass-through
+    None(R),
 
     /// Gzip decompression
-    Gzip(GzDecoder<Cursor<MmapSlice>>),
+    Gzip(GzDecoder<R>),
 
     /// Zstandard decompression
     #[cfg(feature = "compress-zstd")]
-    Zstd(zstd::Decoder<'static, std::io::BufReader<Cursor<MmapSlice>>>),
+    Zstd(zstd::Decoder<'static, BufReader<R>>),
 
     /// LZ4 frame decompression
     #[cfg(feature = "compress-lz4")]
-    Lz4(lz4_flex::frame::FrameDecoder<Cursor<MmapSlice>>),
+    Lz4(lz4_flex::frame::FrameDecoder<R>),
 
     /// Bzip2 decompression
     #[cfg(feature = "compress-bzip2")]
-    Bzip2(bzip2::read::BzDecoder<Cursor<MmapSlice>>),
+    Bzip2(bzip2::read::BzDecoder<R>),
 
     /// XZ/LZMA decompression
     #[cfg(feature = "compress-xz")]
-    Xz(xz2::read::XzDecoder<Cursor<MmapSlice>>),
+    Xz(xz2::read::XzDecoder<R>),
 }
+
+impl<R: Read> DecompressReader<R> {
+    /// Create a decompression reader with explicit compression format.
+    pub fn new(source: R, compression: Compression) -> io::Result<Self> {
+        match compression {
+            Compression::None => Ok(DecompressReader::None(source)),
+
+            Compression::Gzip => Ok(DecompressReader::Gzip(GzDecoder::new(source))),
+
+            #[cfg(feature = "compress-zstd")]
+            Compression::Zstd => {
+                let decoder = zstd::Decoder::new(source)?;
+                Ok(DecompressReader::Zstd(decoder))
+            }
+
+            #[cfg(feature = "compress-lz4")]
+            Compression::Lz4 => {
+                let decoder = lz4_flex::frame::FrameDecoder::new(source);
+                Ok(DecompressReader::Lz4(decoder))
+            }
+
+            #[cfg(feature = "compress-bzip2")]
+            Compression::Bzip2 => {
+                let decoder = bzip2::read::BzDecoder::new(source);
+                Ok(DecompressReader::Bzip2(decoder))
+            }
+
+            #[cfg(feature = "compress-xz")]
+            Compression::Xz => {
+                let decoder = xz2::read::XzDecoder::new(source);
+                Ok(DecompressReader::Xz(decoder))
+            }
+        }
+    }
+
+    /// Get the compression format this reader handles.
+    pub fn compression(&self) -> Compression {
+        match self {
+            DecompressReader::None(_) => Compression::None,
+            DecompressReader::Gzip(_) => Compression::Gzip,
+            #[cfg(feature = "compress-zstd")]
+            DecompressReader::Zstd(_) => Compression::Zstd,
+            #[cfg(feature = "compress-lz4")]
+            DecompressReader::Lz4(_) => Compression::Lz4,
+            #[cfg(feature = "compress-bzip2")]
+            DecompressReader::Bzip2(_) => Compression::Bzip2,
+            #[cfg(feature = "compress-xz")]
+            DecompressReader::Xz(_) => Compression::Xz,
+        }
+    }
+}
+
+impl<R: Read> Read for DecompressReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            DecompressReader::None(r) => r.read(buf),
+            DecompressReader::Gzip(r) => r.read(buf),
+            #[cfg(feature = "compress-zstd")]
+            DecompressReader::Zstd(r) => r.read(buf),
+            #[cfg(feature = "compress-lz4")]
+            DecompressReader::Lz4(r) => r.read(buf),
+            #[cfg(feature = "compress-bzip2")]
+            DecompressReader::Bzip2(r) => r.read(buf),
+            #[cfg(feature = "compress-xz")]
+            DecompressReader::Xz(r) => r.read(buf),
+        }
+    }
+}
+
+// DecompressReader is Send when R is Send
+unsafe impl<R: Read + Send> Send for DecompressReader<R> {}
+
+// Required for async compatibility
+impl<R: Read + Unpin> Unpin for DecompressReader<R> {}
+
+// =============================================================================
+// Legacy type aliases for backward compatibility during migration
+// =============================================================================
+
+use std::fs::File;
+use std::io::Cursor;
+
+/// Type alias for backward compatibility - prefer `DecompressReader<File>` directly
+pub type FileDecoder = DecompressReader<File>;
+
+/// Type alias for backward compatibility - prefer `DecompressReader<Cursor<MmapSlice>>` directly
+pub type AnyDecoder = DecompressReader<Cursor<MmapSlice>>;
 
 impl AnyDecoder {
     /// Create a decoder for the given mmap'd data.
     ///
     /// Automatically detects compression format from magic bytes.
-    pub fn new(mmap: Arc<Mmap>) -> io::Result<Self> {
+    pub fn from_mmap(mmap: Arc<Mmap>) -> io::Result<Self> {
         let compression = Compression::detect(&mmap);
-        Self::with_compression(mmap, compression)
+        Self::with_compression_mmap(mmap, compression)
     }
 
     /// Create a decoder with explicit compression format.
-    pub fn with_compression(mmap: Arc<Mmap>, compression: Compression) -> io::Result<Self> {
+    pub fn with_compression_mmap(mmap: Arc<Mmap>, compression: Compression) -> io::Result<Self> {
         let slice = MmapSlice::new(mmap);
         let cursor = Cursor::new(slice);
-
-        match compression {
-            Compression::None => Ok(AnyDecoder::None(cursor)),
-
-            Compression::Gzip => Ok(AnyDecoder::Gzip(GzDecoder::new(cursor))),
-
-            #[cfg(feature = "compress-zstd")]
-            Compression::Zstd => {
-                let decoder = zstd::Decoder::new(cursor)?;
-                Ok(AnyDecoder::Zstd(decoder))
-            }
-
-            #[cfg(feature = "compress-lz4")]
-            Compression::Lz4 => {
-                let decoder = lz4_flex::frame::FrameDecoder::new(cursor);
-                Ok(AnyDecoder::Lz4(decoder))
-            }
-
-            #[cfg(feature = "compress-bzip2")]
-            Compression::Bzip2 => {
-                let decoder = bzip2::read::BzDecoder::new(cursor);
-                Ok(AnyDecoder::Bzip2(decoder))
-            }
-
-            #[cfg(feature = "compress-xz")]
-            Compression::Xz => {
-                let decoder = xz2::read::XzDecoder::new(cursor);
-                Ok(AnyDecoder::Xz(decoder))
-            }
-        }
-    }
-
-    /// Get the compression format this decoder handles.
-    pub fn compression(&self) -> Compression {
-        match self {
-            AnyDecoder::None(_) => Compression::None,
-            AnyDecoder::Gzip(_) => Compression::Gzip,
-            #[cfg(feature = "compress-zstd")]
-            AnyDecoder::Zstd(_) => Compression::Zstd,
-            #[cfg(feature = "compress-lz4")]
-            AnyDecoder::Lz4(_) => Compression::Lz4,
-            #[cfg(feature = "compress-bzip2")]
-            AnyDecoder::Bzip2(_) => Compression::Bzip2,
-            #[cfg(feature = "compress-xz")]
-            AnyDecoder::Xz(_) => Compression::Xz,
-        }
+        DecompressReader::new(cursor, compression)
     }
 }
-
-impl Read for AnyDecoder {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        match self {
-            AnyDecoder::None(r) => r.read(buf),
-            AnyDecoder::Gzip(r) => r.read(buf),
-            #[cfg(feature = "compress-zstd")]
-            AnyDecoder::Zstd(r) => r.read(buf),
-            #[cfg(feature = "compress-lz4")]
-            AnyDecoder::Lz4(r) => r.read(buf),
-            #[cfg(feature = "compress-bzip2")]
-            AnyDecoder::Bzip2(r) => r.read(buf),
-            #[cfg(feature = "compress-xz")]
-            AnyDecoder::Xz(r) => r.read(buf),
-        }
-    }
-}
-
-// Required for async compatibility
-impl Unpin for AnyDecoder {}
-
-/// File-based decoder that wraps various decompression formats.
-///
-/// Similar to `AnyDecoder` but for `File` input instead of mmap'd data.
-/// Uses enum dispatch for zero-allocation decompression.
-pub enum FileDecoder {
-    /// No compression - direct file access
-    None(File),
-
-    /// Gzip decompression
-    Gzip(GzDecoder<File>),
-
-    /// Zstandard decompression
-    #[cfg(feature = "compress-zstd")]
-    Zstd(zstd::Decoder<'static, std::io::BufReader<File>>),
-
-    /// LZ4 frame decompression
-    #[cfg(feature = "compress-lz4")]
-    Lz4(lz4_flex::frame::FrameDecoder<File>),
-
-    /// Bzip2 decompression
-    #[cfg(feature = "compress-bzip2")]
-    Bzip2(bzip2::read::BzDecoder<File>),
-
-    /// XZ/LZMA decompression
-    #[cfg(feature = "compress-xz")]
-    Xz(xz2::read::XzDecoder<File>),
-}
-
-impl FileDecoder {
-    /// Create a decoder for the given file with explicit compression format.
-    pub fn new(file: File, compression: Compression) -> io::Result<Self> {
-        match compression {
-            Compression::None => Ok(FileDecoder::None(file)),
-
-            Compression::Gzip => Ok(FileDecoder::Gzip(GzDecoder::new(file))),
-
-            #[cfg(feature = "compress-zstd")]
-            Compression::Zstd => {
-                let decoder = zstd::Decoder::new(file)?;
-                Ok(FileDecoder::Zstd(decoder))
-            }
-
-            #[cfg(feature = "compress-lz4")]
-            Compression::Lz4 => {
-                let decoder = lz4_flex::frame::FrameDecoder::new(file);
-                Ok(FileDecoder::Lz4(decoder))
-            }
-
-            #[cfg(feature = "compress-bzip2")]
-            Compression::Bzip2 => {
-                let decoder = bzip2::read::BzDecoder::new(file);
-                Ok(FileDecoder::Bzip2(decoder))
-            }
-
-            #[cfg(feature = "compress-xz")]
-            Compression::Xz => {
-                let decoder = xz2::read::XzDecoder::new(file);
-                Ok(FileDecoder::Xz(decoder))
-            }
-        }
-    }
-
-    /// Get the compression format this decoder handles.
-    pub fn compression(&self) -> Compression {
-        match self {
-            FileDecoder::None(_) => Compression::None,
-            FileDecoder::Gzip(_) => Compression::Gzip,
-            #[cfg(feature = "compress-zstd")]
-            FileDecoder::Zstd(_) => Compression::Zstd,
-            #[cfg(feature = "compress-lz4")]
-            FileDecoder::Lz4(_) => Compression::Lz4,
-            #[cfg(feature = "compress-bzip2")]
-            FileDecoder::Bzip2(_) => Compression::Bzip2,
-            #[cfg(feature = "compress-xz")]
-            FileDecoder::Xz(_) => Compression::Xz,
-        }
-    }
-}
-
-impl Read for FileDecoder {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        match self {
-            FileDecoder::None(r) => r.read(buf),
-            FileDecoder::Gzip(r) => r.read(buf),
-            #[cfg(feature = "compress-zstd")]
-            FileDecoder::Zstd(r) => r.read(buf),
-            #[cfg(feature = "compress-lz4")]
-            FileDecoder::Lz4(r) => r.read(buf),
-            #[cfg(feature = "compress-bzip2")]
-            FileDecoder::Bzip2(r) => r.read(buf),
-            #[cfg(feature = "compress-xz")]
-            FileDecoder::Xz(r) => r.read(buf),
-        }
-    }
-}
-
-// FileDecoder is Send since File and all decoders are Send
-unsafe impl Send for FileDecoder {}
-
-// Required for async compatibility
-impl Unpin for FileDecoder {}
 
 #[cfg(test)]
 mod tests {

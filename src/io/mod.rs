@@ -27,11 +27,13 @@
 
 mod decompress;
 mod mmap;
+mod pcap_stream;
 mod source;
 
-pub use decompress::{AnyDecoder, Compression, FileDecoder, MmapSlice};
+pub use decompress::{AnyDecoder, Compression, DecompressReader, FileDecoder, MmapSlice};
 pub use mmap::{MmapPacketReader, MmapPacketSource};
+pub use pcap_stream::{GenericPcapReader, PcapFormat};
 pub use source::{
-    FilePacketReader, FilePacketSource, PacketPosition, PacketRange, PacketReader, PacketSource,
-    PacketSourceMetadata, RawPacket,
+    FilePacketReader, FilePacketSource, PacketPosition, PacketRange, PacketReader, PacketRef,
+    PacketSource, PacketSourceMetadata, RawPacket,
 };

@@ -17,6 +17,35 @@ use bytes::Bytes;
 use crate::error::Error;
 use crate::pcap::PcapReader;
 
+/// Borrowed packet reference - zero-copy view into pcap_parser buffer.
+///
+/// This struct is passed to callbacks in `process_packets()`. The data
+/// is only valid for the duration of the callback - it must be processed
+/// (parsed, copied to Arrow buffers, etc.) before the callback returns.
+#[derive(Debug, Clone, Copy)]
+pub struct PacketRef<'a> {
+    /// Frame number (1-indexed, matching Wireshark)
+    pub frame_number: u64,
+    /// Timestamp in microseconds since Unix epoch
+    pub timestamp_us: i64,
+    /// Captured length (may be less than original)
+    pub captured_len: u32,
+    /// Original packet length on the wire
+    pub original_len: u32,
+    /// Link layer type (e.g., 1 = Ethernet)
+    pub link_type: u16,
+    /// Packet data (borrowed from pcap_parser buffer)
+    pub data: &'a [u8],
+}
+
+impl<'a> PacketRef<'a> {
+    /// Check if the packet was truncated during capture.
+    #[inline]
+    pub fn is_truncated(&self) -> bool {
+        self.captured_len < self.original_len
+    }
+}
+
 /// Position within a packet source (for seeking/checkpointing).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PacketPosition {
@@ -82,11 +111,20 @@ pub struct RawPacket {
     /// Timestamp in microseconds since Unix epoch
     pub timestamp_us: i64,
     /// Captured length (may be less than original)
-    pub captured_len: u32,
+    pub captured_length: u32,
     /// Original packet length on the wire
-    pub original_len: u32,
+    pub original_length: u32,
+    /// Link layer type (e.g., 1 = Ethernet)
+    pub link_type: u16,
     /// Packet data (potentially zero-copy with Bytes)
     pub data: Bytes,
+}
+
+impl RawPacket {
+    /// Check if the packet was truncated during capture.
+    pub fn is_truncated(&self) -> bool {
+        self.captured_length < self.original_length
+    }
 }
 
 /// Source of packet data. Creates readers and computes partitions.
@@ -98,7 +136,7 @@ pub struct RawPacket {
 ///
 /// We use generics rather than `Box<dyn PacketReader>` because:
 /// 1. Each QueryEngine uses ONE source type (no heterogeneous mixing)
-/// 2. The hot loop calls `reader.next_packet()` millions of times
+/// 2. The hot loop uses `reader.process_packets()` for zero-copy access
 /// 3. Static dispatch enables inlining and optimization
 /// 4. Type erasure happens at DataFusion boundaries anyway
 pub trait PacketSource: Send + Sync + Clone + 'static {
@@ -137,37 +175,40 @@ pub trait PacketSource: Send + Sync + Clone + 'static {
 ///
 /// This is the hot path - implementations should be optimized for
 /// sequential reading with minimal overhead per packet.
+///
+/// ## Zero-Copy API
+///
+/// Uses `process_packets()` with a callback pattern to avoid copying
+/// packet data. The callback receives borrowed packet data that is
+/// only valid during the callback invocation.
 pub trait PacketReader: Send + Unpin {
-    /// Read the next packet.
+    /// Process up to `max` packets with borrowed data via callback.
     ///
-    /// Returns `Ok(None)` at end of range/file.
-    /// This is the primary hot-path method.
-    fn next_packet(&mut self) -> Result<Option<RawPacket>, Error>;
+    /// The callback receives borrowed packet data and must process it
+    /// (parse, add to Arrow builders, etc.) before returning. The borrow
+    /// is only valid during the callback.
+    ///
+    /// Returns the number of packets processed (may be less than `max` at EOF).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// reader.process_packets(1024, |packet| {
+    ///     // packet.data is borrowed - must be processed here
+    ///     let parsed = parse_packet(packet.link_type, packet.data);
+    ///     builder.add_row(packet.frame_number, &parsed);
+    ///     Ok(())
+    /// })?;
+    /// ```
+    fn process_packets<F>(&mut self, max: usize, f: F) -> Result<usize, Error>
+    where
+        F: FnMut(PacketRef<'_>) -> Result<(), Error>;
 
     /// Current position in the source.
     fn position(&self) -> PacketPosition;
 
     /// Get the link type for packets from this reader.
     fn link_type(&self) -> u32;
-
-    /// Read multiple packets at once for efficiency.
-    ///
-    /// This amortizes any per-call overhead and enables better
-    /// cache utilization. The buffer is cleared before reading.
-    ///
-    /// Returns the number of packets read (0 means EOF).
-    #[inline]
-    fn read_batch(&mut self, buffer: &mut Vec<RawPacket>, max: usize) -> Result<usize, Error> {
-        buffer.clear();
-        buffer.reserve(max);
-        while buffer.len() < max {
-            match self.next_packet()? {
-                Some(pkt) => buffer.push(pkt),
-                None => break,
-            }
-        }
-        Ok(buffer.len())
-    }
 }
 
 /// Packet source backed by a PCAP/PCAPNG file.
@@ -265,41 +306,53 @@ impl FilePacketReader {
         }
         false
     }
+
+    /// Skip packets until we reach the range start.
+    fn skip_to_range_start(&mut self) -> Result<(), Error> {
+        while self.inner.frame_count() + 1 < self.position.frame_number {
+            // Use process_packets to skip one packet at a time
+            let processed = self.inner.process_packets(1, |_| Ok(()))?;
+            if processed == 0 {
+                break; // EOF
+            }
+        }
+        Ok(())
+    }
 }
 
 impl PacketReader for FilePacketReader {
-    #[inline]
-    fn next_packet(&mut self) -> Result<Option<RawPacket>, Error> {
+    fn process_packets<F>(&mut self, max: usize, mut f: F) -> Result<usize, Error>
+    where
+        F: FnMut(PacketRef<'_>) -> Result<(), Error>,
+    {
         // Check range bounds
         if self.past_range_end() {
-            return Ok(None);
+            return Ok(0);
         }
 
-        // Skip packets before our range start
-        while self.inner.frame_count() + 1 < self.position.frame_number {
-            if self.inner.next_packet()?.is_none() {
-                return Ok(None);
+        // Skip packets before our range start (using internal skip method)
+        self.skip_to_range_start()?;
+
+        // Calculate how many packets we can process before hitting range end
+        let effective_max = if let Some(ref range) = self.range {
+            if let Some(ref end) = range.end {
+                let remaining = end.frame_number.saturating_sub(self.inner.frame_count());
+                max.min(remaining as usize)
+            } else {
+                max
             }
-        }
+        } else {
+            max
+        };
 
-        // Read next packet from the underlying reader
-        match self.inner.next_packet()? {
-            Some(raw) => {
-                let packet = RawPacket {
-                    frame_number: raw.frame_number,
-                    timestamp_us: raw.timestamp_us,
-                    captured_len: raw.captured_length,
-                    original_len: raw.original_length,
-                    data: Bytes::from(raw.data),
-                };
+        // Delegate to underlying PcapReader's zero-copy implementation
+        let count = self.inner.process_packets(effective_max, |packet| {
+            // Update position tracking
+            self.position.frame_number = packet.frame_number + 1;
+            f(packet)
+        })?;
 
-                // Update position
-                self.position.frame_number = raw.frame_number + 1;
-
-                Ok(Some(packet))
-            }
-            None => Ok(None),
-        }
+        Ok(count)
     }
 
     #[inline]
@@ -310,9 +363,6 @@ impl PacketReader for FilePacketReader {
     fn link_type(&self) -> u32 {
         self.link_type
     }
-
-    // read_batch() uses default implementation, which is efficient enough
-    // for file I/O where the BufReader handles batching at the I/O level
 }
 
 #[cfg(test)]

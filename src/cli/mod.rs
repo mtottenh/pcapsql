@@ -11,7 +11,7 @@ mod export;
 mod output;
 mod repl;
 
-pub use args::{Args, ExportFormat};
+pub use args::{parse_size, Args, ExportFormat};
 pub use export::Exporter;
 pub use output::{OutputFormat, OutputFormatter};
 pub use repl::{Repl, ReplCommand, ReplInput};

@@ -11,6 +11,7 @@ use arrow::record_batch::RecordBatch;
 
 use super::protocol::ProtocolBatchBuilder;
 use crate::error::Error;
+use crate::io::PacketRef;
 use crate::pcap::RawPacket;
 use crate::protocol::ParseResult;
 use crate::query::tables;
@@ -71,10 +72,12 @@ impl NormalizedBatchSet {
         }
     }
 
-    /// Add a packet to all relevant protocol tables.
+    /// Add a packet to all relevant protocol tables (legacy API).
     ///
     /// `raw` is the raw packet data.
     /// `parsed` is the chain of parsed protocol layers from parse_packet().
+    ///
+    /// **Note**: Prefer `add_packet_from_ref()` for zero-copy processing.
     pub fn add_packet(
         &mut self,
         raw: &RawPacket,
@@ -84,6 +87,51 @@ impl NormalizedBatchSet {
 
         // Always add to frames table
         self.frames_builder.add_frame(raw);
+        if let Some(batch) = self.frames_builder.try_build()? {
+            self.batches
+                .get_mut("frames")
+                .expect("frames batches should exist")
+                .push(batch);
+        }
+
+        // Route each parsed protocol to its table
+        for (proto_name, result) in parsed {
+            // Find the table name for this protocol
+            if let Some(builder) = self.protocol_builders.get_mut(*proto_name) {
+                builder.add_parsed_row(frame_number, result);
+
+                if let Some(batch) = builder.try_build()? {
+                    self.batches
+                        .get_mut(*proto_name)
+                        .expect("protocol batches should exist")
+                        .push(batch);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Add a packet to all relevant protocol tables (zero-copy API).
+    ///
+    /// `packet` is a borrowed reference to the packet data.
+    /// `parsed` is the chain of parsed protocol layers from parse_packet().
+    pub fn add_packet_from_ref(
+        &mut self,
+        packet: PacketRef<'_>,
+        parsed: &[(&'static str, ParseResult<'_>)],
+    ) -> Result<(), Error> {
+        let frame_number = packet.frame_number;
+
+        // Always add to frames table
+        self.frames_builder.add_frame_from_raw(
+            packet.frame_number,
+            packet.timestamp_us,
+            packet.captured_len,
+            packet.original_len,
+            packet.data,
+            packet.link_type,
+        );
         if let Some(batch) = self.frames_builder.try_build()? {
             self.batches
                 .get_mut("frames")

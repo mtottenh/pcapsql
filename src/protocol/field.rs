@@ -98,6 +98,15 @@ impl FieldValue {
         }
     }
 
+    /// Try to get as u16.
+    pub fn as_u16(&self) -> Option<u16> {
+        match self {
+            FieldValue::UInt16(v) => Some(*v),
+            FieldValue::UInt8(v) => Some(*v as u16),
+            _ => None,
+        }
+    }
+
     /// Try to get as string.
     pub fn as_string(&self) -> Option<String> {
         match self {

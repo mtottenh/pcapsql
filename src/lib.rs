@@ -25,5 +25,6 @@ pub mod io;
 pub mod pcap;
 pub mod protocol;
 pub mod query;
+pub mod stream;
 
 pub use error::{Error, Result};

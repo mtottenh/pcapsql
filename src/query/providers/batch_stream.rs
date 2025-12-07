@@ -12,7 +12,7 @@ use futures::Stream;
 
 use crate::cache::{CachedParse, ParseCache};
 use crate::error::{Error, Result};
-use crate::io::{PacketReader, RawPacket};
+use crate::io::{PacketReader, PacketRef};
 use crate::protocol::{parse_packet, ProtocolRegistry};
 use crate::query::builders::ProtocolBatchBuilder;
 
@@ -22,10 +22,16 @@ use crate::query::builders::ProtocolBatchBuilder;
 ///
 /// # How It Works
 ///
-/// 1. Reads packets from the source using `reader.next_packet()`
+/// 1. Reads packets from the source using `reader.process_packets()` (zero-copy)
 /// 2. Parses each packet using the protocol registry (or cache lookup)
 /// 3. Filters to only packets matching this table's protocol
 /// 4. Builds Arrow RecordBatches in chunks of `batch_size`
+///
+/// # Zero-Copy Processing
+///
+/// Uses the callback-based `process_packets()` API to avoid copying packet
+/// data. The callback receives borrowed packet data that is parsed and
+/// added to Arrow builders before the borrow ends.
 ///
 /// # Caching
 ///
@@ -41,8 +47,6 @@ pub struct ProtocolBatchStream<R: PacketReader> {
     batch_size: usize,
     projection: Option<Vec<usize>>,
     finished: bool,
-    /// Reusable buffer for batch reads
-    packet_buffer: Vec<RawPacket>,
     /// Optional parse cache for reducing redundant parsing
     cache: Option<Arc<dyn ParseCache>>,
     /// Reader ID for cache eviction tracking
@@ -72,13 +76,16 @@ impl<R: PacketReader> ProtocolBatchStream<R> {
             batch_size,
             projection,
             finished: false,
-            packet_buffer: Vec::with_capacity(batch_size),
             cache,
             cache_reader_id,
         })
     }
 
     /// Read and process the next batch of packets.
+    ///
+    /// Uses the zero-copy `process_packets()` API to avoid copying packet data.
+    /// The callback receives borrowed packet data that is parsed and added to
+    /// Arrow builders before the borrow ends.
     fn read_next_batch(&mut self) -> Result<Option<RecordBatch>> {
         if self.finished {
             return Ok(None);
@@ -93,76 +100,76 @@ impl<R: PacketReader> ProtocolBatchStream<R> {
             }
         };
 
-        let mut rows_added = 0;
+        let mut rows_added = 0usize;
         let mut last_frame = 0u64;
 
-        // Read packets until we have a full batch or reach EOF
-        while rows_added < self.batch_size {
-            // Use batch reading for efficiency
-            let count = self.reader.read_batch(
-                &mut self.packet_buffer,
-                (self.batch_size - rows_added).min(256), // Read in reasonable chunks
-            )?;
+        // Capture references for the closure
+        let table_name = &self.table_name;
+        let cache = &self.cache;
+        let registry = &self.registry;
+        let link_type = self.link_type;
 
-            if count == 0 {
-                self.finished = true;
-                break;
-            }
+        // Process packets using zero-copy callback API
+        let packets_processed = self.reader.process_packets(self.batch_size, |packet: PacketRef<'_>| {
+            last_frame = packet.frame_number;
 
-            for packet in &self.packet_buffer[..count] {
-                last_frame = packet.frame_number;
-
-                // For frames table, add all packets without parsing
-                if self.table_name == "frames" {
-                    builder.add_frame_from_raw(
-                        packet.frame_number,
-                        packet.timestamp_us,
-                        packet.captured_len,
-                        packet.original_len,
-                        &packet.data,
-                        self.link_type as u16,
-                    );
-                    rows_added += 1;
-                    continue;
-                }
-
-                // Check cache first
-                if let Some(ref cache) = self.cache {
-                    if let Some(cached) = cache.get(packet.frame_number) {
-                        // Cache hit - use cached parse result
-                        if let Some(result) = cached.get_protocol(&self.table_name) {
-                            builder.add_cached_row(packet.frame_number, result);
-                            rows_added += 1;
-                        }
-                        continue;
-                    }
-                }
-
-                // Cache miss (or no cache) - parse packet
-                let parsed = parse_packet(
-                    &self.registry,
-                    self.link_type as u16,
-                    &packet.data,
+            // For frames table, add all packets without parsing
+            if table_name == "frames" {
+                builder.add_frame_from_raw(
+                    packet.frame_number,
+                    packet.timestamp_us,
+                    packet.captured_len,
+                    packet.original_len,
+                    packet.data,  // Borrowed slice - copied into Arrow buffer
+                    packet.link_type,
                 );
+                rows_added += 1;
+                return Ok(());
+            }
 
-                // Store in cache if available
-                if let Some(ref cache) = self.cache {
-                    let cached = Arc::new(CachedParse::from_parse_results(
-                        packet.frame_number,
-                        &parsed,
-                    ));
-                    cache.put(packet.frame_number, cached);
-                }
-
-                // For protocol-specific tables, only add if the protocol is present
-                for (proto_name, result) in &parsed {
-                    if *proto_name == self.table_name {
-                        builder.add_parsed_row(packet.frame_number, result);
+            // Check cache first
+            if let Some(ref cache) = cache {
+                if let Some(cached) = cache.get(packet.frame_number) {
+                    // Cache hit - use cached parse result (raw bytes not needed!)
+                    if let Some(result) = cached.get_protocol(table_name) {
+                        builder.add_cached_row(packet.frame_number, result);
                         rows_added += 1;
-                        break;
                     }
+                    return Ok(());
                 }
             }
+
+            // Cache miss (or no cache) - parse using borrowed data
+            let parsed = parse_packet(
+                registry,
+                link_type as u16,
+                packet.data,  // Borrowed slice - no copy needed for parsing
+            );
+
+            // Store owned result in cache if available
+            if let Some(ref cache) = cache {
+                let cached = Arc::new(CachedParse::from_parse_results(
+                    packet.frame_number,
+                    &parsed,
+                ));
+                cache.put(packet.frame_number, cached);
+            }
+
+            // For protocol-specific tables, only add if the protocol is present
+            for (proto_name, result) in &parsed {
+                if *proto_name == *table_name {
+                    builder.add_parsed_row(packet.frame_number, result);
+                    rows_added += 1;
+                    break;
+                }
+            }
+
+            Ok(())
+        })?;
+
+        // Check if we've reached EOF
+        if packets_processed == 0 {
+            self.finished = true;
         }
 
         // Notify cache of progress for eviction

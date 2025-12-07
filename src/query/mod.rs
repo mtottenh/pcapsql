@@ -289,6 +289,7 @@ impl QueryEngine {
     /// Load packets from a PCAP file into normalized per-protocol Arrow batches.
     ///
     /// Returns a HashMap mapping table names to vectors of RecordBatches.
+    /// Uses zero-copy processing via `process_packets()` callback API.
     fn load_normalized_packets<P: AsRef<Path>>(
         path: P,
         registry: &ProtocolRegistry,
@@ -318,21 +319,28 @@ impl QueryEngine {
 
         let mut packet_count = 0u64;
 
-        while let Some(raw_packet) = reader.next_packet()? {
-            // Parse the packet through all protocol layers
-            let parsed = parse_packet(registry, link_type, &raw_packet.data);
+        // Process packets in batches using zero-copy callback API
+        loop {
+            let processed = reader.process_packets(1000, |packet| {
+                // Parse the packet through all protocol layers
+                let parsed = parse_packet(registry, link_type, packet.data);
 
-            // Add to normalized batch set (routes to appropriate protocol tables)
-            batch_set.add_packet(&raw_packet, &parsed)?;
+                // Add to normalized batch set (routes to appropriate protocol tables)
+                batch_set.add_packet_from_ref(packet, &parsed)?;
 
-            packet_count += 1;
+                packet_count += 1;
+                Ok(())
+            })?;
 
             // Update progress bar
             if let Some(ref pb) = progress {
-                if packet_count % 1000 == 0 {
-                    pb.set_message(format!("{} packets loaded", packet_count));
-                    pb.tick();
-                }
+                pb.set_message(format!("{} packets loaded", packet_count));
+                pb.tick();
+            }
+
+            // Check for EOF
+            if processed == 0 {
+                break;
             }
         }
 

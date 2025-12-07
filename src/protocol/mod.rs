@@ -33,7 +33,7 @@ pub mod test_utils;
 
 pub use context::{ParseContext, ParseResult};
 pub use field::FieldValue;
-pub use registry::{BuiltinProtocol, Protocol, ProtocolRegistry};
+pub use registry::{BuiltinProtocol, PayloadMode, Protocol, ProtocolRegistry};
 
 // Re-export protocol implementations
 pub use arp::ArpProtocol;
@@ -117,4 +117,45 @@ pub fn parse_packet<'a>(
     }
 
     results
+}
+
+#[cfg(test)]
+mod payload_mode_tests {
+    use super::*;
+
+    // Test 1: Default payload mode is Chain
+    #[test]
+    fn test_default_payload_mode() {
+        // Most protocols should default to Chain
+        let eth = EthernetProtocol;
+        assert_eq!(eth.payload_mode(), PayloadMode::Chain);
+
+        let ipv4 = Ipv4Protocol;
+        assert_eq!(ipv4.payload_mode(), PayloadMode::Chain);
+
+        let udp = UdpProtocol;
+        assert_eq!(udp.payload_mode(), PayloadMode::Chain);
+    }
+
+    // Test 2: TCP returns Stream mode
+    #[test]
+    fn test_tcp_stream_mode() {
+        let tcp = TcpProtocol;
+        assert_eq!(tcp.payload_mode(), PayloadMode::Stream);
+    }
+
+    // Test 3: TCP child_protocols is empty
+    #[test]
+    fn test_tcp_no_child_protocols() {
+        let tcp = TcpProtocol;
+        assert!(tcp.child_protocols().is_empty());
+    }
+
+    // Test 4: PayloadMode enum values
+    #[test]
+    fn test_payload_mode_values() {
+        assert_ne!(PayloadMode::Chain, PayloadMode::Stream);
+        assert_ne!(PayloadMode::Stream, PayloadMode::None);
+        assert_ne!(PayloadMode::Chain, PayloadMode::None);
+    }
 }

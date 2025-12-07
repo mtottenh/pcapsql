@@ -8,6 +8,22 @@ use super::{
     QuicProtocol, SshProtocol, TcpProtocol, TlsProtocol, UdpProtocol, VlanProtocol,
 };
 
+/// How a protocol's remaining bytes should be handled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PayloadMode {
+    /// Continue with parse_packet() loop (default).
+    /// Remaining bytes are passed to child protocol parsers.
+    Chain,
+
+    /// Route payload to StreamManager for reassembly.
+    /// Used by TCP - application protocols are parsed from reassembled streams.
+    Stream,
+
+    /// No payload / terminal protocol.
+    /// Parsing stops after this protocol.
+    None,
+}
+
 /// Core trait all protocol parsers must implement.
 pub trait Protocol: Send + Sync {
     /// Unique identifier for this protocol (e.g., "tcp", "dns").
@@ -32,6 +48,15 @@ pub trait Protocol: Send + Sync {
     /// Protocols that might follow this one.
     fn child_protocols(&self) -> &[&'static str] {
         &[]
+    }
+
+    /// How should remaining bytes be handled after parsing?
+    ///
+    /// - `Chain`: Continue parsing with child protocols (default)
+    /// - `Stream`: Route to StreamManager for TCP reassembly
+    /// - `None`: Stop parsing (terminal protocol)
+    fn payload_mode(&self) -> PayloadMode {
+        PayloadMode::Chain
     }
 }
 
@@ -112,6 +137,11 @@ impl Protocol for BuiltinProtocol {
     #[inline]
     fn child_protocols(&self) -> &[&'static str] {
         delegate_protocol!(self, child_protocols)
+    }
+
+    #[inline]
+    fn payload_mode(&self) -> PayloadMode {
+        delegate_protocol!(self, payload_mode)
     }
 }
 
