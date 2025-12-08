@@ -93,12 +93,12 @@ impl Protocol for Ipv6Protocol {
                 // Check for IP-in-IP encapsulation
                 if final_next_header == next_header::IPIP {
                     // IPv4 encapsulated in IPv6 - signal tunnel boundary
-                    child_hints.push(("tunnel_type", TunnelType::Ip6InIp as u64));
+                    child_hints.push(("tunnel_type", TunnelType::Ip4InIp6 as u64));
                     // Set ethertype hint so inner IPv4 can be parsed
                     child_hints.push(("ethertype", ethertype::IPV4 as u64));
                 } else if final_next_header == next_header::IPV6_IN_IP {
                     // IPv6 encapsulated in IPv6 - signal tunnel boundary
-                    child_hints.push(("tunnel_type", TunnelType::Ip6InIp as u64));
+                    child_hints.push(("tunnel_type", TunnelType::Ip6InIp6 as u64));
                     // Set ethertype hint so inner IPv6 can be parsed
                     child_hints.push(("ethertype", ethertype::IPV6 as u64));
                 }
@@ -633,5 +633,79 @@ mod tests {
         assert_eq!(result.get("ext_hop_by_hop"), Some(&FieldValue::Bool(true)));
         // Final protocol should be 250 (unknown)
         assert_eq!(result.hint("ip_protocol"), Some(250u64));
+    }
+
+    #[test]
+    fn test_ipv4_in_ipv6_tunnel() {
+        // IPv6 header with next_header=4 (IPv4 encapsulated in IPv6)
+        let mut packet = vec![
+            0x60, 0x00, 0x00, 0x00, // Version (6) + Traffic class + Flow label
+            0x00, 0x14, // Payload length: 20 (inner IPv4 header)
+            0x04, // Next header: IPIP (4) - IPv4 encapsulated
+            0x40, // Hop limit: 64
+        ];
+        // Source: 2001:db8::1
+        packet.extend_from_slice(&[
+            0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x01,
+        ]);
+        // Destination: 2001:db8::2
+        packet.extend_from_slice(&[
+            0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x02,
+        ]);
+        // Inner IPv4 header stub (first few bytes)
+        packet.extend_from_slice(&[0x45, 0x00, 0x00, 0x14, 0x00, 0x00, 0x00, 0x00]);
+
+        let parser = Ipv6Protocol;
+        let context = create_ipv6_context();
+
+        let result = parser.parse(&packet, &context);
+
+        assert!(result.is_ok());
+        assert_eq!(result.get("next_header"), Some(&FieldValue::UInt8(4)));
+        // Should set ip_protocol hint for inner protocol
+        assert_eq!(result.hint("ip_protocol"), Some(4u64));
+        // Should set ethertype hint for IPv4 so inner IPv4 parser can match
+        assert_eq!(result.hint("ethertype"), Some(0x0800u64));
+        // Should indicate tunnel type
+        assert_eq!(result.hint("tunnel_type"), Some(TunnelType::Ip4InIp6 as u64));
+    }
+
+    #[test]
+    fn test_ipv6_in_ipv6_tunnel() {
+        // IPv6 header with next_header=41 (IPv6 encapsulated in IPv6)
+        let mut packet = vec![
+            0x60, 0x00, 0x00, 0x00, // Version (6) + Traffic class + Flow label
+            0x00, 0x28, // Payload length: 40 (inner IPv6 header)
+            0x29, // Next header: IPv6 (41) - IPv6 encapsulated
+            0x40, // Hop limit: 64
+        ];
+        // Source: 2001:db8::1
+        packet.extend_from_slice(&[
+            0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x01,
+        ]);
+        // Destination: 2001:db8::2
+        packet.extend_from_slice(&[
+            0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x02,
+        ]);
+        // Inner IPv6 header stub
+        packet.extend_from_slice(&[0x60, 0x00, 0x00, 0x00, 0x00, 0x00, 0x06, 0x40]);
+
+        let parser = Ipv6Protocol;
+        let context = create_ipv6_context();
+
+        let result = parser.parse(&packet, &context);
+
+        assert!(result.is_ok());
+        assert_eq!(result.get("next_header"), Some(&FieldValue::UInt8(41)));
+        // Should set ip_protocol hint for inner protocol
+        assert_eq!(result.hint("ip_protocol"), Some(41u64));
+        // Should set ethertype hint for IPv6 so inner IPv6 parser can match
+        assert_eq!(result.hint("ethertype"), Some(0x86DDu64));
+        // Should indicate tunnel type
+        assert_eq!(result.hint("tunnel_type"), Some(TunnelType::Ip6InIp6 as u64));
     }
 }

@@ -27,12 +27,16 @@ pub enum TunnelType {
     Gtp = 3,
     /// MPLS encapsulation.
     Mpls = 4,
-    /// IPv4-in-IP encapsulation (IP protocol 4).
+    /// IPv4-in-IPv4 encapsulation (IP protocol 4 in IPv4).
     IpInIp = 5,
-    /// IPv6-in-IP encapsulation (IP protocol 41).
+    /// IPv6-in-IPv4 encapsulation (IP protocol 41 in IPv4).
     Ip6InIp = 6,
     /// IPsec encapsulation.
     Ipsec = 7,
+    /// IPv4-in-IPv6 encapsulation (next header 4 in IPv6).
+    Ip4InIp6 = 8,
+    /// IPv6-in-IPv6 encapsulation (next header 41 in IPv6).
+    Ip6InIp6 = 9,
 }
 
 impl TunnelType {
@@ -47,6 +51,8 @@ impl TunnelType {
             5 => TunnelType::IpInIp,
             6 => TunnelType::Ip6InIp,
             7 => TunnelType::Ipsec,
+            8 => TunnelType::Ip4InIp6,
+            9 => TunnelType::Ip6InIp6,
             _ => TunnelType::None,
         }
     }
@@ -62,6 +68,8 @@ impl TunnelType {
             TunnelType::IpInIp => Some("ipinip"),
             TunnelType::Ip6InIp => Some("ip6inip"),
             TunnelType::Ipsec => Some("ipsec"),
+            TunnelType::Ip4InIp6 => Some("ip4inip6"),
+            TunnelType::Ip6InIp6 => Some("ip6inip6"),
         }
     }
 }
