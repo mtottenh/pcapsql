@@ -8,16 +8,29 @@
 //! -- Load the extension
 //! LOAD 'pcapsql.duckdb_extension';
 //!
-//! -- Query a PCAP file (to be implemented in Task 12)
+//! -- Read TCP packets from a PCAP file
 //! SELECT * FROM read_pcap('capture.pcap', 'tcp') LIMIT 10;
+//!
+//! -- Read DNS packets
+//! SELECT * FROM read_pcap('capture.pcap', 'dns');
+//!
+//! -- Read all frames (raw packet metadata)
+//! SELECT * FROM read_pcap('capture.pcap', 'frames');
+//!
+//! -- Join protocols
+//! SELECT t.src_port, t.dst_port, d.query_name
+//! FROM read_pcap('capture.pcap', 'tcp') t
+//! JOIN read_pcap('capture.pcap', 'dns') d USING (frame_number);
 //! ```
 
 mod duckdb_schema;
 mod error;
+mod vtab;
 
 pub use duckdb_schema::{protocol_columns, to_duckdb_column, to_duckdb_type};
 pub use error::DuckDbError;
 pub use pcapsql_core;
+pub use vtab::{register_read_pcap, ReadPcapVTab};
 
 // Required imports for the duckdb_entrypoint_c_api macro
 use duckdb::ffi;
@@ -42,11 +55,10 @@ pub unsafe fn pcapsql_init(con: Connection) -> duckdb::Result<(), Box<dyn std::e
         EXTENSION_VERSION
     );
 
-    // Table functions will be registered in Task 12-14
-    // UDFs will be registered in Task 15
+    // Register table functions
+    vtab::register_read_pcap(&con)?;
 
-    // Suppress unused variable warning for now
-    let _ = con;
+    // UDFs will be registered in Task 15
 
     Ok(())
 }
