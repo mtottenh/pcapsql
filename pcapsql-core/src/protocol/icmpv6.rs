@@ -1,7 +1,8 @@
 //! ICMPv6 protocol parser with NDP and MLD support.
 
-use std::collections::HashMap;
 use std::net::Ipv6Addr;
+
+use smallvec::SmallVec;
 
 use super::{FieldValue, ParseContext, ParseResult, Protocol};
 use crate::schema::{DataKind, FieldDescriptor};
@@ -79,19 +80,19 @@ impl Protocol for Icmpv6Protocol {
             );
         }
 
-        let mut fields = HashMap::new();
+        let mut fields = SmallVec::new();
 
         let icmpv6_type = data[0];
         let icmpv6_code = data[1];
         let checksum = u16::from_be_bytes([data[2], data[3]]);
 
-        fields.insert("type", FieldValue::UInt8(icmpv6_type));
-        fields.insert("code", FieldValue::UInt8(icmpv6_code));
-        fields.insert("checksum", FieldValue::UInt16(checksum));
+        fields.push(("type", FieldValue::UInt8(icmpv6_type)));
+        fields.push(("code", FieldValue::UInt8(icmpv6_code)));
+        fields.push(("checksum", FieldValue::UInt16(checksum)));
 
         // Add type name
         let type_name = get_type_name(icmpv6_type);
-        fields.insert("type_name", FieldValue::String(type_name.to_string()));
+        fields.push(("type_name", FieldValue::String(type_name.to_string())));
 
         // Parse type-specific fields
         let consumed = match icmpv6_type {
@@ -128,7 +129,7 @@ impl Protocol for Icmpv6Protocol {
             _ => 4, // Just consume the header
         };
 
-        ParseResult::success(fields, &data[consumed..], HashMap::new())
+        ParseResult::success(fields, &data[consumed..], SmallVec::new())
     }
 
     fn schema_fields(&self) -> Vec<FieldDescriptor> {
@@ -169,6 +170,10 @@ impl Protocol for Icmpv6Protocol {
             FieldDescriptor::new("icmpv6.mld_num_group_records", DataKind::UInt16).set_nullable(true),
         ]
     }
+
+    fn dependencies(&self) -> &'static [&'static str] {
+        &["ipv6"]
+    }
 }
 
 /// Get ICMPv6 type name.
@@ -194,39 +199,39 @@ fn get_type_name(icmpv6_type: u8) -> &'static str {
 }
 
 /// Parse Echo Request/Reply (types 128/129).
-fn parse_echo(data: &[u8], fields: &mut HashMap<&'static str, FieldValue>) -> usize {
+fn parse_echo(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) -> usize {
     if data.len() < 4 {
         return 4;
     }
     let id = u16::from_be_bytes([data[0], data[1]]);
     let seq = u16::from_be_bytes([data[2], data[3]]);
-    fields.insert("echo_id", FieldValue::UInt16(id));
-    fields.insert("echo_seq", FieldValue::UInt16(seq));
+    fields.push(("echo_id", FieldValue::UInt16(id)));
+    fields.push(("echo_seq", FieldValue::UInt16(seq)));
     8 // 4 bytes header + 4 bytes echo data
 }
 
 /// Parse Packet Too Big (type 2).
-fn parse_packet_too_big(data: &[u8], fields: &mut HashMap<&'static str, FieldValue>) -> usize {
+fn parse_packet_too_big(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) -> usize {
     if data.len() < 4 {
         return 4;
     }
     let mtu = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-    fields.insert("mtu", FieldValue::UInt32(mtu));
+    fields.push(("mtu", FieldValue::UInt32(mtu)));
     8 // 4 bytes header + 4 bytes MTU
 }
 
 /// Parse Parameter Problem (type 4).
-fn parse_parameter_problem(data: &[u8], fields: &mut HashMap<&'static str, FieldValue>) -> usize {
+fn parse_parameter_problem(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) -> usize {
     if data.len() < 4 {
         return 4;
     }
     let pointer = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-    fields.insert("pointer", FieldValue::UInt32(pointer));
+    fields.push(("pointer", FieldValue::UInt32(pointer)));
     8 // 4 bytes header + 4 bytes pointer
 }
 
 /// Parse Router Solicitation (type 133).
-fn parse_router_solicitation(data: &[u8], fields: &mut HashMap<&'static str, FieldValue>) -> usize {
+fn parse_router_solicitation(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) -> usize {
     // Router Solicitation has 4 bytes reserved, then options
     if data.len() < 4 {
         return 4;
@@ -240,7 +245,7 @@ fn parse_router_solicitation(data: &[u8], fields: &mut HashMap<&'static str, Fie
 /// Parse Router Advertisement (type 134).
 fn parse_router_advertisement(
     data: &[u8],
-    fields: &mut HashMap<&'static str, FieldValue>,
+    fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
 ) -> usize {
     // RA has 12 bytes of fixed data after the ICMPv6 header
     if data.len() < 12 {
@@ -253,12 +258,12 @@ fn parse_router_advertisement(
     let reachable_time = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
     let retrans_timer = u32::from_be_bytes([data[8], data[9], data[10], data[11]]);
 
-    fields.insert("ndp_cur_hop_limit", FieldValue::UInt8(cur_hop_limit));
-    fields.insert("ndp_managed_flag", FieldValue::Bool((flags & 0x80) != 0));
-    fields.insert("ndp_other_flag", FieldValue::Bool((flags & 0x40) != 0));
-    fields.insert("ndp_router_lifetime", FieldValue::UInt16(router_lifetime));
-    fields.insert("ndp_reachable_time", FieldValue::UInt32(reachable_time));
-    fields.insert("ndp_retrans_timer", FieldValue::UInt32(retrans_timer));
+    fields.push(("ndp_cur_hop_limit", FieldValue::UInt8(cur_hop_limit)));
+    fields.push(("ndp_managed_flag", FieldValue::Bool((flags & 0x80) != 0)));
+    fields.push(("ndp_other_flag", FieldValue::Bool((flags & 0x40) != 0)));
+    fields.push(("ndp_router_lifetime", FieldValue::UInt16(router_lifetime)));
+    fields.push(("ndp_reachable_time", FieldValue::UInt32(reachable_time)));
+    fields.push(("ndp_retrans_timer", FieldValue::UInt32(retrans_timer)));
 
     // Parse options
     if data.len() > 12 {
@@ -271,7 +276,7 @@ fn parse_router_advertisement(
 /// Parse Neighbor Solicitation (type 135).
 fn parse_neighbor_solicitation(
     data: &[u8],
-    fields: &mut HashMap<&'static str, FieldValue>,
+    fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
 ) -> usize {
     // NS has 4 bytes reserved + 16 bytes target address
     if data.len() < 20 {
@@ -280,7 +285,7 @@ fn parse_neighbor_solicitation(
 
     // Skip 4 bytes reserved
     let target = format_ipv6(&data[4..20]);
-    fields.insert("ndp_target_address", FieldValue::String(target));
+    fields.push(("ndp_target_address", FieldValue::String(target)));
 
     // Parse options
     if data.len() > 20 {
@@ -293,7 +298,7 @@ fn parse_neighbor_solicitation(
 /// Parse Neighbor Advertisement (type 136).
 fn parse_neighbor_advertisement(
     data: &[u8],
-    fields: &mut HashMap<&'static str, FieldValue>,
+    fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
 ) -> usize {
     // NA has 4 bytes flags + 16 bytes target address
     if data.len() < 20 {
@@ -301,12 +306,12 @@ fn parse_neighbor_advertisement(
     }
 
     let flags = data[0];
-    fields.insert("ndp_router_flag", FieldValue::Bool((flags & 0x80) != 0));
-    fields.insert("ndp_solicited_flag", FieldValue::Bool((flags & 0x40) != 0));
-    fields.insert("ndp_override_flag", FieldValue::Bool((flags & 0x20) != 0));
+    fields.push(("ndp_router_flag", FieldValue::Bool((flags & 0x80) != 0)));
+    fields.push(("ndp_solicited_flag", FieldValue::Bool((flags & 0x40) != 0)));
+    fields.push(("ndp_override_flag", FieldValue::Bool((flags & 0x20) != 0)));
 
     let target = format_ipv6(&data[4..20]);
-    fields.insert("ndp_target_address", FieldValue::String(target));
+    fields.push(("ndp_target_address", FieldValue::String(target)));
 
     // Parse options
     if data.len() > 20 {
@@ -317,7 +322,7 @@ fn parse_neighbor_advertisement(
 }
 
 /// Parse Redirect (type 137).
-fn parse_redirect(data: &[u8], fields: &mut HashMap<&'static str, FieldValue>) -> usize {
+fn parse_redirect(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) -> usize {
     // Redirect has 4 bytes reserved + 16 bytes target + 16 bytes destination
     if data.len() < 36 {
         return 4 + data.len();
@@ -325,7 +330,7 @@ fn parse_redirect(data: &[u8], fields: &mut HashMap<&'static str, FieldValue>) -
 
     // Skip 4 bytes reserved
     let target = format_ipv6(&data[4..20]);
-    fields.insert("ndp_target_address", FieldValue::String(target));
+    fields.push(("ndp_target_address", FieldValue::String(target)));
 
     // Parse options
     if data.len() > 36 {
@@ -336,7 +341,7 @@ fn parse_redirect(data: &[u8], fields: &mut HashMap<&'static str, FieldValue>) -
 }
 
 /// Parse NDP options (TLV format).
-fn parse_ndp_options(data: &[u8], fields: &mut HashMap<&'static str, FieldValue>) {
+fn parse_ndp_options(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) {
     let mut offset = 0;
 
     while offset + 2 <= data.len() {
@@ -351,13 +356,13 @@ fn parse_ndp_options(data: &[u8], fields: &mut HashMap<&'static str, FieldValue>
             ndp_option::SOURCE_LINK_LAYER_ADDR => {
                 if opt_len >= 8 {
                     let mac = format_mac(&data[offset + 2..offset + 8]);
-                    fields.insert("ndp_source_mac", FieldValue::String(mac));
+                    fields.push(("ndp_source_mac", FieldValue::String(mac)));
                 }
             }
             ndp_option::TARGET_LINK_LAYER_ADDR => {
                 if opt_len >= 8 {
                     let mac = format_mac(&data[offset + 2..offset + 8]);
-                    fields.insert("ndp_target_mac", FieldValue::String(mac));
+                    fields.push(("ndp_target_mac", FieldValue::String(mac)));
                 }
             }
             ndp_option::PREFIX_INFO => {
@@ -365,8 +370,8 @@ fn parse_ndp_options(data: &[u8], fields: &mut HashMap<&'static str, FieldValue>
                 if opt_len >= 32 {
                     let prefix_len = data[offset + 2];
                     let prefix = format_ipv6(&data[offset + 16..offset + 32]);
-                    fields.insert("ndp_prefix_length", FieldValue::UInt8(prefix_len));
-                    fields.insert("ndp_prefix", FieldValue::String(prefix));
+                    fields.push(("ndp_prefix_length", FieldValue::UInt8(prefix_len)));
+                    fields.push(("ndp_prefix", FieldValue::String(prefix)));
                 }
             }
             ndp_option::MTU => {
@@ -377,7 +382,7 @@ fn parse_ndp_options(data: &[u8], fields: &mut HashMap<&'static str, FieldValue>
                         data[offset + 6],
                         data[offset + 7],
                     ]);
-                    fields.insert("mtu", FieldValue::UInt32(mtu));
+                    fields.push(("mtu", FieldValue::UInt32(mtu)));
                 }
             }
             _ => {
@@ -390,30 +395,30 @@ fn parse_ndp_options(data: &[u8], fields: &mut HashMap<&'static str, FieldValue>
 }
 
 /// Parse MLDv1 message (types 130, 131, 132).
-fn parse_mldv1(data: &[u8], fields: &mut HashMap<&'static str, FieldValue>) -> usize {
+fn parse_mldv1(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) -> usize {
     // MLDv1 has 2 bytes max response delay + 2 bytes reserved + 16 bytes multicast address
     if data.len() < 20 {
         return 4 + data.len();
     }
 
     let max_response_delay = u16::from_be_bytes([data[0], data[1]]);
-    fields.insert(
+    fields.push((
         "mld_max_response_delay",
         FieldValue::UInt16(max_response_delay),
-    );
+    ));
 
     // Skip 2 bytes reserved
     let multicast_addr = format_ipv6(&data[4..20]);
-    fields.insert(
+    fields.push((
         "mld_multicast_address",
         FieldValue::String(multicast_addr),
-    );
+    ));
 
     4 + 20 // header + MLDv1 message body
 }
 
 /// Parse MLDv2 Report (type 143).
-fn parse_mldv2_report(data: &[u8], fields: &mut HashMap<&'static str, FieldValue>) -> usize {
+fn parse_mldv2_report(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) -> usize {
     // MLDv2 Report has 2 bytes reserved + 2 bytes number of group records
     if data.len() < 4 {
         return 4 + data.len();
@@ -421,10 +426,10 @@ fn parse_mldv2_report(data: &[u8], fields: &mut HashMap<&'static str, FieldValue
 
     // Skip 2 bytes reserved
     let num_group_records = u16::from_be_bytes([data[2], data[3]]);
-    fields.insert(
+    fields.push((
         "mld_num_group_records",
         FieldValue::UInt16(num_group_records),
-    );
+    ));
 
     4 + data.len() // Consume all remaining data
 }
@@ -458,8 +463,8 @@ mod tests {
 
     fn create_context_icmpv6() -> ParseContext {
         let mut context = ParseContext::new(1);
-        context.hints.insert("ip_protocol", IP_PROTO_ICMPV6 as u64);
-        context.hints.insert("ip_version", 6);
+        context.insert_hint("ip_protocol", IP_PROTO_ICMPV6 as u64);
+        context.insert_hint("ip_version", 6);
         context
     }
 
@@ -474,8 +479,8 @@ mod tests {
     fn test_cannot_parse_without_ipv6() {
         let parser = Icmpv6Protocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("ip_protocol", IP_PROTO_ICMPV6 as u64);
-        context.hints.insert("ip_version", 4);
+        context.insert_hint("ip_protocol", IP_PROTO_ICMPV6 as u64);
+        context.insert_hint("ip_version", 4);
         assert!(parser.can_parse(&context).is_none());
     }
 

@@ -8,7 +8,7 @@
 //! RFC 6793: BGP Support for Four-Octet Autonomous System (AS) Number Space
 //! RFC 2918: Route Refresh Capability for BGP-4
 
-use std::collections::HashMap;
+use smallvec::SmallVec;
 
 use super::{FieldValue, ParseContext, ParseResult, Protocol};
 use crate::schema::{DataKind, FieldDescriptor};
@@ -165,7 +165,7 @@ impl Protocol for BgpProtocol {
             return ParseResult::error("BGP header too short".to_string(), data);
         }
 
-        let mut fields = HashMap::new();
+        let mut fields = SmallVec::new();
 
         // Bytes 0-15: Marker (should be all 0xFF)
         if data[0..16] != BGP_MARKER {
@@ -174,7 +174,7 @@ impl Protocol for BgpProtocol {
 
         // Bytes 16-17: Length (total message length including header)
         let length = u16::from_be_bytes([data[16], data[17]]);
-        fields.insert("length", FieldValue::UInt16(length));
+        fields.push(("length", FieldValue::UInt16(length)));
 
         if length < 19 || length > 4096 {
             return ParseResult::error(format!("BGP: invalid length {}", length), data);
@@ -182,11 +182,11 @@ impl Protocol for BgpProtocol {
 
         // Byte 18: Type
         let msg_type = data[18];
-        fields.insert("message_type", FieldValue::UInt8(msg_type));
-        fields.insert(
+        fields.push(("message_type", FieldValue::UInt8(msg_type)));
+        fields.push((
             "message_type_name",
             FieldValue::String(message_type_name(msg_type).to_string()),
-        );
+        ));
 
         // Parse message-specific fields
         let message_data = if data.len() >= length as usize {
@@ -218,7 +218,7 @@ impl Protocol for BgpProtocol {
 
         // Calculate remaining data
         let consumed = std::cmp::min(length as usize, data.len());
-        ParseResult::success(fields, &data[consumed..], HashMap::new())
+        ParseResult::success(fields, &data[consumed..], SmallVec::new())
     }
 
     fn schema_fields(&self) -> Vec<FieldDescriptor> {
@@ -264,6 +264,10 @@ impl Protocol for BgpProtocol {
     fn child_protocols(&self) -> &[&'static str] {
         &[]
     }
+
+    fn dependencies(&self) -> &'static [&'static str] {
+        &["tcp"]
+    }
 }
 
 impl BgpProtocol {
@@ -287,26 +291,26 @@ impl BgpProtocol {
     /// |             Optional Parameters (variable)                    |
     /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
     /// ```
-    fn parse_open_message(&self, data: &[u8], fields: &mut HashMap<&'static str, FieldValue>) {
+    fn parse_open_message(&self, data: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) {
         if data.len() < 10 {
             return;
         }
 
         // Byte 0: Version
         let version = data[0];
-        fields.insert("version", FieldValue::UInt8(version));
+        fields.push(("version", FieldValue::UInt8(version)));
 
         // Bytes 1-2: My AS (may be AS_TRANS=23456 if 4-byte ASN is used)
         let my_as = u16::from_be_bytes([data[1], data[2]]);
-        fields.insert("my_as", FieldValue::UInt16(my_as));
+        fields.push(("my_as", FieldValue::UInt16(my_as)));
 
         // Bytes 3-4: Hold Time
         let hold_time = u16::from_be_bytes([data[3], data[4]]);
-        fields.insert("hold_time", FieldValue::UInt16(hold_time));
+        fields.push(("hold_time", FieldValue::UInt16(hold_time)));
 
         // Bytes 5-8: BGP Identifier (IPv4 address)
         let bgp_id = format!("{}.{}.{}.{}", data[5], data[6], data[7], data[8]);
-        fields.insert("bgp_id", FieldValue::String(bgp_id));
+        fields.push(("bgp_id", FieldValue::String(bgp_id)));
 
         // Byte 9: Optional Parameters Length
         let opt_params_len = data[9] as usize;
@@ -323,11 +327,12 @@ impl BgpProtocol {
     fn parse_open_optional_params(
         &self,
         data: &[u8],
-        fields: &mut HashMap<&'static str, FieldValue>,
+        fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
         my_as_2byte: u16,
     ) {
         let mut offset = 0;
-        let mut capabilities = Vec::new();
+        // Typical OPEN has 2-5 capabilities
+        let mut capabilities = Vec::with_capacity(4);
         let mut four_byte_asn: Option<u32> = None;
 
         while offset + 2 <= data.len() {
@@ -384,16 +389,16 @@ impl BgpProtocol {
         }
 
         if !capabilities.is_empty() {
-            fields.insert("capabilities", FieldValue::String(capabilities.join(",")));
+            fields.push(("capabilities", FieldValue::String(capabilities.join(","))));
         }
 
         // If 4-byte ASN capability was found, store it
         // Also check if my_as is AS_TRANS (23456), indicating 4-byte ASN is in use
         if let Some(asn) = four_byte_asn {
-            fields.insert("my_as_4byte", FieldValue::UInt32(asn));
+            fields.push(("my_as_4byte", FieldValue::UInt32(asn)));
         } else if my_as_2byte != AS_TRANS {
             // No 4-byte capability, so the 2-byte AS is the real AS
-            fields.insert("my_as_4byte", FieldValue::UInt32(my_as_2byte as u32));
+            fields.push(("my_as_4byte", FieldValue::UInt32(my_as_2byte as u32)));
         }
     }
 
@@ -415,7 +420,7 @@ impl BgpProtocol {
     /// |       Network Layer Reachability Information (variable)      |
     /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
     /// ```
-    fn parse_update_message(&self, data: &[u8], fields: &mut HashMap<&'static str, FieldValue>) {
+    fn parse_update_message(&self, data: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) {
         if data.len() < 4 {
             return;
         }
@@ -424,7 +429,7 @@ impl BgpProtocol {
 
         // Bytes 0-1: Withdrawn Routes Length
         let withdrawn_routes_len = u16::from_be_bytes([data[0], data[1]]) as usize;
-        fields.insert("withdrawn_routes_len", FieldValue::UInt16(withdrawn_routes_len as u16));
+        fields.push(("withdrawn_routes_len", FieldValue::UInt16(withdrawn_routes_len as u16)));
         offset += 2;
 
         // Parse withdrawn routes (NLRI prefixes)
@@ -434,8 +439,8 @@ impl BgpProtocol {
         let withdrawn_data = &data[offset..offset + withdrawn_routes_len];
         let withdrawn_prefixes = self.parse_nlri_prefixes(withdrawn_data);
         if !withdrawn_prefixes.is_empty() {
-            fields.insert("withdrawn_routes", FieldValue::String(withdrawn_prefixes.join(",")));
-            fields.insert("withdrawn_count", FieldValue::UInt16(withdrawn_prefixes.len() as u16));
+            fields.push(("withdrawn_routes", FieldValue::String(withdrawn_prefixes.join(","))));
+            fields.push(("withdrawn_count", FieldValue::UInt16(withdrawn_prefixes.len() as u16)));
         }
         offset += withdrawn_routes_len;
 
@@ -446,7 +451,7 @@ impl BgpProtocol {
 
         // Total Path Attribute Length
         let path_attr_len = u16::from_be_bytes([data[offset], data[offset + 1]]) as usize;
-        fields.insert("path_attr_len", FieldValue::UInt16(path_attr_len as u16));
+        fields.push(("path_attr_len", FieldValue::UInt16(path_attr_len as u16)));
         offset += 2;
 
         // Parse path attributes
@@ -462,8 +467,8 @@ impl BgpProtocol {
             let nlri_data = &data[offset..];
             let nlri_prefixes = self.parse_nlri_prefixes(nlri_data);
             if !nlri_prefixes.is_empty() {
-                fields.insert("nlri", FieldValue::String(nlri_prefixes.join(",")));
-                fields.insert("nlri_count", FieldValue::UInt16(nlri_prefixes.len() as u16));
+                fields.push(("nlri", FieldValue::String(nlri_prefixes.join(","))));
+                fields.push(("nlri_count", FieldValue::UInt16(nlri_prefixes.len() as u16)));
             }
         }
     }
@@ -471,7 +476,8 @@ impl BgpProtocol {
     /// Parse NLRI prefixes (used for both withdrawn routes and announced routes).
     /// Each prefix is: length (1 byte) + prefix bytes (ceil(length/8) bytes)
     fn parse_nlri_prefixes(&self, data: &[u8]) -> Vec<String> {
-        let mut prefixes = Vec::new();
+        // UPDATE messages typically have 1-8 prefixes
+        let mut prefixes = Vec::with_capacity(8);
         let mut offset = 0;
 
         while offset < data.len() {
@@ -504,7 +510,7 @@ impl BgpProtocol {
     }
 
     /// Parse path attributes from UPDATE message.
-    fn parse_path_attributes(&self, data: &[u8], fields: &mut HashMap<&'static str, FieldValue>) {
+    fn parse_path_attributes(&self, data: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) {
         let mut offset = 0;
 
         while offset + 3 <= data.len() {
@@ -548,14 +554,14 @@ impl BgpProtocol {
                 path_attr_type::ORIGIN => {
                     if !attr_data.is_empty() {
                         let origin = attr_data[0];
-                        fields.insert("origin", FieldValue::UInt8(origin));
-                        fields.insert("origin_name", FieldValue::String(origin_name(origin).to_string()));
+                        fields.push(("origin", FieldValue::UInt8(origin)));
+                        fields.push(("origin_name", FieldValue::String(origin_name(origin).to_string())));
                     }
                 }
                 path_attr_type::AS_PATH => {
                     let (as_path_str, path_length) = self.parse_as_path(attr_data);
-                    fields.insert("as_path", FieldValue::String(as_path_str));
-                    fields.insert("as_path_length", FieldValue::UInt16(path_length));
+                    fields.push(("as_path", FieldValue::String(as_path_str)));
+                    fields.push(("as_path_length", FieldValue::UInt16(path_length)));
                 }
                 path_attr_type::NEXT_HOP => {
                     if attr_data.len() >= 4 {
@@ -563,7 +569,7 @@ impl BgpProtocol {
                             "{}.{}.{}.{}",
                             attr_data[0], attr_data[1], attr_data[2], attr_data[3]
                         );
-                        fields.insert("next_hop", FieldValue::String(next_hop));
+                        fields.push(("next_hop", FieldValue::String(next_hop)));
                     }
                 }
                 path_attr_type::MULTI_EXIT_DISC => {
@@ -571,7 +577,7 @@ impl BgpProtocol {
                         let med = u32::from_be_bytes([
                             attr_data[0], attr_data[1], attr_data[2], attr_data[3]
                         ]);
-                        fields.insert("med", FieldValue::UInt32(med));
+                        fields.push(("med", FieldValue::UInt32(med)));
                     }
                 }
                 path_attr_type::LOCAL_PREF => {
@@ -579,12 +585,12 @@ impl BgpProtocol {
                         let local_pref = u32::from_be_bytes([
                             attr_data[0], attr_data[1], attr_data[2], attr_data[3]
                         ]);
-                        fields.insert("local_pref", FieldValue::UInt32(local_pref));
+                        fields.push(("local_pref", FieldValue::UInt32(local_pref)));
                     }
                 }
                 path_attr_type::ATOMIC_AGGREGATE => {
                     // Presence indicates atomic aggregate (no value)
-                    fields.insert("atomic_aggregate", FieldValue::Bool(true));
+                    fields.push(("atomic_aggregate", FieldValue::Bool(true)));
                 }
                 path_attr_type::AGGREGATOR => {
                     // Can be 6 bytes (2-byte AS + 4-byte IP) or 8 bytes (4-byte AS + 4-byte IP)
@@ -598,7 +604,7 @@ impl BgpProtocol {
                             // 2-byte AS
                             (u16::from_be_bytes([attr_data[0], attr_data[1]]) as u32, 2)
                         };
-                        fields.insert("aggregator_as", FieldValue::UInt32(asn));
+                        fields.push(("aggregator_as", FieldValue::UInt32(asn)));
 
                         if attr_data.len() >= ip_offset + 4 {
                             let ip = format!(
@@ -606,7 +612,7 @@ impl BgpProtocol {
                                 attr_data[ip_offset], attr_data[ip_offset + 1],
                                 attr_data[ip_offset + 2], attr_data[ip_offset + 3]
                             );
-                            fields.insert("aggregator_ip", FieldValue::String(ip));
+                            fields.push(("aggregator_ip", FieldValue::String(ip)));
                         }
                     }
                 }
@@ -622,7 +628,8 @@ impl BgpProtocol {
     /// Parse AS_PATH attribute and return (path_string, path_length).
     /// Supports both 2-byte and 4-byte AS numbers (auto-detected based on segment length).
     fn parse_as_path(&self, data: &[u8]) -> (String, u16) {
-        let mut segments = Vec::new();
+        // Typical AS path has 2-6 segments
+        let mut segments = Vec::with_capacity(4);
         let mut total_length = 0u16;
         let mut offset = 0;
 
@@ -645,7 +652,8 @@ impl BgpProtocol {
                 break;
             }
 
-            let mut asns = Vec::new();
+            // Pre-allocate based on segment_len
+            let mut asns = Vec::with_capacity(segment_len);
             for i in 0..segment_len {
                 let asn = if as_size == 4 {
                     u32::from_be_bytes([
@@ -684,37 +692,37 @@ impl BgpProtocol {
     }
 
     /// Parse NOTIFICATION message.
-    fn parse_notification_message(&self, data: &[u8], fields: &mut HashMap<&'static str, FieldValue>) {
+    fn parse_notification_message(&self, data: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) {
         if data.len() < 2 {
             return;
         }
 
         // Byte 0: Error Code
         let error_code = data[0];
-        fields.insert("error_code", FieldValue::UInt8(error_code));
-        fields.insert("error_code_name", FieldValue::String(error_code_name(error_code).to_string()));
+        fields.push(("error_code", FieldValue::UInt8(error_code)));
+        fields.push(("error_code_name", FieldValue::String(error_code_name(error_code).to_string())));
 
         // Byte 1: Error Subcode
         let error_subcode = data[1];
-        fields.insert("error_subcode", FieldValue::UInt8(error_subcode));
+        fields.push(("error_subcode", FieldValue::UInt8(error_subcode)));
 
         // Remaining bytes are error-specific data (not parsed)
     }
 
     /// Parse ROUTE-REFRESH message (RFC 2918).
-    fn parse_route_refresh_message(&self, data: &[u8], fields: &mut HashMap<&'static str, FieldValue>) {
+    fn parse_route_refresh_message(&self, data: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) {
         if data.len() < 4 {
             return;
         }
 
         // Bytes 0-1: AFI (Address Family Identifier)
         let afi = u16::from_be_bytes([data[0], data[1]]);
-        fields.insert("afi", FieldValue::UInt16(afi));
+        fields.push(("afi", FieldValue::UInt16(afi)));
 
         // Byte 2: Reserved (must be 0)
         // Byte 3: SAFI (Subsequent Address Family Identifier)
         let safi = data[3];
-        fields.insert("safi", FieldValue::UInt8(safi));
+        fields.push(("safi", FieldValue::UInt8(safi)));
     }
 }
 
@@ -791,17 +799,17 @@ mod tests {
 
         // With wrong port
         let mut ctx2 = ParseContext::new(1);
-        ctx2.hints.insert("dst_port", 80);
+        ctx2.insert_hint("dst_port", 80);
         assert!(parser.can_parse(&ctx2).is_none());
 
         // With BGP dst_port
         let mut ctx3 = ParseContext::new(1);
-        ctx3.hints.insert("dst_port", 179);
+        ctx3.insert_hint("dst_port", 179);
         assert!(parser.can_parse(&ctx3).is_some());
 
         // With BGP src_port
         let mut ctx4 = ParseContext::new(1);
-        ctx4.hints.insert("src_port", 179);
+        ctx4.insert_hint("src_port", 179);
         assert!(parser.can_parse(&ctx4).is_some());
     }
 
@@ -810,7 +818,7 @@ mod tests {
     fn test_marker_validation() {
         let parser = BgpProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("dst_port", 179);
+        context.insert_hint("dst_port", 179);
 
         // Valid marker
         let valid_msg = create_bgp_header(message_type::KEEPALIVE, 19);
@@ -830,7 +838,7 @@ mod tests {
     fn test_message_type_parsing() {
         let parser = BgpProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("dst_port", 179);
+        context.insert_hint("dst_port", 179);
 
         let test_types = [
             (message_type::OPEN, "OPEN"),
@@ -861,7 +869,7 @@ mod tests {
     fn test_open_message_parsing() {
         let parser = BgpProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("dst_port", 179);
+        context.insert_hint("dst_port", 179);
 
         let msg = create_bgp_open(4, 65001, 180, [192, 168, 1, 1]);
         let result = parser.parse(&msg, &context);
@@ -878,7 +886,7 @@ mod tests {
     fn test_keepalive_message() {
         let parser = BgpProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("dst_port", 179);
+        context.insert_hint("dst_port", 179);
 
         let msg = create_bgp_header(message_type::KEEPALIVE, 19);
         let result = parser.parse(&msg, &context);
@@ -893,7 +901,7 @@ mod tests {
     fn test_update_message_basic_parsing() {
         let parser = BgpProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("dst_port", 179);
+        context.insert_hint("dst_port", 179);
 
         let msg = create_bgp_update(5, 10);
         let result = parser.parse(&msg, &context);
@@ -909,7 +917,7 @@ mod tests {
     fn test_notification_message() {
         let parser = BgpProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("dst_port", 179);
+        context.insert_hint("dst_port", 179);
 
         let mut msg = create_bgp_header(message_type::NOTIFICATION, 21);
         msg.push(6); // Error code: Cease
@@ -927,7 +935,7 @@ mod tests {
     fn test_invalid_marker_rejection() {
         let parser = BgpProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("dst_port", 179);
+        context.insert_hint("dst_port", 179);
 
         // All zeros marker (invalid)
         let mut msg = vec![0u8; 16];
@@ -944,7 +952,7 @@ mod tests {
     fn test_bgp_too_short() {
         let parser = BgpProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("dst_port", 179);
+        context.insert_hint("dst_port", 179);
 
         let short_msg = [0xFF; 18]; // Only 18 bytes
         let result = parser.parse(&short_msg, &context);
@@ -977,7 +985,7 @@ mod tests {
     fn test_multiple_messages() {
         let parser = BgpProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("dst_port", 179);
+        context.insert_hint("dst_port", 179);
 
         // Two KEEPALIVE messages back-to-back
         let mut data = create_bgp_header(message_type::KEEPALIVE, 19);
@@ -994,7 +1002,7 @@ mod tests {
     fn test_open_with_4byte_asn_capability() {
         let parser = BgpProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("dst_port", 179);
+        context.insert_hint("dst_port", 179);
 
         // Build OPEN with optional parameters containing 4-byte AS capability
         let mut msg = Vec::new();
@@ -1042,7 +1050,7 @@ mod tests {
     fn test_update_with_withdrawn_routes() {
         let parser = BgpProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("dst_port", 179);
+        context.insert_hint("dst_port", 179);
 
         // Build UPDATE with withdrawn routes: 10.0.0.0/8, 192.168.0.0/16
         let mut msg = Vec::new();
@@ -1085,7 +1093,7 @@ mod tests {
     fn test_update_with_path_attributes() {
         let parser = BgpProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("dst_port", 179);
+        context.insert_hint("dst_port", 179);
 
         // Build path attributes
         let mut path_attrs = Vec::new();
@@ -1157,7 +1165,7 @@ mod tests {
     fn test_update_with_nlri() {
         let parser = BgpProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("dst_port", 179);
+        context.insert_hint("dst_port", 179);
 
         // Minimal path attributes (ORIGIN + AS_PATH + NEXT_HOP required)
         let path_attrs = [
@@ -1198,7 +1206,7 @@ mod tests {
     fn test_route_refresh_message() {
         let parser = BgpProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("dst_port", 179);
+        context.insert_hint("dst_port", 179);
 
         let mut msg = create_bgp_header(message_type::ROUTE_REFRESH, 23); // 19 + 4
 
@@ -1221,7 +1229,7 @@ mod tests {
     fn test_route_refresh_ipv6_multicast() {
         let parser = BgpProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("dst_port", 179);
+        context.insert_hint("dst_port", 179);
 
         let mut msg = create_bgp_header(message_type::ROUTE_REFRESH, 23);
 
@@ -1242,7 +1250,7 @@ mod tests {
     fn test_as_path_with_as_set() {
         let parser = BgpProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("dst_port", 179);
+        context.insert_hint("dst_port", 179);
 
         // AS_PATH with AS_SET {65001, 65002, 65003}
         let path_attrs = [
@@ -1286,7 +1294,7 @@ mod tests {
     fn test_notification_error_codes() {
         let parser = BgpProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("dst_port", 179);
+        context.insert_hint("dst_port", 179);
 
         let test_cases = [
             (error_code::MESSAGE_HEADER_ERROR, 1, "Message Header Error"),
@@ -1316,7 +1324,7 @@ mod tests {
     fn test_atomic_aggregate_attribute() {
         let parser = BgpProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("dst_port", 179);
+        context.insert_hint("dst_port", 179);
 
         let path_attrs = [
             0x40, path_attr_type::ORIGIN, 1, origin_type::IGP,
@@ -1347,7 +1355,7 @@ mod tests {
     fn test_aggregator_attribute() {
         let parser = BgpProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("dst_port", 179);
+        context.insert_hint("dst_port", 179);
 
         // AGGREGATOR with 2-byte AS
         let path_attrs = [
@@ -1382,7 +1390,7 @@ mod tests {
     fn test_extended_length_attribute() {
         let parser = BgpProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("dst_port", 179);
+        context.insert_hint("dst_port", 179);
 
         // Build a path with extended length flag
         let mut path_attrs = Vec::new();
@@ -1428,7 +1436,7 @@ mod tests {
     fn test_multiple_nlri_prefixes() {
         let parser = BgpProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("dst_port", 179);
+        context.insert_hint("dst_port", 179);
 
         let path_attrs = [
             0x40, path_attr_type::ORIGIN, 1, origin_type::IGP,

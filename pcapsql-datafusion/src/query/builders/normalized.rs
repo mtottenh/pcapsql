@@ -224,6 +224,7 @@ impl NormalizedBatchSet {
 mod tests {
     use super::*;
     use pcapsql_core::FieldValue;
+    use smallvec::SmallVec;
 
     fn create_test_packet(frame_number: u64) -> RawPacket {
         RawPacket {
@@ -237,59 +238,59 @@ mod tests {
     }
 
     fn create_ethernet_result<'a>() -> ParseResult<'a> {
-        let mut fields = HashMap::new();
-        fields.insert(
+        let mut fields = SmallVec::new();
+        fields.push((
             "src_mac",
             FieldValue::MacAddr([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
-        );
-        fields.insert(
+        ));
+        fields.push((
             "dst_mac",
             FieldValue::MacAddr([0xff, 0xff, 0xff, 0xff, 0xff, 0xff]),
-        );
-        fields.insert("ethertype", FieldValue::UInt16(0x0800));
+        ));
+        fields.push(("ethertype", FieldValue::UInt16(0x0800)));
 
         ParseResult {
             fields,
             remaining: &[],
-            child_hints: HashMap::new(),
+            child_hints: SmallVec::new(),
             error: None,
         }
     }
 
     fn create_ipv4_result<'a>() -> ParseResult<'a> {
-        let mut fields = HashMap::new();
-        fields.insert("version", FieldValue::UInt8(4));
-        fields.insert(
+        let mut fields = SmallVec::new();
+        fields.push(("version", FieldValue::UInt8(4)));
+        fields.push((
             "src_ip",
             FieldValue::IpAddr(std::net::IpAddr::V4("192.168.1.1".parse().unwrap())),
-        );
-        fields.insert(
+        ));
+        fields.push((
             "dst_ip",
             FieldValue::IpAddr(std::net::IpAddr::V4("192.168.1.2".parse().unwrap())),
-        );
-        fields.insert("ttl", FieldValue::UInt8(64));
-        fields.insert("protocol", FieldValue::UInt8(6));
+        ));
+        fields.push(("ttl", FieldValue::UInt8(64)));
+        fields.push(("protocol", FieldValue::UInt8(6)));
 
         ParseResult {
             fields,
             remaining: &[],
-            child_hints: HashMap::new(),
+            child_hints: SmallVec::new(),
             error: None,
         }
     }
 
     fn create_tcp_result<'a>() -> ParseResult<'a> {
-        let mut fields = HashMap::new();
-        fields.insert("src_port", FieldValue::UInt16(12345));
-        fields.insert("dst_port", FieldValue::UInt16(80));
-        fields.insert("seq", FieldValue::UInt32(100));
-        fields.insert("ack", FieldValue::UInt32(0));
-        fields.insert("flags", FieldValue::UInt16(0x02));
+        let mut fields = SmallVec::new();
+        fields.push(("src_port", FieldValue::UInt16(12345)));
+        fields.push(("dst_port", FieldValue::UInt16(80)));
+        fields.push(("seq", FieldValue::UInt32(100)));
+        fields.push(("ack", FieldValue::UInt32(0)));
+        fields.push(("flags", FieldValue::UInt16(0x02)));
 
         ParseResult {
             fields,
             remaining: &[],
-            child_hints: HashMap::new(),
+            child_hints: SmallVec::new(),
             error: None,
         }
     }
@@ -431,24 +432,24 @@ mod tests {
         let eth2 = create_ethernet_result();
         let ipv4_2 = create_ipv4_result();
 
-        let mut udp_fields = HashMap::new();
-        udp_fields.insert("src_port", FieldValue::UInt16(12345));
-        udp_fields.insert("dst_port", FieldValue::UInt16(53));
+        let mut udp_fields = SmallVec::new();
+        udp_fields.push(("src_port", FieldValue::UInt16(12345)));
+        udp_fields.push(("dst_port", FieldValue::UInt16(53)));
         let udp = ParseResult {
             fields: udp_fields,
             remaining: &[],
-            child_hints: HashMap::new(),
+            child_hints: SmallVec::new(),
             error: None,
         };
 
-        let mut dns_fields = HashMap::new();
-        dns_fields.insert("query_name", FieldValue::String("example.com".to_string()));
-        dns_fields.insert("query_type", FieldValue::UInt16(1));
-        dns_fields.insert("is_query", FieldValue::Bool(true));
+        let mut dns_fields = SmallVec::new();
+        dns_fields.push(("query_name", FieldValue::String("example.com".to_string())));
+        dns_fields.push(("query_type", FieldValue::UInt16(1)));
+        dns_fields.push(("is_query", FieldValue::Bool(true)));
         let dns = ParseResult {
             fields: dns_fields,
             remaining: &[],
-            child_hints: HashMap::new(),
+            child_hints: SmallVec::new(),
             error: None,
         };
 

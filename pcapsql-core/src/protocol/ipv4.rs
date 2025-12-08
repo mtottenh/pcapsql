@@ -1,6 +1,6 @@
 //! IPv4 protocol parser.
 
-use std::collections::HashMap;
+use smallvec::SmallVec;
 
 use etherparse::Ipv4HeaderSlice;
 
@@ -31,26 +31,26 @@ impl Protocol for Ipv4Protocol {
     fn parse<'a>(&self, data: &'a [u8], _context: &ParseContext) -> ParseResult<'a> {
         match Ipv4HeaderSlice::from_slice(data) {
             Ok(ipv4) => {
-                let mut fields = HashMap::new();
+                let mut fields = SmallVec::new();
 
-                fields.insert("version", FieldValue::UInt8(4));
-                fields.insert("ihl", FieldValue::UInt8(ipv4.ihl()));
-                fields.insert("dscp", FieldValue::UInt8(ipv4.dcp().value()));
-                fields.insert("ecn", FieldValue::UInt8(ipv4.ecn().value()));
-                fields.insert("total_length", FieldValue::UInt16(ipv4.total_len()));
-                fields.insert("identification", FieldValue::UInt16(ipv4.identification()));
-                fields.insert("dont_fragment", FieldValue::Bool(ipv4.dont_fragment()));
-                fields.insert("more_fragments", FieldValue::Bool(ipv4.more_fragments()));
-                fields.insert("fragment_offset", FieldValue::UInt16(ipv4.fragments_offset().value()));
-                fields.insert("ttl", FieldValue::UInt8(ipv4.ttl()));
-                fields.insert("protocol", FieldValue::UInt8(ipv4.protocol().0));
-                fields.insert("checksum", FieldValue::UInt16(ipv4.header_checksum()));
-                fields.insert("src_ip", FieldValue::ipv4(&ipv4.source()));
-                fields.insert("dst_ip", FieldValue::ipv4(&ipv4.destination()));
+                fields.push(("version", FieldValue::UInt8(4)));
+                fields.push(("ihl", FieldValue::UInt8(ipv4.ihl())));
+                fields.push(("dscp", FieldValue::UInt8(ipv4.dcp().value())));
+                fields.push(("ecn", FieldValue::UInt8(ipv4.ecn().value())));
+                fields.push(("total_length", FieldValue::UInt16(ipv4.total_len())));
+                fields.push(("identification", FieldValue::UInt16(ipv4.identification())));
+                fields.push(("dont_fragment", FieldValue::Bool(ipv4.dont_fragment())));
+                fields.push(("more_fragments", FieldValue::Bool(ipv4.more_fragments())));
+                fields.push(("fragment_offset", FieldValue::UInt16(ipv4.fragments_offset().value())));
+                fields.push(("ttl", FieldValue::UInt8(ipv4.ttl())));
+                fields.push(("protocol", FieldValue::UInt8(ipv4.protocol().0)));
+                fields.push(("checksum", FieldValue::UInt16(ipv4.header_checksum())));
+                fields.push(("src_ip", FieldValue::ipv4(&ipv4.source())));
+                fields.push(("dst_ip", FieldValue::ipv4(&ipv4.destination())));
 
-                let mut child_hints = HashMap::new();
-                child_hints.insert("ip_protocol", ipv4.protocol().0 as u64);
-                child_hints.insert("ip_version", 4);
+                let mut child_hints = SmallVec::new();
+                child_hints.push(("ip_protocol", ipv4.protocol().0 as u64));
+                child_hints.push(("ip_version", 4));
 
                 let header_len = ipv4.slice().len();
                 ParseResult::success(fields, &data[header_len..], child_hints)
@@ -81,6 +81,10 @@ impl Protocol for Ipv4Protocol {
     fn child_protocols(&self) -> &[&'static str] {
         &["tcp", "udp", "icmp"]
     }
+
+    fn dependencies(&self) -> &'static [&'static str] {
+        &["ethernet", "vlan", "mpls", "gre", "vxlan", "gtp"]
+    }
 }
 
 #[cfg(test)]
@@ -106,14 +110,14 @@ mod tests {
 
         let parser = Ipv4Protocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("ethertype", 0x0800);
+        context.insert_hint("ethertype", 0x0800);
 
         let result = parser.parse(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("ttl"), Some(&FieldValue::UInt8(64)));
         assert_eq!(result.get("protocol"), Some(&FieldValue::UInt8(6)));
-        assert_eq!(result.child_hints.get("ip_protocol"), Some(&6u64));
+        assert_eq!(result.hint("ip_protocol"), Some(6u64));
     }
 
     #[test]
@@ -133,7 +137,7 @@ mod tests {
 
         let parser = Ipv4Protocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("ethertype", 0x0800);
+        context.insert_hint("ethertype", 0x0800);
 
         let result = parser.parse(&header, &context);
 
@@ -141,7 +145,7 @@ mod tests {
         assert_eq!(result.get("ttl"), Some(&FieldValue::UInt8(128)));
         assert_eq!(result.get("protocol"), Some(&FieldValue::UInt8(17)));
         assert_eq!(result.get("dont_fragment"), Some(&FieldValue::Bool(true)));
-        assert_eq!(result.child_hints.get("ip_protocol"), Some(&17u64));
+        assert_eq!(result.hint("ip_protocol"), Some(17u64));
     }
 
     #[test]
@@ -161,13 +165,13 @@ mod tests {
 
         let parser = Ipv4Protocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("ethertype", 0x0800);
+        context.insert_hint("ethertype", 0x0800);
 
         let result = parser.parse(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("protocol"), Some(&FieldValue::UInt8(1)));
-        assert_eq!(result.child_hints.get("ip_protocol"), Some(&1u64));
+        assert_eq!(result.hint("ip_protocol"), Some(1u64));
     }
 
     #[test]
@@ -189,7 +193,7 @@ mod tests {
 
         let parser = Ipv4Protocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("ethertype", 0x0800);
+        context.insert_hint("ethertype", 0x0800);
 
         let result = parser.parse(&packet, &context);
 
@@ -207,12 +211,12 @@ mod tests {
 
         // With IPv6 ethertype
         let mut ctx2 = ParseContext::new(1);
-        ctx2.hints.insert("ethertype", 0x86DD);
+        ctx2.insert_hint("ethertype", 0x86DD);
         assert!(parser.can_parse(&ctx2).is_none());
 
         // With IPv4 ethertype
         let mut ctx3 = ParseContext::new(1);
-        ctx3.hints.insert("ethertype", 0x0800);
+        ctx3.insert_hint("ethertype", 0x0800);
         assert!(parser.can_parse(&ctx3).is_some());
     }
 
@@ -222,7 +226,7 @@ mod tests {
 
         let parser = Ipv4Protocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("ethertype", 0x0800);
+        context.insert_hint("ethertype", 0x0800);
 
         let result = parser.parse(&short_header, &context);
 
@@ -242,7 +246,7 @@ mod tests {
 
         let parser = Ipv4Protocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("ethertype", 0x0800);
+        context.insert_hint("ethertype", 0x0800);
 
         let result = parser.parse(&header, &context);
 
@@ -274,7 +278,7 @@ mod tests {
 
         let parser = Ipv4Protocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("ethertype", 0x0800);
+        context.insert_hint("ethertype", 0x0800);
 
         let result = parser.parse(&header, &context);
 
@@ -296,12 +300,12 @@ mod tests {
 
         let parser = Ipv4Protocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("ethertype", 0x0800);
+        context.insert_hint("ethertype", 0x0800);
 
         let result = parser.parse(&header, &context);
 
         assert!(result.is_ok());
-        assert_eq!(result.child_hints.get("ip_protocol"), Some(&6u64));
-        assert_eq!(result.child_hints.get("ip_version"), Some(&4u64));
+        assert_eq!(result.hint("ip_protocol"), Some(6u64));
+        assert_eq!(result.hint("ip_version"), Some(4u64));
     }
 }

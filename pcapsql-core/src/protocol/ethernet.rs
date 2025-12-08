@@ -1,6 +1,6 @@
 //! Ethernet II protocol parser.
 
-use std::collections::HashMap;
+use smallvec::SmallVec;
 
 use etherparse::Ethernet2HeaderSlice;
 
@@ -43,14 +43,14 @@ impl Protocol for EthernetProtocol {
     fn parse<'a>(&self, data: &'a [u8], _context: &ParseContext) -> ParseResult<'a> {
         match Ethernet2HeaderSlice::from_slice(data) {
             Ok(eth) => {
-                let mut fields = HashMap::new();
+                let mut fields = SmallVec::new();
 
-                fields.insert("src_mac", FieldValue::mac(&eth.source()));
-                fields.insert("dst_mac", FieldValue::mac(&eth.destination()));
-                fields.insert("ethertype", FieldValue::UInt16(eth.ether_type().0));
+                fields.push(("src_mac", FieldValue::mac(&eth.source())));
+                fields.push(("dst_mac", FieldValue::mac(&eth.destination())));
+                fields.push(("ethertype", FieldValue::UInt16(eth.ether_type().0)));
 
-                let mut child_hints = HashMap::new();
-                child_hints.insert("ethertype", eth.ether_type().0 as u64);
+                let mut child_hints = SmallVec::new();
+                child_hints.push(("ethertype", eth.ether_type().0 as u64));
 
                 let header_len = eth.slice().len();
                 ParseResult::success(fields, &data[header_len..], child_hints)
@@ -96,7 +96,7 @@ mod tests {
             Some(&FieldValue::UInt16(ethertype::IPV4))
         );
         assert_eq!(result.remaining.len(), 2); // IPv4 header bytes
-        assert_eq!(result.child_hints.get("ethertype"), Some(&0x0800u64));
+        assert_eq!(result.hint("ethertype"), Some(0x0800u64));
     }
 
     #[test]
@@ -116,7 +116,7 @@ mod tests {
             result.get("ethertype"),
             Some(&FieldValue::UInt16(ethertype::IPV6))
         );
-        assert_eq!(result.child_hints.get("ethertype"), Some(&0x86DDu64));
+        assert_eq!(result.hint("ethertype"), Some(0x86DDu64));
     }
 
     #[test]

@@ -46,6 +46,9 @@ anyhow.workspace = true
 # Logging
 tracing.workspace = true
 
+# Small collections
+smallvec.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
 hex.workspace = true

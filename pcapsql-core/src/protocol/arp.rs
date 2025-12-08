@@ -1,6 +1,6 @@
 //! ARP protocol parser.
 
-use std::collections::HashMap;
+use smallvec::SmallVec;
 
 use super::ethernet::ethertype;
 use super::{FieldValue, ParseContext, ParseResult, Protocol};
@@ -41,7 +41,7 @@ impl Protocol for ArpProtocol {
             );
         }
 
-        let mut fields = HashMap::new();
+        let mut fields = SmallVec::new();
 
         let hardware_type = u16::from_be_bytes([data[0], data[1]]);
         let protocol_type = u16::from_be_bytes([data[2], data[3]]);
@@ -49,11 +49,11 @@ impl Protocol for ArpProtocol {
         let protocol_size = data[5];
         let operation = u16::from_be_bytes([data[6], data[7]]);
 
-        fields.insert("hardware_type", FieldValue::UInt16(hardware_type));
-        fields.insert("protocol_type", FieldValue::UInt16(protocol_type));
-        fields.insert("hardware_size", FieldValue::UInt8(hardware_size));
-        fields.insert("protocol_size", FieldValue::UInt8(protocol_size));
-        fields.insert("operation", FieldValue::UInt16(operation));
+        fields.push(("hardware_type", FieldValue::UInt16(hardware_type)));
+        fields.push(("protocol_type", FieldValue::UInt16(protocol_type)));
+        fields.push(("hardware_size", FieldValue::UInt8(hardware_size)));
+        fields.push(("protocol_size", FieldValue::UInt8(protocol_size)));
+        fields.push(("operation", FieldValue::UInt16(operation)));
 
         // Operation name for convenience
         let operation_name = match operation {
@@ -61,22 +61,22 @@ impl Protocol for ArpProtocol {
             operation::REPLY => "Reply",
             _ => "Unknown",
         };
-        fields.insert(
+        fields.push((
             "operation_name",
             FieldValue::String(operation_name.to_string()),
-        );
+        ));
 
         // For Ethernet/IPv4 ARP (most common case)
         if hardware_type == 1 && protocol_type == 0x0800 && hardware_size == 6 && protocol_size == 4
         {
-            fields.insert("sender_mac", FieldValue::mac(&data[8..14]));
-            fields.insert("sender_ip", FieldValue::ipv4(&data[14..18]));
-            fields.insert("target_mac", FieldValue::mac(&data[18..24]));
-            fields.insert("target_ip", FieldValue::ipv4(&data[24..28]));
+            fields.push(("sender_mac", FieldValue::mac(&data[8..14])));
+            fields.push(("sender_ip", FieldValue::ipv4(&data[14..18])));
+            fields.push(("target_mac", FieldValue::mac(&data[18..24])));
+            fields.push(("target_ip", FieldValue::ipv4(&data[24..28])));
         }
 
         // ARP doesn't have payload protocols
-        ParseResult::success(fields, &data[28..], HashMap::new())
+        ParseResult::success(fields, &data[28..], SmallVec::new())
     }
 
     fn schema_fields(&self) -> Vec<FieldDescriptor> {
@@ -92,6 +92,10 @@ impl Protocol for ArpProtocol {
             FieldDescriptor::mac_field("arp.target_mac").set_nullable(true),
             FieldDescriptor::new("arp.target_ip", DataKind::String).set_nullable(true),
         ]
+    }
+
+    fn dependencies(&self) -> &'static [&'static str] {
+        &["ethernet", "vlan"]
     }
 }
 
@@ -117,7 +121,7 @@ mod tests {
 
         let parser = ArpProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("ethertype", 0x0806);
+        context.insert_hint("ethertype", 0x0806);
 
         let result = parser.parse(&packet, &context);
 
@@ -151,7 +155,7 @@ mod tests {
 
         let parser = ArpProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("ethertype", 0x0806);
+        context.insert_hint("ethertype", 0x0806);
 
         let result = parser.parse(&packet, &context);
 
@@ -184,12 +188,12 @@ mod tests {
 
         // With IPv4 ethertype
         let mut ctx2 = ParseContext::new(1);
-        ctx2.hints.insert("ethertype", 0x0800);
+        ctx2.insert_hint("ethertype", 0x0800);
         assert!(parser.can_parse(&ctx2).is_none());
 
         // With ARP ethertype
         let mut ctx3 = ParseContext::new(1);
-        ctx3.hints.insert("ethertype", 0x0806);
+        ctx3.insert_hint("ethertype", 0x0806);
         assert!(parser.can_parse(&ctx3).is_some());
     }
 
@@ -199,7 +203,7 @@ mod tests {
 
         let parser = ArpProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("ethertype", 0x0806);
+        context.insert_hint("ethertype", 0x0806);
 
         let result = parser.parse(&short_packet, &context);
 
@@ -223,7 +227,7 @@ mod tests {
 
         let parser = ArpProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("ethertype", 0x0806);
+        context.insert_hint("ethertype", 0x0806);
 
         let result = parser.parse(&packet, &context);
 
@@ -250,7 +254,7 @@ mod tests {
 
         let parser = ArpProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("ethertype", 0x0806);
+        context.insert_hint("ethertype", 0x0806);
 
         let result = parser.parse(&packet, &context);
 

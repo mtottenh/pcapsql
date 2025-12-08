@@ -3,7 +3,7 @@
 //! Parses NTP (Network Time Protocol) messages used for time synchronization.
 //! Matches on UDP port 123.
 
-use std::collections::HashMap;
+use smallvec::SmallVec;
 
 use super::{FieldValue, ParseContext, ParseResult, Protocol};
 use crate::schema::{DataKind, FieldDescriptor};
@@ -44,7 +44,7 @@ impl Protocol for NtpProtocol {
             return ParseResult::error("NTP header too short".to_string(), data);
         }
 
-        let mut fields = HashMap::new();
+        let mut fields = SmallVec::new();
 
         // First byte: LI (2 bits), VN (3 bits), Mode (3 bits)
         let first_byte = data[0];
@@ -52,29 +52,29 @@ impl Protocol for NtpProtocol {
         let version = (first_byte >> 3) & 0x07; // Version Number
         let mode = first_byte & 0x07; // Mode
 
-        fields.insert("version", FieldValue::UInt8(version));
-        fields.insert("mode", FieldValue::UInt8(mode));
-        fields.insert("leap_indicator", FieldValue::UInt8(li));
+        fields.push(("version", FieldValue::UInt8(version)));
+        fields.push(("mode", FieldValue::UInt8(mode)));
+        fields.push(("leap_indicator", FieldValue::UInt8(li)));
 
         // Second byte: Stratum
         let stratum = data[1];
-        fields.insert("stratum", FieldValue::UInt8(stratum));
+        fields.push(("stratum", FieldValue::UInt8(stratum)));
 
         // Third byte: Poll (signed, log2 seconds)
         let poll = data[2] as i8;
-        fields.insert("poll", FieldValue::UInt8(poll as u8));
+        fields.push(("poll", FieldValue::UInt8(poll as u8)));
 
         // Fourth byte: Precision (signed, log2 seconds)
         let precision = data[3] as i8;
-        fields.insert("precision", FieldValue::UInt8(precision as u8));
+        fields.push(("precision", FieldValue::UInt8(precision as u8)));
 
         // Root Delay (4 bytes, signed fixed-point)
         let root_delay = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
-        fields.insert("root_delay", FieldValue::UInt32(root_delay));
+        fields.push(("root_delay", FieldValue::UInt32(root_delay)));
 
         // Root Dispersion (4 bytes, unsigned fixed-point)
         let root_dispersion = u32::from_be_bytes([data[8], data[9], data[10], data[11]]);
-        fields.insert("root_dispersion", FieldValue::UInt32(root_dispersion));
+        fields.push(("root_dispersion", FieldValue::UInt32(root_dispersion)));
 
         // Reference ID (4 bytes) - meaning depends on stratum
         let ref_id_bytes = &data[12..16];
@@ -90,28 +90,28 @@ impl Protocol for NtpProtocol {
                 ref_id_bytes[0], ref_id_bytes[1], ref_id_bytes[2], ref_id_bytes[3]
             )
         };
-        fields.insert("reference_id", FieldValue::String(reference_id));
+        fields.push(("reference_id", FieldValue::String(reference_id)));
 
         // Reference Timestamp (8 bytes) - NTP format
         let reference_ts = read_ntp_timestamp(&data[16..24]);
-        fields.insert("reference_ts", FieldValue::Int64(reference_ts));
+        fields.push(("reference_ts", FieldValue::Int64(reference_ts)));
 
         // Origin Timestamp (8 bytes)
         let origin_ts = read_ntp_timestamp(&data[24..32]);
-        fields.insert("origin_ts", FieldValue::Int64(origin_ts));
+        fields.push(("origin_ts", FieldValue::Int64(origin_ts)));
 
         // Receive Timestamp (8 bytes)
         let receive_ts = read_ntp_timestamp(&data[32..40]);
-        fields.insert("receive_ts", FieldValue::Int64(receive_ts));
+        fields.push(("receive_ts", FieldValue::Int64(receive_ts)));
 
         // Transmit Timestamp (8 bytes)
         let transmit_ts = read_ntp_timestamp(&data[40..48]);
-        fields.insert("transmit_ts", FieldValue::Int64(transmit_ts));
+        fields.push(("transmit_ts", FieldValue::Int64(transmit_ts)));
 
         // Any remaining data would be extension fields or authentication
         let remaining = &data[NTP_HEADER_SIZE..];
 
-        ParseResult::success(fields, remaining, HashMap::new())
+        ParseResult::success(fields, remaining, SmallVec::new())
     }
 
     fn schema_fields(&self) -> Vec<FieldDescriptor> {
@@ -134,6 +134,10 @@ impl Protocol for NtpProtocol {
 
     fn child_protocols(&self) -> &[&'static str] {
         &[]
+    }
+
+    fn dependencies(&self) -> &'static [&'static str] {
+        &["udp"]
     }
 }
 
@@ -248,17 +252,17 @@ mod tests {
 
         // With dst_port 123
         let mut ctx2 = ParseContext::new(1);
-        ctx2.hints.insert("dst_port", 123);
+        ctx2.insert_hint("dst_port", 123);
         assert!(parser.can_parse(&ctx2).is_some());
 
         // With src_port 123
         let mut ctx3 = ParseContext::new(1);
-        ctx3.hints.insert("src_port", 123);
+        ctx3.insert_hint("src_port", 123);
         assert!(parser.can_parse(&ctx3).is_some());
 
         // With different port
         let mut ctx4 = ParseContext::new(1);
-        ctx4.hints.insert("dst_port", 80);
+        ctx4.insert_hint("dst_port", 80);
         assert!(parser.can_parse(&ctx4).is_none());
     }
 
@@ -268,7 +272,7 @@ mod tests {
 
         let parser = NtpProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("dst_port", 123);
+        context.insert_hint("dst_port", 123);
 
         let result = parser.parse(&packet, &context);
 
@@ -284,7 +288,7 @@ mod tests {
 
         let parser = NtpProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("src_port", 123);
+        context.insert_hint("src_port", 123);
 
         let result = parser.parse(&packet, &context);
 

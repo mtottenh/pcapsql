@@ -466,6 +466,7 @@ impl ProtocolBatchBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use smallvec::SmallVec;
 
     #[test]
     fn test_protocol_builder_new() {
@@ -507,17 +508,17 @@ mod tests {
     fn test_protocol_builder_add_parsed() {
         let mut builder = ProtocolBatchBuilder::new("tcp", 10).unwrap();
 
-        let mut fields = HashMap::new();
-        fields.insert("src_port", FieldValue::UInt16(12345));
-        fields.insert("dst_port", FieldValue::UInt16(80));
-        fields.insert("seq", FieldValue::UInt32(100));
-        fields.insert("ack", FieldValue::UInt32(0));
-        fields.insert("flags", FieldValue::UInt16(0x02));
+        let mut fields = SmallVec::new();
+        fields.push(("src_port", FieldValue::UInt16(12345)));
+        fields.push(("dst_port", FieldValue::UInt16(80)));
+        fields.push(("seq", FieldValue::UInt32(100)));
+        fields.push(("ack", FieldValue::UInt32(0)));
+        fields.push(("flags", FieldValue::UInt16(0x02)));
 
         let parsed = ParseResult {
             fields,
             remaining: &[],
-            child_hints: HashMap::new(),
+            child_hints: SmallVec::new(),
             error: None,
         };
 
@@ -543,14 +544,14 @@ mod tests {
         let mut builder = ProtocolBatchBuilder::new("tcp", 5).unwrap();
 
         for i in 1..=5 {
-            let mut fields = HashMap::new();
-            fields.insert("src_port", FieldValue::UInt16(12345));
-            fields.insert("dst_port", FieldValue::UInt16(80));
+            let mut fields = SmallVec::new();
+            fields.push(("src_port", FieldValue::UInt16(12345)));
+            fields.push(("dst_port", FieldValue::UInt16(80)));
 
             let parsed = ParseResult {
                 fields,
                 remaining: &[],
-                child_hints: HashMap::new(),
+                child_hints: SmallVec::new(),
                 error: None,
             };
 

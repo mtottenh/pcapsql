@@ -1,6 +1,6 @@
 //! ICMP protocol parser.
 
-use std::collections::HashMap;
+use smallvec::SmallVec;
 
 use super::{FieldValue, ParseContext, ParseResult, Protocol};
 use crate::schema::{DataKind, FieldDescriptor};
@@ -50,40 +50,40 @@ impl Protocol for IcmpProtocol {
             );
         }
 
-        let mut fields = HashMap::new();
+        let mut fields = SmallVec::new();
 
         let icmp_type = data[0];
         let icmp_code = data[1];
         let checksum = u16::from_be_bytes([data[2], data[3]]);
 
-        fields.insert("type", FieldValue::UInt8(icmp_type));
-        fields.insert("code", FieldValue::UInt8(icmp_code));
-        fields.insert("checksum", FieldValue::UInt16(checksum));
+        fields.push(("type", FieldValue::UInt8(icmp_type)));
+        fields.push(("code", FieldValue::UInt8(icmp_code)));
+        fields.push(("checksum", FieldValue::UInt16(checksum)));
 
         // Type-specific fields (bytes 4-7)
         match icmp_type {
             icmp_type::ECHO_REQUEST | icmp_type::ECHO_REPLY => {
                 let identifier = u16::from_be_bytes([data[4], data[5]]);
                 let sequence = u16::from_be_bytes([data[6], data[7]]);
-                fields.insert("identifier", FieldValue::UInt16(identifier));
-                fields.insert("sequence", FieldValue::UInt16(sequence));
+                fields.push(("identifier", FieldValue::UInt16(identifier)));
+                fields.push(("sequence", FieldValue::UInt16(sequence)));
             }
             icmp_type::DESTINATION_UNREACHABLE => {
                 // Next-hop MTU for "fragmentation needed" (code 4)
                 if icmp_code == 4 && data.len() >= 8 {
                     let mtu = u16::from_be_bytes([data[6], data[7]]);
-                    fields.insert("next_hop_mtu", FieldValue::UInt16(mtu));
+                    fields.push(("next_hop_mtu", FieldValue::UInt16(mtu)));
                 }
             }
             icmp_type::REDIRECT => {
                 if data.len() >= 8 {
-                    fields.insert("gateway", FieldValue::ipv4(&data[4..8]));
+                    fields.push(("gateway", FieldValue::ipv4(&data[4..8])));
                 }
             }
             _ => {
                 // Store the 4 bytes as a generic field
                 let rest = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
-                fields.insert("rest_of_header", FieldValue::UInt32(rest));
+                fields.push(("rest_of_header", FieldValue::UInt32(rest)));
             }
         }
 
@@ -100,10 +100,10 @@ impl Protocol for IcmpProtocol {
             icmp_type::TIMESTAMP_REPLY => "Timestamp Reply",
             _ => "Unknown",
         };
-        fields.insert("type_name", FieldValue::String(type_name.to_string()));
+        fields.push(("type_name", FieldValue::String(type_name.to_string())));
 
         // ICMP doesn't have child protocols typically
-        ParseResult::success(fields, &data[8..], HashMap::new())
+        ParseResult::success(fields, &data[8..], SmallVec::new())
     }
 
     fn schema_fields(&self) -> Vec<FieldDescriptor> {
@@ -117,6 +117,10 @@ impl Protocol for IcmpProtocol {
             FieldDescriptor::new("icmp.next_hop_mtu", DataKind::UInt16).set_nullable(true),
             FieldDescriptor::new("icmp.gateway", DataKind::String).set_nullable(true),
         ]
+    }
+
+    fn dependencies(&self) -> &'static [&'static str] {
+        &["ipv4"]
     }
 }
 
@@ -137,7 +141,7 @@ mod tests {
 
         let parser = IcmpProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("ip_protocol", 1);
+        context.insert_hint("ip_protocol", 1);
 
         let result = parser.parse(&header, &context);
 
@@ -163,7 +167,7 @@ mod tests {
 
         let parser = IcmpProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("ip_protocol", 1);
+        context.insert_hint("ip_protocol", 1);
 
         let result = parser.parse(&header, &context);
 
@@ -191,7 +195,7 @@ mod tests {
 
         let parser = IcmpProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("ip_protocol", 1);
+        context.insert_hint("ip_protocol", 1);
 
         let result = parser.parse(&header, &context);
 
@@ -218,7 +222,7 @@ mod tests {
 
         let parser = IcmpProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("ip_protocol", 1);
+        context.insert_hint("ip_protocol", 1);
 
         let result = parser.parse(&header, &context);
 
@@ -243,12 +247,12 @@ mod tests {
 
         // With TCP protocol
         let mut ctx2 = ParseContext::new(1);
-        ctx2.hints.insert("ip_protocol", 6);
+        ctx2.insert_hint("ip_protocol", 6);
         assert!(parser.can_parse(&ctx2).is_none());
 
         // With ICMP protocol
         let mut ctx3 = ParseContext::new(1);
-        ctx3.hints.insert("ip_protocol", 1);
+        ctx3.insert_hint("ip_protocol", 1);
         assert!(parser.can_parse(&ctx3).is_some());
     }
 
@@ -258,7 +262,7 @@ mod tests {
 
         let parser = IcmpProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("ip_protocol", 1);
+        context.insert_hint("ip_protocol", 1);
 
         let result = parser.parse(&short_header, &context);
 
@@ -280,7 +284,7 @@ mod tests {
 
         let parser = IcmpProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("ip_protocol", 1);
+        context.insert_hint("ip_protocol", 1);
 
         let result = parser.parse(&packet, &context);
 

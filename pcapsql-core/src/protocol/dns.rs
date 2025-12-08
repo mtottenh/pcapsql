@@ -1,6 +1,8 @@
 //! DNS protocol parser.
 
-use std::collections::HashMap;
+use std::collections::HashSet;
+
+use smallvec::SmallVec;
 
 use super::{FieldValue, ParseContext, ParseResult, Protocol};
 use crate::schema::{DataKind, FieldDescriptor};
@@ -38,66 +40,66 @@ impl Protocol for DnsProtocol {
             return ParseResult::error("DNS header too short".to_string(), data);
         }
 
-        let mut fields = HashMap::new();
+        let mut fields = SmallVec::new();
 
         // Transaction ID (2 bytes)
         let transaction_id = u16::from_be_bytes([data[0], data[1]]);
-        fields.insert("transaction_id", FieldValue::UInt16(transaction_id));
+        fields.push(("transaction_id", FieldValue::UInt16(transaction_id)));
 
         // Flags (2 bytes)
         let flags = u16::from_be_bytes([data[2], data[3]]);
 
         // QR bit (bit 15) - 0 = query, 1 = response
         let is_query = (flags & 0x8000) == 0;
-        fields.insert("is_query", FieldValue::Bool(is_query));
+        fields.push(("is_query", FieldValue::Bool(is_query)));
 
         // Opcode (bits 11-14)
         let opcode = ((flags >> 11) & 0x0F) as u8;
-        fields.insert("opcode", FieldValue::UInt8(opcode));
+        fields.push(("opcode", FieldValue::UInt8(opcode)));
 
         // AA bit (bit 10) - Authoritative Answer
         let is_authoritative = (flags & 0x0400) != 0;
-        fields.insert("is_authoritative", FieldValue::Bool(is_authoritative));
+        fields.push(("is_authoritative", FieldValue::Bool(is_authoritative)));
 
         // TC bit (bit 9) - Truncated
         let is_truncated = (flags & 0x0200) != 0;
-        fields.insert("is_truncated", FieldValue::Bool(is_truncated));
+        fields.push(("is_truncated", FieldValue::Bool(is_truncated)));
 
         // RD bit (bit 8) - Recursion Desired
         let recursion_desired = (flags & 0x0100) != 0;
-        fields.insert("recursion_desired", FieldValue::Bool(recursion_desired));
+        fields.push(("recursion_desired", FieldValue::Bool(recursion_desired)));
 
         // RA bit (bit 7) - Recursion Available
         let recursion_available = (flags & 0x0080) != 0;
-        fields.insert("recursion_available", FieldValue::Bool(recursion_available));
+        fields.push(("recursion_available", FieldValue::Bool(recursion_available)));
 
         // RCODE (bits 0-3) - Response Code
         let response_code = (flags & 0x000F) as u8;
-        fields.insert("response_code", FieldValue::UInt8(response_code));
+        fields.push(("response_code", FieldValue::UInt8(response_code)));
 
         // Question count (2 bytes)
         let query_count = u16::from_be_bytes([data[4], data[5]]);
-        fields.insert("query_count", FieldValue::UInt16(query_count));
+        fields.push(("query_count", FieldValue::UInt16(query_count)));
 
         // Answer count (2 bytes)
         let answer_count = u16::from_be_bytes([data[6], data[7]]);
-        fields.insert("answer_count", FieldValue::UInt16(answer_count));
+        fields.push(("answer_count", FieldValue::UInt16(answer_count)));
 
         // Authority count (2 bytes)
         let authority_count = u16::from_be_bytes([data[8], data[9]]);
-        fields.insert("authority_count", FieldValue::UInt16(authority_count));
+        fields.push(("authority_count", FieldValue::UInt16(authority_count)));
 
         // Additional count (2 bytes)
         let additional_count = u16::from_be_bytes([data[10], data[11]]);
-        fields.insert("additional_count", FieldValue::UInt16(additional_count));
+        fields.push(("additional_count", FieldValue::UInt16(additional_count)));
 
         // Parse the first question section if present
         if query_count > 0 {
             match parse_question(&data[12..]) {
                 Ok((name, qtype, qclass, consumed)) => {
-                    fields.insert("query_name", FieldValue::String(name));
-                    fields.insert("query_type", FieldValue::UInt16(qtype));
-                    fields.insert("query_class", FieldValue::UInt16(qclass));
+                    fields.push(("query_name", FieldValue::String(name)));
+                    fields.push(("query_type", FieldValue::UInt16(qtype)));
+                    fields.push(("query_class", FieldValue::UInt16(qclass)));
 
                     // Return remaining bytes after the question section
                     let remaining_offset = 12 + consumed;
@@ -105,7 +107,7 @@ impl Protocol for DnsProtocol {
                         return ParseResult::success(
                             fields,
                             &data[remaining_offset..],
-                            HashMap::new(),
+                            SmallVec::new(),
                         );
                     }
                 }
@@ -117,7 +119,7 @@ impl Protocol for DnsProtocol {
         }
 
         // No questions or couldn't parse them
-        ParseResult::success(fields, &data[12..], HashMap::new())
+        ParseResult::success(fields, &data[12..], SmallVec::new())
     }
 
     fn schema_fields(&self) -> Vec<FieldDescriptor> {
@@ -143,6 +145,142 @@ impl Protocol for DnsProtocol {
     fn child_protocols(&self) -> &[&'static str] {
         &[]
     }
+
+    fn dependencies(&self) -> &'static [&'static str] {
+        &["udp", "tcp"] // DNS runs over UDP (primarily) and TCP
+    }
+
+    fn parse_projected<'a>(
+        &self,
+        data: &'a [u8],
+        _context: &ParseContext,
+        fields: Option<&HashSet<String>>,
+    ) -> ParseResult<'a> {
+        // If no projection, use full parse
+        let fields = match fields {
+            None => return self.parse(data, _context),
+            Some(f) if f.is_empty() => return self.parse(data, _context),
+            Some(f) => f,
+        };
+
+        // DNS header is 12 bytes minimum
+        if data.len() < 12 {
+            return ParseResult::error("DNS header too short".to_string(), data);
+        }
+
+        let mut result_fields = SmallVec::new();
+
+        // Parse header fields (all cheap)
+        let transaction_id = u16::from_be_bytes([data[0], data[1]]);
+        let flags = u16::from_be_bytes([data[2], data[3]]);
+        let is_query = (flags & 0x8000) == 0;
+        let opcode = ((flags >> 11) & 0x0F) as u8;
+        let is_authoritative = (flags & 0x0400) != 0;
+        let is_truncated = (flags & 0x0200) != 0;
+        let recursion_desired = (flags & 0x0100) != 0;
+        let recursion_available = (flags & 0x0080) != 0;
+        let response_code = (flags & 0x000F) as u8;
+        let query_count = u16::from_be_bytes([data[4], data[5]]);
+        let answer_count = u16::from_be_bytes([data[6], data[7]]);
+        let authority_count = u16::from_be_bytes([data[8], data[9]]);
+        let additional_count = u16::from_be_bytes([data[10], data[11]]);
+
+        // Insert only requested header fields
+        if fields.contains("transaction_id") {
+            result_fields.push(("transaction_id", FieldValue::UInt16(transaction_id)));
+        }
+        if fields.contains("is_query") {
+            result_fields.push(("is_query", FieldValue::Bool(is_query)));
+        }
+        if fields.contains("opcode") {
+            result_fields.push(("opcode", FieldValue::UInt8(opcode)));
+        }
+        if fields.contains("is_authoritative") {
+            result_fields.push(("is_authoritative", FieldValue::Bool(is_authoritative)));
+        }
+        if fields.contains("is_truncated") {
+            result_fields.push(("is_truncated", FieldValue::Bool(is_truncated)));
+        }
+        if fields.contains("recursion_desired") {
+            result_fields.push(("recursion_desired", FieldValue::Bool(recursion_desired)));
+        }
+        if fields.contains("recursion_available") {
+            result_fields.push(("recursion_available", FieldValue::Bool(recursion_available)));
+        }
+        if fields.contains("response_code") {
+            result_fields.push(("response_code", FieldValue::UInt8(response_code)));
+        }
+        if fields.contains("query_count") {
+            result_fields.push(("query_count", FieldValue::UInt16(query_count)));
+        }
+        if fields.contains("answer_count") {
+            result_fields.push(("answer_count", FieldValue::UInt16(answer_count)));
+        }
+        if fields.contains("authority_count") {
+            result_fields.push(("authority_count", FieldValue::UInt16(authority_count)));
+        }
+        if fields.contains("additional_count") {
+            result_fields.push(("additional_count", FieldValue::UInt16(additional_count)));
+        }
+
+        // Only parse question section if any of the expensive fields are requested
+        let need_question = fields.contains("query_name")
+            || fields.contains("query_type")
+            || fields.contains("query_class");
+
+        if need_question && query_count > 0 {
+            match parse_question(&data[12..]) {
+                Ok((name, qtype, qclass, consumed)) => {
+                    if fields.contains("query_name") {
+                        result_fields.push(("query_name", FieldValue::String(name)));
+                    }
+                    if fields.contains("query_type") {
+                        result_fields.push(("query_type", FieldValue::UInt16(qtype)));
+                    }
+                    if fields.contains("query_class") {
+                        result_fields.push(("query_class", FieldValue::UInt16(qclass)));
+                    }
+
+                    let remaining_offset = 12 + consumed;
+                    if remaining_offset <= data.len() {
+                        return ParseResult::success(
+                            result_fields,
+                            &data[remaining_offset..],
+                            SmallVec::new(),
+                        );
+                    }
+                }
+                Err(e) => {
+                    return ParseResult::partial(result_fields, &data[12..], e);
+                }
+            }
+        }
+
+        ParseResult::success(result_fields, &data[12..], SmallVec::new())
+    }
+
+    fn cheap_fields(&self) -> &'static [&'static str] {
+        // Header fields are all cheap - they come from the fixed 12-byte header
+        &[
+            "transaction_id",
+            "is_query",
+            "opcode",
+            "is_authoritative",
+            "is_truncated",
+            "recursion_desired",
+            "recursion_available",
+            "response_code",
+            "query_count",
+            "answer_count",
+            "authority_count",
+            "additional_count",
+        ]
+    }
+
+    fn expensive_fields(&self) -> &'static [&'static str] {
+        // Question fields require parsing variable-length domain name
+        &["query_name", "query_type", "query_class"]
+    }
 }
 
 /// Parse a DNS question section and return (name, qtype, qclass, bytes_consumed).
@@ -164,7 +302,8 @@ fn parse_question(data: &[u8]) -> Result<(String, u16, u16, usize), String> {
 /// Parse a DNS domain name from the data.
 /// Returns (decoded_name, bytes_consumed).
 fn parse_domain_name(data: &[u8]) -> Result<(String, usize), String> {
-    let mut name_parts = Vec::new();
+    // Typical domain has 2-4 labels (e.g., www.example.com)
+    let mut name_parts = Vec::with_capacity(4);
     let mut pos = 0;
 
     loop {
@@ -335,7 +474,7 @@ mod tests {
 
         let parser = DnsProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("dst_port", 53);
+        context.insert_hint("dst_port", 53);
         context.parent_protocol = Some("udp");
 
         let result = parser.parse(&packet, &context);
@@ -363,7 +502,7 @@ mod tests {
 
         let parser = DnsProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("src_port", 53);
+        context.insert_hint("src_port", 53);
         context.parent_protocol = Some("udp");
 
         let result = parser.parse(&packet, &context);
@@ -385,7 +524,7 @@ mod tests {
 
         let parser = DnsProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("src_port", 53);
+        context.insert_hint("src_port", 53);
         context.parent_protocol = Some("udp");
 
         let result = parser.parse(&packet, &context);
@@ -407,17 +546,17 @@ mod tests {
 
         // With dst_port 53
         let mut ctx2 = ParseContext::new(1);
-        ctx2.hints.insert("dst_port", 53);
+        ctx2.insert_hint("dst_port", 53);
         assert!(parser.can_parse(&ctx2).is_some());
 
         // With src_port 53
         let mut ctx3 = ParseContext::new(1);
-        ctx3.hints.insert("src_port", 53);
+        ctx3.insert_hint("src_port", 53);
         assert!(parser.can_parse(&ctx3).is_some());
 
         // With different port
         let mut ctx4 = ParseContext::new(1);
-        ctx4.hints.insert("dst_port", 80);
+        ctx4.insert_hint("dst_port", 80);
         assert!(parser.can_parse(&ctx4).is_none());
     }
 
@@ -427,7 +566,7 @@ mod tests {
 
         let parser = DnsProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("dst_port", 53);
+        context.insert_hint("dst_port", 53);
 
         let result = parser.parse(&short_packet, &context);
 
@@ -489,7 +628,7 @@ mod tests {
 
         let parser = DnsProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("dst_port", 53);
+        context.insert_hint("dst_port", 53);
 
         let result = parser.parse(&packet, &context);
 
@@ -516,5 +655,66 @@ mod tests {
         assert!(field_names.contains(&"dns.is_query"));
         assert!(field_names.contains(&"dns.query_name"));
         assert!(field_names.contains(&"dns.query_type"));
+    }
+
+    #[test]
+    fn test_dns_projected_header_only() {
+        // Test that we can skip expensive query_name parsing
+        let query_name = encode_domain_name("example.com");
+        let packet = create_dns_query(0x1234, &query_name);
+
+        let parser = DnsProtocol;
+        let mut context = ParseContext::new(1);
+        context.insert_hint("dst_port", 53);
+
+        // Only request header fields - skip expensive query_name parsing
+        let fields: HashSet<String> = ["transaction_id", "is_query", "response_code"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let result = parser.parse_projected(&packet, &context, Some(&fields));
+
+        assert!(result.is_ok());
+        // Requested fields are present
+        assert_eq!(
+            result.get("transaction_id"),
+            Some(&FieldValue::UInt16(0x1234))
+        );
+        assert_eq!(result.get("is_query"), Some(&FieldValue::Bool(true)));
+        assert_eq!(result.get("response_code"), Some(&FieldValue::UInt8(0)));
+        // Expensive fields are NOT present (query_name was skipped)
+        assert!(result.get("query_name").is_none());
+        assert!(result.get("query_type").is_none());
+        assert!(result.get("query_class").is_none());
+    }
+
+    #[test]
+    fn test_dns_projected_with_query_name() {
+        let query_name = encode_domain_name("example.com");
+        let packet = create_dns_query(0x5678, &query_name);
+
+        let parser = DnsProtocol;
+        let mut context = ParseContext::new(1);
+        context.insert_hint("dst_port", 53);
+
+        // Request query_name - this requires domain name parsing
+        let fields: HashSet<String> = ["transaction_id", "query_name"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let result = parser.parse_projected(&packet, &context, Some(&fields));
+
+        assert!(result.is_ok());
+        assert_eq!(
+            result.get("transaction_id"),
+            Some(&FieldValue::UInt16(0x5678))
+        );
+        assert_eq!(
+            result.get("query_name"),
+            Some(&FieldValue::String("example.com".to_string()))
+        );
+        // Other fields not requested
+        assert!(result.get("is_query").is_none());
+        assert!(result.get("query_type").is_none());
     }
 }

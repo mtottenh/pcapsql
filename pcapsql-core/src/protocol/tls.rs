@@ -3,7 +3,7 @@
 //! Parses TLS (Transport Layer Security) handshake records, particularly
 //! Client Hello messages for SNI extraction and cipher suite analysis.
 
-use std::collections::HashMap;
+use smallvec::SmallVec;
 
 use super::{FieldValue, ParseContext, ParseResult, Protocol};
 use crate::schema::{DataKind, FieldDescriptor};
@@ -66,16 +66,16 @@ impl Protocol for TlsProtocol {
             return ParseResult::error("TLS record too short".to_string(), data);
         }
 
-        let mut fields = HashMap::new();
+        let mut fields = SmallVec::new();
 
         // Parse TLS record header
         let record_type = data[0];
-        fields.insert("record_type", FieldValue::UInt8(record_type));
+        fields.push(("record_type", FieldValue::UInt8(record_type)));
 
         let version_major = data[1];
         let version_minor = data[2];
         let version_str = format_tls_version(version_major, version_minor);
-        fields.insert("version", FieldValue::String(version_str));
+        fields.push(("version", FieldValue::String(version_str)));
 
         let record_length = u16::from_be_bytes([data[3], data[4]]) as usize;
 
@@ -96,7 +96,7 @@ impl Protocol for TlsProtocol {
         }
 
         let remaining = &data[5 + record_length..];
-        ParseResult::success(fields, remaining, HashMap::new())
+        ParseResult::success(fields, remaining, SmallVec::new())
     }
 
     fn schema_fields(&self) -> Vec<FieldDescriptor> {
@@ -113,6 +113,10 @@ impl Protocol for TlsProtocol {
     fn child_protocols(&self) -> &[&'static str] {
         &[]
     }
+
+    fn dependencies(&self) -> &'static [&'static str] {
+        &["tcp"]
+    }
 }
 
 /// Format TLS version from major.minor bytes.
@@ -128,13 +132,13 @@ fn format_tls_version(major: u8, minor: u8) -> String {
 }
 
 /// Parse a TLS handshake message.
-fn parse_tls_handshake(data: &[u8], fields: &mut HashMap<&'static str, FieldValue>) {
+fn parse_tls_handshake(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) {
     if data.len() < 4 {
         return;
     }
 
     let handshake_type = data[0];
-    fields.insert("handshake_type", FieldValue::UInt8(handshake_type));
+    fields.push(("handshake_type", FieldValue::UInt8(handshake_type)));
 
     // Handshake length (3 bytes)
     let handshake_len =
@@ -158,7 +162,7 @@ fn parse_tls_handshake(data: &[u8], fields: &mut HashMap<&'static str, FieldValu
 }
 
 /// Parse a Client Hello message.
-fn parse_client_hello(data: &[u8], fields: &mut HashMap<&'static str, FieldValue>) {
+fn parse_client_hello(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) {
     if data.len() < 38 {
         return;
     }
@@ -194,7 +198,7 @@ fn parse_client_hello(data: &[u8], fields: &mut HashMap<&'static str, FieldValue
             .collect();
 
         if !cipher_names.is_empty() {
-            fields.insert("cipher_suites", FieldValue::String(cipher_names.join(",")));
+            fields.push(("cipher_suites", FieldValue::String(cipher_names.join(","))));
         }
     }
     offset += cipher_suites_len;
@@ -220,7 +224,7 @@ fn parse_client_hello(data: &[u8], fields: &mut HashMap<&'static str, FieldValue
 }
 
 /// Parse a Server Hello message.
-fn parse_server_hello(data: &[u8], fields: &mut HashMap<&'static str, FieldValue>) {
+fn parse_server_hello(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) {
     if data.len() < 38 {
         return;
     }
@@ -240,14 +244,14 @@ fn parse_server_hello(data: &[u8], fields: &mut HashMap<&'static str, FieldValue
         return;
     }
     let cipher_id = u16::from_be_bytes([data[offset], data[offset + 1]]);
-    fields.insert(
+    fields.push((
         "selected_cipher",
         FieldValue::String(format_cipher_suite(cipher_id)),
-    );
+    ));
 }
 
 /// Parse TLS extensions and extract SNI.
-fn parse_extensions(data: &[u8], fields: &mut HashMap<&'static str, FieldValue>) {
+fn parse_extensions(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) {
     let mut offset = 0;
 
     while offset + 4 <= data.len() {
@@ -263,7 +267,7 @@ fn parse_extensions(data: &[u8], fields: &mut HashMap<&'static str, FieldValue>)
 
         if ext_type == extension_type::SERVER_NAME {
             if let Some(sni) = parse_sni_extension(ext_data) {
-                fields.insert("sni", FieldValue::String(sni));
+                fields.push(("sni", FieldValue::String(sni)));
             }
         }
 
@@ -486,12 +490,12 @@ mod tests {
 
         // With dst_port 443
         let mut ctx2 = ParseContext::new(1);
-        ctx2.hints.insert("dst_port", 443);
+        ctx2.insert_hint("dst_port", 443);
         assert!(parser.can_parse(&ctx2).is_some());
 
         // With src_port 443
         let mut ctx3 = ParseContext::new(1);
-        ctx3.hints.insert("src_port", 443);
+        ctx3.insert_hint("src_port", 443);
         assert!(parser.can_parse(&ctx3).is_some());
     }
 
@@ -501,7 +505,7 @@ mod tests {
 
         let parser = TlsProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("dst_port", 443);
+        context.insert_hint("dst_port", 443);
 
         let result = parser.parse(&packet, &context);
 
@@ -526,7 +530,7 @@ mod tests {
 
         let parser = TlsProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("src_port", 443);
+        context.insert_hint("src_port", 443);
 
         let result = parser.parse(&packet, &context);
 
@@ -549,7 +553,7 @@ mod tests {
 
         let parser = TlsProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("dst_port", 443);
+        context.insert_hint("dst_port", 443);
 
         let result = parser.parse(&packet, &context);
 

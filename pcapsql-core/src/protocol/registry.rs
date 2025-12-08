@@ -1,5 +1,7 @@
 //! Protocol registry for managing parsers.
 
+use std::collections::HashSet;
+
 use crate::schema::FieldDescriptor;
 
 use super::{
@@ -58,6 +60,54 @@ pub trait Protocol: Send + Sync {
     /// - `None`: Stop parsing (terminal protocol)
     fn payload_mode(&self) -> PayloadMode {
         PayloadMode::Chain
+    }
+
+    /// Protocols that must be parsed before this one can be reached.
+    ///
+    /// Used for protocol pruning optimization - when a query only needs
+    /// certain protocols, we can skip parsing protocols not in the
+    /// transitive dependency chain.
+    ///
+    /// Returns a list of protocol names that could appear in the parse
+    /// chain before this protocol (e.g., TCP depends on ipv4, ipv6).
+    fn dependencies(&self) -> &'static [&'static str] {
+        &[] // Default: no dependencies (link layer protocols)
+    }
+
+    /// Parse with field projection - only extract requested fields.
+    ///
+    /// If `fields` is None, extract all fields (default behavior).
+    /// If `fields` is Some, only extract fields in the set.
+    ///
+    /// Note: `frame_number` and `timestamp` are always available from
+    /// the packet metadata, not from parsing.
+    ///
+    /// The default implementation ignores projection and calls `parse()`.
+    /// Protocols can override this to skip expensive field extraction.
+    fn parse_projected<'a>(
+        &self,
+        data: &'a [u8],
+        context: &ParseContext,
+        _fields: Option<&HashSet<String>>,
+    ) -> ParseResult<'a> {
+        // Default: ignore projection, parse everything
+        self.parse(data, context)
+    }
+
+    /// Returns fields that are "cheap" to extract (header fields parsed anyway).
+    ///
+    /// These fields come from the basic header parse that must happen
+    /// regardless of projection. Used to decide if projection is worthwhile.
+    fn cheap_fields(&self) -> &'static [&'static str] {
+        &[] // Default: no fields are marked as cheap
+    }
+
+    /// Returns fields that are "expensive" to extract.
+    ///
+    /// These fields require additional parsing beyond the basic header,
+    /// such as variable-length options, compressed data, or string parsing.
+    fn expensive_fields(&self) -> &'static [&'static str] {
+        &[] // Default: no fields are marked as expensive
     }
 }
 
@@ -155,6 +205,31 @@ impl Protocol for BuiltinProtocol {
     #[inline]
     fn payload_mode(&self) -> PayloadMode {
         delegate_protocol!(self, payload_mode)
+    }
+
+    #[inline]
+    fn dependencies(&self) -> &'static [&'static str] {
+        delegate_protocol!(self, dependencies)
+    }
+
+    #[inline]
+    fn parse_projected<'a>(
+        &self,
+        data: &'a [u8],
+        context: &ParseContext,
+        fields: Option<&HashSet<String>>,
+    ) -> ParseResult<'a> {
+        delegate_protocol!(self, parse_projected, data, context, fields)
+    }
+
+    #[inline]
+    fn cheap_fields(&self) -> &'static [&'static str] {
+        delegate_protocol!(self, cheap_fields)
+    }
+
+    #[inline]
+    fn expensive_fields(&self) -> &'static [&'static str] {
+        delegate_protocol!(self, expensive_fields)
     }
 }
 

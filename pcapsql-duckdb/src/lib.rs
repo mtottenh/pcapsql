@@ -8,29 +8,40 @@
 //! -- Load the extension
 //! LOAD 'pcapsql.duckdb_extension';
 //!
-//! -- Read TCP packets from a PCAP file
-//! SELECT * FROM read_pcap('capture.pcap', 'tcp') LIMIT 10;
+//! -- List available protocols
+//! SELECT * FROM pcap_protocols();
 //!
-//! -- Read DNS packets
-//! SELECT * FROM read_pcap('capture.pcap', 'dns');
+//! -- Show schema for a protocol
+//! SELECT * FROM pcap_schema('tcp');
+//!
+//! -- Use protocol-specific functions (recommended)
+//! SELECT * FROM read_tcp('capture.pcap') LIMIT 10;
+//! SELECT * FROM read_dns('capture.pcap');
+//!
+//! -- Or use the generic read_pcap function
+//! SELECT * FROM read_pcap('capture.pcap', 'tcp') LIMIT 10;
 //!
 //! -- Read all frames (raw packet metadata)
 //! SELECT * FROM read_pcap('capture.pcap', 'frames');
 //!
 //! -- Join protocols
 //! SELECT t.src_port, t.dst_port, d.query_name
-//! FROM read_pcap('capture.pcap', 'tcp') t
-//! JOIN read_pcap('capture.pcap', 'dns') d USING (frame_number);
+//! FROM read_tcp('capture.pcap') t
+//! JOIN read_dns('capture.pcap') d USING (frame_number);
 //! ```
 
 mod duckdb_schema;
 mod error;
+mod udf;
 mod vtab;
 
 pub use duckdb_schema::{protocol_columns, to_duckdb_column, to_duckdb_type};
 pub use error::DuckDbError;
 pub use pcapsql_core;
-pub use vtab::{register_read_pcap, ReadPcapVTab};
+pub use vtab::{
+    register_all, register_protocol_tables, register_read_pcap, register_registry,
+    PcapProtocolsVTab, PcapSchemaVTab, ReadPcapVTab,
+};
 
 // Required imports for the duckdb_entrypoint_c_api macro
 use duckdb::ffi;
@@ -55,10 +66,11 @@ pub unsafe fn pcapsql_init(con: Connection) -> duckdb::Result<(), Box<dyn std::e
         EXTENSION_VERSION
     );
 
-    // Register table functions
-    vtab::register_read_pcap(&con)?;
+    // Register all table functions
+    vtab::register_all(&con)?;
 
-    // UDFs will be registered in Task 15
+    // Register all scalar functions (UDFs)
+    udf::register_all(&con)?;
 
     Ok(())
 }

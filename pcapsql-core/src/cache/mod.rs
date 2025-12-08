@@ -29,7 +29,10 @@ pub struct OwnedParseResult {
 
 impl OwnedParseResult {
     /// Create a new owned parse result from a borrowed one.
-    pub fn from_borrowed(fields: &HashMap<&'static str, FieldValue>, error: Option<&String>) -> Self {
+    pub fn from_borrowed(
+        fields: &smallvec::SmallVec<[(&'static str, FieldValue); 16]>,
+        error: Option<&String>,
+    ) -> Self {
         Self {
             fields: fields
                 .iter()
@@ -365,10 +368,11 @@ mod tests {
     #[test]
     fn test_owned_parse_result_from_borrowed() {
         use crate::protocol::FieldValue;
+        use smallvec::SmallVec;
 
-        let mut borrowed_fields: HashMap<&'static str, FieldValue> = HashMap::new();
-        borrowed_fields.insert("src_mac", FieldValue::MacAddr([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]));
-        borrowed_fields.insert("ethertype", FieldValue::UInt16(0x0800));
+        let mut borrowed_fields: SmallVec<[(&'static str, FieldValue); 16]> = SmallVec::new();
+        borrowed_fields.push(("src_mac", FieldValue::MacAddr([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff])));
+        borrowed_fields.push(("ethertype", FieldValue::UInt16(0x0800)));
 
         let error_msg = "Some error".to_string();
         let owned = OwnedParseResult::from_borrowed(&borrowed_fields, Some(&error_msg));

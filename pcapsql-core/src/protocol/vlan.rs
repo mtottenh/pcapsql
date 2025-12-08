@@ -1,6 +1,6 @@
 //! IEEE 802.1Q VLAN tag parser.
 
-use std::collections::HashMap;
+use smallvec::SmallVec;
 
 use super::{FieldValue, ParseContext, ParseResult, Protocol};
 use crate::schema::{DataKind, FieldDescriptor};
@@ -41,31 +41,31 @@ impl Protocol for VlanProtocol {
             return ParseResult::error("VLAN tag too short".to_string(), data);
         }
 
-        let mut fields = HashMap::new();
+        let mut fields = SmallVec::new();
 
         // TCI (Tag Control Information) - 2 bytes
         let tci = u16::from_be_bytes([data[0], data[1]]);
 
         // PCP (Priority Code Point) - bits 13-15 (3 bits)
         let priority = (tci >> 13) & 0x07;
-        fields.insert("priority", FieldValue::UInt8(priority as u8));
+        fields.push(("priority", FieldValue::UInt8(priority as u8)));
 
         // DEI (Drop Eligible Indicator) - bit 12 (1 bit)
         let dei = (tci >> 12) & 0x01;
-        fields.insert("dei", FieldValue::Bool(dei != 0));
+        fields.push(("dei", FieldValue::Bool(dei != 0)));
 
         // VID (VLAN Identifier) - bits 0-11 (12 bits)
         let vlan_id = tci & 0x0FFF;
-        fields.insert("vlan_id", FieldValue::UInt16(vlan_id));
+        fields.push(("vlan_id", FieldValue::UInt16(vlan_id)));
 
         // Inner EtherType - 2 bytes
         let inner_ethertype = u16::from_be_bytes([data[2], data[3]]);
-        fields.insert("inner_ethertype", FieldValue::UInt16(inner_ethertype));
+        fields.push(("inner_ethertype", FieldValue::UInt16(inner_ethertype)));
 
         // Set up child hints for the next layer
-        let mut child_hints = HashMap::new();
-        child_hints.insert("ethertype", inner_ethertype as u64);
-        child_hints.insert("vlan_id", vlan_id as u64);
+        let mut child_hints = SmallVec::new();
+        child_hints.push(("ethertype", inner_ethertype as u64));
+        child_hints.push(("vlan_id", vlan_id as u64));
 
         // VLAN tag is 4 bytes
         ParseResult::success(fields, &data[4..], child_hints)
@@ -82,6 +82,10 @@ impl Protocol for VlanProtocol {
 
     fn child_protocols(&self) -> &[&'static str] {
         &["ipv4", "ipv6", "arp", "vlan"]
+    }
+
+    fn dependencies(&self) -> &'static [&'static str] {
+        &["ethernet", "vlan"] // Can follow Ethernet or another VLAN (QinQ)
     }
 }
 
@@ -111,7 +115,7 @@ mod tests {
 
         let parser = VlanProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("ethertype", ETHERTYPE_VLAN as u64);
+        context.insert_hint("ethertype", ETHERTYPE_VLAN as u64);
         context.parent_protocol = Some("ethernet");
 
         let result = parser.parse(&tag, &context);
@@ -130,7 +134,7 @@ mod tests {
 
         let parser = VlanProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("ethertype", ETHERTYPE_VLAN as u64);
+        context.insert_hint("ethertype", ETHERTYPE_VLAN as u64);
         context.parent_protocol = Some("ethernet");
 
         let result = parser.parse(&tag, &context);
@@ -149,7 +153,7 @@ mod tests {
 
         let parser = VlanProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("ethertype", ETHERTYPE_VLAN as u64);
+        context.insert_hint("ethertype", ETHERTYPE_VLAN as u64);
 
         let result = parser.parse(&tag, &context);
 
@@ -168,17 +172,17 @@ mod tests {
 
         // With VLAN ethertype
         let mut ctx2 = ParseContext::new(1);
-        ctx2.hints.insert("ethertype", ETHERTYPE_VLAN as u64);
+        ctx2.insert_hint("ethertype", ETHERTYPE_VLAN as u64);
         assert!(parser.can_parse(&ctx2).is_some());
 
         // With QinQ ethertype
         let mut ctx3 = ParseContext::new(1);
-        ctx3.hints.insert("ethertype", ETHERTYPE_QINQ as u64);
+        ctx3.insert_hint("ethertype", ETHERTYPE_QINQ as u64);
         assert!(parser.can_parse(&ctx3).is_some());
 
         // With different ethertype
         let mut ctx4 = ParseContext::new(1);
-        ctx4.hints.insert("ethertype", 0x0800u64); // IPv4
+        ctx4.insert_hint("ethertype", 0x0800u64); // IPv4
         assert!(parser.can_parse(&ctx4).is_none());
     }
 
@@ -188,7 +192,7 @@ mod tests {
 
         let parser = VlanProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("ethertype", ETHERTYPE_VLAN as u64);
+        context.insert_hint("ethertype", ETHERTYPE_VLAN as u64);
 
         let result = parser.parse(&short_tag, &context);
 
@@ -203,13 +207,13 @@ mod tests {
 
         let parser = VlanProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("ethertype", ETHERTYPE_VLAN as u64);
+        context.insert_hint("ethertype", ETHERTYPE_VLAN as u64);
 
         let result = parser.parse(&tag, &context);
 
         assert!(result.is_ok());
-        assert_eq!(result.child_hints.get("ethertype"), Some(&0x0800u64));
-        assert_eq!(result.child_hints.get("vlan_id"), Some(&42u64));
+        assert_eq!(result.hint("ethertype"), Some(0x0800u64));
+        assert_eq!(result.hint("vlan_id"), Some(42u64));
     }
 
     #[test]
@@ -220,7 +224,7 @@ mod tests {
 
         let parser = VlanProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("ethertype", ETHERTYPE_VLAN as u64);
+        context.insert_hint("ethertype", ETHERTYPE_VLAN as u64);
 
         let result = parser.parse(&data, &context);
 

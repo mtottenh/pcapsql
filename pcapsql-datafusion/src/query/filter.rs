@@ -373,25 +373,24 @@ mod tests {
     use super::*;
     use datafusion::logical_expr::col;
     use datafusion::prelude::lit;
+    use smallvec::SmallVec;
 
     fn create_tcp_parsed() -> Vec<(&'static str, ParseResult<'static>)> {
-        use std::collections::HashMap;
+        let mut eth_fields = SmallVec::new();
+        eth_fields.push(("src_mac", FieldValue::String("00:11:22:33:44:55".to_string())));
+        eth_fields.push(("dst_mac", FieldValue::String("ff:ff:ff:ff:ff:ff".to_string())));
+        eth_fields.push(("ethertype", FieldValue::UInt16(0x0800)));
 
-        let mut eth_fields = HashMap::new();
-        eth_fields.insert("src_mac", FieldValue::String("00:11:22:33:44:55".to_string()));
-        eth_fields.insert("dst_mac", FieldValue::String("ff:ff:ff:ff:ff:ff".to_string()));
-        eth_fields.insert("ethertype", FieldValue::UInt16(0x0800));
+        let mut ipv4_fields = SmallVec::new();
+        ipv4_fields.push(("src_ip", FieldValue::String("192.168.1.1".to_string())));
+        ipv4_fields.push(("dst_ip", FieldValue::String("192.168.1.2".to_string())));
+        ipv4_fields.push(("ttl", FieldValue::UInt8(64)));
+        ipv4_fields.push(("protocol", FieldValue::UInt8(6)));
 
-        let mut ipv4_fields = HashMap::new();
-        ipv4_fields.insert("src_ip", FieldValue::String("192.168.1.1".to_string()));
-        ipv4_fields.insert("dst_ip", FieldValue::String("192.168.1.2".to_string()));
-        ipv4_fields.insert("ttl", FieldValue::UInt8(64));
-        ipv4_fields.insert("protocol", FieldValue::UInt8(6));
-
-        let mut tcp_fields = HashMap::new();
-        tcp_fields.insert("src_port", FieldValue::UInt16(12345));
-        tcp_fields.insert("dst_port", FieldValue::UInt16(80));
-        tcp_fields.insert("flags", FieldValue::UInt16(0x02));
+        let mut tcp_fields = SmallVec::new();
+        tcp_fields.push(("src_port", FieldValue::UInt16(12345)));
+        tcp_fields.push(("dst_port", FieldValue::UInt16(80)));
+        tcp_fields.push(("flags", FieldValue::UInt16(0x02)));
 
         vec![
             (
@@ -399,7 +398,7 @@ mod tests {
                 ParseResult {
                     fields: eth_fields,
                     remaining: &[],
-                    child_hints: HashMap::new(),
+                    child_hints: SmallVec::new(),
                     error: None,
                 },
             ),
@@ -408,7 +407,7 @@ mod tests {
                 ParseResult {
                     fields: ipv4_fields,
                     remaining: &[],
-                    child_hints: HashMap::new(),
+                    child_hints: SmallVec::new(),
                     error: None,
                 },
             ),
@@ -417,7 +416,7 @@ mod tests {
                 ParseResult {
                     fields: tcp_fields,
                     remaining: &[],
-                    child_hints: HashMap::new(),
+                    child_hints: SmallVec::new(),
                     error: None,
                 },
             ),

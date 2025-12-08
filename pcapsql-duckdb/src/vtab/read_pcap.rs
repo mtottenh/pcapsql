@@ -68,8 +68,6 @@ pub struct ReadPcapInitData {
     frame_number: AtomicU64,
     /// Whether we've finished reading.
     done: AtomicBool,
-    /// Link type from PCAP header.
-    link_type: u32,
 }
 
 // Safety: InitData uses thread-safe primitives
@@ -146,8 +144,6 @@ impl VTab for ReadPcapVTab {
         let source = FilePacketSource::open(&bind_data.file_path)
             .map_err(|e| DuckDbError::Extension(format!("Failed to open PCAP file: {}", e)))?;
 
-        let link_type = source.link_type();
-
         // Create reader
         let reader = source.reader(None).map_err(|e| {
             DuckDbError::Extension(format!("Failed to create reader: {}", e))
@@ -158,7 +154,6 @@ impl VTab for ReadPcapVTab {
             registry: Arc::new(default_registry()),
             frame_number: AtomicU64::new(0),
             done: AtomicBool::new(false),
-            link_type,
         })
     }
 

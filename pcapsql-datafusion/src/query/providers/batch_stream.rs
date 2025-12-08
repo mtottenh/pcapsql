@@ -1,5 +1,6 @@
 //! Async stream that produces RecordBatches for a protocol table.
 
+use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -13,7 +14,10 @@ use futures::Stream;
 use crate::error::{Error, Result};
 use crate::query::builders::ProtocolBatchBuilder;
 use pcapsql_core::io::PacketRef;
-use pcapsql_core::{parse_packet, CachedParse, PacketReader, ParseCache, ProtocolRegistry};
+use pcapsql_core::{
+    parse_packet, parse_packet_projected, parse_packet_pruned, parse_packet_pruned_projected,
+    CachedParse, PacketReader, ParseCache, ProtocolRegistry,
+};
 
 /// Async stream that produces RecordBatches for a protocol table.
 ///
@@ -37,6 +41,11 @@ use pcapsql_core::{parse_packet, CachedParse, PacketReader, ParseCache, Protocol
 /// When a cache is provided, parsed results are stored and shared between
 /// multiple readers. This significantly reduces CPU usage when multiple
 /// protocol tables read the same PCAP file (e.g., during JOINs).
+///
+/// # Limit Pushdown
+///
+/// When a limit is provided, the stream stops reading packets once the
+/// limit is satisfied, avoiding unnecessary parsing work.
 pub struct ProtocolBatchStream<R: PacketReader> {
     table_name: String,
     schema: SchemaRef,
@@ -50,6 +59,17 @@ pub struct ProtocolBatchStream<R: PacketReader> {
     cache: Option<Arc<dyn ParseCache>>,
     /// Reader ID for cache eviction tracking
     cache_reader_id: Option<usize>,
+    /// Optional row limit for limit pushdown optimization
+    limit: Option<usize>,
+    /// Number of rows already emitted (for limit tracking)
+    rows_emitted: usize,
+    /// Optional set of required protocols for pruning optimization.
+    /// When set, uses parse_packet_pruned instead of parse_packet.
+    required_protocols: Option<Arc<HashSet<String>>>,
+    /// Optional per-protocol field projections for field extraction optimization.
+    /// Key is protocol name, value is set of field names to extract.
+    /// When set, only requested fields are extracted during parsing.
+    field_projections: Option<Arc<HashMap<String, HashSet<String>>>>,
 }
 
 impl<R: PacketReader> ProtocolBatchStream<R> {
@@ -62,6 +82,46 @@ impl<R: PacketReader> ProtocolBatchStream<R> {
         batch_size: usize,
         projection: Option<Vec<usize>>,
         cache: Option<Arc<dyn ParseCache>>,
+        limit: Option<usize>,
+        required_protocols: Option<Arc<HashSet<String>>>,
+    ) -> Result<Self> {
+        Self::new_with_field_projections(
+            table_name,
+            schema,
+            reader,
+            registry,
+            link_type,
+            batch_size,
+            projection,
+            cache,
+            limit,
+            required_protocols,
+            None, // No field projections
+        )
+    }
+
+    /// Create a new stream with field projection support.
+    ///
+    /// Field projections specify which fields to extract for each protocol.
+    /// This can significantly reduce CPU usage when queries only need a
+    /// subset of fields.
+    ///
+    /// # Arguments
+    ///
+    /// * `field_projections` - Per-protocol field sets. Key is protocol name,
+    ///   value is set of field names to extract.
+    pub fn new_with_field_projections(
+        table_name: String,
+        schema: SchemaRef,
+        reader: R,
+        registry: Arc<ProtocolRegistry>,
+        link_type: u32,
+        batch_size: usize,
+        projection: Option<Vec<usize>>,
+        cache: Option<Arc<dyn ParseCache>>,
+        limit: Option<usize>,
+        required_protocols: Option<Arc<HashSet<String>>>,
+        field_projections: Option<Arc<HashMap<String, HashSet<String>>>>,
     ) -> Result<Self> {
         // Register with cache if provided
         let cache_reader_id = cache.as_ref().map(|c| c.register_reader());
@@ -77,6 +137,10 @@ impl<R: PacketReader> ProtocolBatchStream<R> {
             finished: false,
             cache,
             cache_reader_id,
+            limit,
+            rows_emitted: 0,
+            required_protocols,
+            field_projections,
         })
     }
 
@@ -85,9 +149,23 @@ impl<R: PacketReader> ProtocolBatchStream<R> {
     /// Uses the zero-copy `process_packets()` API to avoid copying packet data.
     /// The callback receives borrowed packet data that is parsed and added to
     /// Arrow builders before the borrow ends.
+    ///
+    /// # Limit Pushdown
+    ///
+    /// When a limit is set, this method tracks rows emitted and stops reading
+    /// once the limit is satisfied. The final batch may be sliced to not exceed
+    /// the limit.
     fn read_next_batch(&mut self) -> Result<Option<RecordBatch>> {
         if self.finished {
             return Ok(None);
+        }
+
+        // Check if we've already satisfied the limit
+        if let Some(limit) = self.limit {
+            if self.rows_emitted >= limit {
+                self.finished = true;
+                return Ok(None);
+            }
         }
 
         let mut builder = match ProtocolBatchBuilder::new(&self.table_name, self.batch_size) {
@@ -107,6 +185,8 @@ impl<R: PacketReader> ProtocolBatchStream<R> {
         let cache = &self.cache;
         let registry = &self.registry;
         let link_type = self.link_type;
+        let required_protocols = &self.required_protocols;
+        let field_projections = &self.field_projections;
 
         // Process packets using zero-copy callback API
         let packets_processed = self.reader.process_packets(self.batch_size, |packet: PacketRef<'_>| {
@@ -139,11 +219,45 @@ impl<R: PacketReader> ProtocolBatchStream<R> {
             }
 
             // Cache miss (or no cache) - parse using borrowed data
-            let parsed = parse_packet(
-                registry,
-                link_type as u16,
-                packet.data,  // Borrowed slice - no copy needed for parsing
-            );
+            // Select appropriate parse function based on optimizations enabled
+            let parsed = match (required_protocols, field_projections) {
+                // Both pruning and projection
+                (Some(ref required), Some(ref projections)) => {
+                    parse_packet_pruned_projected(
+                        registry,
+                        link_type as u16,
+                        packet.data,
+                        required,
+                        projections,
+                    )
+                }
+                // Only pruning
+                (Some(ref required), None) => {
+                    parse_packet_pruned(
+                        registry,
+                        link_type as u16,
+                        packet.data,
+                        required,
+                    )
+                }
+                // Only projection
+                (None, Some(ref projections)) => {
+                    parse_packet_projected(
+                        registry,
+                        link_type as u16,
+                        packet.data,
+                        projections,
+                    )
+                }
+                // Neither - full parsing
+                (None, None) => {
+                    parse_packet(
+                        registry,
+                        link_type as u16,
+                        packet.data,
+                    )
+                }
+            };
 
             // Store owned result in cache if available
             if let Some(ref cache) = cache {
@@ -188,13 +302,39 @@ impl<R: PacketReader> ProtocolBatchStream<R> {
         });
 
         // Apply projection if specified
-        if let Some(ref indices) = self.projection {
-            Ok(Some(batch.project(indices).map_err(|e| {
+        let batch = if let Some(ref indices) = self.projection {
+            batch.project(indices).map_err(|e| {
                 Error::Query(crate::error::QueryError::Arrow(e.to_string()))
-            })?))
+            })?
         } else {
-            Ok(Some(batch))
+            batch
+        };
+
+        // Apply limit: slice batch if it would exceed the remaining limit
+        let batch = if let Some(limit) = self.limit {
+            let remaining = limit.saturating_sub(self.rows_emitted);
+            if batch.num_rows() > remaining {
+                // Slice to only return remaining rows
+                self.finished = true;
+                batch.slice(0, remaining)
+            } else {
+                batch
+            }
+        } else {
+            batch
+        };
+
+        // Track rows emitted for limit pushdown
+        self.rows_emitted += batch.num_rows();
+
+        // Mark finished if we've now hit the limit
+        if let Some(limit) = self.limit {
+            if self.rows_emitted >= limit {
+                self.finished = true;
+            }
         }
+
+        Ok(Some(batch))
     }
 
     /// Get the output schema (after projection)

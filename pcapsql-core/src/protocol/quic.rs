@@ -4,7 +4,7 @@
 //! so this parser focuses on what's visible in cleartext: connection IDs,
 //! version, and packet type information.
 
-use std::collections::HashMap;
+use smallvec::SmallVec;
 
 use super::{FieldValue, ParseContext, ParseResult, Protocol};
 use crate::schema::{DataKind, FieldDescriptor};
@@ -59,7 +59,7 @@ impl Protocol for QuicProtocol {
     }
 
     fn parse<'a>(&self, data: &'a [u8], _context: &ParseContext) -> ParseResult<'a> {
-        let mut fields = HashMap::new();
+        let mut fields = SmallVec::new();
 
         if data.is_empty() {
             return ParseResult::error("QUIC packet empty".to_string(), data);
@@ -71,10 +71,10 @@ impl Protocol for QuicProtocol {
         let is_long_header = (first_byte & 0x80) != 0;
 
         if is_long_header {
-            fields.insert("header_form", FieldValue::String("long".to_string()));
+            fields.push(("header_form", FieldValue::String("long".to_string())));
             parse_long_header(data, &mut fields)
         } else {
-            fields.insert("header_form", FieldValue::String("short".to_string()));
+            fields.push(("header_form", FieldValue::String("short".to_string())));
             parse_short_header(data, &mut fields)
         }
     }
@@ -100,12 +100,16 @@ impl Protocol for QuicProtocol {
     fn child_protocols(&self) -> &[&'static str] {
         &[]
     }
+
+    fn dependencies(&self) -> &'static [&'static str] {
+        &["udp"]
+    }
 }
 
 /// Parse QUIC long header.
 fn parse_long_header<'a>(
     data: &'a [u8],
-    fields: &mut HashMap<&'static str, FieldValue>,
+    fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
 ) -> ParseResult<'a> {
     // Long Header format:
     // 0                   1                   2                   3
@@ -141,22 +145,22 @@ fn parse_long_header<'a>(
         long_packet_type::RETRY => "Retry",
         _ => "Unknown",
     };
-    fields.insert(
+    fields.push((
         "long_packet_type",
         FieldValue::String(packet_type_name.to_string()),
-    );
+    ));
 
     // Version (4 bytes)
     let quic_version = u32::from_be_bytes([data[1], data[2], data[3], data[4]]);
-    fields.insert("version", FieldValue::UInt32(quic_version));
-    fields.insert(
+    fields.push(("version", FieldValue::UInt32(quic_version)));
+    fields.push((
         "version_name",
         FieldValue::String(format_version(quic_version)),
-    );
+    ));
 
     // DCID Length
     let dcid_len = data[5] as usize;
-    fields.insert("dcid_length", FieldValue::UInt8(dcid_len as u8));
+    fields.push(("dcid_length", FieldValue::UInt8(dcid_len as u8)));
 
     let mut offset = 6;
 
@@ -170,7 +174,7 @@ fn parse_long_header<'a>(
     }
     if dcid_len > 0 {
         let dcid = &data[offset..offset + dcid_len];
-        fields.insert("dcid", FieldValue::String(hex_encode(dcid)));
+        fields.push(("dcid", FieldValue::String(hex_encode(dcid))));
     }
     offset += dcid_len;
 
@@ -183,7 +187,7 @@ fn parse_long_header<'a>(
         );
     }
     let scid_len = data[offset] as usize;
-    fields.insert("scid_length", FieldValue::UInt8(scid_len as u8));
+    fields.push(("scid_length", FieldValue::UInt8(scid_len as u8)));
     offset += 1;
 
     // Source Connection ID
@@ -196,7 +200,7 @@ fn parse_long_header<'a>(
     }
     if scid_len > 0 {
         let scid = &data[offset..offset + scid_len];
-        fields.insert("scid", FieldValue::String(hex_encode(scid)));
+        fields.push(("scid", FieldValue::String(hex_encode(scid))));
     }
     offset += scid_len;
 
@@ -205,13 +209,13 @@ fn parse_long_header<'a>(
         parse_initial_packet(&data[offset..], fields);
     }
 
-    ParseResult::success(fields.clone(), &[], HashMap::new())
+    ParseResult::success(fields.clone(), &[], SmallVec::new())
 }
 
 /// Parse QUIC short header.
 fn parse_short_header<'a>(
     data: &'a [u8],
-    fields: &mut HashMap<&'static str, FieldValue>,
+    fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
 ) -> ParseResult<'a> {
     // Short Header format:
     // 0                   1                   2                   3
@@ -236,20 +240,20 @@ fn parse_short_header<'a>(
 
     // Spin bit (bit 5)
     let spin_bit = (first_byte & 0x20) != 0;
-    fields.insert("spin_bit", FieldValue::Bool(spin_bit));
+    fields.push(("spin_bit", FieldValue::Bool(spin_bit)));
 
     // Key phase (bit 2)
     let key_phase = (first_byte & 0x04) != 0;
-    fields.insert("key_phase", FieldValue::Bool(key_phase));
+    fields.push(("key_phase", FieldValue::Bool(key_phase)));
 
     // Note: DCID length is not in the short header - it must be known from context
     // For now, we can only note that this is a short header packet
 
-    ParseResult::success(fields.clone(), &[], HashMap::new())
+    ParseResult::success(fields.clone(), &[], SmallVec::new())
 }
 
 /// Parse Initial packet payload to extract token and potentially SNI.
-fn parse_initial_packet(data: &[u8], fields: &mut HashMap<&'static str, FieldValue>) {
+fn parse_initial_packet(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) {
     // Initial packet has:
     // - Token Length (variable-length integer)
     // - Token
@@ -267,7 +271,7 @@ fn parse_initial_packet(data: &[u8], fields: &mut HashMap<&'static str, FieldVal
         None => return,
     };
 
-    fields.insert("token_length", FieldValue::UInt32(token_len as u32));
+    fields.push(("token_length", FieldValue::UInt32(token_len as u32)));
 
     let mut offset = consumed;
 
@@ -286,7 +290,7 @@ fn parse_initial_packet(data: &[u8], fields: &mut HashMap<&'static str, FieldVal
         None => return,
     };
 
-    fields.insert("packet_length", FieldValue::UInt32(packet_len as u32));
+    fields.push(("packet_length", FieldValue::UInt32(packet_len as u32)));
     offset += consumed;
 
     // The rest is encrypted - we'd need to derive keys to parse further
@@ -302,7 +306,7 @@ fn parse_initial_packet(data: &[u8], fields: &mut HashMap<&'static str, FieldVal
 
 /// Try to extract SNI from potentially unencrypted Initial packet payload.
 /// This is a heuristic that looks for patterns typical of TLS ClientHello.
-fn try_extract_sni(data: &[u8], fields: &mut HashMap<&'static str, FieldValue>) {
+fn try_extract_sni(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) {
     // Look for SNI extension pattern in the data
     // SNI extension has type 0x0000, followed by length, then name type, name length, and name
 
@@ -350,7 +354,7 @@ fn try_extract_sni(data: &[u8], fields: &mut HashMap<&'static str, FieldValue>) 
                     .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
                     && hostname.contains('.')
                 {
-                    fields.insert("sni", FieldValue::String(hostname.to_string()));
+                    fields.push(("sni", FieldValue::String(hostname.to_string())));
                     return;
                 }
             }
@@ -529,13 +533,13 @@ mod tests {
         // UDP but wrong port
         let mut ctx2 = ParseContext::new(1);
         ctx2.parent_protocol = Some("udp");
-        ctx2.hints.insert("dst_port", 80);
+        ctx2.insert_hint("dst_port", 80);
         assert!(parser.can_parse(&ctx2).is_none());
 
         // UDP on port 443
         let mut ctx3 = ParseContext::new(1);
         ctx3.parent_protocol = Some("udp");
-        ctx3.hints.insert("dst_port", 443);
+        ctx3.insert_hint("dst_port", 443);
         assert!(parser.can_parse(&ctx3).is_some());
     }
 
@@ -548,7 +552,7 @@ mod tests {
         let parser = QuicProtocol;
         let mut context = ParseContext::new(1);
         context.parent_protocol = Some("udp");
-        context.hints.insert("dst_port", 443);
+        context.insert_hint("dst_port", 443);
 
         let result = parser.parse(&packet, &context);
 
@@ -567,7 +571,7 @@ mod tests {
         let parser = QuicProtocol;
         let mut context = ParseContext::new(1);
         context.parent_protocol = Some("udp");
-        context.hints.insert("dst_port", 443);
+        context.insert_hint("dst_port", 443);
 
         let result = parser.parse(&packet, &context);
 

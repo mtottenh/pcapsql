@@ -99,8 +99,11 @@ pub use io::{FilePacketReader, FilePacketSource, PacketReader, PacketSource, Raw
 pub use io::{MmapPacketReader, MmapPacketSource};
 pub use pcap::PcapReader;
 pub use protocol::{
-    default_registry, parse_packet, BuiltinProtocol, FieldValue, ParseContext, ParseResult,
-    PayloadMode, Protocol, ProtocolRegistry,
+    chain_fields_for_protocol, compute_required_protocols, default_registry,
+    merge_with_chain_fields, parse_packet, parse_packet_projected, parse_packet_pruned,
+    parse_packet_pruned_projected, should_continue_parsing, should_run_parser, BuiltinProtocol,
+    FieldValue, ParseContext, ParseResult, PayloadMode, ProjectionConfig, Protocol,
+    ProtocolRegistry,
 };
 pub use schema::{DataKind, FieldDescriptor, ProtocolSchema};
 pub use stream::{

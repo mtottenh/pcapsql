@@ -1,8 +1,7 @@
 //! IPv6 protocol parser with extension header support.
 
-use std::collections::HashMap;
-
 use etherparse::Ipv6HeaderSlice;
+use smallvec::SmallVec;
 
 use super::ethernet::ethertype;
 use super::{FieldValue, ParseContext, ParseResult, Protocol};
@@ -59,16 +58,16 @@ impl Protocol for Ipv6Protocol {
     fn parse<'a>(&self, data: &'a [u8], _context: &ParseContext) -> ParseResult<'a> {
         match Ipv6HeaderSlice::from_slice(data) {
             Ok(ipv6) => {
-                let mut fields = HashMap::new();
+                let mut fields = SmallVec::new();
 
-                fields.insert("version", FieldValue::UInt8(6));
-                fields.insert("traffic_class", FieldValue::UInt8(ipv6.traffic_class()));
-                fields.insert("flow_label", FieldValue::UInt32(ipv6.flow_label().value()));
-                fields.insert("payload_length", FieldValue::UInt16(ipv6.payload_length()));
-                fields.insert("next_header", FieldValue::UInt8(ipv6.next_header().0));
-                fields.insert("hop_limit", FieldValue::UInt8(ipv6.hop_limit()));
-                fields.insert("src_ip", FieldValue::ipv6(&ipv6.source()));
-                fields.insert("dst_ip", FieldValue::ipv6(&ipv6.destination()));
+                fields.push(("version", FieldValue::UInt8(6)));
+                fields.push(("traffic_class", FieldValue::UInt8(ipv6.traffic_class())));
+                fields.push(("flow_label", FieldValue::UInt32(ipv6.flow_label().value())));
+                fields.push(("payload_length", FieldValue::UInt16(ipv6.payload_length())));
+                fields.push(("next_header", FieldValue::UInt8(ipv6.next_header().0)));
+                fields.push(("hop_limit", FieldValue::UInt8(ipv6.hop_limit())));
+                fields.push(("src_ip", FieldValue::ipv6(&ipv6.source())));
+                fields.push(("dst_ip", FieldValue::ipv6(&ipv6.destination())));
 
                 let base_header_len = ipv6.slice().len();
                 let payload = &data[base_header_len..];
@@ -80,12 +79,12 @@ impl Protocol for Ipv6Protocol {
 
                 // Merge extension header fields
                 for (k, v) in ext_fields {
-                    fields.insert(k, v);
+                    fields.push((k, v));
                 }
 
-                let mut child_hints = HashMap::new();
-                child_hints.insert("ip_protocol", final_next_header as u64);
-                child_hints.insert("ip_version", 6);
+                let mut child_hints = SmallVec::new();
+                child_hints.push(("ip_protocol", final_next_header as u64));
+                child_hints.push(("ip_version", 6));
 
                 let total_consumed = base_header_len + ext_consumed;
                 ParseResult::success(fields, &data[total_consumed..], child_hints)
@@ -123,14 +122,18 @@ impl Protocol for Ipv6Protocol {
     fn child_protocols(&self) -> &[&'static str] {
         &["tcp", "udp", "icmpv6"]
     }
+
+    fn dependencies(&self) -> &'static [&'static str] {
+        &["ethernet", "vlan", "mpls", "gre", "vxlan", "gtp"]
+    }
 }
 
 /// Parse IPv6 extension headers and return (final_next_header, bytes_consumed, fields).
 fn parse_extension_headers(
     first_nh: u8,
     data: &[u8],
-) -> (u8, usize, HashMap<&'static str, FieldValue>) {
-    let mut fields = HashMap::new();
+) -> (u8, usize, SmallVec<[(&'static str, FieldValue); 16]>) {
+    let mut fields = SmallVec::new();
     let mut offset = 0;
     let mut current_nh = first_nh;
 
@@ -157,7 +160,7 @@ fn parse_extension_headers(
                     parse_routing_header(&data[offset..])
                 {
                     for (k, v) in routing_fields {
-                        fields.insert(k, v);
+                        fields.push((k, v));
                     }
                     current_nh = next_nh;
                     offset += consumed;
@@ -171,7 +174,7 @@ fn parse_extension_headers(
                     parse_fragment_header(&data[offset..])
                 {
                     for (k, v) in frag_fields {
-                        fields.insert(k, v);
+                        fields.push((k, v));
                     }
                     current_nh = next_nh;
                     offset += consumed;
@@ -210,10 +213,10 @@ fn parse_extension_headers(
     }
 
     // Add extension header presence flags
-    fields.insert("ext_hop_by_hop", FieldValue::Bool(has_hop_by_hop));
-    fields.insert("ext_routing", FieldValue::Bool(has_routing));
-    fields.insert("ext_fragment", FieldValue::Bool(has_fragment));
-    fields.insert("ext_destination", FieldValue::Bool(has_destination));
+    fields.push(("ext_hop_by_hop", FieldValue::Bool(has_hop_by_hop)));
+    fields.push(("ext_routing", FieldValue::Bool(has_routing)));
+    fields.push(("ext_fragment", FieldValue::Bool(has_fragment)));
+    fields.push(("ext_destination", FieldValue::Bool(has_destination)));
 
     (current_nh, offset, fields)
 }
@@ -239,13 +242,13 @@ fn parse_generic_ext_header(data: &[u8]) -> Option<(u8, usize)> {
 
 /// Parse Fragment Header.
 /// Returns (next_header, bytes_consumed, fields) or None if parsing fails.
-fn parse_fragment_header(data: &[u8]) -> Option<(u8, usize, HashMap<&'static str, FieldValue>)> {
+fn parse_fragment_header(data: &[u8]) -> Option<(u8, usize, SmallVec<[(&'static str, FieldValue); 16]>)> {
     // Fragment header is exactly 8 bytes
     if data.len() < 8 {
         return None;
     }
 
-    let mut fields = HashMap::new();
+    let mut fields = SmallVec::new();
 
     let next_header = data[0];
     // data[1] is reserved
@@ -254,21 +257,21 @@ fn parse_fragment_header(data: &[u8]) -> Option<(u8, usize, HashMap<&'static str
     let more_fragments = (frag_offset_and_flags & 0x0001) != 0; // Lowest bit is M flag
     let identification = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
 
-    fields.insert("frag_offset", FieldValue::UInt16(frag_offset));
-    fields.insert("frag_more", FieldValue::Bool(more_fragments));
-    fields.insert("frag_id", FieldValue::UInt32(identification));
+    fields.push(("frag_offset", FieldValue::UInt16(frag_offset)));
+    fields.push(("frag_more", FieldValue::Bool(more_fragments)));
+    fields.push(("frag_id", FieldValue::UInt32(identification)));
 
     Some((next_header, 8, fields))
 }
 
 /// Parse Routing Header.
 /// Returns (next_header, bytes_consumed, fields) or None if parsing fails.
-fn parse_routing_header(data: &[u8]) -> Option<(u8, usize, HashMap<&'static str, FieldValue>)> {
+fn parse_routing_header(data: &[u8]) -> Option<(u8, usize, SmallVec<[(&'static str, FieldValue); 16]>)> {
     if data.len() < 4 {
         return None;
     }
 
-    let mut fields = HashMap::new();
+    let mut fields = SmallVec::new();
 
     let next_header = data[0];
     let hdr_ext_len = data[1] as usize;
@@ -282,8 +285,8 @@ fn parse_routing_header(data: &[u8]) -> Option<(u8, usize, HashMap<&'static str,
         return None;
     }
 
-    fields.insert("routing_type", FieldValue::UInt8(routing_type));
-    fields.insert("segments_left", FieldValue::UInt8(segments_left));
+    fields.push(("routing_type", FieldValue::UInt8(routing_type)));
+    fields.push(("segments_left", FieldValue::UInt8(segments_left)));
 
     Some((next_header, total_len, fields))
 }
@@ -313,7 +316,7 @@ mod tests {
 
     fn create_ipv6_context() -> ParseContext {
         let mut context = ParseContext::new(1);
-        context.hints.insert("ethertype", 0x86DD);
+        context.insert_hint("ethertype", 0x86DD);
         context
     }
 
@@ -341,25 +344,27 @@ mod tests {
         assert_eq!(result.get("version"), Some(&FieldValue::UInt8(6)));
         assert_eq!(result.get("hop_limit"), Some(&FieldValue::UInt8(64)));
         assert_eq!(result.get("next_header"), Some(&FieldValue::UInt8(6)));
-        assert_eq!(result.child_hints.get("ip_protocol"), Some(&6u64));
-        assert_eq!(result.child_hints.get("ip_version"), Some(&6u64));
+        assert_eq!(result.hint("ip_protocol"), Some(6u64));
+        assert_eq!(result.hint("ip_version"), Some(6u64));
     }
 
     #[test]
     fn test_can_parse_with_ipv6_ethertype() {
         let parser = Ipv6Protocol;
-        let mut context = ParseContext::new(1);
 
         // Without ethertype hint
-        assert!(parser.can_parse(&context).is_none());
+        let context1 = ParseContext::new(1);
+        assert!(parser.can_parse(&context1).is_none());
 
         // With IPv4 ethertype
-        context.hints.insert("ethertype", 0x0800);
-        assert!(parser.can_parse(&context).is_none());
+        let mut context2 = ParseContext::new(1);
+        context2.insert_hint("ethertype", 0x0800);
+        assert!(parser.can_parse(&context2).is_none());
 
         // With IPv6 ethertype
-        context.hints.insert("ethertype", 0x86DD);
-        assert!(parser.can_parse(&context).is_some());
+        let mut context3 = ParseContext::new(1);
+        context3.insert_hint("ethertype", 0x86DD);
+        assert!(parser.can_parse(&context3).is_some());
     }
 
     #[test]
@@ -385,7 +390,7 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.get("next_header"), Some(&FieldValue::UInt8(17)));
         assert_eq!(result.get("hop_limit"), Some(&FieldValue::UInt8(128)));
-        assert_eq!(result.child_hints.get("ip_protocol"), Some(&17u64));
+        assert_eq!(result.hint("ip_protocol"), Some(17u64));
     }
 
     #[test]
@@ -431,7 +436,7 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.get("ext_hop_by_hop"), Some(&FieldValue::Bool(true)));
         assert_eq!(result.get("ext_routing"), Some(&FieldValue::Bool(false)));
-        assert_eq!(result.child_hints.get("ip_protocol"), Some(&6u64)); // TCP
+        assert_eq!(result.hint("ip_protocol"), Some(6u64)); // TCP
     }
 
     #[test]
@@ -465,7 +470,7 @@ mod tests {
         assert_eq!(result.get("ext_routing"), Some(&FieldValue::Bool(true)));
         assert_eq!(result.get("routing_type"), Some(&FieldValue::UInt8(2)));
         assert_eq!(result.get("segments_left"), Some(&FieldValue::UInt8(1)));
-        assert_eq!(result.child_hints.get("ip_protocol"), Some(&6u64));
+        assert_eq!(result.hint("ip_protocol"), Some(6u64));
     }
 
     #[test]
@@ -524,7 +529,7 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(result.get("ext_destination"), Some(&FieldValue::Bool(true)));
-        assert_eq!(result.child_hints.get("ip_protocol"), Some(&6u64));
+        assert_eq!(result.hint("ip_protocol"), Some(6u64));
     }
 
     #[test]
@@ -554,7 +559,7 @@ mod tests {
         assert_eq!(result.get("ext_hop_by_hop"), Some(&FieldValue::Bool(true)));
         assert_eq!(result.get("ext_routing"), Some(&FieldValue::Bool(true)));
         assert_eq!(result.get("ext_fragment"), Some(&FieldValue::Bool(true)));
-        assert_eq!(result.child_hints.get("ip_protocol"), Some(&6u64));
+        assert_eq!(result.hint("ip_protocol"), Some(6u64));
     }
 
     #[test]
@@ -610,6 +615,6 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.get("ext_hop_by_hop"), Some(&FieldValue::Bool(true)));
         // Final protocol should be 250 (unknown)
-        assert_eq!(result.child_hints.get("ip_protocol"), Some(&250u64));
+        assert_eq!(result.hint("ip_protocol"), Some(250u64));
     }
 }

@@ -60,6 +60,9 @@ criterion = { version = "0.5", features = ["html_reports"] }
 tempfile = "3"
 hex = "0.4"
 
+# Small collections
+smallvec = "1.13"
+
 [profile.release]
 lto = true
 codegen-units = 1

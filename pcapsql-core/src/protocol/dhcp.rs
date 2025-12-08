@@ -3,7 +3,7 @@
 //! Parses DHCP (Dynamic Host Configuration Protocol) messages used for
 //! network configuration. Matches on UDP ports 67/68 and the DHCP magic cookie.
 
-use std::collections::HashMap;
+use smallvec::SmallVec;
 
 use super::{FieldValue, ParseContext, ParseResult, Protocol};
 use crate::schema::{DataKind, FieldDescriptor};
@@ -58,57 +58,57 @@ impl Protocol for DhcpProtocol {
             );
         }
 
-        let mut fields = HashMap::new();
+        let mut fields = SmallVec::new();
 
         // Parse fixed header fields
         // Op (1 byte): 1 = BOOTREQUEST, 2 = BOOTREPLY
         let op = data[0];
-        fields.insert("op", FieldValue::UInt8(op));
+        fields.push(("op", FieldValue::UInt8(op)));
 
         // Hardware type (1 byte): 1 = Ethernet
         let htype = data[1];
-        fields.insert("htype", FieldValue::UInt8(htype));
+        fields.push(("htype", FieldValue::UInt8(htype)));
 
         // Hardware address length (1 byte)
         let hlen = data[2];
-        fields.insert("hlen", FieldValue::UInt8(hlen));
+        fields.push(("hlen", FieldValue::UInt8(hlen)));
 
         // Hops (1 byte)
         let hops = data[3];
-        fields.insert("hops", FieldValue::UInt8(hops));
+        fields.push(("hops", FieldValue::UInt8(hops)));
 
         // Transaction ID (4 bytes)
         let xid = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
-        fields.insert("xid", FieldValue::UInt32(xid));
+        fields.push(("xid", FieldValue::UInt32(xid)));
 
         // Seconds elapsed (2 bytes)
         let secs = u16::from_be_bytes([data[8], data[9]]);
-        fields.insert("secs", FieldValue::UInt16(secs));
+        fields.push(("secs", FieldValue::UInt16(secs)));
 
         // Flags (2 bytes)
         let flags = u16::from_be_bytes([data[10], data[11]]);
-        fields.insert("flags", FieldValue::UInt16(flags));
+        fields.push(("flags", FieldValue::UInt16(flags)));
 
         // Client IP address (4 bytes)
         let ciaddr = format_ip(&data[12..16]);
-        fields.insert("ciaddr", FieldValue::String(ciaddr));
+        fields.push(("ciaddr", FieldValue::String(ciaddr)));
 
         // Your (client) IP address (4 bytes)
         let yiaddr = format_ip(&data[16..20]);
-        fields.insert("yiaddr", FieldValue::String(yiaddr));
+        fields.push(("yiaddr", FieldValue::String(yiaddr)));
 
         // Server IP address (4 bytes)
         let siaddr = format_ip(&data[20..24]);
-        fields.insert("siaddr", FieldValue::String(siaddr));
+        fields.push(("siaddr", FieldValue::String(siaddr)));
 
         // Gateway/relay IP address (4 bytes)
         let giaddr = format_ip(&data[24..28]);
-        fields.insert("giaddr", FieldValue::String(giaddr));
+        fields.push(("giaddr", FieldValue::String(giaddr)));
 
         // Client hardware address (16 bytes, but only first hlen are valid)
         let chaddr_len = (hlen as usize).min(16);
         let chaddr = format_mac(&data[28..28 + chaddr_len]);
-        fields.insert("chaddr", FieldValue::String(chaddr));
+        fields.push(("chaddr", FieldValue::String(chaddr)));
 
         // Skip server host name (64 bytes) and boot file name (128 bytes)
         // These are at offsets 44 and 108 respectively
@@ -119,7 +119,7 @@ impl Protocol for DhcpProtocol {
         }
 
         // No child protocols after DHCP
-        ParseResult::success(fields, &[], HashMap::new())
+        ParseResult::success(fields, &[], SmallVec::new())
     }
 
     fn schema_fields(&self) -> Vec<FieldDescriptor> {
@@ -148,6 +148,10 @@ impl Protocol for DhcpProtocol {
     fn child_protocols(&self) -> &[&'static str] {
         &[]
     }
+
+    fn dependencies(&self) -> &'static [&'static str] {
+        &["udp"]
+    }
 }
 
 /// Format an IP address from 4 bytes.
@@ -169,7 +173,7 @@ fn format_mac(bytes: &[u8]) -> String {
 }
 
 /// Parse DHCP options and add relevant fields.
-fn parse_dhcp_options(data: &[u8], fields: &mut HashMap<&'static str, FieldValue>) {
+fn parse_dhcp_options(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) {
     let mut offset = 0;
 
     while offset < data.len() {
@@ -201,12 +205,12 @@ fn parse_dhcp_options(data: &[u8], fields: &mut HashMap<&'static str, FieldValue
         match option_code {
             // Option 1: Subnet Mask
             1 if option_len == 4 => {
-                fields.insert("subnet_mask", FieldValue::String(format_ip(option_data)));
+                fields.push(("subnet_mask", FieldValue::String(format_ip(option_data))));
             }
             // Option 3: Router
             3 if option_len >= 4 => {
                 // Can have multiple routers, just use first one
-                fields.insert("router", FieldValue::String(format_ip(&option_data[..4])));
+                fields.push(("router", FieldValue::String(format_ip(&option_data[..4]))));
             }
             // Option 6: DNS Servers
             6 if option_len >= 4 => {
@@ -215,7 +219,7 @@ fn parse_dhcp_options(data: &[u8], fields: &mut HashMap<&'static str, FieldValue
                     .filter(|chunk| chunk.len() == 4)
                     .map(format_ip)
                     .collect();
-                fields.insert("dns_servers", FieldValue::String(dns_servers.join(",")));
+                fields.push(("dns_servers", FieldValue::String(dns_servers.join(","))));
             }
             // Option 51: IP Address Lease Time
             51 if option_len == 4 => {
@@ -225,15 +229,15 @@ fn parse_dhcp_options(data: &[u8], fields: &mut HashMap<&'static str, FieldValue
                     option_data[2],
                     option_data[3],
                 ]);
-                fields.insert("lease_time", FieldValue::UInt32(lease_time));
+                fields.push(("lease_time", FieldValue::UInt32(lease_time)));
             }
             // Option 53: DHCP Message Type
             53 if option_len == 1 => {
-                fields.insert("message_type", FieldValue::UInt8(option_data[0]));
+                fields.push(("message_type", FieldValue::UInt8(option_data[0])));
             }
             // Option 54: Server Identifier
             54 if option_len == 4 => {
-                fields.insert("server_id", FieldValue::String(format_ip(option_data)));
+                fields.push(("server_id", FieldValue::String(format_ip(option_data))));
             }
             _ => {}
         }
@@ -392,17 +396,17 @@ mod tests {
 
         // With dst_port 67 (server)
         let mut ctx2 = ParseContext::new(1);
-        ctx2.hints.insert("dst_port", 67);
+        ctx2.insert_hint("dst_port", 67);
         assert!(parser.can_parse(&ctx2).is_some());
 
         // With src_port 68 (client)
         let mut ctx3 = ParseContext::new(1);
-        ctx3.hints.insert("src_port", 68);
+        ctx3.insert_hint("src_port", 68);
         assert!(parser.can_parse(&ctx3).is_some());
 
         // With different port
         let mut ctx4 = ParseContext::new(1);
-        ctx4.hints.insert("dst_port", 80);
+        ctx4.insert_hint("dst_port", 80);
         assert!(parser.can_parse(&ctx4).is_none());
     }
 
@@ -412,7 +416,7 @@ mod tests {
 
         let parser = DhcpProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("dst_port", 67);
+        context.insert_hint("dst_port", 67);
 
         let result = parser.parse(&packet, &context);
 
@@ -435,7 +439,7 @@ mod tests {
 
         let parser = DhcpProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("src_port", 67);
+        context.insert_hint("src_port", 67);
 
         let result = parser.parse(&packet, &context);
 
@@ -463,7 +467,7 @@ mod tests {
 
         let parser = DhcpProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("src_port", 67);
+        context.insert_hint("src_port", 67);
 
         let result = parser.parse(&packet, &context);
 
@@ -477,7 +481,7 @@ mod tests {
 
         let parser = DhcpProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("src_port", 67);
+        context.insert_hint("src_port", 67);
 
         let result = parser.parse(&packet, &context);
 
@@ -517,7 +521,7 @@ mod tests {
 
         let parser = DhcpProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("dst_port", 67);
+        context.insert_hint("dst_port", 67);
 
         let result = parser.parse(&short_packet, &context);
 

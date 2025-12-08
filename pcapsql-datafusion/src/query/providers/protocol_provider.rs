@@ -1,6 +1,7 @@
 //! Protocol table provider for DataFusion.
 
 use std::any::Any;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
@@ -13,7 +14,7 @@ use datafusion::logical_expr::Expr;
 use datafusion_datasource::memory::MemorySourceConfig;
 use datafusion::physical_plan::ExecutionPlan;
 
-use pcapsql_core::{PacketSource, ParseCache, ProtocolRegistry};
+use pcapsql_core::{compute_required_protocols, PacketSource, ParseCache, ProtocolRegistry};
 
 use super::ProtocolStreamExec;
 
@@ -111,7 +112,7 @@ impl<S: PacketSource + 'static> TableProvider for ProtocolTableProvider<S> {
         _state: &dyn Session,
         projection: Option<&Vec<usize>>,
         _filters: &[Expr],
-        _limit: Option<usize>,
+        limit: Option<usize>,
     ) -> DFResult<Arc<dyn ExecutionPlan>> {
         match &self.mode {
             TableMode::InMemory { batches } => Ok(MemorySourceConfig::try_new_exec(
@@ -130,7 +131,30 @@ impl<S: PacketSource + 'static> TableProvider for ProtocolTableProvider<S> {
                     .partitions(1)
                     .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
 
-                Ok(Arc::new(ProtocolStreamExec::new(
+                // Protocol Pruning Optimization:
+                // Compute required protocols for this table scan.
+                // This includes the table itself and all its dependencies (e.g., tcp requires ipv4/ipv6, ethernet).
+                // Parsing will stop once all required protocols have been parsed.
+                let required_protocols = Arc::new(compute_required_protocols(
+                    &[self.table_name.as_str()],
+                    registry,
+                ));
+
+                // Field Projection Optimization:
+                // Convert DataFusion projection indices to field names.
+                // This tells the parser to only extract needed fields, reducing CPU usage.
+                let field_projections = projection.map(|indices| {
+                    let field_names: HashSet<String> = indices
+                        .iter()
+                        .filter_map(|&idx| self.schema.field(idx).name().to_string().into())
+                        .collect();
+
+                    let mut projections = HashMap::new();
+                    projections.insert(self.table_name.clone(), field_names);
+                    Arc::new(projections)
+                });
+
+                Ok(Arc::new(ProtocolStreamExec::new_with_optimizations(
                     self.table_name.clone(),
                     self.schema.clone(),
                     source.clone(),
@@ -139,6 +163,9 @@ impl<S: PacketSource + 'static> TableProvider for ProtocolTableProvider<S> {
                     *batch_size,
                     projection.cloned(),
                     cache.clone(),
+                    limit,
+                    Some(required_protocols),
+                    field_projections,
                 )))
             }
         }

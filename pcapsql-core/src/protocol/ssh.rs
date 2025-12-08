@@ -3,7 +3,7 @@
 //! Parses SSH (Secure Shell) protocol identification strings and binary packets,
 //! particularly KEXINIT messages for algorithm negotiation analysis.
 
-use std::collections::HashMap;
+use smallvec::SmallVec;
 
 use super::{FieldValue, ParseContext, ParseResult, Protocol};
 use crate::schema::{DataKind, FieldDescriptor};
@@ -65,7 +65,7 @@ impl Protocol for SshProtocol {
     }
 
     fn parse<'a>(&self, data: &'a [u8], _context: &ParseContext) -> ParseResult<'a> {
-        let mut fields = HashMap::new();
+        let mut fields = SmallVec::new();
 
         // Check if this is an SSH protocol identification string
         if data.starts_with(b"SSH-") {
@@ -82,14 +82,14 @@ impl Protocol for SshProtocol {
         // Sanity check on packet length - SSH packets shouldn't exceed 35000 bytes typically
         if packet_length > 35000 || packet_length < 2 {
             // This might be encrypted traffic or not an SSH packet
-            fields.insert("encrypted", FieldValue::Bool(true));
+            fields.push(("encrypted", FieldValue::Bool(true)));
             let remaining_start = data.len().min(4 + packet_length);
-            return ParseResult::success(fields, &data[remaining_start..], HashMap::new());
+            return ParseResult::success(fields, &data[remaining_start..], SmallVec::new());
         }
 
         let padding_length = data[4] as usize;
-        fields.insert("packet_length", FieldValue::UInt32(packet_length as u32));
-        fields.insert("padding_length", FieldValue::UInt8(padding_length as u8));
+        fields.push(("packet_length", FieldValue::UInt32(packet_length as u32)));
+        fields.push(("padding_length", FieldValue::UInt8(padding_length as u8)));
 
         // Check if we have the full packet
         if data.len() < 4 + packet_length {
@@ -99,15 +99,15 @@ impl Protocol for SshProtocol {
         // Payload starts at offset 5
         let payload_length = packet_length.saturating_sub(padding_length + 1);
         if payload_length == 0 || data.len() < 6 {
-            return ParseResult::success(fields, &data[4 + packet_length..], HashMap::new());
+            return ParseResult::success(fields, &data[4 + packet_length..], SmallVec::new());
         }
 
         let msg_type = data[5];
-        fields.insert("msg_type", FieldValue::UInt8(msg_type));
-        fields.insert(
+        fields.push(("msg_type", FieldValue::UInt8(msg_type)));
+        fields.push((
             "msg_type_name",
             FieldValue::String(format_msg_type(msg_type)),
-        );
+        ));
 
         // Parse specific message types
         let payload = &data[5..5 + payload_length];
@@ -125,7 +125,7 @@ impl Protocol for SshProtocol {
         }
 
         let remaining = &data[4 + packet_length..];
-        ParseResult::success(fields, remaining, HashMap::new())
+        ParseResult::success(fields, remaining, SmallVec::new())
     }
 
     fn schema_fields(&self) -> Vec<FieldDescriptor> {
@@ -159,12 +159,16 @@ impl Protocol for SshProtocol {
     fn child_protocols(&self) -> &[&'static str] {
         &[]
     }
+
+    fn dependencies(&self) -> &'static [&'static str] {
+        &["tcp"]
+    }
 }
 
 /// Parse SSH protocol identification string.
 fn parse_protocol_identification<'a>(
     data: &'a [u8],
-    fields: &mut HashMap<&'static str, FieldValue>,
+    fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
 ) -> ParseResult<'a> {
     // Find the end of the identification string (CR LF or just LF)
     let line_end = data.iter().position(|&b| b == b'\n').unwrap_or(data.len());
@@ -184,10 +188,10 @@ fn parse_protocol_identification<'a>(
 
             if let Some(dash_pos) = content.find('-') {
                 let proto_version = &content[..dash_pos];
-                fields.insert(
+                fields.push((
                     "protocol_version",
                     FieldValue::String(proto_version.to_string()),
-                );
+                ));
 
                 let rest = &content[dash_pos + 1..];
 
@@ -196,15 +200,15 @@ fn parse_protocol_identification<'a>(
                     let software_version = &rest[..space_pos];
                     let comments = rest[space_pos + 1..].trim();
 
-                    fields.insert(
+                    fields.push((
                         "software_version",
                         FieldValue::String(software_version.to_string()),
-                    );
+                    ));
                     if !comments.is_empty() {
-                        fields.insert("comments", FieldValue::String(comments.to_string()));
+                        fields.push(("comments", FieldValue::String(comments.to_string())));
                     }
                 } else {
-                    fields.insert("software_version", FieldValue::String(rest.to_string()));
+                    fields.push(("software_version", FieldValue::String(rest.to_string())));
                 }
             }
         }
@@ -212,11 +216,11 @@ fn parse_protocol_identification<'a>(
 
     // Remaining data after the identification string
     let remaining_start = (line_end + 1).min(data.len());
-    ParseResult::success(fields.clone(), &data[remaining_start..], HashMap::new())
+    ParseResult::success(fields.clone(), &data[remaining_start..], SmallVec::new())
 }
 
 /// Parse KEXINIT message to extract algorithm lists.
-fn parse_kexinit_message(payload: &[u8], fields: &mut HashMap<&'static str, FieldValue>) {
+fn parse_kexinit_message(payload: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) {
     // KEXINIT format:
     // byte      SSH_MSG_KEXINIT (20) - included in payload
     // byte[16]  cookie
@@ -250,19 +254,19 @@ fn parse_kexinit_message(payload: &[u8], fields: &mut HashMap<&'static str, Fiel
 
     if let Some(kex_algs) = read_name_list(payload, &mut offset) {
         if !kex_algs.is_empty() {
-            fields.insert("kex_algorithms", FieldValue::String(kex_algs));
+            fields.push(("kex_algorithms", FieldValue::String(kex_algs)));
         }
     }
 
     if let Some(host_key_algs) = read_name_list(payload, &mut offset) {
         if !host_key_algs.is_empty() {
-            fields.insert("host_key_algorithms", FieldValue::String(host_key_algs));
+            fields.push(("host_key_algorithms", FieldValue::String(host_key_algs)));
         }
     }
 
     if let Some(enc_c2s) = read_name_list(payload, &mut offset) {
         if !enc_c2s.is_empty() {
-            fields.insert("encryption_algorithms", FieldValue::String(enc_c2s));
+            fields.push(("encryption_algorithms", FieldValue::String(enc_c2s)));
         }
     }
 
@@ -271,7 +275,7 @@ fn parse_kexinit_message(payload: &[u8], fields: &mut HashMap<&'static str, Fiel
 
     if let Some(mac_c2s) = read_name_list(payload, &mut offset) {
         if !mac_c2s.is_empty() {
-            fields.insert("mac_algorithms", FieldValue::String(mac_c2s));
+            fields.push(("mac_algorithms", FieldValue::String(mac_c2s)));
         }
     }
 
@@ -280,13 +284,13 @@ fn parse_kexinit_message(payload: &[u8], fields: &mut HashMap<&'static str, Fiel
 
     if let Some(comp_c2s) = read_name_list(payload, &mut offset) {
         if !comp_c2s.is_empty() {
-            fields.insert("compression_algorithms", FieldValue::String(comp_c2s));
+            fields.push(("compression_algorithms", FieldValue::String(comp_c2s)));
         }
     }
 }
 
 /// Parse USERAUTH_REQUEST message.
-fn parse_userauth_request(payload: &[u8], fields: &mut HashMap<&'static str, FieldValue>) {
+fn parse_userauth_request(payload: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) {
     if payload.len() < 5 {
         return;
     }
@@ -313,25 +317,25 @@ fn parse_userauth_request(payload: &[u8], fields: &mut HashMap<&'static str, Fie
 
     if let Some(username) = read_string(payload, &mut offset) {
         if !username.is_empty() {
-            fields.insert("auth_username", FieldValue::String(username));
+            fields.push(("auth_username", FieldValue::String(username)));
         }
     }
 
     if let Some(service) = read_string(payload, &mut offset) {
         if !service.is_empty() {
-            fields.insert("auth_service", FieldValue::String(service));
+            fields.push(("auth_service", FieldValue::String(service)));
         }
     }
 
     if let Some(method) = read_string(payload, &mut offset) {
         if !method.is_empty() {
-            fields.insert("auth_method", FieldValue::String(method));
+            fields.push(("auth_method", FieldValue::String(method)));
         }
     }
 }
 
 /// Parse CHANNEL_OPEN message.
-fn parse_channel_open(payload: &[u8], fields: &mut HashMap<&'static str, FieldValue>) {
+fn parse_channel_open(payload: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) {
     if payload.len() < 5 {
         return;
     }
@@ -353,7 +357,7 @@ fn parse_channel_open(payload: &[u8], fields: &mut HashMap<&'static str, FieldVa
 
     if let Ok(channel_type) = std::str::from_utf8(&payload[offset..offset + len]) {
         if !channel_type.is_empty() {
-            fields.insert("channel_type", FieldValue::String(channel_type.to_string()));
+            fields.push(("channel_type", FieldValue::String(channel_type.to_string())));
         }
     }
     offset += len;
@@ -366,7 +370,7 @@ fn parse_channel_open(payload: &[u8], fields: &mut HashMap<&'static str, FieldVa
             payload[offset + 2],
             payload[offset + 3],
         ]);
-        fields.insert("channel_id", FieldValue::UInt32(channel_id));
+        fields.push(("channel_id", FieldValue::UInt32(channel_id)));
     }
 }
 
@@ -490,11 +494,11 @@ mod tests {
         assert!(parser.can_parse(&ctx1).is_none());
 
         let mut ctx2 = ParseContext::new(1);
-        ctx2.hints.insert("dst_port", 22);
+        ctx2.insert_hint("dst_port", 22);
         assert!(parser.can_parse(&ctx2).is_some());
 
         let mut ctx3 = ParseContext::new(1);
-        ctx3.hints.insert("src_port", 22);
+        ctx3.insert_hint("src_port", 22);
         assert!(parser.can_parse(&ctx3).is_some());
     }
 
@@ -504,7 +508,7 @@ mod tests {
 
         let parser = SshProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("dst_port", 22);
+        context.insert_hint("dst_port", 22);
 
         let result = parser.parse(&packet, &context);
 
@@ -529,7 +533,7 @@ mod tests {
 
         let parser = SshProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("dst_port", 22);
+        context.insert_hint("dst_port", 22);
 
         let result = parser.parse(&packet, &context);
 
@@ -551,7 +555,7 @@ mod tests {
 
         let parser = SshProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("src_port", 22);
+        context.insert_hint("src_port", 22);
 
         let result = parser.parse(&packet, &context);
 
@@ -605,7 +609,7 @@ mod tests {
 
         let parser = SshProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("dst_port", 22);
+        context.insert_hint("dst_port", 22);
 
         let result = parser.parse(&packet, &context);
 
@@ -627,7 +631,7 @@ mod tests {
 
         let parser = SshProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("dst_port", 22);
+        context.insert_hint("dst_port", 22);
 
         let result = parser.parse(&packet, &context);
 
@@ -647,7 +651,7 @@ mod tests {
 
         let parser = SshProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("dst_port", 22);
+        context.insert_hint("dst_port", 22);
 
         let result = parser.parse(&packet, &context);
 
@@ -666,7 +670,7 @@ mod tests {
 
         let parser = SshProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("dst_port", 22);
+        context.insert_hint("dst_port", 22);
 
         let result = parser.parse(&packet, &context);
 
@@ -691,7 +695,7 @@ mod tests {
 
         let parser = SshProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("dst_port", 22);
+        context.insert_hint("dst_port", 22);
 
         let result = parser.parse(&packet, &context);
 
@@ -742,7 +746,7 @@ mod tests {
 
         let parser = SshProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("dst_port", 22);
+        context.insert_hint("dst_port", 22);
 
         let result = parser.parse(&packet, &context);
 
@@ -780,7 +784,7 @@ mod tests {
 
         let parser = SshProtocol;
         let mut context = ParseContext::new(1);
-        context.hints.insert("dst_port", 22);
+        context.insert_hint("dst_port", 22);
 
         let result = parser.parse(&packet, &context);
 

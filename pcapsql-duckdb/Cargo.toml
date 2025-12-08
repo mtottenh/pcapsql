@@ -14,9 +14,12 @@ crate-type = ["cdylib"]
 pcapsql-core = { path = "../pcapsql-core" }
 
 # DuckDB extension support
-duckdb = { version = "1.4", features = ["vtab-loadable"] }
+duckdb = { version = "1.4", features = ["vtab-loadable", "vscalar"] }
 duckdb-loadable-macros = "0.1"
 libduckdb-sys = { version = "1.4", features = ["loadable-extension"] }
+
+# Hex encoding/decoding
+hex = "0.4"
 
 # Error handling
 anyhow.workspace = true
