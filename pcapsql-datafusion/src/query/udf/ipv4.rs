@@ -9,7 +9,9 @@ use std::sync::Arc;
 use arrow::array::{Array, BooleanArray, StringArray, UInt32Array};
 use arrow::datatypes::DataType;
 use datafusion::common::Result as DFResult;
-use datafusion::logical_expr::{ColumnarValue, ScalarUDF, ScalarUDFImpl, Signature, Volatility};
+use datafusion::logical_expr::{
+    ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
+};
 
 /// Create the `ip4()` UDF that converts an IPv4 string to UInt32.
 ///
@@ -45,7 +47,7 @@ pub fn create_ip_in_cidr_udf() -> ScalarUDF {
 // ip4() UDF Implementation
 // ============================================================================
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 struct Ip4Udf {
     signature: Signature,
 }
@@ -75,8 +77,8 @@ impl ScalarUDFImpl for Ip4Udf {
         Ok(DataType::UInt32)
     }
 
-    fn invoke(&self, args: &[ColumnarValue]) -> DFResult<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(args)?;
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
         let ip_strings = args[0]
             .as_any()
             .downcast_ref::<StringArray>()
@@ -101,7 +103,7 @@ impl ScalarUDFImpl for Ip4Udf {
 // ip4_to_string() UDF Implementation
 // ============================================================================
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 struct Ip4ToStringUdf {
     signature: Signature,
 }
@@ -131,8 +133,8 @@ impl ScalarUDFImpl for Ip4ToStringUdf {
         Ok(DataType::Utf8)
     }
 
-    fn invoke(&self, args: &[ColumnarValue]) -> DFResult<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(args)?;
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
         let ip_values = args[0]
             .as_any()
             .downcast_ref::<UInt32Array>()
@@ -156,7 +158,7 @@ impl ScalarUDFImpl for Ip4ToStringUdf {
 // ip_in_cidr() UDF Implementation
 // ============================================================================
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 struct IpInCidrUdf {
     signature: Signature,
 }
@@ -189,8 +191,8 @@ impl ScalarUDFImpl for IpInCidrUdf {
         Ok(DataType::Boolean)
     }
 
-    fn invoke(&self, args: &[ColumnarValue]) -> DFResult<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(args)?;
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
         let ip_values = args[0]
             .as_any()
             .downcast_ref::<UInt32Array>()

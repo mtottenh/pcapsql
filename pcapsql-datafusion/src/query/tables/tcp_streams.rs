@@ -72,7 +72,7 @@ pub fn build_tcp_streams_batch(streams: &[StreamData]) -> Result<RecordBatch> {
     ];
 
     RecordBatch::try_new(tcp_streams_schema(), columns)
-        .map_err(|e| datafusion::error::DataFusionError::ArrowError(e, None))
+        .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))
 }
 
 #[cfg(test)]

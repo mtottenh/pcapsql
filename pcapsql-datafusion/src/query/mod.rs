@@ -28,6 +28,7 @@ mod provider;
 pub mod providers;
 pub mod tables;
 pub mod udf;
+pub mod udtf;
 pub mod views;
 
 pub use arrow_schema::{descriptors_to_arrow_schema, protocol_to_arrow_schema, to_arrow_field};
@@ -46,8 +47,8 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::error::{Error, QueryError};
 use pcapsql_core::{
-    default_registry, parse_packet, FilePacketSource, LruParseCache, MmapPacketSource, NoCache,
-    PacketSource, ParseCache, PcapReader, ProtocolRegistry,
+    default_registry, parse_packet, CacheStats, FilePacketSource, LruParseCache, MmapPacketSource,
+    NoCache, PacketSource, ParseCache, PcapReader, ProtocolRegistry,
 };
 
 /// File size threshold for automatic streaming mode selection.
@@ -61,6 +62,8 @@ pub const DEFAULT_CACHE_SIZE: usize = 10_000;
 pub struct QueryEngine {
     ctx: SessionContext,
     registry: ProtocolRegistry,
+    /// Parse cache for streaming mode (if enabled)
+    cache: Option<Arc<dyn ParseCache>>,
 }
 
 impl QueryEngine {
@@ -120,7 +123,15 @@ impl QueryEngine {
         // Register cross-layer views (including backward-compatible packets view)
         Self::register_cross_layer_views(&ctx).await?;
 
-        Ok(Self { ctx, registry })
+        // Register cache_stats() table function (returns default stats in in-memory mode)
+        let stats_fn = udtf::CacheStatsFunction::new(|| None);
+        ctx.register_udtf("cache_stats", Arc::new(stats_fn));
+
+        Ok(Self {
+            ctx,
+            registry,
+            cache: None,
+        })
     }
 
     /// Create a QueryEngine in streaming mode for large files.
@@ -232,9 +243,17 @@ impl QueryEngine {
         // Register cross-layer views (including backward-compatible packets view)
         Self::register_cross_layer_views(&ctx).await?;
 
+        // Register cache_stats() table function
+        let cache_for_udtf = cache_dyn.clone();
+        let stats_fn = udtf::CacheStatsFunction::new(move || {
+            cache_for_udtf.as_ref().and_then(|c| c.stats())
+        });
+        ctx.register_udtf("cache_stats", Arc::new(stats_fn));
+
         Ok(Self {
             ctx,
             registry: (*registry).clone(),
+            cache: cache_dyn,
         })
     }
 
@@ -379,6 +398,20 @@ impl QueryEngine {
     /// Get the session context for advanced usage.
     pub fn context(&self) -> &SessionContext {
         &self.ctx
+    }
+
+    /// Get current cache statistics, if caching is enabled.
+    ///
+    /// Returns `None` if cache is disabled or in non-streaming mode.
+    pub fn cache_stats(&self) -> Option<CacheStats> {
+        self.cache.as_ref().and_then(|c| c.stats())
+    }
+
+    /// Get a reference to the parse cache, if enabled.
+    ///
+    /// This can be used to reset statistics or access advanced cache features.
+    pub fn cache(&self) -> Option<&Arc<dyn ParseCache>> {
+        self.cache.as_ref()
     }
 
     /// Register cross-layer views that JOIN normalized protocol tables.

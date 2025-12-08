@@ -125,6 +125,9 @@ pub trait ParseCache: Send + Sync {
     fn stats(&self) -> Option<CacheStats> {
         None
     }
+
+    /// Reset statistics counters. Default implementation does nothing.
+    fn reset_stats(&self) {}
 }
 
 /// No-op cache implementation for when caching is disabled.
@@ -159,14 +162,29 @@ impl ParseCache for NoCache {
 /// Cache statistics for monitoring.
 #[derive(Clone, Debug, Default)]
 pub struct CacheStats {
+    /// Number of cache hits.
     pub hits: u64,
+    /// Number of cache misses.
     pub misses: u64,
+    /// Current number of cached entries.
     pub entries: usize,
+    /// Maximum number of entries allowed.
     pub max_entries: usize,
+
+    /// Number of entries evicted due to LRU policy.
+    pub evictions_lru: u64,
+    /// Number of entries evicted because all readers passed them.
+    pub evictions_reader: u64,
+    /// Peak number of entries ever held (high watermark).
+    pub peak_entries: usize,
+    /// Number of currently active readers.
+    pub active_readers: usize,
+    /// Estimated memory usage in bytes.
+    pub memory_bytes_estimate: usize,
 }
 
 impl CacheStats {
-    /// Cache hit ratio (0.0 to 1.0).
+    /// Calculate the hit ratio (hits / total accesses).
     pub fn hit_ratio(&self) -> f64 {
         let total = self.hits + self.misses;
         if total == 0 {
@@ -174,6 +192,62 @@ impl CacheStats {
         } else {
             self.hits as f64 / total as f64
         }
+    }
+
+    /// Calculate cache utilization (entries / max_entries).
+    pub fn utilization(&self) -> f64 {
+        if self.max_entries == 0 {
+            0.0
+        } else {
+            self.entries as f64 / self.max_entries as f64
+        }
+    }
+
+    /// Total evictions (LRU + reader-based).
+    pub fn total_evictions(&self) -> u64 {
+        self.evictions_lru + self.evictions_reader
+    }
+
+    /// Format statistics as a human-readable string.
+    pub fn format_summary(&self) -> String {
+        let hit_pct = self.hit_ratio() * 100.0;
+        let miss_pct = 100.0 - hit_pct;
+        let util_pct = self.utilization() * 100.0;
+
+        format!(
+            "Cache Statistics:\n\
+             \x20 Hits:        {:>10} ({:.1}%)\n\
+             \x20 Misses:      {:>10} ({:.1}%)\n\
+             \x20 Entries:     {:>10} / {} ({:.1}%)\n\
+             \x20 Peak:        {:>10}\n\
+             \x20 Evictions:   {:>10} (LRU: {}, Reader: {})\n\
+             \x20 Readers:     {:>10}\n\
+             \x20 Memory:      {:>10}",
+            self.hits, hit_pct,
+            self.misses, miss_pct,
+            self.entries, self.max_entries, util_pct,
+            self.peak_entries,
+            self.total_evictions(), self.evictions_lru, self.evictions_reader,
+            self.active_readers,
+            format_bytes(self.memory_bytes_estimate),
+        )
+    }
+}
+
+/// Format bytes as human-readable string.
+fn format_bytes(bytes: usize) -> String {
+    const KB: usize = 1024;
+    const MB: usize = KB * 1024;
+    const GB: usize = MB * 1024;
+
+    if bytes >= GB {
+        format!("{:.2} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.2} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.2} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} B", bytes)
     }
 }
 
@@ -231,6 +305,7 @@ mod tests {
             misses: 25,
             entries: 100,
             max_entries: 1000,
+            ..Default::default()
         };
 
         assert!((stats.hit_ratio() - 0.75).abs() < 0.001);
@@ -400,15 +475,102 @@ mod tests {
     #[test]
     fn test_cache_stats_various_ratios() {
         // 50% hit ratio
-        let stats_50 = CacheStats { hits: 50, misses: 50, entries: 100, max_entries: 1000 };
+        let stats_50 = CacheStats { hits: 50, misses: 50, entries: 100, max_entries: 1000, ..Default::default() };
         assert!((stats_50.hit_ratio() - 0.5).abs() < 0.001);
 
         // 100% hit ratio
-        let stats_100 = CacheStats { hits: 100, misses: 0, entries: 100, max_entries: 1000 };
+        let stats_100 = CacheStats { hits: 100, misses: 0, entries: 100, max_entries: 1000, ..Default::default() };
         assert!((stats_100.hit_ratio() - 1.0).abs() < 0.001);
 
         // 0% hit ratio (all misses)
-        let stats_0 = CacheStats { hits: 0, misses: 100, entries: 0, max_entries: 1000 };
+        let stats_0 = CacheStats { hits: 0, misses: 100, entries: 0, max_entries: 1000, ..Default::default() };
         assert!((stats_0.hit_ratio() - 0.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_cache_stats_utilization() {
+        // 0% utilization
+        let stats_0 = CacheStats { entries: 0, max_entries: 100, ..Default::default() };
+        assert!((stats_0.utilization() - 0.0).abs() < 0.001);
+
+        // 50% utilization
+        let stats_50 = CacheStats { entries: 50, max_entries: 100, ..Default::default() };
+        assert!((stats_50.utilization() - 0.5).abs() < 0.001);
+
+        // 100% utilization
+        let stats_100 = CacheStats { entries: 100, max_entries: 100, ..Default::default() };
+        assert!((stats_100.utilization() - 1.0).abs() < 0.001);
+
+        // Edge case: max_entries = 0
+        let stats_zero_max = CacheStats { entries: 0, max_entries: 0, ..Default::default() };
+        assert!((stats_zero_max.utilization() - 0.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_cache_stats_total_evictions() {
+        let stats = CacheStats {
+            evictions_lru: 50,
+            evictions_reader: 30,
+            ..Default::default()
+        };
+        assert_eq!(stats.total_evictions(), 80);
+    }
+
+    #[test]
+    fn test_cache_stats_format_summary() {
+        let stats = CacheStats {
+            hits: 75,
+            misses: 25,
+            entries: 500,
+            max_entries: 1000,
+            evictions_lru: 100,
+            evictions_reader: 50,
+            peak_entries: 750,
+            active_readers: 3,
+            memory_bytes_estimate: 512000, // 500 KB
+        };
+
+        let summary = stats.format_summary();
+
+        // Check that key information is present
+        assert!(summary.contains("Hits:"));
+        assert!(summary.contains("75"));
+        assert!(summary.contains("Misses:"));
+        assert!(summary.contains("25"));
+        assert!(summary.contains("Entries:"));
+        assert!(summary.contains("500"));
+        assert!(summary.contains("1000"));
+        assert!(summary.contains("Peak:"));
+        assert!(summary.contains("750"));
+        assert!(summary.contains("Evictions:"));
+        assert!(summary.contains("150")); // total evictions
+        assert!(summary.contains("LRU: 100"));
+        assert!(summary.contains("Reader: 50"));
+        assert!(summary.contains("Readers:"));
+        assert!(summary.contains("3"));
+        assert!(summary.contains("Memory:"));
+        assert!(summary.contains("KB"));
+    }
+
+    #[test]
+    fn test_format_bytes() {
+        // Bytes
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(500), "500 B");
+        assert_eq!(format_bytes(1023), "1023 B");
+
+        // KB
+        assert_eq!(format_bytes(1024), "1.00 KB");
+        assert_eq!(format_bytes(1536), "1.50 KB"); // 1.5 KB
+        assert_eq!(format_bytes(10240), "10.00 KB");
+
+        // MB
+        assert_eq!(format_bytes(1048576), "1.00 MB"); // 1 MB
+        assert_eq!(format_bytes(5242880), "5.00 MB"); // 5 MB
+        assert_eq!(format_bytes(10485760), "10.00 MB"); // 10 MB
+
+        // GB
+        assert_eq!(format_bytes(1073741824), "1.00 GB"); // 1 GB
+        assert_eq!(format_bytes(2147483648), "2.00 GB"); // 2 GB
     }
 }

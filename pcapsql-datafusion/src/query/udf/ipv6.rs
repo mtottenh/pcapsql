@@ -9,7 +9,9 @@ use std::sync::Arc;
 use arrow::array::{Array, BooleanArray, FixedSizeBinaryArray, StringArray};
 use arrow::datatypes::DataType;
 use datafusion::common::Result as DFResult;
-use datafusion::logical_expr::{ColumnarValue, ScalarUDF, ScalarUDFImpl, Signature, Volatility};
+use datafusion::logical_expr::{
+    ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
+};
 
 /// Create the `ip6()` UDF that converts an IPv6 string to FixedSizeBinary(16).
 ///
@@ -45,7 +47,7 @@ pub fn create_ip6_in_cidr_udf() -> ScalarUDF {
 // ip6() UDF Implementation
 // ============================================================================
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 struct Ip6Udf {
     signature: Signature,
 }
@@ -75,8 +77,8 @@ impl ScalarUDFImpl for Ip6Udf {
         Ok(DataType::FixedSizeBinary(16))
     }
 
-    fn invoke(&self, args: &[ColumnarValue]) -> DFResult<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(args)?;
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
         let ip_strings = args[0]
             .as_any()
             .downcast_ref::<StringArray>()
@@ -103,7 +105,7 @@ impl ScalarUDFImpl for Ip6Udf {
 // ip6_to_string() UDF Implementation
 // ============================================================================
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 struct Ip6ToStringUdf {
     signature: Signature,
 }
@@ -133,8 +135,8 @@ impl ScalarUDFImpl for Ip6ToStringUdf {
         Ok(DataType::Utf8)
     }
 
-    fn invoke(&self, args: &[ColumnarValue]) -> DFResult<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(args)?;
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
         let ip_values = args[0]
             .as_any()
             .downcast_ref::<FixedSizeBinaryArray>()
@@ -160,7 +162,7 @@ impl ScalarUDFImpl for Ip6ToStringUdf {
 // ip6_in_cidr() UDF Implementation
 // ============================================================================
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 struct Ip6InCidrUdf {
     signature: Signature,
 }
@@ -193,8 +195,8 @@ impl ScalarUDFImpl for Ip6InCidrUdf {
         Ok(DataType::Boolean)
     }
 
-    fn invoke(&self, args: &[ColumnarValue]) -> DFResult<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(args)?;
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
         let ip_values = args[0]
             .as_any()
             .downcast_ref::<FixedSizeBinaryArray>()

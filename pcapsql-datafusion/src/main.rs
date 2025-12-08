@@ -112,6 +112,12 @@ async fn main() -> Result<()> {
                 formatter.write(&batch, &mut stdout)?;
             }
         }
+
+        // Show cache stats if requested
+        if args.show_stats {
+            print_cache_stats(&engine);
+        }
+
         return Ok(());
     }
 
@@ -137,11 +143,27 @@ async fn main() -> Result<()> {
                 formatter.write(&batch, &mut stdout)?;
             }
         }
+
+        // Show cache stats if requested
+        if args.show_stats {
+            print_cache_stats(&engine);
+        }
+
         return Ok(());
     }
 
     // Interactive REPL
     run_repl(&engine, &formatter, &pcap_file).await
+}
+
+fn print_cache_stats(engine: &QueryEngine) {
+    if let Some(stats) = engine.cache_stats() {
+        eprintln!();
+        eprintln!("{}", stats.format_summary());
+    } else {
+        eprintln!();
+        eprintln!("Cache statistics not available (cache disabled or in-memory mode)");
+    }
 }
 
 fn list_protocols() {
@@ -244,6 +266,22 @@ async fn run_repl(
                     ReplCommand::Tables => print_tables(),
                     ReplCommand::Schema => show_schema(),
                     ReplCommand::Protocols => list_protocols(),
+                    ReplCommand::Stats => {
+                        if let Some(stats) = engine.cache_stats() {
+                            println!("{}", stats.format_summary());
+                        } else {
+                            println!("Cache statistics not available.");
+                            println!("Cache is only used in streaming mode with --cache-size > 0");
+                        }
+                    }
+                    ReplCommand::StatsReset => {
+                        if let Some(cache) = engine.cache() {
+                            cache.reset_stats();
+                            println!("Cache statistics reset.");
+                        } else {
+                            println!("No cache to reset.");
+                        }
+                    }
                     ReplCommand::Unknown(s) => {
                         eprintln!("Unknown command: {s}");
                         eprintln!("Type .help for available commands");
@@ -308,12 +346,14 @@ async fn run_repl(
 
 fn print_help() {
     println!("Commands:");
-    println!("  .help      Show this help");
-    println!("  .tables    List available tables");
-    println!("  .schema    Show table schemas");
-    println!("  .protocols List registered protocols");
+    println!("  .help            Show this help");
+    println!("  .tables          List available tables");
+    println!("  .schema          Show table schemas");
+    println!("  .protocols       List registered protocols");
     println!("  .export <file> [query]  Export to file (format inferred from extension)");
-    println!("  .quit      Exit");
+    println!("  .stats           Show cache statistics");
+    println!("  .stats reset     Reset cache statistics counters");
+    println!("  .quit            Exit");
     println!();
     println!("Export formats: .parquet, .json/.jsonl, .csv");
     println!("SQL queries end with a semicolon (;)");

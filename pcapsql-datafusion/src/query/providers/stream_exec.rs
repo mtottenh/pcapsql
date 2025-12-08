@@ -9,8 +9,9 @@ use arrow::datatypes::SchemaRef;
 use datafusion::error::Result as DFResult;
 use datafusion::execution::context::TaskContext;
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalSortExpr};
+use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionMode, ExecutionPlan, Partitioning, PlanProperties,
+    DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
     SendableRecordBatchStream,
 };
 
@@ -68,7 +69,8 @@ impl<S: PacketSource + 'static> ProtocolStreamExec<S> {
         let properties = PlanProperties::new(
             eq_props,
             Partitioning::UnknownPartitioning(partitions.len()),
-            ExecutionMode::Bounded,
+            EmissionType::Incremental,
+            Boundedness::Bounded,
         );
 
         Self {
@@ -91,7 +93,6 @@ impl<S: PacketSource + 'static> ProtocolStreamExec<S> {
         // Declare that output is sorted by frame_number (if present in schema)
         if schema.index_of("frame_number").is_ok() {
             use datafusion::physical_expr::expressions::col;
-            use datafusion::physical_expr::LexOrdering;
 
             if let Ok(col_expr) = col("frame_number", schema) {
                 let sort_expr = PhysicalSortExpr {
@@ -101,8 +102,8 @@ impl<S: PacketSource + 'static> ProtocolStreamExec<S> {
                         nulls_first: false,
                     },
                 };
-                let ordering = LexOrdering::new(vec![sort_expr]);
-                eq_props = eq_props.with_reorder(ordering);
+                // reorder() mutates in place and returns Result<bool>
+                let _ = eq_props.reorder(vec![sort_expr]);
             }
         }
 
@@ -176,7 +177,7 @@ impl<S: PacketSource + 'static> ExecutionPlan for ProtocolStreamExec<S> {
 impl<S: PacketSource> DisplayAs for ProtocolStreamExec<S> {
     fn fmt_as(&self, t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
         match t {
-            DisplayFormatType::Default | DisplayFormatType::Verbose => {
+            DisplayFormatType::Default | DisplayFormatType::Verbose | DisplayFormatType::TreeRender => {
                 write!(
                     f,
                     "ProtocolStreamExec: table={}, partitions={}, batch_size={}",

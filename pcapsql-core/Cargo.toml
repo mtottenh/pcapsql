@@ -27,6 +27,7 @@ compress-all = ["compress-gzip", "compress-zstd", "compress-lz4", "compress-bzip
 etherparse.workspace = true
 pcap-parser.workspace = true
 bytes.workspace = true
+httparse.workspace = true
 
 # Compression (flate2 always included for gzip, others optional)
 flate2.workspace = true

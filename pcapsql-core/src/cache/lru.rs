@@ -11,6 +11,9 @@ use std::sync::{Arc, RwLock};
 
 use super::{CacheStats, CachedParse, ParseCache};
 
+/// Average estimated size per cached entry (for memory estimation).
+const ESTIMATED_ENTRY_SIZE: usize = 1024; // 1 KB per entry
+
 /// LRU parse cache with configurable size limit.
 ///
 /// Thread-safe implementation using RwLock for the main cache
@@ -35,6 +38,13 @@ pub struct LruParseCache {
     /// Statistics
     hits: AtomicU64,
     misses: AtomicU64,
+
+    /// LRU evictions counter
+    evictions_lru: AtomicU64,
+    /// Reader-based evictions counter
+    evictions_reader: AtomicU64,
+    /// Peak entries ever held (high watermark)
+    peak_entries: AtomicUsize,
 }
 
 impl LruParseCache {
@@ -51,6 +61,9 @@ impl LruParseCache {
             next_reader_id: AtomicUsize::new(0),
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
+            evictions_lru: AtomicU64::new(0),
+            evictions_reader: AtomicU64::new(0),
+            peak_entries: AtomicUsize::new(0),
         }
     }
 
@@ -64,8 +77,15 @@ impl LruParseCache {
         // Find minimum frame that all readers have passed
         let min_passed = readers.values().min().copied().unwrap_or(0);
 
+        let before_count = entries.len();
+
         // Remove entries below this threshold
         entries.retain(|&frame_number, _| frame_number >= min_passed);
+
+        let evicted = before_count - entries.len();
+        if evicted > 0 {
+            self.evictions_reader.fetch_add(evicted as u64, Ordering::Relaxed);
+        }
     }
 
     /// Evict least recently used entries to make room.
@@ -87,16 +107,51 @@ impl LruParseCache {
         for (frame, _) in access_orders.into_iter().take(to_remove) {
             entries.remove(&frame);
         }
+
+        self.evictions_lru.fetch_add(to_remove as u64, Ordering::Relaxed);
+    }
+
+    /// Update peak entries if current is higher.
+    fn update_peak(&self, current: usize) {
+        let mut peak = self.peak_entries.load(Ordering::Relaxed);
+        while current > peak {
+            match self.peak_entries.compare_exchange_weak(
+                peak,
+                current,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => peak = actual,
+            }
+        }
     }
 
     /// Get current cache statistics.
     pub fn get_stats(&self) -> CacheStats {
+        let entries = self.entries.read().unwrap();
+        let readers = self.readers.read().unwrap();
+
         CacheStats {
             hits: self.hits.load(Ordering::Relaxed),
             misses: self.misses.load(Ordering::Relaxed),
-            entries: self.entries.read().unwrap().len(),
+            entries: entries.len(),
             max_entries: self.max_entries,
+            evictions_lru: self.evictions_lru.load(Ordering::Relaxed),
+            evictions_reader: self.evictions_reader.load(Ordering::Relaxed),
+            peak_entries: self.peak_entries.load(Ordering::Relaxed),
+            active_readers: readers.len(),
+            memory_bytes_estimate: entries.len() * ESTIMATED_ENTRY_SIZE,
         }
+    }
+
+    /// Reset statistics counters (keeps cache contents).
+    pub fn reset_stats(&self) {
+        self.hits.store(0, Ordering::Relaxed);
+        self.misses.store(0, Ordering::Relaxed);
+        self.evictions_lru.store(0, Ordering::Relaxed);
+        self.evictions_reader.store(0, Ordering::Relaxed);
+        // Note: peak_entries is NOT reset - it's a high watermark
     }
 
     /// Clear all cached entries.
@@ -142,6 +197,13 @@ impl ParseCache for LruParseCache {
 
         let access_order = self.access_counter.fetch_add(1, Ordering::Relaxed);
         entries.insert(frame_number, (parsed, access_order));
+
+        // Update peak after insertion
+        self.update_peak(entries.len());
+    }
+
+    fn reset_stats(&self) {
+        LruParseCache::reset_stats(self);
     }
 
     fn reader_passed(&self, reader_id: usize, frame_number: u64) {
@@ -516,5 +578,172 @@ mod tests {
         let stats = cache.get_stats();
         // Should still function without panic - entries may or may not be evicted
         assert!(stats.max_entries == 0);
+    }
+
+    #[test]
+    fn test_eviction_counters() {
+        let cache = LruParseCache::new(5);
+
+        // Add 5 entries (fill the cache)
+        for i in 1..=5 {
+            cache.put(i, Arc::new(CachedParse { frame_number: i, protocols: vec![] }));
+        }
+
+        let stats = cache.get_stats();
+        assert_eq!(stats.evictions_lru, 0);
+        assert_eq!(stats.evictions_reader, 0);
+
+        // Add more entries to trigger LRU eviction
+        for i in 6..=10 {
+            cache.put(i, Arc::new(CachedParse { frame_number: i, protocols: vec![] }));
+        }
+
+        let stats = cache.get_stats();
+        // LRU evictions should have occurred
+        assert!(stats.evictions_lru > 0);
+        assert_eq!(stats.total_evictions(), stats.evictions_lru + stats.evictions_reader);
+    }
+
+    #[test]
+    fn test_reader_eviction_counters() {
+        let cache = LruParseCache::new(20);
+
+        // Register a reader
+        let r1 = cache.register_reader();
+
+        // Add 10 entries
+        for i in 1..=10 {
+            cache.put(i, Arc::new(CachedParse { frame_number: i, protocols: vec![] }));
+        }
+
+        // Reader passes frame 5
+        cache.reader_passed(r1, 5);
+
+        let stats_before = cache.get_stats();
+        let evictions_reader_before = stats_before.evictions_reader;
+
+        // Add more entries to trigger eviction of passed entries
+        for i in 11..=25 {
+            cache.put(i, Arc::new(CachedParse { frame_number: i, protocols: vec![] }));
+        }
+
+        let stats = cache.get_stats();
+        // Reader-based evictions should have occurred
+        assert!(stats.evictions_reader >= evictions_reader_before);
+
+        cache.unregister_reader(r1);
+    }
+
+    #[test]
+    fn test_peak_entries_tracking() {
+        let cache = LruParseCache::new(10);
+
+        // Add 10 entries (fill the cache)
+        for i in 1..=10 {
+            cache.put(i, Arc::new(CachedParse { frame_number: i, protocols: vec![] }));
+        }
+
+        let stats = cache.get_stats();
+        assert_eq!(stats.peak_entries, 10);
+        assert_eq!(stats.entries, 10);
+
+        // Clear the cache
+        cache.clear();
+
+        let stats = cache.get_stats();
+        assert_eq!(stats.entries, 0);
+        // Peak should still be 10 (high watermark)
+        assert_eq!(stats.peak_entries, 10);
+    }
+
+    #[test]
+    fn test_active_readers_count() {
+        let cache = LruParseCache::new(100);
+
+        let stats = cache.get_stats();
+        assert_eq!(stats.active_readers, 0);
+
+        let r1 = cache.register_reader();
+        let stats = cache.get_stats();
+        assert_eq!(stats.active_readers, 1);
+
+        let r2 = cache.register_reader();
+        let stats = cache.get_stats();
+        assert_eq!(stats.active_readers, 2);
+
+        cache.unregister_reader(r1);
+        let stats = cache.get_stats();
+        assert_eq!(stats.active_readers, 1);
+
+        cache.unregister_reader(r2);
+        let stats = cache.get_stats();
+        assert_eq!(stats.active_readers, 0);
+    }
+
+    #[test]
+    fn test_memory_bytes_estimate() {
+        let cache = LruParseCache::new(100);
+
+        let stats = cache.get_stats();
+        assert_eq!(stats.memory_bytes_estimate, 0);
+
+        // Add 5 entries
+        for i in 1..=5 {
+            cache.put(i, Arc::new(CachedParse { frame_number: i, protocols: vec![] }));
+        }
+
+        let stats = cache.get_stats();
+        // 5 entries * 1024 bytes per entry = 5120 bytes
+        assert_eq!(stats.memory_bytes_estimate, 5 * ESTIMATED_ENTRY_SIZE);
+    }
+
+    #[test]
+    fn test_reset_stats() {
+        let cache = LruParseCache::new(5);
+
+        // Generate some stats
+        cache.get(1); // miss
+        cache.put(1, Arc::new(CachedParse { frame_number: 1, protocols: vec![] }));
+        cache.get(1); // hit
+
+        // Trigger some evictions
+        for i in 2..=10 {
+            cache.put(i, Arc::new(CachedParse { frame_number: i, protocols: vec![] }));
+        }
+
+        let stats = cache.get_stats();
+        assert!(stats.hits > 0);
+        assert!(stats.misses > 0);
+        assert!(stats.evictions_lru > 0);
+        let old_peak = stats.peak_entries;
+
+        // Reset stats
+        cache.reset_stats();
+
+        let stats = cache.get_stats();
+        assert_eq!(stats.hits, 0);
+        assert_eq!(stats.misses, 0);
+        assert_eq!(stats.evictions_lru, 0);
+        assert_eq!(stats.evictions_reader, 0);
+        // Peak should NOT be reset (it's a high watermark)
+        assert_eq!(stats.peak_entries, old_peak);
+        // Entries should still be there (cache not cleared)
+        assert!(stats.entries > 0);
+    }
+
+    #[test]
+    fn test_utilization() {
+        let cache = LruParseCache::new(100);
+
+        let stats = cache.get_stats();
+        assert!((stats.utilization() - 0.0).abs() < 0.001);
+
+        // Add 50 entries (50% utilization)
+        for i in 1..=50 {
+            cache.put(i, Arc::new(CachedParse { frame_number: i, protocols: vec![] }));
+        }
+
+        let stats = cache.get_stats();
+        assert!((stats.utilization() - 0.5).abs() < 0.001);
     }
 }

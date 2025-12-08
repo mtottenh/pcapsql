@@ -277,12 +277,12 @@ fn convert_binary_expr(left: &Expr, op: &Operator, right: &Expr) -> Option<Simpl
     let compare_op = CompareOp::from_datafusion(op)?;
 
     // Try column = literal pattern
-    if let (Expr::Column(col), Expr::Literal(lit)) = (left, right) {
+    if let (Expr::Column(col), Expr::Literal(lit, _)) = (left, right) {
         return convert_column_literal_compare(&col.name, compare_op, lit);
     }
 
     // Try literal = column pattern (reverse)
-    if let (Expr::Literal(lit), Expr::Column(col)) = (left, right) {
+    if let (Expr::Literal(lit, _), Expr::Column(col)) = (left, right) {
         // Reverse the operator for symmetric comparisons
         let reversed_op = match compare_op {
             CompareOp::Lt => CompareOp::Gt,

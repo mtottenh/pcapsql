@@ -3,9 +3,10 @@
 use crate::schema::FieldDescriptor;
 
 use super::{
-    ArpProtocol, DhcpProtocol, DnsProtocol, EthernetProtocol, HttpProtocol, IcmpProtocol,
-    Icmpv6Protocol, Ipv4Protocol, Ipv6Protocol, NtpProtocol, ParseContext, ParseResult,
-    QuicProtocol, SshProtocol, TcpProtocol, TlsProtocol, UdpProtocol, VlanProtocol,
+    ArpProtocol, BgpProtocol, DhcpProtocol, DnsProtocol, EthernetProtocol, GreProtocol,
+    GtpProtocol, IcmpProtocol, Icmpv6Protocol, IpsecProtocol, Ipv4Protocol, Ipv6Protocol,
+    MplsProtocol, NtpProtocol, OspfProtocol, ParseContext, ParseResult, QuicProtocol, SshProtocol,
+    TcpProtocol, TlsProtocol, UdpProtocol, VlanProtocol, VxlanProtocol,
 };
 
 /// How a protocol's remaining bytes should be handled.
@@ -69,16 +70,22 @@ pub enum BuiltinProtocol {
     Ethernet(EthernetProtocol),
     Arp(ArpProtocol),
     Vlan(VlanProtocol),
+    Mpls(MplsProtocol),
     Ipv4(Ipv4Protocol),
     Ipv6(Ipv6Protocol),
     Tcp(TcpProtocol),
     Udp(UdpProtocol),
     Icmp(IcmpProtocol),
     Icmpv6(Icmpv6Protocol),
+    Gre(GreProtocol),
+    Vxlan(VxlanProtocol),
+    Gtp(GtpProtocol),
+    Ipsec(IpsecProtocol),
+    Bgp(BgpProtocol),
+    Ospf(OspfProtocol),
     Dns(DnsProtocol),
     Dhcp(DhcpProtocol),
     Ntp(NtpProtocol),
-    Http(HttpProtocol),
     Tls(TlsProtocol),
     Ssh(SshProtocol),
     Quic(QuicProtocol),
@@ -91,16 +98,22 @@ macro_rules! delegate_protocol {
             BuiltinProtocol::Ethernet(p) => p.$method($($arg),*),
             BuiltinProtocol::Arp(p) => p.$method($($arg),*),
             BuiltinProtocol::Vlan(p) => p.$method($($arg),*),
+            BuiltinProtocol::Mpls(p) => p.$method($($arg),*),
             BuiltinProtocol::Ipv4(p) => p.$method($($arg),*),
             BuiltinProtocol::Ipv6(p) => p.$method($($arg),*),
             BuiltinProtocol::Tcp(p) => p.$method($($arg),*),
             BuiltinProtocol::Udp(p) => p.$method($($arg),*),
             BuiltinProtocol::Icmp(p) => p.$method($($arg),*),
             BuiltinProtocol::Icmpv6(p) => p.$method($($arg),*),
+            BuiltinProtocol::Gre(p) => p.$method($($arg),*),
+            BuiltinProtocol::Vxlan(p) => p.$method($($arg),*),
+            BuiltinProtocol::Gtp(p) => p.$method($($arg),*),
+            BuiltinProtocol::Ipsec(p) => p.$method($($arg),*),
+            BuiltinProtocol::Bgp(p) => p.$method($($arg),*),
+            BuiltinProtocol::Ospf(p) => p.$method($($arg),*),
             BuiltinProtocol::Dns(p) => p.$method($($arg),*),
             BuiltinProtocol::Dhcp(p) => p.$method($($arg),*),
             BuiltinProtocol::Ntp(p) => p.$method($($arg),*),
-            BuiltinProtocol::Http(p) => p.$method($($arg),*),
             BuiltinProtocol::Tls(p) => p.$method($($arg),*),
             BuiltinProtocol::Ssh(p) => p.$method($($arg),*),
             BuiltinProtocol::Quic(p) => p.$method($($arg),*),
@@ -164,6 +177,12 @@ impl From<VlanProtocol> for BuiltinProtocol {
     }
 }
 
+impl From<MplsProtocol> for BuiltinProtocol {
+    fn from(p: MplsProtocol) -> Self {
+        BuiltinProtocol::Mpls(p)
+    }
+}
+
 impl From<Ipv4Protocol> for BuiltinProtocol {
     fn from(p: Ipv4Protocol) -> Self {
         BuiltinProtocol::Ipv4(p)
@@ -200,6 +219,42 @@ impl From<Icmpv6Protocol> for BuiltinProtocol {
     }
 }
 
+impl From<GreProtocol> for BuiltinProtocol {
+    fn from(p: GreProtocol) -> Self {
+        BuiltinProtocol::Gre(p)
+    }
+}
+
+impl From<VxlanProtocol> for BuiltinProtocol {
+    fn from(p: VxlanProtocol) -> Self {
+        BuiltinProtocol::Vxlan(p)
+    }
+}
+
+impl From<GtpProtocol> for BuiltinProtocol {
+    fn from(p: GtpProtocol) -> Self {
+        BuiltinProtocol::Gtp(p)
+    }
+}
+
+impl From<IpsecProtocol> for BuiltinProtocol {
+    fn from(p: IpsecProtocol) -> Self {
+        BuiltinProtocol::Ipsec(p)
+    }
+}
+
+impl From<BgpProtocol> for BuiltinProtocol {
+    fn from(p: BgpProtocol) -> Self {
+        BuiltinProtocol::Bgp(p)
+    }
+}
+
+impl From<OspfProtocol> for BuiltinProtocol {
+    fn from(p: OspfProtocol) -> Self {
+        BuiltinProtocol::Ospf(p)
+    }
+}
+
 impl From<DnsProtocol> for BuiltinProtocol {
     fn from(p: DnsProtocol) -> Self {
         BuiltinProtocol::Dns(p)
@@ -215,12 +270,6 @@ impl From<DhcpProtocol> for BuiltinProtocol {
 impl From<NtpProtocol> for BuiltinProtocol {
     fn from(p: NtpProtocol) -> Self {
         BuiltinProtocol::Ntp(p)
-    }
-}
-
-impl From<HttpProtocol> for BuiltinProtocol {
-    fn from(p: HttpProtocol) -> Self {
-        BuiltinProtocol::Http(p)
     }
 }
 

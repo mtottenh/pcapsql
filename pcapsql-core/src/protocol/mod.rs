@@ -3,7 +3,7 @@
 //! This module provides:
 //! - [`Protocol`] trait for implementing parsers
 //! - [`ProtocolRegistry`] for managing registered parsers
-//! - Built-in parsers for 17 common protocols
+//! - Built-in parsers for common protocols
 //!
 //! ## Supported Protocols
 //!
@@ -12,7 +12,9 @@
 //! | Link | Ethernet, VLAN (802.1Q) |
 //! | Network | IPv4, IPv6, ARP, ICMP, ICMPv6 |
 //! | Transport | TCP, UDP |
-//! | Application | DNS, DHCP, NTP, HTTP, TLS, SSH, QUIC |
+//! | Application | DNS, DHCP, NTP, TLS, SSH, QUIC |
+//!
+//! Note: HTTP is parsed via TCP stream reassembly (see `stream::parsers::http`).
 //!
 //! ## Example
 //!
@@ -41,21 +43,27 @@ mod registry;
 
 // Protocol implementations
 mod arp;
+mod bgp;
 mod dhcp;
 mod dns;
 mod ethernet;
-mod http;
+mod gre;
+mod gtp;
 mod icmp;
 mod icmpv6;
+mod ipsec;
 mod ipv4;
 mod ipv6;
+mod mpls;
 mod ntp;
+mod ospf;
 mod quic;
 mod ssh;
 mod tcp;
 mod tls;
 mod udp;
 mod vlan;
+mod vxlan;
 
 // Test utilities (only compiled for tests)
 #[cfg(test)]
@@ -67,21 +75,27 @@ pub use registry::{BuiltinProtocol, PayloadMode, Protocol, ProtocolRegistry};
 
 // Re-export protocol implementations
 pub use arp::ArpProtocol;
+pub use bgp::BgpProtocol;
 pub use dhcp::DhcpProtocol;
 pub use dns::DnsProtocol;
 pub use ethernet::EthernetProtocol;
-pub use http::HttpProtocol;
+pub use gre::GreProtocol;
+pub use gtp::GtpProtocol;
 pub use icmp::IcmpProtocol;
 pub use icmpv6::Icmpv6Protocol;
+pub use ipsec::IpsecProtocol;
 pub use ipv4::Ipv4Protocol;
 pub use ipv6::Ipv6Protocol;
+pub use mpls::MplsProtocol;
 pub use ntp::NtpProtocol;
+pub use ospf::OspfProtocol;
 pub use quic::QuicProtocol;
 pub use ssh::SshProtocol;
 pub use tcp::TcpProtocol;
 pub use tls::TlsProtocol;
 pub use udp::UdpProtocol;
 pub use vlan::VlanProtocol;
+pub use vxlan::VxlanProtocol;
 
 /// Create a registry with all built-in protocol parsers.
 pub fn default_registry() -> ProtocolRegistry {
@@ -91,6 +105,7 @@ pub fn default_registry() -> ProtocolRegistry {
     registry.register(EthernetProtocol);
     registry.register(ArpProtocol);
     registry.register(VlanProtocol);
+    registry.register(MplsProtocol);
 
     // Layer 3
     registry.register(Ipv4Protocol);
@@ -102,11 +117,21 @@ pub fn default_registry() -> ProtocolRegistry {
     registry.register(IcmpProtocol);
     registry.register(Icmpv6Protocol);
 
+    // Tunneling protocols (higher priority than application protocols)
+    registry.register(GreProtocol);
+    registry.register(VxlanProtocol);
+    registry.register(GtpProtocol);
+    registry.register(IpsecProtocol);
+
+    // Routing protocols
+    registry.register(BgpProtocol);
+    registry.register(OspfProtocol);
+
     // Application layer
+    // Note: HTTP is parsed via TCP stream reassembly (see stream::parsers::http)
     registry.register(DnsProtocol);
     registry.register(DhcpProtocol);
     registry.register(NtpProtocol);
-    registry.register(HttpProtocol);
     registry.register(TlsProtocol);
     registry.register(SshProtocol);
     registry.register(QuicProtocol);

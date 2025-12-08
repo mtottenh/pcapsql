@@ -7,7 +7,9 @@ use std::sync::Arc;
 use arrow::array::{Array, StringArray, UInt16Array, UInt8Array};
 use arrow::datatypes::DataType;
 use datafusion::common::Result as DFResult;
-use datafusion::logical_expr::{ColumnarValue, ScalarUDF, ScalarUDFImpl, Signature, Volatility};
+use datafusion::logical_expr::{
+    ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
+};
 
 /// Create the `ip_proto_name()` UDF that converts IP protocol number to name.
 ///
@@ -35,7 +37,7 @@ pub fn create_ethertype_name_udf() -> ScalarUDF {
 // ip_proto_name() UDF Implementation
 // ============================================================================
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 struct IpProtoNameUdf {
     signature: Signature,
 }
@@ -65,8 +67,8 @@ impl ScalarUDFImpl for IpProtoNameUdf {
         Ok(DataType::Utf8)
     }
 
-    fn invoke(&self, args: &[ColumnarValue]) -> DFResult<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(args)?;
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
         let proto_values = args[0]
             .as_any()
             .downcast_ref::<UInt8Array>()
@@ -233,7 +235,7 @@ fn ip_proto_to_name(proto: u8) -> String {
 // ethertype_name() UDF Implementation
 // ============================================================================
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 struct EthertypeNameUdf {
     signature: Signature,
 }
@@ -263,8 +265,8 @@ impl ScalarUDFImpl for EthertypeNameUdf {
         Ok(DataType::Utf8)
     }
 
-    fn invoke(&self, args: &[ColumnarValue]) -> DFResult<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(args)?;
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
         let ethertype_values = args[0]
             .as_any()
             .downcast_ref::<UInt16Array>()

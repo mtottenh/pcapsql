@@ -7,7 +7,9 @@ use std::sync::Arc;
 use arrow::array::{Array, BooleanArray, StringArray, UInt16Array};
 use arrow::datatypes::DataType;
 use datafusion::common::Result as DFResult;
-use datafusion::logical_expr::{ColumnarValue, ScalarUDF, ScalarUDFImpl, Signature, Volatility};
+use datafusion::logical_expr::{
+    ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
+};
 
 /// TCP flag bit positions and names.
 const TCP_FLAGS: &[(u16, &str)] = &[
@@ -48,7 +50,7 @@ pub fn create_has_tcp_flag_udf() -> ScalarUDF {
 // tcp_flags_str() UDF Implementation
 // ============================================================================
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 struct TcpFlagsStrUdf {
     signature: Signature,
 }
@@ -78,8 +80,8 @@ impl ScalarUDFImpl for TcpFlagsStrUdf {
         Ok(DataType::Utf8)
     }
 
-    fn invoke(&self, args: &[ColumnarValue]) -> DFResult<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(args)?;
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
         let flags_values = args[0]
             .as_any()
             .downcast_ref::<UInt16Array>()
@@ -113,7 +115,7 @@ fn format_tcp_flags(flags: u16) -> String {
 // has_tcp_flag() UDF Implementation
 // ============================================================================
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 struct HasTcpFlagUdf {
     signature: Signature,
 }
@@ -146,8 +148,8 @@ impl ScalarUDFImpl for HasTcpFlagUdf {
         Ok(DataType::Boolean)
     }
 
-    fn invoke(&self, args: &[ColumnarValue]) -> DFResult<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(args)?;
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
         let flags_values = args[0]
             .as_any()
             .downcast_ref::<UInt16Array>()

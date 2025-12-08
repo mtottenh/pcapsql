@@ -7,7 +7,9 @@ use std::sync::Arc;
 use arrow::array::{Array, StringArray, UInt16Array, UInt8Array};
 use arrow::datatypes::DataType;
 use datafusion::common::Result as DFResult;
-use datafusion::logical_expr::{ColumnarValue, ScalarUDF, ScalarUDFImpl, Signature, Volatility};
+use datafusion::logical_expr::{
+    ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
+};
 
 /// Create the `dns_type_name()` UDF that converts DNS query type number to name.
 ///
@@ -46,7 +48,7 @@ pub fn create_dns_class_name_udf() -> ScalarUDF {
 // dns_type_name() UDF Implementation
 // ============================================================================
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 struct DnsTypeNameUdf {
     signature: Signature,
 }
@@ -76,8 +78,8 @@ impl ScalarUDFImpl for DnsTypeNameUdf {
         Ok(DataType::Utf8)
     }
 
-    fn invoke(&self, args: &[ColumnarValue]) -> DFResult<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(args)?;
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
         let type_values = args[0]
             .as_any()
             .downcast_ref::<UInt16Array>()
@@ -154,7 +156,7 @@ fn dns_type_to_name(qtype: u16) -> String {
 // dns_rcode_name() UDF Implementation
 // ============================================================================
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 struct DnsRcodeNameUdf {
     signature: Signature,
 }
@@ -184,8 +186,8 @@ impl ScalarUDFImpl for DnsRcodeNameUdf {
         Ok(DataType::Utf8)
     }
 
-    fn invoke(&self, args: &[ColumnarValue]) -> DFResult<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(args)?;
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
         let rcode_values = args[0]
             .as_any()
             .downcast_ref::<UInt8Array>()
@@ -231,7 +233,7 @@ fn dns_rcode_to_name(rcode: u8) -> String {
 // dns_class_name() UDF Implementation
 // ============================================================================
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 struct DnsClassNameUdf {
     signature: Signature,
 }
@@ -261,8 +263,8 @@ impl ScalarUDFImpl for DnsClassNameUdf {
         Ok(DataType::Utf8)
     }
 
-    fn invoke(&self, args: &[ColumnarValue]) -> DFResult<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(args)?;
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
         let class_values = args[0]
             .as_any()
             .downcast_ref::<UInt16Array>()

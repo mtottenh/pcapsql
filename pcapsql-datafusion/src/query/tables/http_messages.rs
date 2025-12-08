@@ -113,7 +113,7 @@ pub fn build_http_messages_batch(messages: &[ParsedMessage]) -> Result<RecordBat
     ];
 
     RecordBatch::try_new(http_messages_schema(), columns)
-        .map_err(|e| datafusion::error::DataFusionError::ArrowError(e, None))
+        .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))
 }
 
 fn append_string(

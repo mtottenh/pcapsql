@@ -78,7 +78,7 @@ pub fn build_tls_sessions_batch(messages: &[ParsedMessage]) -> Result<RecordBatc
     ];
 
     RecordBatch::try_new(tls_sessions_schema(), columns)
-        .map_err(|e| datafusion::error::DataFusionError::ArrowError(e, None))
+        .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))
 }
 
 fn append_string_field(

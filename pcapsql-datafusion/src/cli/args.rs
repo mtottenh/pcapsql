@@ -158,6 +158,13 @@ pub struct Args {
     /// Connections with no activity for this duration are cleaned up.
     #[arg(long = "stream-timeout", default_value = "300", value_name = "SECONDS")]
     pub stream_timeout_secs: u64,
+
+    /// Show cache statistics after query execution.
+    ///
+    /// Displays hit rate, eviction counts, memory usage, and other
+    /// cache performance metrics. Useful for tuning --cache-size.
+    #[arg(long = "stats")]
+    pub show_stats: bool,
 }
 
 /// Value parser for size arguments (e.g., "512M", "1G").

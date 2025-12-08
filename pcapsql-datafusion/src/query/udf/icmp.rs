@@ -7,7 +7,9 @@ use std::sync::Arc;
 use arrow::array::{Array, StringArray, UInt8Array};
 use arrow::datatypes::DataType;
 use datafusion::common::Result as DFResult;
-use datafusion::logical_expr::{ColumnarValue, ScalarUDF, ScalarUDFImpl, Signature, Volatility};
+use datafusion::logical_expr::{
+    ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
+};
 
 /// Create the `icmp_type_name()` UDF that converts ICMP type to human-readable name.
 ///
@@ -34,7 +36,7 @@ pub fn create_icmpv6_type_name_udf() -> ScalarUDF {
 // icmp_type_name() UDF Implementation
 // ============================================================================
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 struct IcmpTypeNameUdf {
     signature: Signature,
 }
@@ -64,8 +66,8 @@ impl ScalarUDFImpl for IcmpTypeNameUdf {
         Ok(DataType::Utf8)
     }
 
-    fn invoke(&self, args: &[ColumnarValue]) -> DFResult<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(args)?;
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
         let type_values = args[0]
             .as_any()
             .downcast_ref::<UInt8Array>()
@@ -121,7 +123,7 @@ fn icmp_type_to_name(icmp_type: u8) -> String {
 // icmpv6_type_name() UDF Implementation
 // ============================================================================
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 struct Icmpv6TypeNameUdf {
     signature: Signature,
 }
@@ -151,8 +153,8 @@ impl ScalarUDFImpl for Icmpv6TypeNameUdf {
         Ok(DataType::Utf8)
     }
 
-    fn invoke(&self, args: &[ColumnarValue]) -> DFResult<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(args)?;
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
         let type_values = args[0]
             .as_any()
             .downcast_ref::<UInt8Array>()

@@ -1,8 +1,22 @@
+//! HTTP/1.x stream parser using httparse for zero-copy parsing.
+//!
+//! This parser handles HTTP messages that span multiple TCP packets through
+//! stream reassembly. It supports:
+//! - HTTP/1.0 and HTTP/1.1 requests and responses
+//! - Chunked transfer encoding
+//! - Content-Length based body parsing
+//! - Keep-alive connections with multiple messages per stream
+
 use std::collections::HashMap;
+
+use httparse::{Request, Response, Status, EMPTY_HEADER};
 
 use crate::protocol::FieldValue;
 use crate::schema::{DataKind, FieldDescriptor};
 use crate::stream::{ParsedMessage, StreamContext, StreamParseResult, StreamParser};
+
+/// Maximum number of headers to parse per message.
+const MAX_HEADERS: usize = 100;
 
 /// HTTP/1.x stream parser.
 #[derive(Debug, Clone, Copy, Default)]
@@ -13,93 +27,141 @@ impl HttpStreamParser {
         Self
     }
 
-    /// Find the end of HTTP headers (\r\n\r\n).
-    fn find_header_end(data: &[u8]) -> Option<usize> {
-        data.windows(4)
-            .position(|w| w == b"\r\n\r\n")
-            .map(|p| p + 4)
-    }
+    /// Extract headers from httparse header array into fields map.
+    fn extract_headers(headers: &[httparse::Header], fields: &mut HashMap<String, FieldValue>) {
+        for header in headers.iter().filter(|h| !h.name.is_empty()) {
+            let name_lower = header.name.to_ascii_lowercase();
+            let value = String::from_utf8_lossy(header.value).to_string();
 
-    /// Parse HTTP request line: "METHOD URI VERSION\r\n"
-    fn parse_request_line(line: &str) -> Option<(String, String, String)> {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 3 {
-            Some((
-                parts[0].to_string(),
-                parts[1].to_string(),
-                parts[2].to_string(),
-            ))
-        } else {
-            None
-        }
-    }
-
-    /// Parse HTTP status line: "VERSION STATUS TEXT\r\n"
-    fn parse_status_line(line: &str) -> Option<(String, u16, String)> {
-        let parts: Vec<&str> = line.splitn(3, ' ').collect();
-        if parts.len() >= 2 {
-            let version = parts[0].to_string();
-            let status = parts[1].parse().ok()?;
-            let text = parts.get(2).unwrap_or(&"").to_string();
-            Some((version, status, text))
-        } else {
-            None
-        }
-    }
-
-    /// Parse headers into a map.
-    fn parse_headers(header_section: &str) -> HashMap<String, String> {
-        let mut headers = HashMap::new();
-        for line in header_section.lines().skip(1) {
-            // Skip first line (request/status)
-            if let Some((key, value)) = line.split_once(':') {
-                headers.insert(key.trim().to_lowercase(), value.trim().to_string());
+            match name_lower.as_str() {
+                "host" => {
+                    fields.insert("host".to_string(), FieldValue::String(value));
+                }
+                "content-type" => {
+                    fields.insert("content_type".to_string(), FieldValue::String(value));
+                }
+                "content-length" => {
+                    if let Ok(len) = value.parse::<u64>() {
+                        fields.insert("content_length".to_string(), FieldValue::UInt64(len));
+                    }
+                }
+                "user-agent" => {
+                    fields.insert("user_agent".to_string(), FieldValue::String(value));
+                }
+                "server" => {
+                    fields.insert("server".to_string(), FieldValue::String(value));
+                }
+                "transfer-encoding" => {
+                    fields.insert("transfer_encoding".to_string(), FieldValue::String(value));
+                }
+                "connection" => {
+                    fields.insert("connection".to_string(), FieldValue::String(value));
+                }
+                "cookie" => {
+                    fields.insert("cookie".to_string(), FieldValue::String(value));
+                }
+                "set-cookie" => {
+                    fields
+                        .entry("set_cookie".to_string())
+                        .or_insert(FieldValue::String(value));
+                }
+                "referer" | "referrer" => {
+                    fields.insert("referer".to_string(), FieldValue::String(value));
+                }
+                "accept" => {
+                    fields.insert("accept".to_string(), FieldValue::String(value));
+                }
+                "accept-encoding" => {
+                    fields.insert("accept_encoding".to_string(), FieldValue::String(value));
+                }
+                "accept-language" => {
+                    fields.insert("accept_language".to_string(), FieldValue::String(value));
+                }
+                "cache-control" => {
+                    fields.insert("cache_control".to_string(), FieldValue::String(value));
+                }
+                "authorization" => {
+                    // Store auth type only for security
+                    let auth_type = value.split_whitespace().next().unwrap_or(&value);
+                    fields.insert("authorization".to_string(), FieldValue::String(auth_type.to_string()));
+                }
+                "location" => {
+                    fields.insert("location".to_string(), FieldValue::String(value));
+                }
+                "x-forwarded-for" => {
+                    fields.insert("x_forwarded_for".to_string(), FieldValue::String(value));
+                }
+                "x-real-ip" => {
+                    fields.insert("x_real_ip".to_string(), FieldValue::String(value));
+                }
+                _ => {}
             }
         }
-        headers
-    }
-
-    /// Get Content-Length from headers.
-    fn get_content_length(headers: &HashMap<String, String>) -> Option<usize> {
-        headers.get("content-length").and_then(|v| v.parse().ok())
     }
 
     /// Check if transfer encoding is chunked.
-    fn is_chunked(headers: &HashMap<String, String>) -> bool {
-        headers
-            .get("transfer-encoding")
-            .map(|v| v.to_lowercase().contains("chunked"))
+    fn is_chunked(fields: &HashMap<String, FieldValue>) -> bool {
+        fields
+            .get("transfer_encoding")
+            .map(|v| {
+                if let FieldValue::String(s) = v {
+                    s.to_lowercase().contains("chunked")
+                } else {
+                    false
+                }
+            })
             .unwrap_or(false)
     }
 
-    /// Parse chunked body and return total length.
+    /// Get Content-Length from fields.
+    fn get_content_length(fields: &HashMap<String, FieldValue>) -> Option<usize> {
+        fields.get("content_length").and_then(|v| {
+            if let FieldValue::UInt64(len) = v {
+                Some(*len as usize)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Parse chunked body and return total length consumed.
     fn parse_chunked_body(data: &[u8]) -> Option<usize> {
         let mut pos = 0;
 
         loop {
-            // Find chunk size line
-            let chunk_start = pos;
+            // Find chunk size line ending
             let line_end = data[pos..]
                 .windows(2)
                 .position(|w| w == b"\r\n")
                 .map(|p| pos + p)?;
 
-            let size_str = std::str::from_utf8(&data[chunk_start..line_end]).ok()?;
-            let chunk_size = usize::from_str_radix(size_str.trim(), 16).ok()?;
+            let size_str = std::str::from_utf8(&data[pos..line_end]).ok()?;
+            // Handle chunk extensions (anything after semicolon)
+            let size_part = size_str.split(';').next().unwrap_or(size_str);
+            let chunk_size = usize::from_str_radix(size_part.trim(), 16).ok()?;
 
             pos = line_end + 2; // Skip \r\n
 
             if chunk_size == 0 {
-                // Final chunk
+                // Final chunk - need trailing \r\n (and optional trailers)
                 if data.len() >= pos + 2 && &data[pos..pos + 2] == b"\r\n" {
                     return Some(pos + 2);
                 }
-                return None; // Need trailing \r\n
+                // Might have trailers, look for \r\n\r\n
+                if let Some(end) = data[pos..].windows(4).position(|w| w == b"\r\n\r\n") {
+                    return Some(pos + end + 4);
+                }
+                return None; // Need more data
             }
 
-            // Need chunk data + \r\n
+            // Need chunk data + trailing \r\n
             if data.len() < pos + chunk_size + 2 {
                 return None;
+            }
+
+            // Verify trailing \r\n after chunk data
+            if &data[pos + chunk_size..pos + chunk_size + 2] != b"\r\n" {
+                return None; // Malformed
             }
 
             pos += chunk_size + 2;
@@ -118,8 +180,8 @@ impl StreamParser for HttpStreamParser {
 
     fn can_parse_stream(&self, context: &StreamContext) -> bool {
         // Common HTTP ports
-        let http_ports = [80, 8080, 8000, 8888, 3000, 5000];
-        http_ports.contains(&context.dst_port) || http_ports.contains(&context.src_port)
+        const HTTP_PORTS: [u16; 6] = [80, 8080, 8000, 8888, 3000, 5000];
+        HTTP_PORTS.contains(&context.dst_port) || HTTP_PORTS.contains(&context.src_port)
     }
 
     fn parse_stream(&self, data: &[u8], context: &StreamContext) -> StreamParseResult {
@@ -130,120 +192,174 @@ impl StreamParser for HttpStreamParser {
             };
         }
 
-        // Find end of headers
-        let header_end = match Self::find_header_end(data) {
-            Some(pos) => pos,
-            None => {
+        let mut fields = HashMap::new();
+
+        // Try to parse as HTTP request first
+        let mut headers = [EMPTY_HEADER; MAX_HEADERS];
+        let mut req = Request::new(&mut headers);
+
+        match req.parse(data) {
+            Ok(Status::Complete(header_len)) => {
+                fields.insert("is_request".to_string(), FieldValue::Bool(true));
+
+                if let Some(method) = req.method {
+                    fields.insert("method".to_string(), FieldValue::String(method.to_string()));
+                }
+
+                if let Some(path) = req.path {
+                    fields.insert("uri".to_string(), FieldValue::String(path.to_string()));
+                }
+
+                if let Some(version) = req.version {
+                    let version_str = format!("HTTP/1.{}", version);
+                    fields.insert("http_version".to_string(), FieldValue::String(version_str));
+                }
+
+                Self::extract_headers(&headers, &mut fields);
+
+                // Calculate body length
+                let body_start = header_len;
+                let body_length = if Self::is_chunked(&fields) {
+                    match Self::parse_chunked_body(&data[body_start..]) {
+                        Some(len) => len,
+                        None => {
+                            return StreamParseResult::NeedMore {
+                                minimum_bytes: None,
+                            }
+                        }
+                    }
+                } else if let Some(content_length) = Self::get_content_length(&fields) {
+                    let needed = body_start + content_length;
+                    if data.len() < needed {
+                        return StreamParseResult::NeedMore {
+                            minimum_bytes: Some(needed),
+                        };
+                    }
+                    content_length
+                } else {
+                    // No body for requests without Content-Length or chunked encoding
+                    0
+                };
+
+                let total_length = body_start + body_length;
+
+                let message = ParsedMessage {
+                    protocol: "http",
+                    connection_id: context.connection_id,
+                    message_id: context.messages_parsed as u32,
+                    direction: context.direction,
+                    frame_number: 0,
+                    fields,
+                };
+
+                return StreamParseResult::Complete {
+                    messages: vec![message],
+                    bytes_consumed: total_length,
+                };
+            }
+            Ok(Status::Partial) => {
                 // Headers not complete yet
                 return StreamParseResult::NeedMore {
                     minimum_bytes: None,
                 };
             }
-        };
-
-        // Parse header section
-        let header_section = match std::str::from_utf8(&data[..header_end]) {
-            Ok(s) => s,
             Err(_) => {
-                return StreamParseResult::Error {
-                    message: "Invalid UTF-8 in HTTP headers".to_string(),
-                    skip_bytes: Some(1),
+                // Not a request, try response
+            }
+        }
+
+        // Try to parse as HTTP response
+        let mut headers = [EMPTY_HEADER; MAX_HEADERS];
+        let mut resp = Response::new(&mut headers);
+
+        match resp.parse(data) {
+            Ok(Status::Complete(header_len)) => {
+                fields.insert("is_request".to_string(), FieldValue::Bool(false));
+
+                if let Some(version) = resp.version {
+                    let version_str = format!("HTTP/1.{}", version);
+                    fields.insert("http_version".to_string(), FieldValue::String(version_str));
+                }
+
+                if let Some(code) = resp.code {
+                    fields.insert("status_code".to_string(), FieldValue::UInt16(code));
+                }
+
+                if let Some(reason) = resp.reason {
+                    fields.insert("status_text".to_string(), FieldValue::String(reason.to_string()));
+                }
+
+                Self::extract_headers(&headers, &mut fields);
+
+                // Calculate body length
+                let body_start = header_len;
+                let body_length = if Self::is_chunked(&fields) {
+                    match Self::parse_chunked_body(&data[body_start..]) {
+                        Some(len) => len,
+                        None => {
+                            return StreamParseResult::NeedMore {
+                                minimum_bytes: None,
+                            }
+                        }
+                    }
+                } else if let Some(content_length) = Self::get_content_length(&fields) {
+                    let needed = body_start + content_length;
+                    if data.len() < needed {
+                        return StreamParseResult::NeedMore {
+                            minimum_bytes: Some(needed),
+                        };
+                    }
+                    content_length
+                } else {
+                    // For responses without Content-Length, this is tricky
+                    // In HTTP/1.0, connection close signals end of response
+                    // For now, assume no body if neither is present
+                    0
+                };
+
+                let total_length = body_start + body_length;
+
+                let message = ParsedMessage {
+                    protocol: "http",
+                    connection_id: context.connection_id,
+                    message_id: context.messages_parsed as u32,
+                    direction: context.direction,
+                    frame_number: 0,
+                    fields,
+                };
+
+                return StreamParseResult::Complete {
+                    messages: vec![message],
+                    bytes_consumed: total_length,
                 };
             }
-        };
-
-        let first_line = header_section.lines().next().unwrap_or("");
-        let headers = Self::parse_headers(header_section);
-
-        // Determine if request or response
-        let is_request = first_line.starts_with("GET ")
-            || first_line.starts_with("POST ")
-            || first_line.starts_with("PUT ")
-            || first_line.starts_with("DELETE ")
-            || first_line.starts_with("HEAD ")
-            || first_line.starts_with("OPTIONS ")
-            || first_line.starts_with("PATCH ")
-            || first_line.starts_with("CONNECT ");
-
-        let mut fields = HashMap::new();
-        fields.insert("is_request".to_string(), FieldValue::Bool(is_request));
-
-        if is_request {
-            // Parse request
-            if let Some((method, uri, version)) = Self::parse_request_line(first_line) {
-                fields.insert("method".to_string(), FieldValue::String(method));
-                fields.insert("uri".to_string(), FieldValue::String(uri));
-                fields.insert("http_version".to_string(), FieldValue::String(version));
+            Ok(Status::Partial) => {
+                return StreamParseResult::NeedMore {
+                    minimum_bytes: None,
+                };
             }
-        } else if first_line.starts_with("HTTP/") {
-            // Parse response
-            if let Some((version, status, text)) = Self::parse_status_line(first_line) {
-                fields.insert("http_version".to_string(), FieldValue::String(version));
-                fields.insert("status_code".to_string(), FieldValue::UInt16(status));
-                fields.insert("status_text".to_string(), FieldValue::String(text));
-            }
-        } else {
-            return StreamParseResult::NotThisProtocol;
-        }
-
-        // Add common headers
-        if let Some(host) = headers.get("host") {
-            fields.insert("host".to_string(), FieldValue::String(host.clone()));
-        }
-        if let Some(ct) = headers.get("content-type") {
-            fields.insert("content_type".to_string(), FieldValue::String(ct.clone()));
-        }
-        if let Some(ua) = headers.get("user-agent") {
-            fields.insert("user_agent".to_string(), FieldValue::String(ua.clone()));
-        }
-        if let Some(server) = headers.get("server") {
-            fields.insert("server".to_string(), FieldValue::String(server.clone()));
-        }
-
-        // Calculate total message length
-        let body_start = header_end;
-        let body_length = if Self::is_chunked(&headers) {
-            // Chunked transfer encoding
-            match Self::parse_chunked_body(&data[body_start..]) {
-                Some(len) => len,
-                None => {
+            Err(_) => {
+                // Check if it looks like HTTP at all
+                if data.starts_with(b"GET ")
+                    || data.starts_with(b"POST ")
+                    || data.starts_with(b"PUT ")
+                    || data.starts_with(b"DELETE ")
+                    || data.starts_with(b"HEAD ")
+                    || data.starts_with(b"OPTIONS ")
+                    || data.starts_with(b"PATCH ")
+                    || data.starts_with(b"CONNECT ")
+                    || data.starts_with(b"HTTP/")
+                {
+                    // Looks like HTTP but parsing failed - need more data?
                     return StreamParseResult::NeedMore {
                         minimum_bytes: None,
-                    }
+                    };
                 }
             }
-        } else if let Some(content_length) = Self::get_content_length(&headers) {
-            fields.insert(
-                "content_length".to_string(),
-                FieldValue::UInt64(content_length as u64),
-            );
-            let needed = body_start + content_length;
-            if data.len() < needed {
-                return StreamParseResult::NeedMore {
-                    minimum_bytes: Some(needed),
-                };
-            }
-            content_length
-        } else {
-            // No body (or connection-close semantics)
-            0
-        };
-
-        let total_length = body_start + body_length;
-
-        let message = ParsedMessage {
-            protocol: "http",
-            connection_id: context.connection_id,
-            message_id: context.messages_parsed as u32,
-            direction: context.direction,
-            frame_number: 0, // Set by caller
-            fields,
-        };
-
-        StreamParseResult::Complete {
-            messages: vec![message],
-            bytes_consumed: total_length,
         }
+
+        // Not HTTP
+        StreamParseResult::NotThisProtocol
     }
 
     fn message_schema(&self) -> Vec<FieldDescriptor> {
@@ -262,6 +378,19 @@ impl StreamParser for HttpStreamParser {
             FieldDescriptor::new("content_length", DataKind::UInt64).set_nullable(true),
             FieldDescriptor::new("user_agent", DataKind::String).set_nullable(true),
             FieldDescriptor::new("server", DataKind::String).set_nullable(true),
+            FieldDescriptor::new("transfer_encoding", DataKind::String).set_nullable(true),
+            FieldDescriptor::new("connection", DataKind::String).set_nullable(true),
+            FieldDescriptor::new("cookie", DataKind::String).set_nullable(true),
+            FieldDescriptor::new("set_cookie", DataKind::String).set_nullable(true),
+            FieldDescriptor::new("referer", DataKind::String).set_nullable(true),
+            FieldDescriptor::new("accept", DataKind::String).set_nullable(true),
+            FieldDescriptor::new("accept_encoding", DataKind::String).set_nullable(true),
+            FieldDescriptor::new("accept_language", DataKind::String).set_nullable(true),
+            FieldDescriptor::new("cache_control", DataKind::String).set_nullable(true),
+            FieldDescriptor::new("authorization", DataKind::String).set_nullable(true),
+            FieldDescriptor::new("location", DataKind::String).set_nullable(true),
+            FieldDescriptor::new("x_forwarded_for", DataKind::String).set_nullable(true),
+            FieldDescriptor::new("x_real_ip", DataKind::String).set_nullable(true),
         ]
     }
 }
@@ -286,7 +415,6 @@ mod tests {
         }
     }
 
-    // Test 1: Simple GET request
     #[test]
     fn test_simple_get_request() {
         let parser = HttpStreamParser::new();
@@ -315,7 +443,6 @@ mod tests {
         }
     }
 
-    // Test 2: POST request with body
     #[test]
     fn test_post_with_body() {
         let parser = HttpStreamParser::new();
@@ -343,7 +470,6 @@ mod tests {
         }
     }
 
-    // Test 3: HTTP response with Content-Length
     #[test]
     fn test_response_with_content_length() {
         let parser = HttpStreamParser::new();
@@ -374,7 +500,6 @@ mod tests {
         }
     }
 
-    // Test 4: Chunked transfer encoding
     #[test]
     fn test_chunked_encoding() {
         let parser = HttpStreamParser::new();
@@ -394,7 +519,26 @@ mod tests {
         }
     }
 
-    // Test 5: HTTP keep-alive (multiple messages)
+    #[test]
+    fn test_chunked_with_extensions() {
+        let parser = HttpStreamParser::new();
+        // Chunked encoding with chunk extension (name=value after size)
+        let response =
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5;name=value\r\nHello\r\n0\r\n\r\n";
+
+        let mut ctx = test_context();
+        ctx.direction = Direction::ToClient;
+
+        let result = parser.parse_stream(response.as_bytes(), &ctx);
+
+        match result {
+            StreamParseResult::Complete { bytes_consumed, .. } => {
+                assert_eq!(bytes_consumed, response.len());
+            }
+            _ => panic!("Expected Complete"),
+        }
+    }
+
     #[test]
     fn test_keepalive_multiple_requests() {
         let parser = HttpStreamParser::new();
@@ -429,7 +573,6 @@ mod tests {
         }
     }
 
-    // Test 6: Incomplete header (NeedMore)
     #[test]
     fn test_incomplete_header() {
         let parser = HttpStreamParser::new();
@@ -443,7 +586,6 @@ mod tests {
         }
     }
 
-    // Test 7: Incomplete body (NeedMore)
     #[test]
     fn test_incomplete_body() {
         let parser = HttpStreamParser::new();
@@ -460,17 +602,162 @@ mod tests {
         }
     }
 
-    // Test 8: Malformed request
     #[test]
     fn test_not_http() {
         let parser = HttpStreamParser::new();
-        let garbage = b"\x00\x01\x02\x03not http at all\r\n\r\n";
+        let garbage = b"NOTHTTP random garbage data\x00\x01\x02";
 
         let result = parser.parse_stream(garbage, &test_context());
 
         match result {
-            StreamParseResult::NotThisProtocol | StreamParseResult::Error { .. } => {}
-            _ => panic!("Expected NotThisProtocol or Error"),
+            StreamParseResult::NotThisProtocol => {}
+            _ => panic!("Expected NotThisProtocol"),
+        }
+    }
+
+    #[test]
+    fn test_response_with_all_headers() {
+        let parser = HttpStreamParser::new();
+        let response = "HTTP/1.1 302 Found\r\n\
+            Server: nginx/1.18.0\r\n\
+            Content-Type: text/html\r\n\
+            Content-Length: 0\r\n\
+            Location: https://example.com/new\r\n\
+            Set-Cookie: session=abc123; HttpOnly\r\n\
+            Cache-Control: no-cache\r\n\
+            \r\n";
+
+        let mut ctx = test_context();
+        ctx.direction = Direction::ToClient;
+
+        let result = parser.parse_stream(response.as_bytes(), &ctx);
+
+        match result {
+            StreamParseResult::Complete { messages, .. } => {
+                let msg = &messages[0];
+                assert_eq!(
+                    msg.fields.get("status_code"),
+                    Some(&FieldValue::UInt16(302))
+                );
+                assert_eq!(
+                    msg.fields.get("location"),
+                    Some(&FieldValue::String("https://example.com/new".to_string()))
+                );
+                assert!(msg.fields.get("set_cookie").is_some());
+                assert_eq!(
+                    msg.fields.get("cache_control"),
+                    Some(&FieldValue::String("no-cache".to_string()))
+                );
+            }
+            _ => panic!("Expected Complete"),
+        }
+    }
+
+    #[test]
+    fn test_request_with_cookie() {
+        let parser = HttpStreamParser::new();
+        let request = "GET /api HTTP/1.1\r\n\
+            Host: api.example.com\r\n\
+            Cookie: session=xyz789; user=john\r\n\
+            Authorization: Bearer token123\r\n\
+            X-Forwarded-For: 10.0.0.1\r\n\
+            \r\n";
+
+        let result = parser.parse_stream(request.as_bytes(), &test_context());
+
+        match result {
+            StreamParseResult::Complete { messages, .. } => {
+                let msg = &messages[0];
+                assert_eq!(
+                    msg.fields.get("cookie"),
+                    Some(&FieldValue::String("session=xyz789; user=john".to_string()))
+                );
+                // Auth should only contain the type
+                assert_eq!(
+                    msg.fields.get("authorization"),
+                    Some(&FieldValue::String("Bearer".to_string()))
+                );
+                assert_eq!(
+                    msg.fields.get("x_forwarded_for"),
+                    Some(&FieldValue::String("10.0.0.1".to_string()))
+                );
+            }
+            _ => panic!("Expected Complete"),
+        }
+    }
+
+    #[test]
+    fn test_http10_request() {
+        let parser = HttpStreamParser::new();
+        let request = "GET / HTTP/1.0\r\n\r\n";
+
+        let result = parser.parse_stream(request.as_bytes(), &test_context());
+
+        match result {
+            StreamParseResult::Complete { messages, .. } => {
+                assert_eq!(
+                    messages[0].fields.get("http_version"),
+                    Some(&FieldValue::String("HTTP/1.0".to_string()))
+                );
+            }
+            _ => panic!("Expected Complete"),
+        }
+    }
+
+    #[test]
+    fn test_head_request() {
+        let parser = HttpStreamParser::new();
+        let request = "HEAD /status HTTP/1.1\r\nHost: example.com\r\n\r\n";
+
+        let result = parser.parse_stream(request.as_bytes(), &test_context());
+
+        match result {
+            StreamParseResult::Complete { messages, .. } => {
+                assert_eq!(
+                    messages[0].fields.get("method"),
+                    Some(&FieldValue::String("HEAD".to_string()))
+                );
+            }
+            _ => panic!("Expected Complete"),
+        }
+    }
+
+    #[test]
+    fn test_options_request() {
+        let parser = HttpStreamParser::new();
+        let request = "OPTIONS * HTTP/1.1\r\nHost: example.com\r\n\r\n";
+
+        let result = parser.parse_stream(request.as_bytes(), &test_context());
+
+        match result {
+            StreamParseResult::Complete { messages, .. } => {
+                assert_eq!(
+                    messages[0].fields.get("method"),
+                    Some(&FieldValue::String("OPTIONS".to_string()))
+                );
+            }
+            _ => panic!("Expected Complete"),
+        }
+    }
+
+    #[test]
+    fn test_100_continue_response() {
+        let parser = HttpStreamParser::new();
+        let response = "HTTP/1.1 100 Continue\r\n\r\n";
+
+        let mut ctx = test_context();
+        ctx.direction = Direction::ToClient;
+
+        let result = parser.parse_stream(response.as_bytes(), &ctx);
+
+        match result {
+            StreamParseResult::Complete { messages, .. } => {
+                assert_eq!(
+                    messages[0].fields.get("status_code"),
+                    Some(&FieldValue::UInt16(100))
+                );
+            }
+            _ => panic!("Expected Complete"),
         }
     }
 }

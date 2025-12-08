@@ -8,32 +8,50 @@
 //! so you can query TCP traffic with timestamps and IP addresses directly.
 
 mod arp;
+mod bgp;
 mod dhcp;
 mod dns;
+mod gre;
+mod gtp;
 mod http;
 mod icmp;
 mod icmpv6;
+mod ipsec;
+mod mld;
+mod mpls;
+mod ndp;
 mod ntp;
+mod ospf;
 mod packets;
 mod quic;
 mod ssh;
 mod tcp;
 mod tls;
 mod udp;
+mod vxlan;
 
 pub use arp::arp_packets_view;
+pub use bgp::bgp_packets_view;
 pub use dhcp::dhcp_packets_view;
 pub use dns::dns_packets_view;
+pub use gre::gre_packets_view;
+pub use gtp::gtp_packets_view;
 pub use http::http_packets_view;
 pub use icmp::icmp_packets_view;
 pub use icmpv6::icmpv6_packets_view;
+pub use ipsec::ipsec_packets_view;
+pub use mld::mld_packets_view;
+pub use mpls::mpls_packets_view;
+pub use ndp::ndp_packets_view;
 pub use ntp::ntp_packets_view;
+pub use ospf::ospf_packets_view;
 pub use packets::packets_view;
 pub use quic::quic_packets_view;
 pub use ssh::ssh_packets_view;
 pub use tcp::tcp_packets_view;
 pub use tls::tls_packets_view;
 pub use udp::udp_packets_view;
+pub use vxlan::vxlan_packets_view;
 
 /// A view definition with its name and SQL.
 #[derive(Debug, Clone)]
@@ -59,8 +77,17 @@ pub fn all_views() -> Vec<ViewDefinition> {
         arp_packets_view(),
         icmp_packets_view(),
         icmpv6_packets_view(),
+        ndp_packets_view(),
+        mld_packets_view(),
         dhcp_packets_view(),
         ntp_packets_view(),
+        gre_packets_view(),
+        mpls_packets_view(),
+        vxlan_packets_view(),
+        gtp_packets_view(),
+        ipsec_packets_view(),
+        bgp_packets_view(),
+        ospf_packets_view(),
         packets_view(),
     ]
 }
@@ -83,8 +110,17 @@ pub fn all_view_names() -> Vec<&'static str> {
         "arp_packets",
         "icmp_packets",
         "icmpv6_packets",
+        "ndp_packets",
+        "mld_packets",
         "dhcp_packets",
         "ntp_packets",
+        "gre_packets",
+        "mpls_packets",
+        "vxlan_packets",
+        "gtp_packets",
+        "ipsec_packets",
+        "bgp_packets",
+        "ospf_packets",
         "packets",
     ]
 }

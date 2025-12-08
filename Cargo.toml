@@ -22,6 +22,7 @@ thiserror = "1.0"
 bytes = "1.0"
 etherparse = "0.15"
 pcap-parser = "0.15"
+httparse = "1.8"
 flate2 = "1.0"
 zstd = "0.13"
 lz4_flex = "0.11"
@@ -31,9 +32,11 @@ memmap2 = "0.9"
 tracing = "0.1"
 
 # DataFusion dependencies (used by pcapsql-datafusion)
-arrow = "53"
-datafusion = "43"
-parquet = "53"
+arrow = "57"
+datafusion = "51"
+datafusion-catalog = "51"
+datafusion-datasource = "51"
+parquet = "57"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 futures = "0.3"
 async-trait = "0.1"
@@ -50,6 +53,7 @@ anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+parking_lot = "0.12"
 
 # Dev dependencies
 criterion = { version = "0.5", features = ["html_reports"] }

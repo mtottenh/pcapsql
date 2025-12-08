@@ -7,7 +7,9 @@ use std::sync::Arc;
 use arrow::array::{Array, BinaryArray, StringArray};
 use arrow::datatypes::DataType;
 use datafusion::common::Result as DFResult;
-use datafusion::logical_expr::{ColumnarValue, ScalarUDF, ScalarUDFImpl, Signature, Volatility};
+use datafusion::logical_expr::{
+    ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
+};
 
 /// Create the `hex()` UDF that converts binary data to hexadecimal string.
 ///
@@ -34,7 +36,7 @@ pub fn create_unhex_udf() -> ScalarUDF {
 // hex() UDF Implementation
 // ============================================================================
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 struct HexUdf {
     signature: Signature,
 }
@@ -64,8 +66,8 @@ impl ScalarUDFImpl for HexUdf {
         Ok(DataType::Utf8)
     }
 
-    fn invoke(&self, args: &[ColumnarValue]) -> DFResult<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(args)?;
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
         let binary_values = args[0]
             .as_any()
             .downcast_ref::<BinaryArray>()
@@ -89,7 +91,7 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
 // unhex() UDF Implementation
 // ============================================================================
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 struct UnhexUdf {
     signature: Signature,
 }
@@ -119,8 +121,8 @@ impl ScalarUDFImpl for UnhexUdf {
         Ok(DataType::Binary)
     }
 
-    fn invoke(&self, args: &[ColumnarValue]) -> DFResult<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(args)?;
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
         let hex_values = args[0]
             .as_any()
             .downcast_ref::<StringArray>()

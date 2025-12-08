@@ -21,6 +21,10 @@ pub enum ReplCommand {
     /// Export query results to file
     /// First String is filename, second is optional SQL query
     Export(String, Option<String>),
+    /// Show cache statistics
+    Stats,
+    /// Reset cache statistics counters
+    StatsReset,
     /// Unknown command
     Unknown(String),
     /// Empty input
@@ -43,6 +47,11 @@ impl ReplCommand {
             // Handle .export specially since it has arguments
             if lower.starts_with(".export ") || lower == ".export" {
                 return Self::parse_export(trimmed);
+            }
+
+            // Handle .stats specially since it has an optional "reset" argument
+            if lower.starts_with(".stats") {
+                return Self::parse_stats(trimmed);
             }
 
             match lower.as_str() {
@@ -84,6 +93,26 @@ impl ReplCommand {
                 }
             }
             _ => ReplCommand::Unknown(".export requires a filename".to_string()),
+        }
+    }
+
+    /// Parse .stats command with optional "reset" argument.
+    fn parse_stats(input: &str) -> Self {
+        // Format: .stats [reset]
+        // Strip prefix case-insensitively
+        let lower = input.to_lowercase();
+        let rest = if lower.starts_with(".stats") {
+            input[".stats".len()..].trim()
+        } else {
+            ""
+        };
+
+        if rest.is_empty() {
+            ReplCommand::Stats
+        } else if rest.eq_ignore_ascii_case("reset") {
+            ReplCommand::StatsReset
+        } else {
+            ReplCommand::Unknown(format!("Unknown stats subcommand: '{}'. Use '.stats' or '.stats reset'", rest))
         }
     }
 
@@ -262,6 +291,32 @@ mod tests {
         ));
         assert!(matches!(
             ReplCommand::parse(".export "),
+            ReplCommand::Unknown(_)
+        ));
+    }
+
+    #[test]
+    fn test_parse_stats() {
+        assert_eq!(ReplCommand::parse(".stats"), ReplCommand::Stats);
+        assert_eq!(ReplCommand::parse(".Stats"), ReplCommand::Stats);
+        assert_eq!(ReplCommand::parse(".STATS"), ReplCommand::Stats);
+    }
+
+    #[test]
+    fn test_parse_stats_reset() {
+        assert_eq!(ReplCommand::parse(".stats reset"), ReplCommand::StatsReset);
+        assert_eq!(ReplCommand::parse(".stats RESET"), ReplCommand::StatsReset);
+        assert_eq!(ReplCommand::parse(".Stats Reset"), ReplCommand::StatsReset);
+    }
+
+    #[test]
+    fn test_parse_stats_unknown_subcommand() {
+        assert!(matches!(
+            ReplCommand::parse(".stats foo"),
+            ReplCommand::Unknown(_)
+        ));
+        assert!(matches!(
+            ReplCommand::parse(".stats clear"),
             ReplCommand::Unknown(_)
         ));
     }

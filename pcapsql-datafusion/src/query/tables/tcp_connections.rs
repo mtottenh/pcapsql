@@ -113,7 +113,7 @@ pub fn build_tcp_connections_batch(connections: &[Connection]) -> Result<RecordB
     ];
 
     RecordBatch::try_new(tcp_connections_schema(), columns)
-        .map_err(|e| datafusion::error::DataFusionError::ArrowError(e, None))
+        .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))
 }
 
 #[cfg(test)]

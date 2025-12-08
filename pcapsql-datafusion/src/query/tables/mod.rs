@@ -9,17 +9,23 @@
 //! - JOINs use `frame_number` as the linking key
 
 mod arp;
+mod bgp;
 mod dhcp;
 mod dns;
 mod ethernet;
 mod frames;
+mod gre;
+mod gtp;
 mod http;
 mod http_messages;
 mod icmp;
 mod icmpv6;
+mod ipsec;
 mod ipv4;
 mod ipv6;
+mod mpls;
 mod ntp;
+mod ospf;
 mod quic;
 mod ssh;
 mod tcp;
@@ -29,19 +35,26 @@ mod tls;
 mod tls_sessions;
 mod udp;
 mod vlan;
+mod vxlan;
 
 pub use arp::arp_table_schema;
+pub use bgp::bgp_table_schema;
 pub use dhcp::dhcp_table_schema;
 pub use dns::dns_table_schema;
 pub use ethernet::ethernet_table_schema;
 pub use frames::frames_table_schema;
+pub use gre::gre_table_schema;
+pub use gtp::gtp_table_schema;
 pub use http::http_table_schema;
 pub use http_messages::{build_http_messages_batch, http_messages_schema};
 pub use icmp::icmp_table_schema;
 pub use icmpv6::icmpv6_table_schema;
+pub use ipsec::ipsec_table_schema;
 pub use ipv4::ipv4_table_schema;
 pub use ipv6::ipv6_table_schema;
+pub use mpls::mpls_table_schema;
 pub use ntp::ntp_table_schema;
+pub use ospf::ospf_table_schema;
 pub use quic::quic_table_schema;
 pub use ssh::ssh_table_schema;
 pub use tcp::tcp_table_schema;
@@ -51,6 +64,7 @@ pub use tls::tls_table_schema;
 pub use tls_sessions::{build_tls_sessions_batch, tls_sessions_schema};
 pub use udp::udp_table_schema;
 pub use vlan::vlan_table_schema;
+pub use vxlan::vxlan_table_schema;
 
 use arrow::datatypes::{DataType, Field, Schema};
 
@@ -62,7 +76,8 @@ pub fn frame_number_field() -> Field {
 /// Get all protocol table names.
 pub fn all_table_names() -> Vec<&'static str> {
     vec![
-        "frames", "ethernet", "arp", "vlan", "ipv4", "ipv6", "tcp", "udp", "icmp", "icmpv6",
+        "frames", "ethernet", "arp", "vlan", "mpls", "ipv4", "ipv6", "tcp", "udp", "icmp", "icmpv6",
+        "gre", "vxlan", "gtp", "ipsec", "bgp", "ospf",
         "dns", "dhcp", "ntp", "http", "tls", "ssh", "quic",
     ]
 }
@@ -74,12 +89,19 @@ pub fn get_table_schema(name: &str) -> Option<Schema> {
         "ethernet" => Some(ethernet_table_schema()),
         "arp" => Some(arp_table_schema()),
         "vlan" => Some(vlan_table_schema()),
+        "mpls" => Some(mpls_table_schema()),
         "ipv4" => Some(ipv4_table_schema()),
         "ipv6" => Some(ipv6_table_schema()),
         "tcp" => Some(tcp_table_schema()),
         "udp" => Some(udp_table_schema()),
         "icmp" => Some(icmp_table_schema()),
         "icmpv6" => Some(icmpv6_table_schema()),
+        "gre" => Some(gre_table_schema()),
+        "vxlan" => Some(vxlan_table_schema()),
+        "gtp" => Some(gtp_table_schema()),
+        "ipsec" => Some(ipsec_table_schema()),
+        "bgp" => Some(bgp_table_schema()),
+        "ospf" => Some(ospf_table_schema()),
         "dns" => Some(dns_table_schema()),
         "dhcp" => Some(dhcp_table_schema()),
         "ntp" => Some(ntp_table_schema()),
@@ -98,12 +120,19 @@ pub fn all_table_schemas() -> Vec<(&'static str, Schema)> {
         ("ethernet", ethernet_table_schema()),
         ("arp", arp_table_schema()),
         ("vlan", vlan_table_schema()),
+        ("mpls", mpls_table_schema()),
         ("ipv4", ipv4_table_schema()),
         ("ipv6", ipv6_table_schema()),
         ("tcp", tcp_table_schema()),
         ("udp", udp_table_schema()),
         ("icmp", icmp_table_schema()),
         ("icmpv6", icmpv6_table_schema()),
+        ("gre", gre_table_schema()),
+        ("vxlan", vxlan_table_schema()),
+        ("gtp", gtp_table_schema()),
+        ("ipsec", ipsec_table_schema()),
+        ("bgp", bgp_table_schema()),
+        ("ospf", ospf_table_schema()),
         ("dns", dns_table_schema()),
         ("dhcp", dhcp_table_schema()),
         ("ntp", ntp_table_schema()),

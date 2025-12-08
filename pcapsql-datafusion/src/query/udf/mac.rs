@@ -7,7 +7,9 @@ use std::sync::Arc;
 use arrow::array::{Array, FixedSizeBinaryArray, StringArray};
 use arrow::datatypes::DataType;
 use datafusion::common::Result as DFResult;
-use datafusion::logical_expr::{ColumnarValue, ScalarUDF, ScalarUDFImpl, Signature, Volatility};
+use datafusion::logical_expr::{
+    ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
+};
 
 /// Create the `mac()` UDF that converts a MAC address string to FixedSizeBinary(6).
 ///
@@ -38,7 +40,7 @@ pub fn create_mac_to_string_udf() -> ScalarUDF {
 // mac() UDF Implementation
 // ============================================================================
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 struct MacUdf {
     signature: Signature,
 }
@@ -68,8 +70,8 @@ impl ScalarUDFImpl for MacUdf {
         Ok(DataType::FixedSizeBinary(6))
     }
 
-    fn invoke(&self, args: &[ColumnarValue]) -> DFResult<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(args)?;
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
         let mac_strings = args[0]
             .as_any()
             .downcast_ref::<StringArray>()
@@ -94,7 +96,7 @@ impl ScalarUDFImpl for MacUdf {
 // mac_to_string() UDF Implementation
 // ============================================================================
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 struct MacToStringUdf {
     signature: Signature,
 }
@@ -124,8 +126,8 @@ impl ScalarUDFImpl for MacToStringUdf {
         Ok(DataType::Utf8)
     }
 
-    fn invoke(&self, args: &[ColumnarValue]) -> DFResult<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(args)?;
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
         let mac_values = args[0]
             .as_any()
             .downcast_ref::<FixedSizeBinaryArray>()
