@@ -10,7 +10,7 @@
 use compact_str::CompactString;
 use smallvec::SmallVec;
 
-use super::{FieldValue, ParseContext, ParseResult, Protocol};
+use super::{FieldValue, ParseContext, ParseResult, Protocol, TunnelType};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// GTP-U (User Plane) UDP port.
@@ -229,6 +229,10 @@ impl Protocol for GtpProtocol {
                 child_hints.push(("gtp_plane", 0u64)); // Control plane
             }
         }
+
+        // Signal tunnel boundary for encapsulation tracking
+        child_hints.push(("tunnel_type", TunnelType::Gtp as u64));
+        child_hints.push(("tunnel_id", teid as u64)); // TEID is the tunnel identifier
 
         ParseResult::success(fields, &data[offset..], child_hints)
     }

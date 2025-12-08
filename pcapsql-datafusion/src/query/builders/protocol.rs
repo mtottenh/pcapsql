@@ -12,7 +12,7 @@ use arrow::record_batch::RecordBatch;
 
 use crate::error::{Error, QueryError};
 use crate::query::tables;
-use pcapsql_core::{FieldValue, OwnedParseResult, ParseResult, RawPacket};
+use pcapsql_core::{FieldValue, OwnedFieldValue, OwnedParseResult, ParseResult, RawPacket, TunnelType};
 
 /// Dynamic array builder that can hold different builder types.
 enum DynamicBuilder {
@@ -390,6 +390,11 @@ impl ProtocolBatchBuilder {
     ///
     /// `frame_number` is the frame that this parsed data came from.
     /// `parsed` is the ParseResult for this specific protocol (not the whole chain).
+    ///
+    /// This method also populates encapsulation context fields:
+    /// - `encap_depth`: Encapsulation depth when this protocol was parsed
+    /// - `tunnel_type`: Type of enclosing tunnel (if inside a tunnel)
+    /// - `tunnel_id`: Tunnel identifier (VNI, GRE key, TEID, etc.)
     pub fn add_parsed_row(&mut self, frame_number: u64, parsed: &ParseResult<'_>) {
         self.rows += 1;
 
@@ -398,6 +403,29 @@ impl ProtocolBatchBuilder {
 
             if field_name == "frame_number" {
                 builder.append_u64(frame_number);
+            } else if field_name == "encap_depth" {
+                // Special handling for encap_depth from ParseResult
+                if let DynamicBuilder::UInt8(b) = builder {
+                    b.append_value(parsed.encap_depth);
+                }
+            } else if field_name == "tunnel_type" {
+                // Special handling for tunnel_type from ParseResult
+                if let DynamicBuilder::Utf8(b) = builder {
+                    if let Some(type_str) = parsed.tunnel_type.as_str() {
+                        b.append_value(type_str);
+                    } else {
+                        b.append_null();
+                    }
+                }
+            } else if field_name == "tunnel_id" {
+                // Special handling for tunnel_id from ParseResult
+                if let DynamicBuilder::UInt64(b) = builder {
+                    if let Some(id) = parsed.tunnel_id {
+                        b.append_value(id);
+                    } else {
+                        b.append_null();
+                    }
+                }
             } else if let Some(value) = parsed.get(field_name) {
                 builder.append_field_value(value);
             } else {
@@ -409,6 +437,7 @@ impl ProtocolBatchBuilder {
     /// Add a row for a protocol table from cached parsed data.
     ///
     /// Similar to `add_parsed_row` but takes an `OwnedParseResult` from the cache.
+    /// Also populates encapsulation context fields from the cached result.
     pub fn add_cached_row(&mut self, frame_number: u64, parsed: &OwnedParseResult) {
         self.rows += 1;
 
@@ -417,6 +446,29 @@ impl ProtocolBatchBuilder {
 
             if field_name == "frame_number" {
                 builder.append_u64(frame_number);
+            } else if field_name == "encap_depth" {
+                // Special handling for encap_depth from OwnedParseResult
+                if let DynamicBuilder::UInt8(b) = builder {
+                    b.append_value(parsed.encap_depth);
+                }
+            } else if field_name == "tunnel_type" {
+                // Special handling for tunnel_type from OwnedParseResult
+                if let DynamicBuilder::Utf8(b) = builder {
+                    if let Some(type_str) = parsed.tunnel_type.as_str() {
+                        b.append_value(type_str);
+                    } else {
+                        b.append_null();
+                    }
+                }
+            } else if field_name == "tunnel_id" {
+                // Special handling for tunnel_id from OwnedParseResult
+                if let DynamicBuilder::UInt64(b) = builder {
+                    if let Some(id) = parsed.tunnel_id {
+                        b.append_value(id);
+                    } else {
+                        b.append_null();
+                    }
+                }
             } else if let Some(value) = parsed.get(field_name) {
                 builder.append_field_value(value);
             } else {
@@ -525,6 +577,9 @@ mod tests {
             remaining: &[],
             child_hints: SmallVec::new(),
             error: None,
+            encap_depth: 0,
+            tunnel_type: TunnelType::None,
+            tunnel_id: None,
         };
 
         builder.add_parsed_row(1, &parsed);
@@ -558,6 +613,9 @@ mod tests {
                 remaining: &[],
                 child_hints: SmallVec::new(),
                 error: None,
+                encap_depth: 0,
+                tunnel_type: TunnelType::None,
+                tunnel_id: None,
             };
 
             builder.add_parsed_row(i, &parsed);

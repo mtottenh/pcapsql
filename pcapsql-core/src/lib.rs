@@ -92,6 +92,7 @@ pub mod stream;
 
 // Re-export commonly used types at crate root for convenience
 pub use cache::{CacheStats, CachedParse, LruParseCache, NoCache, OwnedParseResult, ParseCache};
+pub use protocol::OwnedFieldValue;
 pub use error::{Error, PcapError, ProtocolError, Result};
 pub use format::{detect_address_column, format_ipv4, format_ipv6, format_mac, AddressKind};
 pub use io::{FilePacketReader, FilePacketSource, PacketReader, PacketSource, RawPacket};
@@ -103,7 +104,7 @@ pub use protocol::{
     merge_with_chain_fields, parse_packet, parse_packet_projected, parse_packet_pruned,
     parse_packet_pruned_projected, should_continue_parsing, should_run_parser, BuiltinProtocol,
     FieldValue, ParseContext, ParseResult, PayloadMode, ProjectionConfig, Protocol,
-    ProtocolRegistry,
+    ProtocolRegistry, TunnelLayer, TunnelType,
 };
 pub use schema::{DataKind, FieldDescriptor, ProtocolSchema};
 pub use stream::{

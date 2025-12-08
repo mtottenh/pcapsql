@@ -14,7 +14,7 @@ pub use lru::LruParseCache;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::protocol::{FieldValue, OwnedFieldValue};
+use crate::protocol::{FieldValue, OwnedFieldValue, TunnelType};
 
 /// Owned parse result for a single protocol layer.
 ///
@@ -26,6 +26,12 @@ pub struct OwnedParseResult {
     pub fields: HashMap<String, OwnedFieldValue>,
     /// Parse error if partial parsing occurred.
     pub error: Option<String>,
+    /// Encapsulation depth when this protocol was parsed (0 = outer layer).
+    pub encap_depth: u8,
+    /// Type of the innermost enclosing tunnel (if inside a tunnel).
+    pub tunnel_type: TunnelType,
+    /// Identifier of the innermost enclosing tunnel (VNI, GRE key, TEID, etc.).
+    pub tunnel_id: Option<u64>,
 }
 
 impl OwnedParseResult {
@@ -41,6 +47,24 @@ impl OwnedParseResult {
                 .map(|(k, v)| (k.to_string(), v.to_owned()))
                 .collect(),
             error: error.cloned(),
+            encap_depth: 0,
+            tunnel_type: TunnelType::None,
+            tunnel_id: None,
+        }
+    }
+
+    /// Create a new owned parse result from a ParseResult with encap context.
+    pub fn from_parse_result(result: &crate::protocol::ParseResult<'_>) -> Self {
+        Self {
+            fields: result
+                .fields
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_owned()))
+                .collect(),
+            error: result.error.clone(),
+            encap_depth: result.encap_depth,
+            tunnel_type: result.tunnel_type,
+            tunnel_id: result.tunnel_id,
         }
     }
 
@@ -73,7 +97,7 @@ impl CachedParse {
             .map(|(name, result)| {
                 (
                     name.to_string(),
-                    OwnedParseResult::from_borrowed(&result.fields, result.error.as_ref()),
+                    OwnedParseResult::from_parse_result(result),
                 )
             })
             .collect();
@@ -84,12 +108,34 @@ impl CachedParse {
         }
     }
 
-    /// Get the parse result for a specific protocol.
+    /// Get the first parse result for a specific protocol.
+    ///
+    /// Note: For tunneled packets, the same protocol may appear multiple times
+    /// at different encapsulation depths. Use `get_all_protocols()` to get all
+    /// occurrences.
     pub fn get_protocol(&self, name: &str) -> Option<&OwnedParseResult> {
         self.protocols
             .iter()
             .find(|(n, _)| n == name)
             .map(|(_, r)| r)
+    }
+
+    /// Get ALL parse results for a specific protocol.
+    ///
+    /// For tunneled packets, the same protocol (e.g., IPv4) may appear at
+    /// multiple encapsulation depths. This method returns all occurrences.
+    pub fn get_all_protocols<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a OwnedParseResult> + 'a {
+        self.protocols
+            .iter()
+            .filter(move |(n, _)| n == name)
+            .map(|(_, r)| r)
+    }
+
+    /// Count how many times a protocol appears in the packet.
+    ///
+    /// Returns 0 if the protocol is not present.
+    pub fn count_protocol(&self, name: &str) -> usize {
+        self.protocols.iter().filter(|(n, _)| n == name).count()
     }
 
     /// Check if a specific protocol is present in the cached results.
@@ -286,6 +332,9 @@ mod tests {
                     OwnedParseResult {
                         fields: HashMap::new(),
                         error: None,
+                        encap_depth: 0,
+                        tunnel_type: TunnelType::None,
+                        tunnel_id: None,
                     },
                 ),
                 (
@@ -293,6 +342,9 @@ mod tests {
                     OwnedParseResult {
                         fields: HashMap::new(),
                         error: None,
+                        encap_depth: 0,
+                        tunnel_type: TunnelType::None,
+                        tunnel_id: None,
                     },
                 ),
             ],
@@ -301,6 +353,96 @@ mod tests {
         assert!(cached.has_protocol("ethernet"));
         assert!(cached.has_protocol("ipv4"));
         assert!(!cached.has_protocol("tcp"));
+    }
+
+    #[test]
+    fn test_cached_parse_get_all_protocols() {
+        // Simulates a VXLAN packet with outer and inner IPv4
+        let cached = CachedParse {
+            frame_number: 1,
+            protocols: vec![
+                (
+                    "ethernet".to_string(),
+                    OwnedParseResult {
+                        fields: HashMap::new(),
+                        error: None,
+                        encap_depth: 0,
+                        tunnel_type: TunnelType::None,
+                        tunnel_id: None,
+                    },
+                ),
+                (
+                    "ipv4".to_string(),
+                    OwnedParseResult {
+                        fields: {
+                            let mut f = HashMap::new();
+                            f.insert("src_ip".to_string(), OwnedFieldValue::OwnedString(compact_str::CompactString::new("10.0.0.1")));
+                            f
+                        },
+                        error: None,
+                        encap_depth: 0,
+                        tunnel_type: TunnelType::None,
+                        tunnel_id: None,
+                    },
+                ),
+                (
+                    "vxlan".to_string(),
+                    OwnedParseResult {
+                        fields: {
+                            let mut f = HashMap::new();
+                            f.insert("vni".to_string(), OwnedFieldValue::UInt32(100));
+                            f
+                        },
+                        error: None,
+                        encap_depth: 0,
+                        tunnel_type: TunnelType::None,
+                        tunnel_id: None,
+                    },
+                ),
+                (
+                    "ethernet".to_string(),
+                    OwnedParseResult {
+                        fields: HashMap::new(),
+                        error: None,
+                        encap_depth: 1,
+                        tunnel_type: TunnelType::Vxlan,
+                        tunnel_id: Some(100),
+                    },
+                ),
+                (
+                    "ipv4".to_string(),
+                    OwnedParseResult {
+                        fields: {
+                            let mut f = HashMap::new();
+                            f.insert("src_ip".to_string(), OwnedFieldValue::OwnedString(compact_str::CompactString::new("192.168.1.1")));
+                            f
+                        },
+                        error: None,
+                        encap_depth: 1,
+                        tunnel_type: TunnelType::Vxlan,
+                        tunnel_id: Some(100),
+                    },
+                ),
+            ],
+        };
+
+        // get_protocol returns first occurrence
+        let first_ipv4 = cached.get_protocol("ipv4").unwrap();
+        assert_eq!(first_ipv4.encap_depth, 0);
+
+        // get_all_protocols returns all occurrences
+        let all_ipv4: Vec<_> = cached.get_all_protocols("ipv4").collect();
+        assert_eq!(all_ipv4.len(), 2);
+        assert_eq!(all_ipv4[0].encap_depth, 0);
+        assert_eq!(all_ipv4[1].encap_depth, 1);
+        assert_eq!(all_ipv4[1].tunnel_type, TunnelType::Vxlan);
+        assert_eq!(all_ipv4[1].tunnel_id, Some(100));
+
+        // count_protocol
+        assert_eq!(cached.count_protocol("ethernet"), 2);
+        assert_eq!(cached.count_protocol("ipv4"), 2);
+        assert_eq!(cached.count_protocol("vxlan"), 1);
+        assert_eq!(cached.count_protocol("tcp"), 0);
     }
 
     #[test]
@@ -336,6 +478,9 @@ mod tests {
         let result = OwnedParseResult {
             fields,
             error: None,
+            encap_depth: 0,
+            tunnel_type: TunnelType::None,
+            tunnel_id: None,
         };
 
         // Test get method
@@ -358,6 +503,9 @@ mod tests {
         let result = OwnedParseResult {
             fields,
             error: Some("Truncated packet: expected 20 bytes, got 12".to_string()),
+            encap_depth: 0,
+            tunnel_type: TunnelType::None,
+            tunnel_id: None,
         };
 
         assert!(result.error.is_some());
@@ -398,6 +546,9 @@ mod tests {
                             f
                         },
                         error: None,
+                        encap_depth: 0,
+                        tunnel_type: TunnelType::None,
+                        tunnel_id: None,
                     },
                 ),
                 (
@@ -409,6 +560,9 @@ mod tests {
                             f
                         },
                         error: None,
+                        encap_depth: 0,
+                        tunnel_type: TunnelType::None,
+                        tunnel_id: None,
                     },
                 ),
             ],
@@ -435,9 +589,9 @@ mod tests {
         let cached = CachedParse {
             frame_number: 1,
             protocols: vec![
-                ("ethernet".to_string(), OwnedParseResult { fields: HashMap::new(), error: None }),
-                ("ipv4".to_string(), OwnedParseResult { fields: HashMap::new(), error: None }),
-                ("tcp".to_string(), OwnedParseResult { fields: HashMap::new(), error: None }),
+                ("ethernet".to_string(), OwnedParseResult { fields: HashMap::new(), error: None, encap_depth: 0, tunnel_type: TunnelType::None, tunnel_id: None }),
+                ("ipv4".to_string(), OwnedParseResult { fields: HashMap::new(), error: None, encap_depth: 0, tunnel_type: TunnelType::None, tunnel_id: None }),
+                ("tcp".to_string(), OwnedParseResult { fields: HashMap::new(), error: None, encap_depth: 0, tunnel_type: TunnelType::None, tunnel_id: None }),
             ],
         };
 

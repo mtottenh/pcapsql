@@ -73,6 +73,29 @@ pub fn frame_number_field() -> Field {
     Field::new("frame_number", DataType::UInt64, false)
 }
 
+/// Encapsulation fields for tunnel-aware queries.
+///
+/// These fields are automatically added to all protocol tables (except frames)
+/// to support queries on tunneled traffic.
+///
+/// - `encap_depth`: Encapsulation depth (0 = outer/no tunnel, 1+ = inside tunnel)
+/// - `tunnel_type`: Type of enclosing tunnel (vxlan, gre, gtp, mpls, ipinip, ip6inip, ipsec)
+/// - `tunnel_id`: Tunnel identifier (VNI, GRE key, TEID, MPLS label)
+pub fn encap_fields() -> Vec<Field> {
+    vec![
+        Field::new("encap_depth", DataType::UInt8, false),
+        Field::new("tunnel_type", DataType::Utf8, true),
+        Field::new("tunnel_id", DataType::UInt64, true),
+    ]
+}
+
+/// Append encapsulation fields to a schema.
+fn with_encap_fields(schema: Schema) -> Schema {
+    let mut fields: Vec<Field> = schema.fields().iter().map(|f| f.as_ref().clone()).collect();
+    fields.extend(encap_fields());
+    Schema::new(fields)
+}
+
 /// Get all protocol table names.
 pub fn all_table_names() -> Vec<&'static str> {
     vec![
@@ -83,64 +106,49 @@ pub fn all_table_names() -> Vec<&'static str> {
 }
 
 /// Get a table schema by protocol name.
+///
+/// All protocol tables (except "frames") automatically include encapsulation
+/// columns (`encap_depth`, `tunnel_type`, `tunnel_id`) for tunnel-aware queries.
 pub fn get_table_schema(name: &str) -> Option<Schema> {
     match name {
+        // "frames" doesn't have encap fields - it's raw packet metadata
         "frames" => Some(frames_table_schema()),
-        "ethernet" => Some(ethernet_table_schema()),
-        "arp" => Some(arp_table_schema()),
-        "vlan" => Some(vlan_table_schema()),
-        "mpls" => Some(mpls_table_schema()),
-        "ipv4" => Some(ipv4_table_schema()),
-        "ipv6" => Some(ipv6_table_schema()),
-        "tcp" => Some(tcp_table_schema()),
-        "udp" => Some(udp_table_schema()),
-        "icmp" => Some(icmp_table_schema()),
-        "icmpv6" => Some(icmpv6_table_schema()),
-        "gre" => Some(gre_table_schema()),
-        "vxlan" => Some(vxlan_table_schema()),
-        "gtp" => Some(gtp_table_schema()),
-        "ipsec" => Some(ipsec_table_schema()),
-        "bgp" => Some(bgp_table_schema()),
-        "ospf" => Some(ospf_table_schema()),
-        "dns" => Some(dns_table_schema()),
-        "dhcp" => Some(dhcp_table_schema()),
-        "ntp" => Some(ntp_table_schema()),
-        "http" => Some(http_table_schema()),
-        "tls" => Some(tls_table_schema()),
-        "ssh" => Some(ssh_table_schema()),
-        "quic" => Some(quic_table_schema()),
+        // All protocol tables include encap fields for tunnel support
+        "ethernet" => Some(with_encap_fields(ethernet_table_schema())),
+        "arp" => Some(with_encap_fields(arp_table_schema())),
+        "vlan" => Some(with_encap_fields(vlan_table_schema())),
+        "mpls" => Some(with_encap_fields(mpls_table_schema())),
+        "ipv4" => Some(with_encap_fields(ipv4_table_schema())),
+        "ipv6" => Some(with_encap_fields(ipv6_table_schema())),
+        "tcp" => Some(with_encap_fields(tcp_table_schema())),
+        "udp" => Some(with_encap_fields(udp_table_schema())),
+        "icmp" => Some(with_encap_fields(icmp_table_schema())),
+        "icmpv6" => Some(with_encap_fields(icmpv6_table_schema())),
+        "gre" => Some(with_encap_fields(gre_table_schema())),
+        "vxlan" => Some(with_encap_fields(vxlan_table_schema())),
+        "gtp" => Some(with_encap_fields(gtp_table_schema())),
+        "ipsec" => Some(with_encap_fields(ipsec_table_schema())),
+        "bgp" => Some(with_encap_fields(bgp_table_schema())),
+        "ospf" => Some(with_encap_fields(ospf_table_schema())),
+        "dns" => Some(with_encap_fields(dns_table_schema())),
+        "dhcp" => Some(with_encap_fields(dhcp_table_schema())),
+        "ntp" => Some(with_encap_fields(ntp_table_schema())),
+        "http" => Some(with_encap_fields(http_table_schema())),
+        "tls" => Some(with_encap_fields(tls_table_schema())),
+        "ssh" => Some(with_encap_fields(ssh_table_schema())),
+        "quic" => Some(with_encap_fields(quic_table_schema())),
         _ => None,
     }
 }
 
 /// Get all table schemas as (name, schema) pairs.
+///
+/// All protocol tables (except "frames") include encapsulation columns.
 pub fn all_table_schemas() -> Vec<(&'static str, Schema)> {
-    vec![
-        ("frames", frames_table_schema()),
-        ("ethernet", ethernet_table_schema()),
-        ("arp", arp_table_schema()),
-        ("vlan", vlan_table_schema()),
-        ("mpls", mpls_table_schema()),
-        ("ipv4", ipv4_table_schema()),
-        ("ipv6", ipv6_table_schema()),
-        ("tcp", tcp_table_schema()),
-        ("udp", udp_table_schema()),
-        ("icmp", icmp_table_schema()),
-        ("icmpv6", icmpv6_table_schema()),
-        ("gre", gre_table_schema()),
-        ("vxlan", vxlan_table_schema()),
-        ("gtp", gtp_table_schema()),
-        ("ipsec", ipsec_table_schema()),
-        ("bgp", bgp_table_schema()),
-        ("ospf", ospf_table_schema()),
-        ("dns", dns_table_schema()),
-        ("dhcp", dhcp_table_schema()),
-        ("ntp", ntp_table_schema()),
-        ("http", http_table_schema()),
-        ("tls", tls_table_schema()),
-        ("ssh", ssh_table_schema()),
-        ("quic", quic_table_schema()),
-    ]
+    all_table_names()
+        .into_iter()
+        .filter_map(|name| get_table_schema(name).map(|schema| (name, schema)))
+        .collect()
 }
 
 /// Strip the protocol prefix from a field name.

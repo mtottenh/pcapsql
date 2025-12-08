@@ -9,7 +9,7 @@
 
 use smallvec::SmallVec;
 
-use super::{FieldValue, ParseContext, ParseResult, Protocol};
+use super::{FieldValue, ParseContext, ParseResult, Protocol, TunnelType};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// IP protocol number for GRE.
@@ -183,6 +183,13 @@ impl Protocol for GreProtocol {
         // 0x86DD = IPv6
         // 0x6558 = Transparent Ethernet Bridging (for NVGRE)
         // 0x880B = PPP
+
+        // Signal tunnel boundary for encapsulation tracking
+        child_hints.push(("tunnel_type", TunnelType::Gre as u64));
+        // Use GRE key as tunnel ID if present
+        if let Some(key) = key_value {
+            child_hints.push(("tunnel_id", key as u64));
+        }
 
         ParseResult::success(fields, &data[offset..], child_hints)
     }

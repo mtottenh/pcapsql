@@ -268,12 +268,13 @@ impl<R: PacketReader> ProtocolBatchStream<R> {
                 cache.put(packet.frame_number, cached);
             }
 
-            // For protocol-specific tables, only add if the protocol is present
+            // For protocol-specific tables, add ALL occurrences (supports tunneled traffic)
+            // For example, a VXLAN packet may have two Ethernet/IPv4 layers at different depths
             for (proto_name, result) in &parsed {
                 if *proto_name == *table_name {
                     builder.add_parsed_row(packet.frame_number, result);
                     rows_added += 1;
-                    break;
+                    // NO break - include all occurrences for tunnel support
                 }
             }
 

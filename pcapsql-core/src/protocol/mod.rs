@@ -72,7 +72,7 @@ mod vxlan;
 #[cfg(test)]
 pub mod test_utils;
 
-pub use context::{FieldEntry, HintEntry, ParseContext, ParseResult};
+pub use context::{FieldEntry, HintEntry, ParseContext, ParseResult, TunnelLayer, TunnelType};
 pub use field::{FieldValue, OwnedFieldValue};
 pub use projection::{chain_fields_for_protocol, merge_with_chain_fields, ProjectionConfig};
 pub use pruning::{compute_required_protocols, should_continue_parsing, should_run_parser};
@@ -147,19 +147,35 @@ pub fn default_registry() -> ProtocolRegistry {
 use std::collections::{HashMap, HashSet};
 
 /// Parse a packet through all protocol layers.
+///
+/// For tunneled traffic, this function tracks encapsulation depth and tunnel context.
+/// Each ParseResult includes encap_depth, tunnel_type, and tunnel_id fields that indicate
+/// whether the protocol was parsed inside a tunnel and which tunnel it was in.
 pub fn parse_packet<'a>(
     registry: &ProtocolRegistry,
     link_type: u16,
     data: &'a [u8],
 ) -> Vec<(&'static str, ParseResult<'a>)> {
     // Typical packet has 3-4 protocol layers (Eth/IP/TCP/App)
-    let mut results = Vec::with_capacity(4);
+    // Tunneled packets may have more (up to 8 layers for complex encapsulation)
+    let mut results = Vec::with_capacity(8);
     let mut context = ParseContext::new(link_type);
     let mut remaining = data;
 
     while !remaining.is_empty() {
         if let Some(parser) = registry.find_parser(&context) {
-            let result = parser.parse(remaining, &context);
+            let mut result = parser.parse(remaining, &context);
+
+            // Set encapsulation context on the result BEFORE updating context
+            // This captures the encap state when this protocol was parsed
+            result.set_encap_context(&context);
+
+            // Check if this protocol's child hints indicate a tunnel boundary
+            // If so, update context for the next layer (inner protocols)
+            if let Some(tunnel_type_val) = result.hint("tunnel_type") {
+                let tunnel_id = result.hint("tunnel_id");
+                context.push_tunnel(TunnelType::from_u64(tunnel_type_val), tunnel_id);
+            }
 
             // Update context for next layer
             context.parent_protocol = Some(parser.name());
@@ -250,8 +266,17 @@ pub fn parse_packet_pruned<'a>(
         }
 
         // Parse
-        let result = parser.parse(remaining, &context);
+        let mut result = parser.parse(remaining, &context);
         parsed_protocols.push(name);
+
+        // Set encapsulation context on the result BEFORE updating context
+        result.set_encap_context(&context);
+
+        // Check if this protocol's child hints indicate a tunnel boundary
+        if let Some(tunnel_type_val) = result.hint("tunnel_type") {
+            let tunnel_id = result.hint("tunnel_id");
+            context.push_tunnel(TunnelType::from_u64(tunnel_type_val), tunnel_id);
+        }
 
         // Update context for next layer
         context.parent_protocol = Some(name);
@@ -328,7 +353,16 @@ pub fn parse_packet_projected<'a>(
             let projection = projections.get(name);
 
             // Use projected parsing if projection is configured
-            let result = parser.parse_projected(remaining, &context, projection);
+            let mut result = parser.parse_projected(remaining, &context, projection);
+
+            // Set encapsulation context on the result BEFORE updating context
+            result.set_encap_context(&context);
+
+            // Check if this protocol's child hints indicate a tunnel boundary
+            if let Some(tunnel_type_val) = result.hint("tunnel_type") {
+                let tunnel_id = result.hint("tunnel_id");
+                context.push_tunnel(TunnelType::from_u64(tunnel_type_val), tunnel_id);
+            }
 
             // Update context for next layer
             context.parent_protocol = Some(name);
@@ -420,8 +454,17 @@ pub fn parse_packet_pruned_projected<'a>(
         let projection = projections.get(name);
 
         // Parse with projection
-        let result = parser.parse_projected(remaining, &context, projection);
+        let mut result = parser.parse_projected(remaining, &context, projection);
         parsed_protocols.push(name);
+
+        // Set encapsulation context on the result BEFORE updating context
+        result.set_encap_context(&context);
+
+        // Check if this protocol's child hints indicate a tunnel boundary
+        if let Some(tunnel_type_val) = result.hint("tunnel_type") {
+            let tunnel_id = result.hint("tunnel_id");
+            context.push_tunnel(TunnelType::from_u64(tunnel_type_val), tunnel_id);
+        }
 
         // Update context for next layer
         context.parent_protocol = Some(name);

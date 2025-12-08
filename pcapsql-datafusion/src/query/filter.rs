@@ -7,7 +7,7 @@
 use datafusion::common::ScalarValue;
 use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
 
-use pcapsql_core::{FieldValue, ParseResult};
+use pcapsql_core::{FieldValue, ParseResult, TunnelType};
 
 /// Comparison operators for predicates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -402,6 +402,9 @@ mod tests {
                     remaining: &[],
                     child_hints: SmallVec::new(),
                     error: None,
+                    encap_depth: 0,
+                    tunnel_type: TunnelType::None,
+                    tunnel_id: None,
                 },
             ),
             (
@@ -411,6 +414,9 @@ mod tests {
                     remaining: &[],
                     child_hints: SmallVec::new(),
                     error: None,
+                    encap_depth: 0,
+                    tunnel_type: TunnelType::None,
+                    tunnel_id: None,
                 },
             ),
             (
@@ -420,6 +426,9 @@ mod tests {
                     remaining: &[],
                     child_hints: SmallVec::new(),
                     error: None,
+                    encap_depth: 0,
+                    tunnel_type: TunnelType::None,
+                    tunnel_id: None,
                 },
             ),
         ]

@@ -4,14 +4,18 @@ use etherparse::Ipv6HeaderSlice;
 use smallvec::SmallVec;
 
 use super::ethernet::ethertype;
-use super::{FieldValue, ParseContext, ParseResult, Protocol};
+use super::{FieldValue, ParseContext, ParseResult, Protocol, TunnelType};
 use crate::schema::{DataKind, FieldDescriptor};
 
-/// IPv6 Next Header values for extension headers.
+/// IPv6 Next Header values for extension headers and encapsulation.
 pub mod next_header {
     pub const HOP_BY_HOP: u8 = 0;
+    /// IPv4 encapsulated in IPv6 (IP-in-IP)
+    pub const IPIP: u8 = 4;
     pub const TCP: u8 = 6;
     pub const UDP: u8 = 17;
+    /// IPv6 encapsulated in IPv6 (IPv6-in-IPv6)
+    pub const IPV6_IN_IP: u8 = 41;
     pub const ROUTING: u8 = 43;
     pub const FRAGMENT: u8 = 44;
     pub const ESP: u8 = 50;
@@ -85,6 +89,19 @@ impl Protocol for Ipv6Protocol {
                 let mut child_hints = SmallVec::new();
                 child_hints.push(("ip_protocol", final_next_header as u64));
                 child_hints.push(("ip_version", 6));
+
+                // Check for IP-in-IP encapsulation
+                if final_next_header == next_header::IPIP {
+                    // IPv4 encapsulated in IPv6 - signal tunnel boundary
+                    child_hints.push(("tunnel_type", TunnelType::Ip6InIp as u64));
+                    // Set ethertype hint so inner IPv4 can be parsed
+                    child_hints.push(("ethertype", ethertype::IPV4 as u64));
+                } else if final_next_header == next_header::IPV6_IN_IP {
+                    // IPv6 encapsulated in IPv6 - signal tunnel boundary
+                    child_hints.push(("tunnel_type", TunnelType::Ip6InIp as u64));
+                    // Set ethertype hint so inner IPv6 can be parsed
+                    child_hints.push(("ethertype", ethertype::IPV6 as u64));
+                }
 
                 let total_consumed = base_header_len + ext_consumed;
                 ParseResult::success(fields, &data[total_consumed..], child_hints)

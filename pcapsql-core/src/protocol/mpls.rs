@@ -9,7 +9,7 @@
 use compact_str::CompactString;
 use smallvec::SmallVec;
 
-use super::{FieldValue, ParseContext, ParseResult, Protocol};
+use super::{FieldValue, ParseContext, ParseResult, Protocol, TunnelType};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// EtherType for MPLS Unicast.
@@ -189,6 +189,10 @@ impl Protocol for MplsProtocol {
                 }
             }
         }
+
+        // Signal tunnel boundary for encapsulation tracking
+        child_hints.push(("tunnel_type", TunnelType::Mpls as u64));
+        child_hints.push(("tunnel_id", top_label as u64)); // Top label as tunnel ID
 
         ParseResult::success(fields, &data[offset..], child_hints)
     }

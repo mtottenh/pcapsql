@@ -5,8 +5,16 @@ use smallvec::SmallVec;
 use etherparse::Ipv4HeaderSlice;
 
 use super::ethernet::ethertype;
-use super::{FieldValue, ParseContext, ParseResult, Protocol};
+use super::{FieldValue, ParseContext, ParseResult, Protocol, TunnelType};
 use crate::schema::{DataKind, FieldDescriptor};
+
+/// IP protocol numbers for IP-in-IP encapsulation.
+mod ip_in_ip_protocol {
+    /// IPv4 encapsulated in IP (IPIP)
+    pub const IPIP: u8 = 4;
+    /// IPv6 encapsulated in IP
+    pub const IPV6_IN_IP: u8 = 41;
+}
 
 /// IPv4 protocol parser.
 #[derive(Debug, Clone, Copy)]
@@ -49,8 +57,22 @@ impl Protocol for Ipv4Protocol {
                 fields.push(("dst_ip", FieldValue::ipv4(&ipv4.destination())));
 
                 let mut child_hints = SmallVec::new();
-                child_hints.push(("ip_protocol", ipv4.protocol().0 as u64));
+                let protocol = ipv4.protocol().0;
+                child_hints.push(("ip_protocol", protocol as u64));
                 child_hints.push(("ip_version", 4));
+
+                // Check for IP-in-IP encapsulation
+                if protocol == ip_in_ip_protocol::IPIP {
+                    // IPv4 encapsulated in IPv4 - signal tunnel boundary
+                    child_hints.push(("tunnel_type", TunnelType::IpInIp as u64));
+                    // Also set ethertype hint so inner IPv4 can be parsed
+                    child_hints.push(("ethertype", ethertype::IPV4 as u64));
+                } else if protocol == ip_in_ip_protocol::IPV6_IN_IP {
+                    // IPv6 encapsulated in IPv4 - signal tunnel boundary
+                    child_hints.push(("tunnel_type", TunnelType::Ip6InIp as u64));
+                    // Also set ethertype hint so inner IPv6 can be parsed
+                    child_hints.push(("ethertype", ethertype::IPV6 as u64));
+                }
 
                 let header_len = ipv4.slice().len();
                 ParseResult::success(fields, &data[header_len..], child_hints)

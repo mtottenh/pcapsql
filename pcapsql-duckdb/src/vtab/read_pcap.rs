@@ -205,6 +205,7 @@ impl VTab for ReadPcapVTab {
                     packet.data,
                 );
 
+                // Add ALL occurrences of the protocol (supports tunneled traffic)
                 for (proto_name, parsed) in &results {
                     if *proto_name == bind_data.protocol_name {
                         output_parsed_row(
@@ -215,7 +216,7 @@ impl VTab for ReadPcapVTab {
                             &bind_data.field_indices,
                         );
                         row_count += 1;
-                        break;
+                        // NO break - include all occurrences for tunnel support
                     }
                 }
             }

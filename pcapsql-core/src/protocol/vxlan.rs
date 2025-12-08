@@ -7,7 +7,7 @@
 
 use smallvec::SmallVec;
 
-use super::{FieldValue, ParseContext, ParseResult, Protocol};
+use super::{FieldValue, ParseContext, ParseResult, Protocol, TunnelType};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// Standard VXLAN UDP destination port.
@@ -78,6 +78,10 @@ impl Protocol for VxlanProtocol {
 
         // VXLAN encapsulates Ethernet frames, so set link_type to Ethernet
         child_hints.push(("link_type", 1u64)); // DLT_EN10MB = Ethernet
+
+        // Signal tunnel boundary for encapsulation tracking
+        child_hints.push(("tunnel_type", TunnelType::Vxlan as u64));
+        child_hints.push(("tunnel_id", vni as u64));
 
         ParseResult::success(fields, &data[8..], child_hints)
     }

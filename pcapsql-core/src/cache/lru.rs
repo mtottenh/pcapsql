@@ -346,6 +346,9 @@ mod tests {
             protocols: vec![("test".to_string(), super::super::OwnedParseResult {
                 fields: std::collections::HashMap::new(),
                 error: None,
+                encap_depth: 0,
+                tunnel_type: crate::protocol::TunnelType::None,
+                tunnel_id: None,
             })],
         });
 

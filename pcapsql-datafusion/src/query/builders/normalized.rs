@@ -224,7 +224,7 @@ impl NormalizedBatchSet {
 mod tests {
     use super::*;
     use compact_str::CompactString;
-    use pcapsql_core::FieldValue;
+    use pcapsql_core::{FieldValue, TunnelType};
     use smallvec::SmallVec;
 
     fn create_test_packet(frame_number: u64) -> RawPacket {
@@ -255,6 +255,9 @@ mod tests {
             remaining: &[],
             child_hints: SmallVec::new(),
             error: None,
+            encap_depth: 0,
+            tunnel_type: TunnelType::None,
+            tunnel_id: None,
         }
     }
 
@@ -277,6 +280,9 @@ mod tests {
             remaining: &[],
             child_hints: SmallVec::new(),
             error: None,
+            encap_depth: 0,
+            tunnel_type: TunnelType::None,
+            tunnel_id: None,
         }
     }
 
@@ -293,6 +299,9 @@ mod tests {
             remaining: &[],
             child_hints: SmallVec::new(),
             error: None,
+            encap_depth: 0,
+            tunnel_type: TunnelType::None,
+            tunnel_id: None,
         }
     }
 
@@ -441,6 +450,9 @@ mod tests {
             remaining: &[],
             child_hints: SmallVec::new(),
             error: None,
+            encap_depth: 0,
+            tunnel_type: TunnelType::None,
+            tunnel_id: None,
         };
 
         let mut dns_fields = SmallVec::new();
@@ -452,6 +464,9 @@ mod tests {
             remaining: &[],
             child_hints: SmallVec::new(),
             error: None,
+            encap_depth: 0,
+            tunnel_type: TunnelType::None,
+            tunnel_id: None,
         };
 
         let parsed2: Vec<(&'static str, ParseResult)> =
