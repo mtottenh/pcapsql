@@ -45,6 +45,19 @@ impl OutputFormatter {
         }
     }
 
+    /// Format multiple RecordBatches and write to the given writer as a single combined result.
+    pub fn write_batches<W: Write>(
+        &self,
+        batches: &[RecordBatch],
+        writer: &mut W,
+    ) -> std::io::Result<()> {
+        match self.format {
+            OutputFormat::Table => self.write_table_batches(batches, writer),
+            OutputFormat::Csv => self.write_csv_batches(batches, writer),
+            OutputFormat::Json => self.write_json_batches(batches, writer),
+        }
+    }
+
     /// Detect address columns and cache their types for efficient formatting.
     fn detect_address_columns(schema: &Schema) -> Vec<Option<AddressKind>> {
         schema
@@ -188,6 +201,110 @@ impl OutputFormatter {
             writeln!(writer, "{}", serde_json::Value::Object(obj))?;
         }
 
+        Ok(())
+    }
+
+    /// Write multiple batches as a single combined table.
+    fn write_table_batches<W: Write>(
+        &self,
+        batches: &[RecordBatch],
+        writer: &mut W,
+    ) -> std::io::Result<()> {
+        use comfy_table::{Cell, Table};
+
+        // Handle empty batches
+        if batches.is_empty() {
+            return Ok(());
+        }
+
+        // Get schema from first non-empty batch
+        let first_batch = batches.iter().find(|b| b.num_rows() > 0);
+        let schema = match first_batch {
+            Some(batch) => batch.schema(),
+            None => return Ok(()), // All batches are empty
+        };
+
+        let address_kinds = Self::detect_address_columns(schema.as_ref());
+
+        let mut table = Table::new();
+
+        // Add header row (once)
+        let headers: Vec<Cell> = schema
+            .fields()
+            .iter()
+            .map(|f| Cell::new(f.name()))
+            .collect();
+        table.set_header(headers);
+
+        // Add data rows from all batches
+        for batch in batches {
+            for row_idx in 0..batch.num_rows() {
+                let mut row = Vec::with_capacity(batch.num_columns());
+                for (col_idx, col) in batch.columns().iter().enumerate() {
+                    let value = Self::format_value(col, row_idx, address_kinds[col_idx]);
+                    row.push(Cell::new(value));
+                }
+                table.add_row(row);
+            }
+        }
+
+        writeln!(writer, "{table}")
+    }
+
+    /// Write multiple batches as CSV with a single header.
+    fn write_csv_batches<W: Write>(
+        &self,
+        batches: &[RecordBatch],
+        writer: &mut W,
+    ) -> std::io::Result<()> {
+        // Handle empty batches
+        if batches.is_empty() {
+            return Ok(());
+        }
+
+        // Get schema from first non-empty batch
+        let first_batch = batches.iter().find(|b| b.num_rows() > 0);
+        let schema = match first_batch {
+            Some(batch) => batch.schema(),
+            None => return Ok(()), // All batches are empty
+        };
+
+        let address_kinds = Self::detect_address_columns(schema.as_ref());
+
+        // Write header (once)
+        let headers: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        writeln!(writer, "{}", headers.join(","))?;
+
+        // Write rows from all batches
+        for batch in batches {
+            for row_idx in 0..batch.num_rows() {
+                let mut values = Vec::with_capacity(batch.num_columns());
+                for (col_idx, col) in batch.columns().iter().enumerate() {
+                    let value = Self::format_value(col, row_idx, address_kinds[col_idx]);
+                    // Escape commas and quotes
+                    if value.contains(',') || value.contains('"') || value.contains('\n') {
+                        values.push(format!("\"{}\"", value.replace('"', "\"\"")));
+                    } else {
+                        values.push(value);
+                    }
+                }
+                writeln!(writer, "{}", values.join(","))?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Write multiple batches as JSON lines.
+    fn write_json_batches<W: Write>(
+        &self,
+        batches: &[RecordBatch],
+        writer: &mut W,
+    ) -> std::io::Result<()> {
+        // JSON lines format doesn't have headers, so just iterate through all batches
+        for batch in batches {
+            self.write_json(batch, writer)?;
+        }
         Ok(())
     }
 }

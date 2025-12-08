@@ -108,9 +108,7 @@ async fn main() -> Result<()> {
         } else {
             // Print to stdout
             let mut stdout = io::stdout();
-            for batch in batches {
-                formatter.write(&batch, &mut stdout)?;
-            }
+            formatter.write_batches(&batches, &mut stdout)?;
         }
 
         // Show cache stats if requested
@@ -139,9 +137,7 @@ async fn main() -> Result<()> {
         } else {
             // Print to stdout
             let mut stdout = io::stdout();
-            for batch in batches {
-                formatter.write(&batch, &mut stdout)?;
-            }
+            formatter.write_batches(&batches, &mut stdout)?;
         }
 
         // Show cache stats if requested
@@ -290,10 +286,8 @@ async fn run_repl(
                         match engine.query(&query).await {
                             Ok(batches) => {
                                 let mut stdout = io::stdout();
-                                for batch in &batches {
-                                    if let Err(e) = formatter.write(batch, &mut stdout) {
-                                        eprintln!("Error writing output: {e}");
-                                    }
+                                if let Err(e) = formatter.write_batches(&batches, &mut stdout) {
+                                    eprintln!("Error writing output: {e}");
                                 }
                                 last_result = Some(batches);
                             }
