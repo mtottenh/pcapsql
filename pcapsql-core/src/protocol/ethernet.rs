@@ -34,10 +34,18 @@ impl Protocol for EthernetProtocol {
     fn can_parse(&self, context: &ParseContext) -> Option<u32> {
         // Parse Ethernet at the root level for Ethernet link type
         if context.is_root() && context.link_type == LINKTYPE_ETHERNET {
-            Some(100)
-        } else {
-            None
+            return Some(100);
         }
+
+        // Also parse inside tunnels when link_type hint is set to Ethernet
+        // This allows parsing inner Ethernet frames inside VXLAN, etc.
+        if let Some(link_type) = context.hint("link_type") {
+            if link_type == LINKTYPE_ETHERNET as u64 {
+                return Some(100);
+            }
+        }
+
+        None
     }
 
     fn parse<'a>(&self, data: &'a [u8], _context: &ParseContext) -> ParseResult<'a> {
