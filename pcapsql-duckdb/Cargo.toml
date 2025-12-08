@@ -1,0 +1,29 @@
+[package]
+name = "pcapsql-duckdb"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "DuckDB extension for PCAP analysis using pcapsql"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Our core library
+pcapsql-core = { path = "../pcapsql-core" }
+
+# DuckDB extension support
+duckdb = { version = "1.4", features = ["vtab-loadable"] }
+duckdb-loadable-macros = "0.1"
+libduckdb-sys = { version = "1.4", features = ["loadable-extension"] }
+
+# Error handling
+anyhow.workspace = true
+thiserror.workspace = true
+
+# Synchronization
+parking_lot.workspace = true
+
+# Logging (optional but useful for debugging)
+tracing.workspace = true
