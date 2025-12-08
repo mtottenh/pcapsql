@@ -6,6 +6,7 @@
 //! RFC 3031: Multiprotocol Label Switching Architecture
 //! RFC 3032: MPLS Label Stack Encoding
 
+use compact_str::CompactString;
 use smallvec::SmallVec;
 
 use super::{FieldValue, ParseContext, ParseResult, Protocol};
@@ -101,7 +102,7 @@ impl Protocol for MplsProtocol {
         let mut top_tc = 0u8;
         let mut top_ttl = 0u8;
         let mut has_special_label = false;
-        let mut special_label_str: Option<String> = None;
+        let mut special_label_str: Option<&'static str> = None;
 
         while !bottom_of_stack && offset + 4 <= data.len() {
             // Check stack depth limit for safety
@@ -133,7 +134,7 @@ impl Protocol for MplsProtocol {
                 // Check if top label is a special/reserved label
                 if label <= 15 {
                     has_special_label = true;
-                    special_label_str = special_label_name(label).map(|s| s.to_string());
+                    special_label_str = special_label_name(label);
                 }
             }
 
@@ -156,12 +157,12 @@ impl Protocol for MplsProtocol {
         fields.push(("bottom", FieldValue::Bool(bottom_of_stack)));
         fields.push(("ttl", FieldValue::UInt8(top_ttl)));
         fields.push(("stack_depth", FieldValue::UInt8(stack_depth)));
-        fields.push(("labels", FieldValue::String(labels.join(","))));
+        fields.push(("labels", FieldValue::OwnedString(CompactString::new(labels.join(",")))));
 
         // Add special label fields
         fields.push(("is_reserved_label", FieldValue::Bool(has_special_label)));
         if let Some(name) = special_label_str {
-            fields.push(("special_label_name", FieldValue::String(name)));
+            fields.push(("special_label_name", FieldValue::Str(name)));
         }
 
         // Set up child hints
@@ -273,7 +274,7 @@ mod tests {
         assert_eq!(result.get("bottom"), Some(&FieldValue::Bool(true)));
         assert_eq!(result.get("ttl"), Some(&FieldValue::UInt8(64)));
         assert_eq!(result.get("stack_depth"), Some(&FieldValue::UInt8(1)));
-        assert_eq!(result.get("labels"), Some(&FieldValue::String("1000".to_string())));
+        assert_eq!(result.get("labels"), Some(&FieldValue::OwnedString(CompactString::new("1000"))));
         assert_eq!(result.remaining.len(), 4);
     }
 
@@ -306,7 +307,7 @@ mod tests {
         // Stack depth should be 3
         assert_eq!(result.get("stack_depth"), Some(&FieldValue::UInt8(3)));
         // Labels string
-        assert_eq!(result.get("labels"), Some(&FieldValue::String("100,200,300".to_string())));
+        assert_eq!(result.get("labels"), Some(&FieldValue::OwnedString(CompactString::new("100,200,300"))));
         // Bottom flag reflects the last label
         assert_eq!(result.get("bottom"), Some(&FieldValue::Bool(true)));
     }
@@ -463,7 +464,7 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.get("label"), Some(&FieldValue::UInt32(0)));
         assert_eq!(result.get("is_reserved_label"), Some(&FieldValue::Bool(true)));
-        assert_eq!(result.get("special_label_name"), Some(&FieldValue::String("IPv4-Explicit-NULL".to_string())));
+        assert_eq!(result.get("special_label_name"), Some(&FieldValue::Str("IPv4-Explicit-NULL")));
     }
 
     // Test 12: Special label recognition - Router Alert
@@ -481,7 +482,7 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.get("label"), Some(&FieldValue::UInt32(1)));
         assert_eq!(result.get("is_reserved_label"), Some(&FieldValue::Bool(true)));
-        assert_eq!(result.get("special_label_name"), Some(&FieldValue::String("Router-Alert".to_string())));
+        assert_eq!(result.get("special_label_name"), Some(&FieldValue::Str("Router-Alert")));
     }
 
     // Test 13: Special label recognition - IPv6 Explicit NULL
@@ -501,7 +502,7 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.get("label"), Some(&FieldValue::UInt32(2)));
         assert_eq!(result.get("is_reserved_label"), Some(&FieldValue::Bool(true)));
-        assert_eq!(result.get("special_label_name"), Some(&FieldValue::String("IPv6-Explicit-NULL".to_string())));
+        assert_eq!(result.get("special_label_name"), Some(&FieldValue::Str("IPv6-Explicit-NULL")));
     }
 
     // Test 14: All special/reserved labels
@@ -528,7 +529,7 @@ mod tests {
 
             assert!(result.is_ok());
             assert_eq!(result.get("is_reserved_label"), Some(&FieldValue::Bool(true)));
-            assert_eq!(result.get("special_label_name"), Some(&FieldValue::String(expected_name.to_string())));
+            assert_eq!(result.get("special_label_name"), Some(&FieldValue::Str(expected_name)));
         }
     }
 
@@ -546,7 +547,7 @@ mod tests {
 
             assert!(result.is_ok());
             assert_eq!(result.get("is_reserved_label"), Some(&FieldValue::Bool(true)));
-            assert_eq!(result.get("special_label_name"), Some(&FieldValue::String("Reserved".to_string())));
+            assert_eq!(result.get("special_label_name"), Some(&FieldValue::Str("Reserved")));
         }
     }
 

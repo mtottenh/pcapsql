@@ -6,6 +6,7 @@
 //! RFC 2328: OSPF Version 2
 //! RFC 5340: OSPF for IPv6
 
+use compact_str::CompactString;
 use smallvec::SmallVec;
 
 use super::{FieldValue, ParseContext, ParseResult, Protocol};
@@ -99,7 +100,7 @@ impl Protocol for OspfProtocol {
         fields.push(("message_type", FieldValue::UInt8(msg_type)));
         fields.push((
             "message_type_name",
-            FieldValue::String(packet_type_name(msg_type).to_string()),
+            FieldValue::Str(packet_type_name(msg_type)),
         ));
 
         // Bytes 2-3: Packet Length
@@ -108,11 +109,11 @@ impl Protocol for OspfProtocol {
 
         // Bytes 4-7: Router ID
         let router_id = format!("{}.{}.{}.{}", data[4], data[5], data[6], data[7]);
-        fields.push(("router_id", FieldValue::String(router_id)));
+        fields.push(("router_id", FieldValue::OwnedString(CompactString::new(router_id))));
 
         // Bytes 8-11: Area ID
         let area_id = format!("{}.{}.{}.{}", data[8], data[9], data[10], data[11]);
-        fields.push(("area_id", FieldValue::String(area_id)));
+        fields.push(("area_id", FieldValue::OwnedString(CompactString::new(area_id))));
 
         // Bytes 12-13: Checksum
         let checksum = u16::from_be_bytes([data[12], data[13]]);
@@ -221,11 +222,11 @@ impl OspfProtocol {
 
         // Bytes 12-15: Designated Router
         let dr = format!("{}.{}.{}.{}", data[12], data[13], data[14], data[15]);
-        fields.push(("designated_router", FieldValue::String(dr)));
+        fields.push(("designated_router", FieldValue::OwnedString(CompactString::new(dr))));
 
         // Bytes 16-19: Backup Designated Router
         let bdr = format!("{}.{}.{}.{}", data[16], data[17], data[18], data[19]);
-        fields.push(("backup_dr", FieldValue::String(bdr)));
+        fields.push(("backup_dr", FieldValue::OwnedString(CompactString::new(bdr))));
 
         // Count neighbors (remaining data is list of neighbor router IDs)
         let neighbor_data = &data[20..];
@@ -326,15 +327,15 @@ impl OspfProtocol {
         // Byte 3: LS Type
         let ls_type = data[3];
         fields.push(("lsa_type", FieldValue::UInt8(ls_type)));
-        fields.push(("lsa_type_name", FieldValue::String(lsa_type_name(ls_type).to_string())));
+        fields.push(("lsa_type_name", FieldValue::Str(lsa_type_name(ls_type))));
 
         // Bytes 4-7: Link State ID
         let ls_id = format!("{}.{}.{}.{}", data[4], data[5], data[6], data[7]);
-        fields.push(("lsa_id", FieldValue::String(ls_id)));
+        fields.push(("lsa_id", FieldValue::OwnedString(CompactString::new(ls_id))));
 
         // Bytes 8-11: Advertising Router
         let adv_router = format!("{}.{}.{}.{}", data[8], data[9], data[10], data[11]);
-        fields.push(("lsa_advertising_router", FieldValue::String(adv_router)));
+        fields.push(("lsa_advertising_router", FieldValue::OwnedString(CompactString::new(adv_router))));
 
         // Bytes 12-15: LS Sequence Number
         let ls_sequence = u32::from_be_bytes([data[12], data[13], data[14], data[15]]);
@@ -506,8 +507,8 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.get("hello_interval"), Some(&FieldValue::UInt16(10)));
         assert_eq!(result.get("dead_interval"), Some(&FieldValue::UInt32(40)));
-        assert_eq!(result.get("designated_router"), Some(&FieldValue::String("192.168.1.1".to_string())));
-        assert_eq!(result.get("backup_dr"), Some(&FieldValue::String("192.168.1.2".to_string())));
+        assert_eq!(result.get("designated_router"), Some(&FieldValue::OwnedString(CompactString::new("192.168.1.1"))));
+        assert_eq!(result.get("backup_dr"), Some(&FieldValue::OwnedString(CompactString::new("192.168.1.2"))));
     }
 
     // Test 5: Router ID extraction
@@ -528,7 +529,7 @@ mod tests {
         let result = parser.parse(&pkt, &context);
 
         assert!(result.is_ok());
-        assert_eq!(result.get("router_id"), Some(&FieldValue::String("10.0.0.1".to_string())));
+        assert_eq!(result.get("router_id"), Some(&FieldValue::OwnedString(CompactString::new("10.0.0.1"))));
     }
 
     // Test 6: Area ID extraction
@@ -542,13 +543,13 @@ mod tests {
         let pkt1 = create_ospf_header(2, packet_type::HELLO, 24, [1, 1, 1, 1], [0, 0, 0, 0]);
         let result1 = parser.parse(&pkt1, &context);
         assert!(result1.is_ok());
-        assert_eq!(result1.get("area_id"), Some(&FieldValue::String("0.0.0.0".to_string())));
+        assert_eq!(result1.get("area_id"), Some(&FieldValue::OwnedString(CompactString::new("0.0.0.0"))));
 
         // Non-backbone area
         let pkt2 = create_ospf_header(2, packet_type::HELLO, 24, [1, 1, 1, 1], [0, 0, 0, 1]);
         let result2 = parser.parse(&pkt2, &context);
         assert!(result2.is_ok());
-        assert_eq!(result2.get("area_id"), Some(&FieldValue::String("0.0.0.1".to_string())));
+        assert_eq!(result2.get("area_id"), Some(&FieldValue::OwnedString(CompactString::new("0.0.0.1"))));
     }
 
     // Test 7: Message type name mapping
@@ -572,7 +573,7 @@ mod tests {
 
             assert!(result.is_ok());
             assert_eq!(result.get("message_type"), Some(&FieldValue::UInt8(pkt_type)));
-            assert_eq!(result.get("message_type_name"), Some(&FieldValue::String(name.to_string())));
+            assert_eq!(result.get("message_type_name"), Some(&FieldValue::Str(name)));
         }
     }
 
@@ -698,7 +699,7 @@ mod tests {
         assert_eq!(result.get("dd_lsa_count"), Some(&FieldValue::UInt16(1)));
         assert_eq!(result.get("lsa_age"), Some(&FieldValue::UInt16(100)));
         assert_eq!(result.get("lsa_type"), Some(&FieldValue::UInt8(lsa_type::ROUTER)));
-        assert_eq!(result.get("lsa_type_name"), Some(&FieldValue::String("Router-LSA".to_string())));
+        assert_eq!(result.get("lsa_type_name"), Some(&FieldValue::Str("Router-LSA")));
     }
 
     // Test 13: LS Update parsing
@@ -736,9 +737,9 @@ mod tests {
         assert_eq!(result.get("lsu_lsa_count"), Some(&FieldValue::UInt32(2)));
         assert_eq!(result.get("lsa_age"), Some(&FieldValue::UInt16(500)));
         assert_eq!(result.get("lsa_type"), Some(&FieldValue::UInt8(lsa_type::NETWORK)));
-        assert_eq!(result.get("lsa_type_name"), Some(&FieldValue::String("Network-LSA".to_string())));
-        assert_eq!(result.get("lsa_id"), Some(&FieldValue::String("192.168.1.0".to_string())));
-        assert_eq!(result.get("lsa_advertising_router"), Some(&FieldValue::String("192.168.1.1".to_string())));
+        assert_eq!(result.get("lsa_type_name"), Some(&FieldValue::Str("Network-LSA")));
+        assert_eq!(result.get("lsa_id"), Some(&FieldValue::OwnedString(CompactString::new("192.168.1.0"))));
+        assert_eq!(result.get("lsa_advertising_router"), Some(&FieldValue::OwnedString(CompactString::new("192.168.1.1"))));
     }
 
     // Test 14: LS Acknowledgment parsing
@@ -784,7 +785,7 @@ mod tests {
         // First LSA header fields
         assert_eq!(result.get("lsa_age"), Some(&FieldValue::UInt16(200)));
         assert_eq!(result.get("lsa_type"), Some(&FieldValue::UInt8(lsa_type::AS_EXTERNAL)));
-        assert_eq!(result.get("lsa_type_name"), Some(&FieldValue::String("AS-External-LSA".to_string())));
+        assert_eq!(result.get("lsa_type_name"), Some(&FieldValue::Str("AS-External-LSA")));
     }
 
     // Test 15: LSA type names
@@ -826,7 +827,7 @@ mod tests {
             let result = parser.parse(&pkt, &context);
             assert!(result.is_ok());
             assert_eq!(result.get("lsa_type"), Some(&FieldValue::UInt8(ls_type)));
-            assert_eq!(result.get("lsa_type_name"), Some(&FieldValue::String(expected_name.to_string())));
+            assert_eq!(result.get("lsa_type_name"), Some(&FieldValue::Str(expected_name)));
         }
     }
 

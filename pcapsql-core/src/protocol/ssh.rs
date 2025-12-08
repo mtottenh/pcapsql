@@ -3,6 +3,7 @@
 //! Parses SSH (Secure Shell) protocol identification strings and binary packets,
 //! particularly KEXINIT messages for algorithm negotiation analysis.
 
+use compact_str::CompactString;
 use smallvec::SmallVec;
 
 use super::{FieldValue, ParseContext, ParseResult, Protocol};
@@ -106,7 +107,7 @@ impl Protocol for SshProtocol {
         fields.push(("msg_type", FieldValue::UInt8(msg_type)));
         fields.push((
             "msg_type_name",
-            FieldValue::String(format_msg_type(msg_type)),
+            format_msg_type(msg_type),
         ));
 
         // Parse specific message types
@@ -168,7 +169,7 @@ impl Protocol for SshProtocol {
 /// Parse SSH protocol identification string.
 fn parse_protocol_identification<'a>(
     data: &'a [u8],
-    fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
+    fields: &mut SmallVec<[(&'static str, FieldValue<'a>); 16]>,
 ) -> ParseResult<'a> {
     // Find the end of the identification string (CR LF or just LF)
     let line_end = data.iter().position(|&b| b == b'\n').unwrap_or(data.len());
@@ -190,7 +191,7 @@ fn parse_protocol_identification<'a>(
                 let proto_version = &content[..dash_pos];
                 fields.push((
                     "protocol_version",
-                    FieldValue::String(proto_version.to_string()),
+                    FieldValue::OwnedString(CompactString::new(proto_version)),
                 ));
 
                 let rest = &content[dash_pos + 1..];
@@ -202,13 +203,13 @@ fn parse_protocol_identification<'a>(
 
                     fields.push((
                         "software_version",
-                        FieldValue::String(software_version.to_string()),
+                        FieldValue::OwnedString(CompactString::new(software_version)),
                     ));
                     if !comments.is_empty() {
-                        fields.push(("comments", FieldValue::String(comments.to_string())));
+                        fields.push(("comments", FieldValue::OwnedString(CompactString::new(comments))));
                     }
                 } else {
-                    fields.push(("software_version", FieldValue::String(rest.to_string())));
+                    fields.push(("software_version", FieldValue::OwnedString(CompactString::new(rest))));
                 }
             }
         }
@@ -254,19 +255,19 @@ fn parse_kexinit_message(payload: &[u8], fields: &mut SmallVec<[(&'static str, F
 
     if let Some(kex_algs) = read_name_list(payload, &mut offset) {
         if !kex_algs.is_empty() {
-            fields.push(("kex_algorithms", FieldValue::String(kex_algs)));
+            fields.push(("kex_algorithms", FieldValue::OwnedString(CompactString::new(kex_algs))));
         }
     }
 
     if let Some(host_key_algs) = read_name_list(payload, &mut offset) {
         if !host_key_algs.is_empty() {
-            fields.push(("host_key_algorithms", FieldValue::String(host_key_algs)));
+            fields.push(("host_key_algorithms", FieldValue::OwnedString(CompactString::new(host_key_algs))));
         }
     }
 
     if let Some(enc_c2s) = read_name_list(payload, &mut offset) {
         if !enc_c2s.is_empty() {
-            fields.push(("encryption_algorithms", FieldValue::String(enc_c2s)));
+            fields.push(("encryption_algorithms", FieldValue::OwnedString(CompactString::new(enc_c2s))));
         }
     }
 
@@ -275,7 +276,7 @@ fn parse_kexinit_message(payload: &[u8], fields: &mut SmallVec<[(&'static str, F
 
     if let Some(mac_c2s) = read_name_list(payload, &mut offset) {
         if !mac_c2s.is_empty() {
-            fields.push(("mac_algorithms", FieldValue::String(mac_c2s)));
+            fields.push(("mac_algorithms", FieldValue::OwnedString(CompactString::new(mac_c2s))));
         }
     }
 
@@ -284,7 +285,7 @@ fn parse_kexinit_message(payload: &[u8], fields: &mut SmallVec<[(&'static str, F
 
     if let Some(comp_c2s) = read_name_list(payload, &mut offset) {
         if !comp_c2s.is_empty() {
-            fields.push(("compression_algorithms", FieldValue::String(comp_c2s)));
+            fields.push(("compression_algorithms", FieldValue::OwnedString(CompactString::new(comp_c2s))));
         }
     }
 }
@@ -317,19 +318,19 @@ fn parse_userauth_request(payload: &[u8], fields: &mut SmallVec<[(&'static str, 
 
     if let Some(username) = read_string(payload, &mut offset) {
         if !username.is_empty() {
-            fields.push(("auth_username", FieldValue::String(username)));
+            fields.push(("auth_username", FieldValue::OwnedString(CompactString::new(username))));
         }
     }
 
     if let Some(service) = read_string(payload, &mut offset) {
         if !service.is_empty() {
-            fields.push(("auth_service", FieldValue::String(service)));
+            fields.push(("auth_service", FieldValue::OwnedString(CompactString::new(service))));
         }
     }
 
     if let Some(method) = read_string(payload, &mut offset) {
         if !method.is_empty() {
-            fields.push(("auth_method", FieldValue::String(method)));
+            fields.push(("auth_method", FieldValue::OwnedString(CompactString::new(method))));
         }
     }
 }
@@ -357,7 +358,7 @@ fn parse_channel_open(payload: &[u8], fields: &mut SmallVec<[(&'static str, Fiel
 
     if let Ok(channel_type) = std::str::from_utf8(&payload[offset..offset + len]) {
         if !channel_type.is_empty() {
-            fields.push(("channel_type", FieldValue::String(channel_type.to_string())));
+            fields.push(("channel_type", FieldValue::OwnedString(CompactString::new(channel_type))));
         }
     }
     offset += len;
@@ -375,34 +376,34 @@ fn parse_channel_open(payload: &[u8], fields: &mut SmallVec<[(&'static str, Fiel
 }
 
 /// Format SSH message type as a readable name.
-fn format_msg_type(msg_type: u8) -> String {
+fn format_msg_type(msg_type: u8) -> FieldValue<'static> {
     match msg_type {
-        msg_type::SSH_MSG_DISCONNECT => "DISCONNECT".to_string(),
-        msg_type::SSH_MSG_IGNORE => "IGNORE".to_string(),
-        msg_type::SSH_MSG_UNIMPLEMENTED => "UNIMPLEMENTED".to_string(),
-        msg_type::SSH_MSG_DEBUG => "DEBUG".to_string(),
-        msg_type::SSH_MSG_SERVICE_REQUEST => "SERVICE_REQUEST".to_string(),
-        msg_type::SSH_MSG_SERVICE_ACCEPT => "SERVICE_ACCEPT".to_string(),
-        msg_type::SSH_MSG_KEXINIT => "KEXINIT".to_string(),
-        msg_type::SSH_MSG_NEWKEYS => "NEWKEYS".to_string(),
-        msg_type::SSH_MSG_KEX_DH_INIT => "KEX_DH_INIT".to_string(),
-        msg_type::SSH_MSG_KEX_DH_REPLY => "KEX_DH_REPLY".to_string(),
-        msg_type::SSH_MSG_USERAUTH_REQUEST => "USERAUTH_REQUEST".to_string(),
-        msg_type::SSH_MSG_USERAUTH_FAILURE => "USERAUTH_FAILURE".to_string(),
-        msg_type::SSH_MSG_USERAUTH_SUCCESS => "USERAUTH_SUCCESS".to_string(),
-        msg_type::SSH_MSG_USERAUTH_BANNER => "USERAUTH_BANNER".to_string(),
-        msg_type::SSH_MSG_CHANNEL_OPEN => "CHANNEL_OPEN".to_string(),
-        msg_type::SSH_MSG_CHANNEL_OPEN_CONFIRMATION => "CHANNEL_OPEN_CONFIRMATION".to_string(),
-        msg_type::SSH_MSG_CHANNEL_OPEN_FAILURE => "CHANNEL_OPEN_FAILURE".to_string(),
-        msg_type::SSH_MSG_CHANNEL_WINDOW_ADJUST => "CHANNEL_WINDOW_ADJUST".to_string(),
-        msg_type::SSH_MSG_CHANNEL_DATA => "CHANNEL_DATA".to_string(),
-        msg_type::SSH_MSG_CHANNEL_EXTENDED_DATA => "CHANNEL_EXTENDED_DATA".to_string(),
-        msg_type::SSH_MSG_CHANNEL_EOF => "CHANNEL_EOF".to_string(),
-        msg_type::SSH_MSG_CHANNEL_CLOSE => "CHANNEL_CLOSE".to_string(),
-        msg_type::SSH_MSG_CHANNEL_REQUEST => "CHANNEL_REQUEST".to_string(),
-        msg_type::SSH_MSG_CHANNEL_SUCCESS => "CHANNEL_SUCCESS".to_string(),
-        msg_type::SSH_MSG_CHANNEL_FAILURE => "CHANNEL_FAILURE".to_string(),
-        _ => format!("UNKNOWN({})", msg_type),
+        msg_type::SSH_MSG_DISCONNECT => FieldValue::Str("DISCONNECT"),
+        msg_type::SSH_MSG_IGNORE => FieldValue::Str("IGNORE"),
+        msg_type::SSH_MSG_UNIMPLEMENTED => FieldValue::Str("UNIMPLEMENTED"),
+        msg_type::SSH_MSG_DEBUG => FieldValue::Str("DEBUG"),
+        msg_type::SSH_MSG_SERVICE_REQUEST => FieldValue::Str("SERVICE_REQUEST"),
+        msg_type::SSH_MSG_SERVICE_ACCEPT => FieldValue::Str("SERVICE_ACCEPT"),
+        msg_type::SSH_MSG_KEXINIT => FieldValue::Str("KEXINIT"),
+        msg_type::SSH_MSG_NEWKEYS => FieldValue::Str("NEWKEYS"),
+        msg_type::SSH_MSG_KEX_DH_INIT => FieldValue::Str("KEX_DH_INIT"),
+        msg_type::SSH_MSG_KEX_DH_REPLY => FieldValue::Str("KEX_DH_REPLY"),
+        msg_type::SSH_MSG_USERAUTH_REQUEST => FieldValue::Str("USERAUTH_REQUEST"),
+        msg_type::SSH_MSG_USERAUTH_FAILURE => FieldValue::Str("USERAUTH_FAILURE"),
+        msg_type::SSH_MSG_USERAUTH_SUCCESS => FieldValue::Str("USERAUTH_SUCCESS"),
+        msg_type::SSH_MSG_USERAUTH_BANNER => FieldValue::Str("USERAUTH_BANNER"),
+        msg_type::SSH_MSG_CHANNEL_OPEN => FieldValue::Str("CHANNEL_OPEN"),
+        msg_type::SSH_MSG_CHANNEL_OPEN_CONFIRMATION => FieldValue::Str("CHANNEL_OPEN_CONFIRMATION"),
+        msg_type::SSH_MSG_CHANNEL_OPEN_FAILURE => FieldValue::Str("CHANNEL_OPEN_FAILURE"),
+        msg_type::SSH_MSG_CHANNEL_WINDOW_ADJUST => FieldValue::Str("CHANNEL_WINDOW_ADJUST"),
+        msg_type::SSH_MSG_CHANNEL_DATA => FieldValue::Str("CHANNEL_DATA"),
+        msg_type::SSH_MSG_CHANNEL_EXTENDED_DATA => FieldValue::Str("CHANNEL_EXTENDED_DATA"),
+        msg_type::SSH_MSG_CHANNEL_EOF => FieldValue::Str("CHANNEL_EOF"),
+        msg_type::SSH_MSG_CHANNEL_CLOSE => FieldValue::Str("CHANNEL_CLOSE"),
+        msg_type::SSH_MSG_CHANNEL_REQUEST => FieldValue::Str("CHANNEL_REQUEST"),
+        msg_type::SSH_MSG_CHANNEL_SUCCESS => FieldValue::Str("CHANNEL_SUCCESS"),
+        msg_type::SSH_MSG_CHANNEL_FAILURE => FieldValue::Str("CHANNEL_FAILURE"),
+        _ => FieldValue::OwnedString(CompactString::new(format!("UNKNOWN({})", msg_type))),
     }
 }
 
@@ -515,15 +516,15 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(
             result.get("protocol_version"),
-            Some(&FieldValue::String("2.0".to_string()))
+            Some(&FieldValue::OwnedString(CompactString::new("2.0")))
         );
         assert_eq!(
             result.get("software_version"),
-            Some(&FieldValue::String("OpenSSH_8.9p1".to_string()))
+            Some(&FieldValue::OwnedString(CompactString::new("OpenSSH_8.9p1")))
         );
         assert_eq!(
             result.get("comments"),
-            Some(&FieldValue::String("Ubuntu-3ubuntu0.1".to_string()))
+            Some(&FieldValue::OwnedString(CompactString::new("Ubuntu-3ubuntu0.1")))
         );
     }
 
@@ -540,11 +541,11 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(
             result.get("protocol_version"),
-            Some(&FieldValue::String("2.0".to_string()))
+            Some(&FieldValue::OwnedString(CompactString::new("2.0")))
         );
         assert_eq!(
             result.get("software_version"),
-            Some(&FieldValue::String("libssh2_1.10.0".to_string()))
+            Some(&FieldValue::OwnedString(CompactString::new("libssh2_1.10.0")))
         );
         assert!(result.get("comments").is_none());
     }
@@ -562,11 +563,11 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(
             result.get("protocol_version"),
-            Some(&FieldValue::String("2.0".to_string()))
+            Some(&FieldValue::OwnedString(CompactString::new("2.0")))
         );
         assert_eq!(
             result.get("software_version"),
-            Some(&FieldValue::String("dropbear_2022.83".to_string()))
+            Some(&FieldValue::OwnedString(CompactString::new("dropbear_2022.83")))
         );
     }
 
@@ -582,7 +583,7 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(
             result.get("protocol_version"),
-            Some(&FieldValue::String("1.99".to_string()))
+            Some(&FieldValue::OwnedString(CompactString::new("1.99")))
         );
     }
 
@@ -598,7 +599,7 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(
             result.get("software_version"),
-            Some(&FieldValue::String("PuTTY_Release_0.78".to_string()))
+            Some(&FieldValue::OwnedString(CompactString::new("PuTTY_Release_0.78")))
         );
     }
 
@@ -620,7 +621,7 @@ mod tests {
         );
         assert_eq!(
             result.get("msg_type_name"),
-            Some(&FieldValue::String("KEXINIT".to_string()))
+            Some(&FieldValue::Str("KEXINIT"))
         );
     }
 
@@ -638,9 +639,9 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(
             result.get("kex_algorithms"),
-            Some(&FieldValue::String(
-                "curve25519-sha256,diffie-hellman-group14-sha256".to_string()
-            ))
+            Some(&FieldValue::OwnedString(CompactString::new(
+                "curve25519-sha256,diffie-hellman-group14-sha256"
+            )))
         );
     }
 
@@ -658,9 +659,9 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(
             result.get("encryption_algorithms"),
-            Some(&FieldValue::String(
-                "aes256-gcm@openssh.com,chacha20-poly1305@openssh.com".to_string()
-            ))
+            Some(&FieldValue::OwnedString(CompactString::new(
+                "aes256-gcm@openssh.com,chacha20-poly1305@openssh.com"
+            )))
         );
     }
 
@@ -681,7 +682,7 @@ mod tests {
         );
         assert_eq!(
             result.get("msg_type_name"),
-            Some(&FieldValue::String("NEWKEYS".to_string()))
+            Some(&FieldValue::Str("NEWKEYS"))
         );
     }
 
@@ -757,15 +758,15 @@ mod tests {
         );
         assert_eq!(
             result.get("auth_username"),
-            Some(&FieldValue::String("testuser".to_string()))
+            Some(&FieldValue::OwnedString(CompactString::new("testuser")))
         );
         assert_eq!(
             result.get("auth_service"),
-            Some(&FieldValue::String("ssh-connection".to_string()))
+            Some(&FieldValue::OwnedString(CompactString::new("ssh-connection")))
         );
         assert_eq!(
             result.get("auth_method"),
-            Some(&FieldValue::String("publickey".to_string()))
+            Some(&FieldValue::OwnedString(CompactString::new("publickey")))
         );
     }
 
@@ -791,7 +792,7 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(
             result.get("channel_type"),
-            Some(&FieldValue::String("session".to_string()))
+            Some(&FieldValue::OwnedString(CompactString::new("session")))
         );
         assert_eq!(result.get("channel_id"), Some(&FieldValue::UInt32(0)));
     }

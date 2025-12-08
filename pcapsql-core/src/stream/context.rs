@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 
-use crate::protocol::FieldValue;
+use crate::protocol::OwnedFieldValue;
 
 /// Direction of data flow in a TCP connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -68,6 +68,8 @@ pub enum StreamParseResult {
 }
 
 /// A parsed application-layer message.
+///
+/// All field values are owned since stream parsing may outlive the original packet data.
 #[derive(Debug, Clone)]
 pub struct ParsedMessage {
     pub protocol: &'static str,
@@ -75,5 +77,5 @@ pub struct ParsedMessage {
     pub message_id: u32,
     pub direction: Direction,
     pub frame_number: u64,
-    pub fields: HashMap<String, FieldValue>,
+    pub fields: HashMap<String, OwnedFieldValue>,
 }

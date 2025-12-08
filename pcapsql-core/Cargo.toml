@@ -49,6 +49,9 @@ tracing.workspace = true
 # Small collections
 smallvec.workspace = true
 
+# Compact strings (inline up to 24 bytes)
+compact_str.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
 hex.workspace = true

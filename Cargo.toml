@@ -63,6 +63,9 @@ hex = "0.4"
 # Small collections
 smallvec = "1.13"
 
+# Compact strings (inline up to 24 bytes)
+compact_str = "0.8"
+
 [profile.release]
 lto = true
 codegen-units = 1

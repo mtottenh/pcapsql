@@ -7,6 +7,7 @@
 //! 3GPP TS 29.281: GPRS Tunnelling Protocol User Plane (GTPv1-U)
 //! 3GPP TS 29.274: GPRS Tunnelling Protocol version 2 (GTPv2-C)
 
+use compact_str::CompactString;
 use smallvec::SmallVec;
 
 use super::{FieldValue, ParseContext, ParseResult, Protocol};
@@ -192,7 +193,7 @@ impl Protocol for GtpProtocol {
                 if !ext_headers.is_empty() {
                     fields.push((
                         "extension_headers",
-                        FieldValue::String(ext_headers.join(",")),
+                        FieldValue::OwnedString(CompactString::new(ext_headers.join(","))),
                     ));
                     fields.push(("extension_header_count", FieldValue::UInt8(ext_count)));
                 }
@@ -609,7 +610,7 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.get("extension_header_count"), Some(&FieldValue::UInt8(1)));
 
-        if let Some(FieldValue::String(ext)) = result.get("extension_headers") {
+        if let Some(FieldValue::OwnedString(ext)) = result.get("extension_headers") {
             assert!(ext.contains("PDCP PDU Number"));
             assert!(ext.contains("0xC0"));
         } else {
@@ -648,7 +649,7 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.get("extension_header_count"), Some(&FieldValue::UInt8(2)));
 
-        if let Some(FieldValue::String(ext)) = result.get("extension_headers") {
+        if let Some(FieldValue::OwnedString(ext)) = result.get("extension_headers") {
             assert!(ext.contains("UDP Port"));
             assert!(ext.contains("PDU Session Container"));
         } else {
@@ -847,7 +848,7 @@ mod tests {
             let result = parser.parse(&header, &context);
             assert!(result.is_ok());
 
-            if let Some(FieldValue::String(ext)) = result.get("extension_headers") {
+            if let Some(FieldValue::OwnedString(ext)) = result.get("extension_headers") {
                 assert!(ext.contains(expected_name), "Expected '{}' in '{}'", expected_name, ext);
             } else {
                 panic!("Expected extension_headers field");

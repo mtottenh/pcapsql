@@ -354,7 +354,14 @@ fn output_parsed_row(
                     let slice = vector.as_mut_slice::<i64>();
                     slice[row_idx] = *v;
                 }
-                FieldValue::String(v) => {
+                FieldValue::Str(v) => {
+                    if let Ok(cstr) = CString::new(*v) {
+                        vector.insert(row_idx, cstr);
+                    } else {
+                        vector.set_null(row_idx);
+                    }
+                }
+                FieldValue::OwnedString(v) => {
                     if let Ok(cstr) = CString::new(v.as_str()) {
                         vector.insert(row_idx, cstr);
                     } else {
@@ -362,6 +369,9 @@ fn output_parsed_row(
                     }
                 }
                 FieldValue::Bytes(v) => {
+                    vector.insert(row_idx, *v);
+                }
+                FieldValue::OwnedBytes(v) => {
                     vector.insert(row_idx, v.as_slice());
                 }
                 FieldValue::MacAddr(v) => {

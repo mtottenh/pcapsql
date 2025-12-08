@@ -4,6 +4,7 @@
 //! so this parser focuses on what's visible in cleartext: connection IDs,
 //! version, and packet type information.
 
+use compact_str::CompactString;
 use smallvec::SmallVec;
 
 use super::{FieldValue, ParseContext, ParseResult, Protocol};
@@ -71,10 +72,10 @@ impl Protocol for QuicProtocol {
         let is_long_header = (first_byte & 0x80) != 0;
 
         if is_long_header {
-            fields.push(("header_form", FieldValue::String("long".to_string())));
+            fields.push(("header_form", FieldValue::Str("long")));
             parse_long_header(data, &mut fields)
         } else {
-            fields.push(("header_form", FieldValue::String("short".to_string())));
+            fields.push(("header_form", FieldValue::Str("short")));
             parse_short_header(data, &mut fields)
         }
     }
@@ -109,7 +110,7 @@ impl Protocol for QuicProtocol {
 /// Parse QUIC long header.
 fn parse_long_header<'a>(
     data: &'a [u8],
-    fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
+    fields: &mut SmallVec<[(&'static str, FieldValue<'a>); 16]>,
 ) -> ParseResult<'a> {
     // Long Header format:
     // 0                   1                   2                   3
@@ -147,7 +148,7 @@ fn parse_long_header<'a>(
     };
     fields.push((
         "long_packet_type",
-        FieldValue::String(packet_type_name.to_string()),
+        FieldValue::Str(packet_type_name),
     ));
 
     // Version (4 bytes)
@@ -155,7 +156,7 @@ fn parse_long_header<'a>(
     fields.push(("version", FieldValue::UInt32(quic_version)));
     fields.push((
         "version_name",
-        FieldValue::String(format_version(quic_version)),
+        FieldValue::OwnedString(CompactString::new(format_version(quic_version))),
     ));
 
     // DCID Length
@@ -174,7 +175,7 @@ fn parse_long_header<'a>(
     }
     if dcid_len > 0 {
         let dcid = &data[offset..offset + dcid_len];
-        fields.push(("dcid", FieldValue::String(hex_encode(dcid))));
+        fields.push(("dcid", FieldValue::OwnedString(CompactString::new(hex_encode(dcid)))));
     }
     offset += dcid_len;
 
@@ -200,7 +201,7 @@ fn parse_long_header<'a>(
     }
     if scid_len > 0 {
         let scid = &data[offset..offset + scid_len];
-        fields.push(("scid", FieldValue::String(hex_encode(scid))));
+        fields.push(("scid", FieldValue::OwnedString(CompactString::new(hex_encode(scid)))));
     }
     offset += scid_len;
 
@@ -215,7 +216,7 @@ fn parse_long_header<'a>(
 /// Parse QUIC short header.
 fn parse_short_header<'a>(
     data: &'a [u8],
-    fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
+    fields: &mut SmallVec<[(&'static str, FieldValue<'a>); 16]>,
 ) -> ParseResult<'a> {
     // Short Header format:
     // 0                   1                   2                   3
@@ -253,7 +254,7 @@ fn parse_short_header<'a>(
 }
 
 /// Parse Initial packet payload to extract token and potentially SNI.
-fn parse_initial_packet(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) {
+fn parse_initial_packet<'a>(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue<'a>); 16]>) {
     // Initial packet has:
     // - Token Length (variable-length integer)
     // - Token
@@ -306,7 +307,7 @@ fn parse_initial_packet(data: &[u8], fields: &mut SmallVec<[(&'static str, Field
 
 /// Try to extract SNI from potentially unencrypted Initial packet payload.
 /// This is a heuristic that looks for patterns typical of TLS ClientHello.
-fn try_extract_sni(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) {
+fn try_extract_sni<'a>(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue<'a>); 16]>) {
     // Look for SNI extension pattern in the data
     // SNI extension has type 0x0000, followed by length, then name type, name length, and name
 
@@ -354,7 +355,7 @@ fn try_extract_sni(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue
                     .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
                     && hostname.contains('.')
                 {
-                    fields.push(("sni", FieldValue::String(hostname.to_string())));
+                    fields.push(("sni", FieldValue::OwnedString(CompactString::new(hostname))));
                     return;
                 }
             }
@@ -559,7 +560,7 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(
             result.get("header_form"),
-            Some(&FieldValue::String("long".to_string()))
+            Some(&FieldValue::Str("long"))
         );
     }
 
@@ -578,7 +579,7 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(
             result.get("header_form"),
-            Some(&FieldValue::String("short".to_string()))
+            Some(&FieldValue::Str("short"))
         );
     }
 
@@ -600,7 +601,7 @@ mod tests {
         );
         assert_eq!(
             result.get("version_name"),
-            Some(&FieldValue::String("QUIC v1".to_string()))
+            Some(&FieldValue::OwnedString(CompactString::new("QUIC v1")))
         );
     }
 
@@ -618,7 +619,7 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(
             result.get("long_packet_type"),
-            Some(&FieldValue::String("Initial".to_string()))
+            Some(&FieldValue::Str("Initial"))
         );
     }
 
@@ -636,7 +637,7 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(
             result.get("long_packet_type"),
-            Some(&FieldValue::String("Handshake".to_string()))
+            Some(&FieldValue::Str("Handshake"))
         );
     }
 
@@ -655,7 +656,7 @@ mod tests {
         assert_eq!(result.get("dcid_length"), Some(&FieldValue::UInt8(4)));
         assert_eq!(
             result.get("dcid"),
-            Some(&FieldValue::String("aabbccdd".to_string()))
+            Some(&FieldValue::OwnedString(CompactString::new("aabbccdd")))
         );
     }
 
@@ -674,7 +675,7 @@ mod tests {
         assert_eq!(result.get("scid_length"), Some(&FieldValue::UInt8(4)));
         assert_eq!(
             result.get("scid"),
-            Some(&FieldValue::String("eeff0011".to_string()))
+            Some(&FieldValue::OwnedString(CompactString::new("eeff0011")))
         );
     }
 
@@ -696,7 +697,7 @@ mod tests {
         );
         assert_eq!(
             result.get("version_name"),
-            Some(&FieldValue::String("Version Negotiation".to_string()))
+            Some(&FieldValue::OwnedString(CompactString::new("Version Negotiation")))
         );
     }
 
@@ -719,7 +720,7 @@ mod tests {
         );
         assert_eq!(
             result.get("version_name"),
-            Some(&FieldValue::String("0xdeadbeef".to_string()))
+            Some(&FieldValue::OwnedString(CompactString::new("0xdeadbeef")))
         );
     }
 

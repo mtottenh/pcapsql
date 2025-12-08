@@ -187,7 +187,7 @@ impl IpsecProtocol {
 
         let mut fields = SmallVec::new();
 
-        fields.push(("protocol", FieldValue::String("ESP".to_string())));
+        fields.push(("protocol", FieldValue::Str("ESP")));
 
         // Bytes 0-3: Security Parameters Index (SPI)
         let spi = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
@@ -230,7 +230,7 @@ impl IpsecProtocol {
 
         let mut fields = SmallVec::new();
 
-        fields.push(("protocol", FieldValue::String("AH".to_string())));
+        fields.push(("protocol", FieldValue::Str("AH")));
 
         // Byte 0: Next Header
         let next_header = data[0];
@@ -360,7 +360,7 @@ mod tests {
         let result = parser.parse(&header, &context);
 
         assert!(result.is_ok());
-        assert_eq!(result.get("protocol"), Some(&FieldValue::String("ESP".to_string())));
+        assert_eq!(result.get("protocol"), Some(&FieldValue::Str("ESP")));
         assert_eq!(result.get("spi"), Some(&FieldValue::UInt32(0x12345678)));
         assert_eq!(result.get("sequence"), Some(&FieldValue::UInt32(0xABCDEF01)));
     }
@@ -377,7 +377,7 @@ mod tests {
         let result = parser.parse(&header, &context);
 
         assert!(result.is_ok());
-        assert_eq!(result.get("protocol"), Some(&FieldValue::String("AH".to_string())));
+        assert_eq!(result.get("protocol"), Some(&FieldValue::Str("AH")));
         assert_eq!(result.get("spi"), Some(&FieldValue::UInt32(0x87654321)));
         assert_eq!(result.get("sequence"), Some(&FieldValue::UInt32(1)));
     }
@@ -418,7 +418,7 @@ mod tests {
         let esp_header = create_esp_header(0x1234, 0x5678);
         let result_esp = parser.parse(&esp_header, &ctx_esp);
         assert!(result_esp.is_ok());
-        assert_eq!(result_esp.get("protocol"), Some(&FieldValue::String("ESP".to_string())));
+        assert_eq!(result_esp.get("protocol"), Some(&FieldValue::Str("ESP")));
 
         // AH
         let mut ctx_ah = ParseContext::new(1);
@@ -426,7 +426,7 @@ mod tests {
         let ah_header = create_ah_header(6, 0x1234, 0x5678, 12);
         let result_ah = parser.parse(&ah_header, &ctx_ah);
         assert!(result_ah.is_ok());
-        assert_eq!(result_ah.get("protocol"), Some(&FieldValue::String("AH".to_string())));
+        assert_eq!(result_ah.get("protocol"), Some(&FieldValue::Str("AH")));
     }
 
     // Test 7: ESP too short

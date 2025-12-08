@@ -133,7 +133,8 @@ impl DynamicBuilder {
                 _ => b.append_null(),
             },
             DynamicBuilder::Utf8(b) => match value {
-                FieldValue::String(v) => b.append_value(v),
+                FieldValue::Str(v) => b.append_value(v),
+                FieldValue::OwnedString(v) => b.append_value(v.as_str()),
                 FieldValue::IpAddr(v) => b.append_value(v.to_string()),
                 FieldValue::MacAddr(mac) => b.append_value(FieldValue::format_mac(mac)),
                 FieldValue::Null => b.append_null(),
@@ -147,6 +148,7 @@ impl DynamicBuilder {
             },
             DynamicBuilder::Binary(b) => match value {
                 FieldValue::Bytes(v) => b.append_value(v),
+                FieldValue::OwnedBytes(v) => b.append_value(v.as_slice()),
                 FieldValue::Null => b.append_null(),
                 _ => b.append_null(),
             },
@@ -155,6 +157,9 @@ impl DynamicBuilder {
                     let _ = b.append_value(mac.as_slice());
                 }
                 FieldValue::Bytes(v) => {
+                    let _ = b.append_value(v);
+                }
+                FieldValue::OwnedBytes(v) => {
                     let _ = b.append_value(v.as_slice());
                 }
                 FieldValue::IpAddr(addr) => {

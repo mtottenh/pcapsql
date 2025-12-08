@@ -57,6 +57,7 @@ criterion.workspace = true
 tempfile.workspace = true
 hex.workspace = true
 smallvec.workspace = true
+compact_str.workspace = true
 
 [[bench]]
 name = "parsing"

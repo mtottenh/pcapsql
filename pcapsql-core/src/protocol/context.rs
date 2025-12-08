@@ -5,7 +5,9 @@ use smallvec::SmallVec;
 use super::FieldValue;
 
 /// Field entry for parse results: (field_name, value).
-pub type FieldEntry = (&'static str, FieldValue);
+/// Field names are always static strings (protocol-defined).
+/// The lifetime parameter ties the value to the packet/buffer data.
+pub type FieldEntry<'data> = (&'static str, FieldValue<'data>);
 
 /// Hint entry for child protocol detection: (hint_name, value).
 pub type HintEntry = (&'static str, u64);
@@ -77,13 +79,17 @@ impl ParseContext {
 ///
 /// Uses SmallVec for inline storage to avoid HashMap allocation overhead.
 /// Most protocols have <16 fields and <4 child hints, so these fit inline.
+///
+/// The lifetime parameter `'data` ties the result to the packet/buffer data,
+/// allowing zero-copy parsing where field values reference the packet directly.
 #[derive(Debug, Clone)]
-pub struct ParseResult<'a> {
+pub struct ParseResult<'data> {
     /// Extracted field values. Most protocols have <16 fields.
-    pub fields: SmallVec<[FieldEntry; 16]>,
+    /// Field values may reference the packet data (zero-copy).
+    pub fields: SmallVec<[FieldEntry<'data>; 16]>,
 
     /// Remaining unparsed bytes (payload for next layer).
-    pub remaining: &'a [u8],
+    pub remaining: &'data [u8],
 
     /// Hints for child protocol identification. Typically 2-4 entries.
     pub child_hints: SmallVec<[HintEntry; 4]>,
@@ -92,11 +98,11 @@ pub struct ParseResult<'a> {
     pub error: Option<String>,
 }
 
-impl<'a> ParseResult<'a> {
+impl<'data> ParseResult<'data> {
     /// Create a successful parse result.
     pub fn success(
-        fields: SmallVec<[FieldEntry; 16]>,
-        remaining: &'a [u8],
+        fields: SmallVec<[FieldEntry<'data>; 16]>,
+        remaining: &'data [u8],
         child_hints: SmallVec<[HintEntry; 4]>,
     ) -> Self {
         Self {
@@ -108,7 +114,7 @@ impl<'a> ParseResult<'a> {
     }
 
     /// Create an error parse result.
-    pub fn error(error: String, remaining: &'a [u8]) -> Self {
+    pub fn error(error: String, remaining: &'data [u8]) -> Self {
         Self {
             fields: SmallVec::new(),
             remaining,
@@ -119,8 +125,8 @@ impl<'a> ParseResult<'a> {
 
     /// Create a result with partial fields and an error.
     pub fn partial(
-        fields: SmallVec<[FieldEntry; 16]>,
-        remaining: &'a [u8],
+        fields: SmallVec<[FieldEntry<'data>; 16]>,
+        remaining: &'data [u8],
         error: String,
     ) -> Self {
         Self {
@@ -132,7 +138,7 @@ impl<'a> ParseResult<'a> {
     }
 
     /// Get a field value by name (linear search, but N is small).
-    pub fn get(&self, name: &str) -> Option<&FieldValue> {
+    pub fn get(&self, name: &str) -> Option<&FieldValue<'data>> {
         self.fields.iter().find(|(k, _)| *k == name).map(|(_, v)| v)
     }
 

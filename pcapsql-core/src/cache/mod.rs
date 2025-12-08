@@ -14,36 +14,38 @@ pub use lru::LruParseCache;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::protocol::FieldValue;
+use crate::protocol::{FieldValue, OwnedFieldValue};
 
 /// Owned parse result for a single protocol layer.
 ///
 /// This is an owned version of `ParseResult<'a>` that can be stored in the cache.
+/// All field values are owned (no borrowed references).
 #[derive(Clone, Debug)]
 pub struct OwnedParseResult {
     /// Extracted field values, keyed by field name.
-    pub fields: HashMap<String, FieldValue>,
+    pub fields: HashMap<String, OwnedFieldValue>,
     /// Parse error if partial parsing occurred.
     pub error: Option<String>,
 }
 
 impl OwnedParseResult {
     /// Create a new owned parse result from a borrowed one.
+    /// Converts all borrowed field values to owned values.
     pub fn from_borrowed(
-        fields: &smallvec::SmallVec<[(&'static str, FieldValue); 16]>,
+        fields: &smallvec::SmallVec<[(&'static str, FieldValue<'_>); 16]>,
         error: Option<&String>,
     ) -> Self {
         Self {
             fields: fields
                 .iter()
-                .map(|(k, v)| (k.to_string(), v.clone()))
+                .map(|(k, v)| (k.to_string(), v.to_owned()))
                 .collect(),
             error: error.cloned(),
         }
     }
 
     /// Get a field value by name.
-    pub fn get(&self, name: &str) -> Option<&FieldValue> {
+    pub fn get(&self, name: &str) -> Option<&OwnedFieldValue> {
         self.fields.get(name)
     }
 }
@@ -322,15 +324,14 @@ mod tests {
 
     #[test]
     fn test_owned_parse_result_with_fields() {
-        use crate::protocol::FieldValue;
         use std::net::{IpAddr, Ipv4Addr};
 
         let mut fields = HashMap::new();
-        fields.insert("src_ip".to_string(), FieldValue::IpAddr(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
-        fields.insert("dst_port".to_string(), FieldValue::UInt16(443));
-        fields.insert("payload".to_string(), FieldValue::Bytes(vec![0x48, 0x65, 0x6c, 0x6c, 0x6f]));
-        fields.insert("flags".to_string(), FieldValue::UInt8(0x18));
-        fields.insert("is_syn".to_string(), FieldValue::Bool(false));
+        fields.insert("src_ip".to_string(), OwnedFieldValue::IpAddr(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
+        fields.insert("dst_port".to_string(), OwnedFieldValue::UInt16(443));
+        fields.insert("payload".to_string(), OwnedFieldValue::OwnedBytes(vec![0x48, 0x65, 0x6c, 0x6c, 0x6f]));
+        fields.insert("flags".to_string(), OwnedFieldValue::UInt8(0x18));
+        fields.insert("is_syn".to_string(), OwnedFieldValue::Bool(false));
 
         let result = OwnedParseResult {
             fields,
@@ -344,7 +345,7 @@ mod tests {
 
         // Verify field values
         match result.get("dst_port") {
-            Some(FieldValue::UInt16(port)) => assert_eq!(*port, 443),
+            Some(OwnedFieldValue::UInt16(port)) => assert_eq!(*port, 443),
             _ => panic!("Expected UInt16 for dst_port"),
         }
     }
@@ -352,7 +353,7 @@ mod tests {
     #[test]
     fn test_owned_parse_result_with_error() {
         let mut fields = HashMap::new();
-        fields.insert("partial_field".to_string(), crate::protocol::FieldValue::UInt32(42));
+        fields.insert("partial_field".to_string(), OwnedFieldValue::UInt32(42));
 
         let result = OwnedParseResult {
             fields,
@@ -385,8 +386,6 @@ mod tests {
 
     #[test]
     fn test_cached_parse_get_protocol() {
-        use crate::protocol::FieldValue;
-
         let cached = CachedParse {
             frame_number: 42,
             protocols: vec![
@@ -395,7 +394,7 @@ mod tests {
                     OwnedParseResult {
                         fields: {
                             let mut f = HashMap::new();
-                            f.insert("src_mac".to_string(), FieldValue::MacAddr([0x00; 6]));
+                            f.insert("src_mac".to_string(), OwnedFieldValue::MacAddr([0x00; 6]));
                             f
                         },
                         error: None,
@@ -406,7 +405,7 @@ mod tests {
                     OwnedParseResult {
                         fields: {
                             let mut f = HashMap::new();
-                            f.insert("ttl".to_string(), FieldValue::UInt8(64));
+                            f.insert("ttl".to_string(), OwnedFieldValue::UInt8(64));
                             f
                         },
                         error: None,
@@ -423,7 +422,7 @@ mod tests {
         let ipv4 = cached.get_protocol("ipv4");
         assert!(ipv4.is_some());
         match ipv4.unwrap().get("ttl") {
-            Some(FieldValue::UInt8(ttl)) => assert_eq!(*ttl, 64),
+            Some(OwnedFieldValue::UInt8(ttl)) => assert_eq!(*ttl, 64),
             _ => panic!("Expected TTL field"),
         }
 

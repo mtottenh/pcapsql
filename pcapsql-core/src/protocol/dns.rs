@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 
+use compact_str::CompactString;
 use smallvec::SmallVec;
 
 use super::{FieldValue, ParseContext, ParseResult, Protocol};
@@ -97,7 +98,7 @@ impl Protocol for DnsProtocol {
         if query_count > 0 {
             match parse_question(&data[12..]) {
                 Ok((name, qtype, qclass, consumed)) => {
-                    fields.push(("query_name", FieldValue::String(name)));
+                    fields.push(("query_name", FieldValue::OwnedString(CompactString::new(name))));
                     fields.push(("query_type", FieldValue::UInt16(qtype)));
                     fields.push(("query_class", FieldValue::UInt16(qclass)));
 
@@ -232,7 +233,7 @@ impl Protocol for DnsProtocol {
             match parse_question(&data[12..]) {
                 Ok((name, qtype, qclass, consumed)) => {
                     if fields.contains("query_name") {
-                        result_fields.push(("query_name", FieldValue::String(name)));
+                        result_fields.push(("query_name", FieldValue::OwnedString(CompactString::new(name))));
                     }
                     if fields.contains("query_type") {
                         result_fields.push(("query_type", FieldValue::UInt16(qtype)));
@@ -490,7 +491,7 @@ mod tests {
         assert_eq!(result.get("recursion_desired"), Some(&FieldValue::Bool(true)));
         assert_eq!(
             result.get("query_name"),
-            Some(&FieldValue::String("example.com".to_string()))
+            Some(&FieldValue::OwnedString(CompactString::new("example.com")))
         );
         assert_eq!(result.get("query_type"), Some(&FieldValue::UInt16(1))); // A record
         assert_eq!(result.get("query_class"), Some(&FieldValue::UInt16(1))); // IN class
@@ -635,7 +636,7 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(
             result.get("query_name"),
-            Some(&FieldValue::String("ipv6.google.com".to_string()))
+            Some(&FieldValue::OwnedString(CompactString::new("ipv6.google.com")))
         );
         assert_eq!(
             result.get("query_type"),
@@ -711,7 +712,7 @@ mod tests {
         );
         assert_eq!(
             result.get("query_name"),
-            Some(&FieldValue::String("example.com".to_string()))
+            Some(&FieldValue::OwnedString(CompactString::new("example.com")))
         );
         // Other fields not requested
         assert!(result.get("is_query").is_none());

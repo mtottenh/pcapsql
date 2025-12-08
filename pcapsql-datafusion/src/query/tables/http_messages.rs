@@ -121,10 +121,10 @@ fn append_string(
     fields: &HashMap<String, FieldValue>,
     key: &str,
 ) {
-    if let Some(FieldValue::String(s)) = fields.get(key) {
-        builder.append_value(s);
-    } else {
-        builder.append_null();
+    match fields.get(key) {
+        Some(FieldValue::Str(s)) => builder.append_value(s),
+        Some(FieldValue::OwnedString(s)) => builder.append_value(s.as_str()),
+        _ => builder.append_null(),
     }
 }
 

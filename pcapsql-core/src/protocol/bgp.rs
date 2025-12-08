@@ -8,6 +8,7 @@
 //! RFC 6793: BGP Support for Four-Octet Autonomous System (AS) Number Space
 //! RFC 2918: Route Refresh Capability for BGP-4
 
+use compact_str::CompactString;
 use smallvec::SmallVec;
 
 use super::{FieldValue, ParseContext, ParseResult, Protocol};
@@ -185,7 +186,7 @@ impl Protocol for BgpProtocol {
         fields.push(("message_type", FieldValue::UInt8(msg_type)));
         fields.push((
             "message_type_name",
-            FieldValue::String(message_type_name(msg_type).to_string()),
+            FieldValue::Str(message_type_name(msg_type)),
         ));
 
         // Parse message-specific fields
@@ -310,7 +311,7 @@ impl BgpProtocol {
 
         // Bytes 5-8: BGP Identifier (IPv4 address)
         let bgp_id = format!("{}.{}.{}.{}", data[5], data[6], data[7], data[8]);
-        fields.push(("bgp_id", FieldValue::String(bgp_id)));
+        fields.push(("bgp_id", FieldValue::OwnedString(CompactString::new(bgp_id))));
 
         // Byte 9: Optional Parameters Length
         let opt_params_len = data[9] as usize;
@@ -389,7 +390,7 @@ impl BgpProtocol {
         }
 
         if !capabilities.is_empty() {
-            fields.push(("capabilities", FieldValue::String(capabilities.join(","))));
+            fields.push(("capabilities", FieldValue::OwnedString(CompactString::new(capabilities.join(",")))));
         }
 
         // If 4-byte ASN capability was found, store it
@@ -439,7 +440,7 @@ impl BgpProtocol {
         let withdrawn_data = &data[offset..offset + withdrawn_routes_len];
         let withdrawn_prefixes = self.parse_nlri_prefixes(withdrawn_data);
         if !withdrawn_prefixes.is_empty() {
-            fields.push(("withdrawn_routes", FieldValue::String(withdrawn_prefixes.join(","))));
+            fields.push(("withdrawn_routes", FieldValue::OwnedString(CompactString::new(withdrawn_prefixes.join(",")))));
             fields.push(("withdrawn_count", FieldValue::UInt16(withdrawn_prefixes.len() as u16)));
         }
         offset += withdrawn_routes_len;
@@ -467,7 +468,7 @@ impl BgpProtocol {
             let nlri_data = &data[offset..];
             let nlri_prefixes = self.parse_nlri_prefixes(nlri_data);
             if !nlri_prefixes.is_empty() {
-                fields.push(("nlri", FieldValue::String(nlri_prefixes.join(","))));
+                fields.push(("nlri", FieldValue::OwnedString(CompactString::new(nlri_prefixes.join(",")))));
                 fields.push(("nlri_count", FieldValue::UInt16(nlri_prefixes.len() as u16)));
             }
         }
@@ -555,12 +556,12 @@ impl BgpProtocol {
                     if !attr_data.is_empty() {
                         let origin = attr_data[0];
                         fields.push(("origin", FieldValue::UInt8(origin)));
-                        fields.push(("origin_name", FieldValue::String(origin_name(origin).to_string())));
+                        fields.push(("origin_name", FieldValue::Str(origin_name(origin))));
                     }
                 }
                 path_attr_type::AS_PATH => {
                     let (as_path_str, path_length) = self.parse_as_path(attr_data);
-                    fields.push(("as_path", FieldValue::String(as_path_str)));
+                    fields.push(("as_path", FieldValue::OwnedString(CompactString::new(as_path_str))));
                     fields.push(("as_path_length", FieldValue::UInt16(path_length)));
                 }
                 path_attr_type::NEXT_HOP => {
@@ -569,7 +570,7 @@ impl BgpProtocol {
                             "{}.{}.{}.{}",
                             attr_data[0], attr_data[1], attr_data[2], attr_data[3]
                         );
-                        fields.push(("next_hop", FieldValue::String(next_hop)));
+                        fields.push(("next_hop", FieldValue::OwnedString(CompactString::new(next_hop))));
                     }
                 }
                 path_attr_type::MULTI_EXIT_DISC => {
@@ -612,7 +613,7 @@ impl BgpProtocol {
                                 attr_data[ip_offset], attr_data[ip_offset + 1],
                                 attr_data[ip_offset + 2], attr_data[ip_offset + 3]
                             );
-                            fields.push(("aggregator_ip", FieldValue::String(ip)));
+                            fields.push(("aggregator_ip", FieldValue::OwnedString(CompactString::new(ip))));
                         }
                     }
                 }
@@ -700,7 +701,7 @@ impl BgpProtocol {
         // Byte 0: Error Code
         let error_code = data[0];
         fields.push(("error_code", FieldValue::UInt8(error_code)));
-        fields.push(("error_code_name", FieldValue::String(error_code_name(error_code).to_string())));
+        fields.push(("error_code_name", FieldValue::Str(error_code_name(error_code))));
 
         // Byte 1: Error Subcode
         let error_subcode = data[1];
@@ -860,7 +861,7 @@ mod tests {
             let result = parser.parse(&msg, &context);
             assert!(result.is_ok());
             assert_eq!(result.get("message_type"), Some(&FieldValue::UInt8(msg_type)));
-            assert_eq!(result.get("message_type_name"), Some(&FieldValue::String(name.to_string())));
+            assert_eq!(result.get("message_type_name"), Some(&FieldValue::Str(name)));
         }
     }
 
@@ -878,7 +879,7 @@ mod tests {
         assert_eq!(result.get("version"), Some(&FieldValue::UInt8(4)));
         assert_eq!(result.get("my_as"), Some(&FieldValue::UInt16(65001)));
         assert_eq!(result.get("hold_time"), Some(&FieldValue::UInt16(180)));
-        assert_eq!(result.get("bgp_id"), Some(&FieldValue::String("192.168.1.1".to_string())));
+        assert_eq!(result.get("bgp_id"), Some(&FieldValue::OwnedString(CompactString::new("192.168.1.1"))));
     }
 
     // Test 5: KEEPALIVE message (no payload)
@@ -927,7 +928,7 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(result.get("message_type"), Some(&FieldValue::UInt8(message_type::NOTIFICATION)));
-        assert_eq!(result.get("message_type_name"), Some(&FieldValue::String("NOTIFICATION".to_string())));
+        assert_eq!(result.get("message_type_name"), Some(&FieldValue::Str("NOTIFICATION")));
     }
 
     // Test 8: Invalid marker rejection
@@ -1038,7 +1039,7 @@ mod tests {
         assert_eq!(result.get("my_as_4byte"), Some(&FieldValue::UInt32(four_byte_asn)));
 
         // Check capabilities string contains 4-BYTE-AS
-        if let Some(FieldValue::String(caps)) = result.get("capabilities") {
+        if let Some(FieldValue::OwnedString(caps)) = result.get("capabilities") {
             assert!(caps.contains("4-BYTE-AS"));
         } else {
             panic!("Expected capabilities field");
@@ -1080,7 +1081,7 @@ mod tests {
         assert_eq!(result.get("withdrawn_routes_len"), Some(&FieldValue::UInt16(5)));
         assert_eq!(result.get("withdrawn_count"), Some(&FieldValue::UInt16(2)));
 
-        if let Some(FieldValue::String(routes)) = result.get("withdrawn_routes") {
+        if let Some(FieldValue::OwnedString(routes)) = result.get("withdrawn_routes") {
             assert!(routes.contains("10.0.0.0/8"));
             assert!(routes.contains("192.168.0.0/16"));
         } else {
@@ -1146,13 +1147,13 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(result.get("origin"), Some(&FieldValue::UInt8(origin_type::IGP)));
-        assert_eq!(result.get("origin_name"), Some(&FieldValue::String("IGP".to_string())));
-        assert_eq!(result.get("next_hop"), Some(&FieldValue::String("192.168.1.1".to_string())));
+        assert_eq!(result.get("origin_name"), Some(&FieldValue::Str("IGP")));
+        assert_eq!(result.get("next_hop"), Some(&FieldValue::OwnedString(CompactString::new("192.168.1.1"))));
         assert_eq!(result.get("med"), Some(&FieldValue::UInt32(100)));
         assert_eq!(result.get("local_pref"), Some(&FieldValue::UInt32(200)));
         assert_eq!(result.get("as_path_length"), Some(&FieldValue::UInt16(2)));
 
-        if let Some(FieldValue::String(as_path)) = result.get("as_path") {
+        if let Some(FieldValue::OwnedString(as_path)) = result.get("as_path") {
             assert!(as_path.contains("65001"));
             assert!(as_path.contains("65002"));
         } else {
@@ -1194,7 +1195,7 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.get("nlri_count"), Some(&FieldValue::UInt16(1)));
 
-        if let Some(FieldValue::String(nlri_str)) = result.get("nlri") {
+        if let Some(FieldValue::OwnedString(nlri_str)) = result.get("nlri") {
             assert!(nlri_str.contains("172.16.0.0/12"));
         } else {
             panic!("Expected nlri field");
@@ -1219,7 +1220,7 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(result.get("message_type"), Some(&FieldValue::UInt8(message_type::ROUTE_REFRESH)));
-        assert_eq!(result.get("message_type_name"), Some(&FieldValue::String("ROUTE-REFRESH".to_string())));
+        assert_eq!(result.get("message_type_name"), Some(&FieldValue::Str("ROUTE-REFRESH")));
         assert_eq!(result.get("afi"), Some(&FieldValue::UInt16(1)));
         assert_eq!(result.get("safi"), Some(&FieldValue::UInt8(1)));
     }
@@ -1280,7 +1281,7 @@ mod tests {
         // AS_SET counts as 1 for path length
         assert_eq!(result.get("as_path_length"), Some(&FieldValue::UInt16(1)));
 
-        if let Some(FieldValue::String(as_path)) = result.get("as_path") {
+        if let Some(FieldValue::OwnedString(as_path)) = result.get("as_path") {
             // AS_SET should be formatted with braces
             assert!(as_path.contains("{"));
             assert!(as_path.contains("}"));
@@ -1315,7 +1316,7 @@ mod tests {
             assert!(result.is_ok());
             assert_eq!(result.get("error_code"), Some(&FieldValue::UInt8(err_code)));
             assert_eq!(result.get("error_subcode"), Some(&FieldValue::UInt8(err_subcode)));
-            assert_eq!(result.get("error_code_name"), Some(&FieldValue::String(expected_name.to_string())));
+            assert_eq!(result.get("error_code_name"), Some(&FieldValue::Str(expected_name)));
         }
     }
 
@@ -1382,7 +1383,7 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(result.get("aggregator_as"), Some(&FieldValue::UInt32(65001)));
-        assert_eq!(result.get("aggregator_ip"), Some(&FieldValue::String("192.168.1.1".to_string())));
+        assert_eq!(result.get("aggregator_ip"), Some(&FieldValue::OwnedString(CompactString::new("192.168.1.1"))));
     }
 
     // Test 22: Extended length path attribute
@@ -1427,7 +1428,7 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(result.get("origin"), Some(&FieldValue::UInt8(origin_type::EGP)));
-        assert_eq!(result.get("origin_name"), Some(&FieldValue::String("EGP".to_string())));
+        assert_eq!(result.get("origin_name"), Some(&FieldValue::Str("EGP")));
         assert_eq!(result.get("as_path_length"), Some(&FieldValue::UInt16(6)));
     }
 
@@ -1468,7 +1469,7 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.get("nlri_count"), Some(&FieldValue::UInt16(3)));
 
-        if let Some(FieldValue::String(nlri_str)) = result.get("nlri") {
+        if let Some(FieldValue::OwnedString(nlri_str)) = result.get("nlri") {
             assert!(nlri_str.contains("10.0.0.0/8"));
             assert!(nlri_str.contains("172.16.0.0/16"));
             assert!(nlri_str.contains("192.168.1.0/24"));

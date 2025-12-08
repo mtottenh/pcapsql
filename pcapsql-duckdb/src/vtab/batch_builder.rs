@@ -40,7 +40,16 @@ pub fn insert_field_value(vector: &mut FlatVector, row_idx: usize, value: &Field
             let slice = vector.as_mut_slice::<i64>();
             slice[row_idx] = *v;
         }
-        FieldValue::String(v) => {
+        FieldValue::Str(v) => {
+            // Use Inserter trait for strings
+            if let Ok(cstr) = CString::new(*v) {
+                vector.insert(row_idx, cstr);
+            } else {
+                // String contains null byte, set as null
+                vector.set_null(row_idx);
+            }
+        }
+        FieldValue::OwnedString(v) => {
             // Use Inserter trait for strings
             if let Ok(cstr) = CString::new(v.as_str()) {
                 vector.insert(row_idx, cstr);
@@ -50,7 +59,11 @@ pub fn insert_field_value(vector: &mut FlatVector, row_idx: usize, value: &Field
             }
         }
         FieldValue::Bytes(v) => {
-            // Use Inserter trait for binary data
+            // Use Inserter trait for binary data (borrowed slice)
+            vector.insert(row_idx, *v);
+        }
+        FieldValue::OwnedBytes(v) => {
+            // Use Inserter trait for binary data (owned vec)
             vector.insert(row_idx, v.as_slice());
         }
         FieldValue::MacAddr(v) => {

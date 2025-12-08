@@ -2,6 +2,7 @@
 
 use std::net::Ipv6Addr;
 
+use compact_str::CompactString;
 use smallvec::SmallVec;
 
 use super::{FieldValue, ParseContext, ParseResult, Protocol};
@@ -92,7 +93,7 @@ impl Protocol for Icmpv6Protocol {
 
         // Add type name
         let type_name = get_type_name(icmpv6_type);
-        fields.push(("type_name", FieldValue::String(type_name.to_string())));
+        fields.push(("type_name", FieldValue::Str(type_name)));
 
         // Parse type-specific fields
         let consumed = match icmpv6_type {
@@ -285,7 +286,7 @@ fn parse_neighbor_solicitation(
 
     // Skip 4 bytes reserved
     let target = format_ipv6(&data[4..20]);
-    fields.push(("ndp_target_address", FieldValue::String(target)));
+    fields.push(("ndp_target_address", FieldValue::OwnedString(CompactString::new(target))));
 
     // Parse options
     if data.len() > 20 {
@@ -311,7 +312,7 @@ fn parse_neighbor_advertisement(
     fields.push(("ndp_override_flag", FieldValue::Bool((flags & 0x20) != 0)));
 
     let target = format_ipv6(&data[4..20]);
-    fields.push(("ndp_target_address", FieldValue::String(target)));
+    fields.push(("ndp_target_address", FieldValue::OwnedString(CompactString::new(target))));
 
     // Parse options
     if data.len() > 20 {
@@ -330,7 +331,7 @@ fn parse_redirect(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue)
 
     // Skip 4 bytes reserved
     let target = format_ipv6(&data[4..20]);
-    fields.push(("ndp_target_address", FieldValue::String(target)));
+    fields.push(("ndp_target_address", FieldValue::OwnedString(CompactString::new(target))));
 
     // Parse options
     if data.len() > 36 {
@@ -356,13 +357,13 @@ fn parse_ndp_options(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldVal
             ndp_option::SOURCE_LINK_LAYER_ADDR => {
                 if opt_len >= 8 {
                     let mac = format_mac(&data[offset + 2..offset + 8]);
-                    fields.push(("ndp_source_mac", FieldValue::String(mac)));
+                    fields.push(("ndp_source_mac", FieldValue::OwnedString(CompactString::new(mac))));
                 }
             }
             ndp_option::TARGET_LINK_LAYER_ADDR => {
                 if opt_len >= 8 {
                     let mac = format_mac(&data[offset + 2..offset + 8]);
-                    fields.push(("ndp_target_mac", FieldValue::String(mac)));
+                    fields.push(("ndp_target_mac", FieldValue::OwnedString(CompactString::new(mac))));
                 }
             }
             ndp_option::PREFIX_INFO => {
@@ -371,7 +372,7 @@ fn parse_ndp_options(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldVal
                     let prefix_len = data[offset + 2];
                     let prefix = format_ipv6(&data[offset + 16..offset + 32]);
                     fields.push(("ndp_prefix_length", FieldValue::UInt8(prefix_len)));
-                    fields.push(("ndp_prefix", FieldValue::String(prefix)));
+                    fields.push(("ndp_prefix", FieldValue::OwnedString(CompactString::new(prefix))));
                 }
             }
             ndp_option::MTU => {
@@ -411,7 +412,7 @@ fn parse_mldv1(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue); 1
     let multicast_addr = format_ipv6(&data[4..20]);
     fields.push((
         "mld_multicast_address",
-        FieldValue::String(multicast_addr),
+        FieldValue::OwnedString(CompactString::new(multicast_addr)),
     ));
 
     4 + 20 // header + MLDv1 message body
@@ -514,7 +515,7 @@ mod tests {
         assert_eq!(result.get("echo_seq"), Some(&FieldValue::UInt16(2)));
         assert_eq!(
             result.get("type_name"),
-            Some(&FieldValue::String("Echo Request".to_string()))
+            Some(&FieldValue::Str("Echo Request"))
         );
     }
 
@@ -539,7 +540,7 @@ mod tests {
         assert_eq!(result.get("echo_seq"), Some(&FieldValue::UInt16(10)));
         assert_eq!(
             result.get("type_name"),
-            Some(&FieldValue::String("Echo Reply".to_string()))
+            Some(&FieldValue::Str("Echo Reply"))
         );
     }
 
@@ -562,7 +563,7 @@ mod tests {
         assert_eq!(result.get("code"), Some(&FieldValue::UInt8(4)));
         assert_eq!(
             result.get("type_name"),
-            Some(&FieldValue::String("Destination Unreachable".to_string()))
+            Some(&FieldValue::Str("Destination Unreachable"))
         );
     }
 
@@ -585,7 +586,7 @@ mod tests {
         assert_eq!(result.get("mtu"), Some(&FieldValue::UInt32(1500)));
         assert_eq!(
             result.get("type_name"),
-            Some(&FieldValue::String("Packet Too Big".to_string()))
+            Some(&FieldValue::Str("Packet Too Big"))
         );
     }
 
@@ -607,7 +608,7 @@ mod tests {
         assert_eq!(result.get("type"), Some(&FieldValue::UInt8(3)));
         assert_eq!(
             result.get("type_name"),
-            Some(&FieldValue::String("Time Exceeded".to_string()))
+            Some(&FieldValue::Str("Time Exceeded"))
         );
     }
 
@@ -631,7 +632,7 @@ mod tests {
         assert_eq!(result.get("pointer"), Some(&FieldValue::UInt32(40)));
         assert_eq!(
             result.get("type_name"),
-            Some(&FieldValue::String("Parameter Problem".to_string()))
+            Some(&FieldValue::Str("Parameter Problem"))
         );
     }
 
@@ -686,12 +687,13 @@ mod tests {
         assert_eq!(result.get("type"), Some(&FieldValue::UInt8(133)));
         assert_eq!(
             result.get("type_name"),
-            Some(&FieldValue::String("Router Solicitation".to_string()))
+            Some(&FieldValue::Str("Router Solicitation"))
         );
-        assert_eq!(
-            result.get("ndp_source_mac"),
-            Some(&FieldValue::String("00:11:22:33:44:55".to_string()))
-        );
+        // For constructed strings like MAC addresses, we need to compare with OwnedString
+        match result.get("ndp_source_mac") {
+            Some(FieldValue::OwnedString(s)) if s.as_str() == "00:11:22:33:44:55" => {},
+            other => panic!("Expected OwnedString(\"00:11:22:33:44:55\"), got {:?}", other),
+        }
     }
 
     #[test]
@@ -769,10 +771,10 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(result.get("type"), Some(&FieldValue::UInt8(135)));
-        assert_eq!(
-            result.get("ndp_target_address"),
-            Some(&FieldValue::String("2001:db8::1".to_string()))
-        );
+        match result.get("ndp_target_address") {
+            Some(FieldValue::OwnedString(s)) if s.as_str() == "2001:db8::1" => {},
+            other => panic!("Expected OwnedString(\"2001:db8::1\"), got {:?}", other),
+        }
     }
 
     #[test]
@@ -798,10 +800,10 @@ mod tests {
         assert_eq!(result.get("ndp_router_flag"), Some(&FieldValue::Bool(true)));
         assert_eq!(result.get("ndp_solicited_flag"), Some(&FieldValue::Bool(true)));
         assert_eq!(result.get("ndp_override_flag"), Some(&FieldValue::Bool(false)));
-        assert_eq!(
-            result.get("ndp_target_address"),
-            Some(&FieldValue::String("2001:db8::1".to_string()))
-        );
+        match result.get("ndp_target_address") {
+            Some(FieldValue::OwnedString(s)) if s.as_str() == "2001:db8::1" => {},
+            other => panic!("Expected OwnedString(\"2001:db8::1\"), got {:?}", other),
+        }
     }
 
     #[test]
@@ -842,10 +844,10 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(result.get("type"), Some(&FieldValue::UInt8(137)));
-        assert_eq!(
-            result.get("ndp_target_address"),
-            Some(&FieldValue::String("fe80::1".to_string()))
-        );
+        match result.get("ndp_target_address") {
+            Some(FieldValue::OwnedString(s)) if s.as_str() == "fe80::1" => {},
+            other => panic!("Expected OwnedString(\"fe80::1\"), got {:?}", other),
+        }
     }
 
     #[test]
@@ -865,10 +867,10 @@ mod tests {
         let result = parser.parse(&data, &context);
 
         assert!(result.is_ok());
-        assert_eq!(
-            result.get("ndp_source_mac"),
-            Some(&FieldValue::String("aa:bb:cc:dd:ee:ff".to_string()))
-        );
+        match result.get("ndp_source_mac") {
+            Some(FieldValue::OwnedString(s)) if s.as_str() == "aa:bb:cc:dd:ee:ff" => {},
+            other => panic!("Expected OwnedString(\"aa:bb:cc:dd:ee:ff\"), got {:?}", other),
+        }
     }
 
     #[test]
@@ -888,10 +890,10 @@ mod tests {
         let result = parser.parse(&data, &context);
 
         assert!(result.is_ok());
-        assert_eq!(
-            result.get("ndp_target_mac"),
-            Some(&FieldValue::String("11:22:33:44:55:66".to_string()))
-        );
+        match result.get("ndp_target_mac") {
+            Some(FieldValue::OwnedString(s)) if s.as_str() == "11:22:33:44:55:66" => {},
+            other => panic!("Expected OwnedString(\"11:22:33:44:55:66\"), got {:?}", other),
+        }
     }
 
     #[test]
@@ -923,10 +925,10 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(result.get("ndp_prefix_length"), Some(&FieldValue::UInt8(64)));
-        assert_eq!(
-            result.get("ndp_prefix"),
-            Some(&FieldValue::String("2001:db8::".to_string()))
-        );
+        match result.get("ndp_prefix") {
+            Some(FieldValue::OwnedString(s)) if s.as_str() == "2001:db8::" => {},
+            other => panic!("Expected OwnedString(\"2001:db8::\"), got {:?}", other),
+        }
     }
 
     // MLD Tests
@@ -954,10 +956,10 @@ mod tests {
             result.get("mld_max_response_delay"),
             Some(&FieldValue::UInt16(10000))
         );
-        assert_eq!(
-            result.get("mld_multicast_address"),
-            Some(&FieldValue::String("ff02::1".to_string()))
-        );
+        match result.get("mld_multicast_address") {
+            Some(FieldValue::OwnedString(s)) if s.as_str() == "ff02::1" => {},
+            other => panic!("Expected OwnedString(\"ff02::1\"), got {:?}", other),
+        }
     }
 
     #[test]
@@ -981,7 +983,7 @@ mod tests {
         assert_eq!(result.get("type"), Some(&FieldValue::UInt8(131)));
         assert_eq!(
             result.get("type_name"),
-            Some(&FieldValue::String("MLDv1 Report".to_string()))
+            Some(&FieldValue::Str("MLDv1 Report"))
         );
     }
 
@@ -1003,7 +1005,7 @@ mod tests {
         assert_eq!(result.get("type"), Some(&FieldValue::UInt8(132)));
         assert_eq!(
             result.get("type_name"),
-            Some(&FieldValue::String("MLDv1 Done".to_string()))
+            Some(&FieldValue::Str("MLDv1 Done"))
         );
     }
 
@@ -1030,7 +1032,7 @@ mod tests {
         );
         assert_eq!(
             result.get("type_name"),
-            Some(&FieldValue::String("MLDv2 Report".to_string()))
+            Some(&FieldValue::Str("MLDv2 Report"))
         );
     }
 
@@ -1046,10 +1048,10 @@ mod tests {
         let result = parser.parse(&data, &context);
 
         assert!(result.is_ok());
-        assert_eq!(
-            result.get("mld_multicast_address"),
-            Some(&FieldValue::String("ff02::16".to_string()))
-        );
+        match result.get("mld_multicast_address") {
+            Some(FieldValue::OwnedString(s)) if s.as_str() == "ff02::16" => {},
+            other => panic!("Expected OwnedString(\"ff02::16\"), got {:?}", other),
+        }
     }
 
     #[test]

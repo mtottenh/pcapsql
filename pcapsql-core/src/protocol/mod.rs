@@ -73,7 +73,7 @@ mod vxlan;
 pub mod test_utils;
 
 pub use context::{FieldEntry, HintEntry, ParseContext, ParseResult};
-pub use field::FieldValue;
+pub use field::{FieldValue, OwnedFieldValue};
 pub use projection::{chain_fields_for_protocol, merge_with_chain_fields, ProjectionConfig};
 pub use pruning::{compute_required_protocols, should_continue_parsing, should_run_parser};
 pub use registry::{BuiltinProtocol, PayloadMode, Protocol, ProtocolRegistry};

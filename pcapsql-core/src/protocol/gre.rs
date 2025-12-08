@@ -109,7 +109,7 @@ impl Protocol for GreProtocol {
             gre_version::PPTP_ENHANCED => "PPTP-Enhanced",
             _ => "Unknown",
         };
-        fields.push(("version_name", FieldValue::String(version_name.to_string())));
+        fields.push(("version_name", FieldValue::Str(version_name)));
 
         offset += 2;
 
@@ -471,7 +471,7 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.get("version"), Some(&FieldValue::UInt8(gre_version::STANDARD)));
         assert_eq!(result.get("version_valid"), Some(&FieldValue::Bool(true)));
-        assert_eq!(result.get("version_name"), Some(&FieldValue::String("Standard".to_string())));
+        assert_eq!(result.get("version_name"), Some(&FieldValue::Str("Standard")));
     }
 
     // Test 12: Version 1 (PPTP Enhanced GRE) validation
@@ -492,7 +492,7 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.get("version"), Some(&FieldValue::UInt8(gre_version::PPTP_ENHANCED)));
         assert_eq!(result.get("version_valid"), Some(&FieldValue::Bool(true)));
-        assert_eq!(result.get("version_name"), Some(&FieldValue::String("PPTP-Enhanced".to_string())));
+        assert_eq!(result.get("version_name"), Some(&FieldValue::Str("PPTP-Enhanced")));
     }
 
     // Test 13: Invalid version (version 2-7)
@@ -514,7 +514,7 @@ mod tests {
             assert!(result.is_ok()); // Still parses (lenient)
             assert_eq!(result.get("version"), Some(&FieldValue::UInt8(version as u8)));
             assert_eq!(result.get("version_valid"), Some(&FieldValue::Bool(false)));
-            assert_eq!(result.get("version_name"), Some(&FieldValue::String("Unknown".to_string())));
+            assert_eq!(result.get("version_name"), Some(&FieldValue::Str("Unknown")));
         }
     }
 

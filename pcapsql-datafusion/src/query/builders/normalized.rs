@@ -223,6 +223,7 @@ impl NormalizedBatchSet {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use compact_str::CompactString;
     use pcapsql_core::FieldValue;
     use smallvec::SmallVec;
 
@@ -443,7 +444,7 @@ mod tests {
         };
 
         let mut dns_fields = SmallVec::new();
-        dns_fields.push(("query_name", FieldValue::String("example.com".to_string())));
+        dns_fields.push(("query_name", FieldValue::OwnedString(CompactString::new("example.com"))));
         dns_fields.push(("query_type", FieldValue::UInt16(1)));
         dns_fields.push(("is_query", FieldValue::Bool(true)));
         let dns = ParseResult {

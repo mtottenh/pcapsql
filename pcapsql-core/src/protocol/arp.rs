@@ -55,7 +55,7 @@ impl Protocol for ArpProtocol {
         fields.push(("protocol_size", FieldValue::UInt8(protocol_size)));
         fields.push(("operation", FieldValue::UInt16(operation)));
 
-        // Operation name for convenience
+        // Operation name for convenience (zero-copy static string)
         let operation_name = match operation {
             operation::REQUEST => "Request",
             operation::REPLY => "Reply",
@@ -63,7 +63,7 @@ impl Protocol for ArpProtocol {
         };
         fields.push((
             "operation_name",
-            FieldValue::String(operation_name.to_string()),
+            FieldValue::Str(operation_name),
         ));
 
         // For Ethernet/IPv4 ARP (most common case)
@@ -135,7 +135,7 @@ mod tests {
         );
         assert_eq!(
             result.get("operation_name"),
-            Some(&FieldValue::String("Request".to_string()))
+            Some(&FieldValue::Str("Request"))
         );
     }
 
@@ -166,7 +166,7 @@ mod tests {
         );
         assert_eq!(
             result.get("operation_name"),
-            Some(&FieldValue::String("Reply".to_string()))
+            Some(&FieldValue::Str("Reply"))
         );
         assert_eq!(
             result.get("sender_ip"),

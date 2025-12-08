@@ -3,6 +3,7 @@
 //! Parses TLS (Transport Layer Security) handshake records, particularly
 //! Client Hello messages for SNI extraction and cipher suite analysis.
 
+use compact_str::CompactString;
 use smallvec::SmallVec;
 
 use super::{FieldValue, ParseContext, ParseResult, Protocol};
@@ -75,7 +76,7 @@ impl Protocol for TlsProtocol {
         let version_major = data[1];
         let version_minor = data[2];
         let version_str = format_tls_version(version_major, version_minor);
-        fields.push(("version", FieldValue::String(version_str)));
+        fields.push(("version", FieldValue::OwnedString(CompactString::new(version_str))));
 
         let record_length = u16::from_be_bytes([data[3], data[4]]) as usize;
 
@@ -198,7 +199,7 @@ fn parse_client_hello(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldVa
             .collect();
 
         if !cipher_names.is_empty() {
-            fields.push(("cipher_suites", FieldValue::String(cipher_names.join(","))));
+            fields.push(("cipher_suites", FieldValue::OwnedString(CompactString::new(cipher_names.join(",")))));
         }
     }
     offset += cipher_suites_len;
@@ -246,7 +247,7 @@ fn parse_server_hello(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldVa
     let cipher_id = u16::from_be_bytes([data[offset], data[offset + 1]]);
     fields.push((
         "selected_cipher",
-        FieldValue::String(format_cipher_suite(cipher_id)),
+        FieldValue::OwnedString(CompactString::new(format_cipher_suite(cipher_id))),
     ));
 }
 
@@ -267,7 +268,7 @@ fn parse_extensions(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldValu
 
         if ext_type == extension_type::SERVER_NAME {
             if let Some(sni) = parse_sni_extension(ext_data) {
-                fields.push(("sni", FieldValue::String(sni)));
+                fields.push(("sni", FieldValue::OwnedString(CompactString::new(sni))));
             }
         }
 
@@ -317,6 +318,7 @@ fn parse_sni_extension(data: &[u8]) -> Option<String> {
 }
 
 /// Format a cipher suite ID as a readable name.
+/// Returns String because the result can be either a static string or a formatted hex value.
 fn format_cipher_suite(id: u16) -> String {
     match id {
         0x0000 => "TLS_NULL_WITH_NULL_NULL".to_string(),
@@ -516,7 +518,7 @@ mod tests {
         );
         assert_eq!(
             result.get("version"),
-            Some(&FieldValue::String("TLS 1.2".to_string()))
+            Some(&FieldValue::OwnedString(CompactString::new("TLS 1.2")))
         );
         assert_eq!(
             result.get("handshake_type"),
@@ -541,8 +543,8 @@ mod tests {
         );
         assert_eq!(
             result.get("selected_cipher"),
-            Some(&FieldValue::String(
-                "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256".to_string()
+            Some(&FieldValue::OwnedString(
+                CompactString::new("TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256")
             ))
         );
     }
@@ -560,7 +562,7 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(
             result.get("sni"),
-            Some(&FieldValue::String("www.example.com".to_string()))
+            Some(&FieldValue::OwnedString(CompactString::new("www.example.com")))
         );
     }
 

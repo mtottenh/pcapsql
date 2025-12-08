@@ -3,6 +3,7 @@
 //! Parses NTP (Network Time Protocol) messages used for time synchronization.
 //! Matches on UDP port 123.
 
+use compact_str::CompactString;
 use smallvec::SmallVec;
 
 use super::{FieldValue, ParseContext, ParseResult, Protocol};
@@ -80,17 +81,18 @@ impl Protocol for NtpProtocol {
         let ref_id_bytes = &data[12..16];
         let reference_id = if stratum == 0 || stratum == 1 {
             // For stratum 0-1, it's ASCII (e.g., "GPS", "PPS")
-            String::from_utf8_lossy(ref_id_bytes)
-                .trim_end_matches('\0')
-                .to_string()
+            CompactString::new(
+                String::from_utf8_lossy(ref_id_bytes)
+                    .trim_end_matches('\0')
+            )
         } else {
             // For stratum 2+, it's an IP address
-            format!(
+            CompactString::new(format!(
                 "{}.{}.{}.{}",
                 ref_id_bytes[0], ref_id_bytes[1], ref_id_bytes[2], ref_id_bytes[3]
-            )
+            ))
         };
-        fields.push(("reference_id", FieldValue::String(reference_id)));
+        fields.push(("reference_id", FieldValue::OwnedString(reference_id)));
 
         // Reference Timestamp (8 bytes) - NTP format
         let reference_ts = read_ntp_timestamp(&data[16..24]);
@@ -298,7 +300,7 @@ mod tests {
         assert_eq!(result.get("stratum"), Some(&FieldValue::UInt8(1))); // Primary
         assert_eq!(
             result.get("reference_id"),
-            Some(&FieldValue::String("GPS".to_string()))
+            Some(&FieldValue::OwnedString(CompactString::new("GPS")))
         );
     }
 

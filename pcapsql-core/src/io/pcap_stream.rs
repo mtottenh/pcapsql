@@ -30,7 +30,7 @@ use crate::error::{Error, PcapError};
 use crate::io::{PacketRef, RawPacket};
 
 /// Buffer size for pcap_parser readers (64KB).
-const BUFFER_SIZE: usize = 65536;
+const BUFFER_SIZE: usize = 262144;
 
 /// Format of the PCAP file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

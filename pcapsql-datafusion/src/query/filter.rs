@@ -84,7 +84,7 @@ pub enum SimplePredicate {
 
 impl SimplePredicate {
     /// Evaluate this predicate against parsed packet data.
-    pub fn matches(&self, parsed: &[(&'static str, ParseResult)]) -> bool {
+    pub fn matches<'a, 'b>(&self, parsed: &'a [(&'static str, ParseResult<'b>)]) -> bool {
         match self {
             SimplePredicate::StringCompare { field, op, value } => {
                 if let Some(field_value) = get_field_value(parsed, field) {
@@ -116,10 +116,10 @@ impl SimplePredicate {
 }
 
 /// Get a field value from parsed packet data.
-fn get_field_value<'a>(
-    parsed: &'a [(&'static str, ParseResult)],
+fn get_field_value<'a, 'b>(
+    parsed: &'a [(&'static str, ParseResult<'b>)],
     field_name: &str,
-) -> Option<&'a FieldValue> {
+) -> Option<&'a FieldValue<'b>> {
     // Handle common field mappings
     match field_name {
         // Ethernet fields
@@ -161,11 +161,11 @@ fn get_field_value<'a>(
 }
 
 /// Find a field in a specific protocol's parse result.
-fn find_field<'a>(
-    parsed: &'a [(&'static str, ParseResult)],
+fn find_field<'a, 'b>(
+    parsed: &'a [(&'static str, ParseResult<'b>)],
     protocol: &str,
     field: &str,
-) -> Option<&'a FieldValue> {
+) -> Option<&'a FieldValue<'b>> {
     parsed
         .iter()
         .find(|(name, _)| *name == protocol)
@@ -237,7 +237,7 @@ impl FilterEvaluator {
     }
 
     /// Evaluate the filter against parsed packet data.
-    pub fn matches(&self, parsed: &[(&'static str, ParseResult)]) -> bool {
+    pub fn matches<'a, 'b>(&self, parsed: &'a [(&'static str, ParseResult<'b>)]) -> bool {
         self.predicate.matches(parsed)
     }
 }
@@ -376,14 +376,16 @@ mod tests {
     use smallvec::SmallVec;
 
     fn create_tcp_parsed() -> Vec<(&'static str, ParseResult<'static>)> {
+        use std::net::{IpAddr, Ipv4Addr};
+
         let mut eth_fields = SmallVec::new();
-        eth_fields.push(("src_mac", FieldValue::String("00:11:22:33:44:55".to_string())));
-        eth_fields.push(("dst_mac", FieldValue::String("ff:ff:ff:ff:ff:ff".to_string())));
+        eth_fields.push(("src_mac", FieldValue::MacAddr([0x00, 0x11, 0x22, 0x33, 0x44, 0x55])));
+        eth_fields.push(("dst_mac", FieldValue::MacAddr([0xff, 0xff, 0xff, 0xff, 0xff, 0xff])));
         eth_fields.push(("ethertype", FieldValue::UInt16(0x0800)));
 
         let mut ipv4_fields = SmallVec::new();
-        ipv4_fields.push(("src_ip", FieldValue::String("192.168.1.1".to_string())));
-        ipv4_fields.push(("dst_ip", FieldValue::String("192.168.1.2".to_string())));
+        ipv4_fields.push(("src_ip", FieldValue::IpAddr(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)))));
+        ipv4_fields.push(("dst_ip", FieldValue::IpAddr(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 2)))));
         ipv4_fields.push(("ttl", FieldValue::UInt8(64)));
         ipv4_fields.push(("protocol", FieldValue::UInt8(6)));
 

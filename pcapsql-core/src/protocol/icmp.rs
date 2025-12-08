@@ -100,7 +100,7 @@ impl Protocol for IcmpProtocol {
             icmp_type::TIMESTAMP_REPLY => "Timestamp Reply",
             _ => "Unknown",
         };
-        fields.push(("type_name", FieldValue::String(type_name.to_string())));
+        fields.push(("type_name", FieldValue::Str(type_name)));
 
         // ICMP doesn't have child protocols typically
         ParseResult::success(fields, &data[8..], SmallVec::new())
@@ -151,7 +151,7 @@ mod tests {
         assert_eq!(result.get("sequence"), Some(&FieldValue::UInt16(2)));
         assert_eq!(
             result.get("type_name"),
-            Some(&FieldValue::String("Echo Request".to_string()))
+            Some(&FieldValue::Str("Echo Request"))
         );
     }
 
@@ -180,7 +180,7 @@ mod tests {
         assert_eq!(result.get("sequence"), Some(&FieldValue::UInt16(10)));
         assert_eq!(
             result.get("type_name"),
-            Some(&FieldValue::String("Echo Reply".to_string()))
+            Some(&FieldValue::Str("Echo Reply"))
         );
     }
 
@@ -207,7 +207,7 @@ mod tests {
         assert_eq!(result.get("code"), Some(&FieldValue::UInt8(1)));
         assert_eq!(
             result.get("type_name"),
-            Some(&FieldValue::String("Destination Unreachable".to_string()))
+            Some(&FieldValue::Str("Destination Unreachable"))
         );
     }
 
@@ -233,7 +233,7 @@ mod tests {
         );
         assert_eq!(
             result.get("type_name"),
-            Some(&FieldValue::String("Time Exceeded".to_string()))
+            Some(&FieldValue::Str("Time Exceeded"))
         );
     }
 

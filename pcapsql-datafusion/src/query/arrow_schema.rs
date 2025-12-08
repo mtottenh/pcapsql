@@ -114,8 +114,10 @@ pub fn field_value_to_scalar(value: &pcapsql_core::FieldValue) -> datafusion::sc
         FieldValue::UInt32(v) => ScalarValue::UInt32(Some(*v)),
         FieldValue::UInt64(v) => ScalarValue::UInt64(Some(*v)),
         FieldValue::Int64(v) => ScalarValue::Int64(Some(*v)),
-        FieldValue::String(v) => ScalarValue::Utf8(Some(v.clone())),
-        FieldValue::Bytes(v) => ScalarValue::Binary(Some(v.clone())),
+        FieldValue::Str(v) => ScalarValue::Utf8(Some(v.to_string())),
+        FieldValue::OwnedString(v) => ScalarValue::Utf8(Some(v.to_string())),
+        FieldValue::Bytes(v) => ScalarValue::Binary(Some(v.to_vec())),
+        FieldValue::OwnedBytes(v) => ScalarValue::Binary(Some(v.clone())),
         FieldValue::MacAddr(v) => ScalarValue::FixedSizeBinary(6, Some(v.to_vec())),
         FieldValue::IpAddr(addr) => {
             // Store as string for now - UDFs handle the conversion
