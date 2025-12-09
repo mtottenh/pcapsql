@@ -113,11 +113,8 @@ pub struct Args {
     pub streaming: bool,
 
     /// Cache size for streaming mode (number of parsed packets to cache).
-    ///
-    /// The parse cache reduces redundant parsing when multiple protocol
-    /// tables read the same PCAP file (e.g., during JOIN queries).
-    /// Set to 0 to disable caching.
-    #[arg(long = "cache-size", default_value = "10000")]
+    /// Disabled by default (0) since cache overhead typically exceeds parsing cost.
+    #[arg(long = "cache-size", default_value = "0")]
     pub cache_size: usize,
 
     /// Use memory-mapped I/O for reading PCAP files.
@@ -165,6 +162,10 @@ pub struct Args {
     /// cache performance metrics. Useful for tuning --cache-size.
     #[arg(long = "stats")]
     pub show_stats: bool,
+
+    /// Use LRU-only cache eviction (disable reader-position-based eviction).
+    #[arg(long = "no-reader-eviction")]
+    pub no_reader_eviction: bool,
 }
 
 /// Value parser for size arguments (e.g., "512M", "1G").

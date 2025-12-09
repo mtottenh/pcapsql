@@ -2,14 +2,21 @@
 
 use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use tracing::debug;
+
 use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
+
 use datafusion::error::DataFusionError;
 use datafusion::physical_plan::RecordBatchStream;
 use futures::Stream;
+
+/// Global sequence counter for tracking batch scheduling order across all streams.
+static BATCH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 use crate::error::{Error, Result};
 use crate::query::builders::ProtocolBatchBuilder;
@@ -178,7 +185,10 @@ impl<R: PacketReader> ProtocolBatchStream<R> {
         };
 
         let mut rows_added = 0usize;
+        let mut first_frame = 0u64;
         let mut last_frame = 0u64;
+        let mut batch_hits = 0usize;
+        let mut batch_misses = 0usize;
 
         // Capture references for the closure
         let table_name = &self.table_name;
@@ -190,6 +200,10 @@ impl<R: PacketReader> ProtocolBatchStream<R> {
 
         // Process packets using zero-copy callback API
         let packets_processed = self.reader.process_packets(self.batch_size, |packet: PacketRef<'_>| {
+            // Track first frame of this batch
+            if first_frame == 0 {
+                first_frame = packet.frame_number;
+            }
             last_frame = packet.frame_number;
 
             // For frames table, add all packets without parsing
@@ -206,80 +220,134 @@ impl<R: PacketReader> ProtocolBatchStream<R> {
                 return Ok(());
             }
 
-            // Check cache first
             if let Some(ref cache) = cache {
-                if let Some(cached) = cache.get(packet.frame_number) {
-                    // Cache hit - use cached parse result (raw bytes not needed!)
-                    if let Some(result) = cached.get_protocol(table_name) {
-                        builder.add_cached_row(packet.frame_number, result);
-                        rows_added += 1;
-                    }
-                    return Ok(());
-                }
-            }
+                let (cached, was_hit) = cache.get_or_insert_with(packet.frame_number, Box::new(|| {
+                    // Parse using borrowed data
+                    let parsed = match (required_protocols, field_projections) {
+                        // Both pruning and projection
+                        (Some(ref required), Some(ref projections)) => {
+                            parse_packet_pruned_projected(
+                                registry,
+                                link_type as u16,
+                                packet.data,
+                                required,
+                                projections,
+                            )
+                        }
+                        // Only pruning
+                        (Some(ref required), None) => {
+                            parse_packet_pruned(
+                                registry,
+                                link_type as u16,
+                                packet.data,
+                                required,
+                            )
+                        }
+                        // Only projection
+                        (None, Some(ref projections)) => {
+                            parse_packet_projected(
+                                registry,
+                                link_type as u16,
+                                packet.data,
+                                projections,
+                            )
+                        }
+                        // Neither - full parsing
+                        (None, None) => {
+                            parse_packet(
+                                registry,
+                                link_type as u16,
+                                packet.data,
+                            )
+                        }
+                    };
+                    Arc::new(CachedParse::from_parse_results(packet.frame_number, &parsed))
+                }));
 
-            // Cache miss (or no cache) - parse using borrowed data
-            // Select appropriate parse function based on optimizations enabled
-            let parsed = match (required_protocols, field_projections) {
-                // Both pruning and projection
-                (Some(ref required), Some(ref projections)) => {
-                    parse_packet_pruned_projected(
-                        registry,
-                        link_type as u16,
-                        packet.data,
-                        required,
-                        projections,
-                    )
+                // Track batch-level hit/miss
+                if was_hit {
+                    batch_hits += 1;
+                } else {
+                    batch_misses += 1;
                 }
-                // Only pruning
-                (Some(ref required), None) => {
-                    parse_packet_pruned(
-                        registry,
-                        link_type as u16,
-                        packet.data,
-                        required,
-                    )
-                }
-                // Only projection
-                (None, Some(ref projections)) => {
-                    parse_packet_projected(
-                        registry,
-                        link_type as u16,
-                        packet.data,
-                        projections,
-                    )
-                }
-                // Neither - full parsing
-                (None, None) => {
-                    parse_packet(
-                        registry,
-                        link_type as u16,
-                        packet.data,
-                    )
-                }
-            };
 
-            // Store owned result in cache if available
-            if let Some(ref cache) = cache {
-                let cached = Arc::new(CachedParse::from_parse_results(
-                    packet.frame_number,
-                    &parsed,
-                ));
-                cache.put(packet.frame_number, cached);
-            }
-
-            // For protocol-specific tables, add ALL occurrences (supports tunneled traffic)
-            // For example, a VXLAN packet may have two Ethernet/IPv4 layers at different depths
-            for (proto_name, result) in &parsed {
-                if *proto_name == *table_name {
-                    builder.add_parsed_row(packet.frame_number, result);
+                // Use cached result to add rows
+                // get_all_protocols handles tunneled packets with multiple
+                // occurrences of the same protocol at different encap depths
+                for result in cached.get_all_protocols(table_name) {
+                    builder.add_cached_row(packet.frame_number, result);
                     rows_added += 1;
-                    // NO break - include all occurrences for tunnel support
+                }
+            } else {
+                // No cache - parse directly using borrowed data (no Arc allocation)
+                let parsed = match (required_protocols, field_projections) {
+                    // Both pruning and projection
+                    (Some(ref required), Some(ref projections)) => {
+                        parse_packet_pruned_projected(
+                            registry,
+                            link_type as u16,
+                            packet.data,
+                            required,
+                            projections,
+                        )
+                    }
+                    // Only pruning
+                    (Some(ref required), None) => {
+                        parse_packet_pruned(
+                            registry,
+                            link_type as u16,
+                            packet.data,
+                            required,
+                        )
+                    }
+                    // Only projection
+                    (None, Some(ref projections)) => {
+                        parse_packet_projected(
+                            registry,
+                            link_type as u16,
+                            packet.data,
+                            projections,
+                        )
+                    }
+                    // Neither - full parsing
+                    (None, None) => {
+                        parse_packet(
+                            registry,
+                            link_type as u16,
+                            packet.data,
+                        )
+                    }
+                };
+
+                // For protocol-specific tables, add ALL occurrences (supports tunneled traffic)
+                // For example, a VXLAN packet may have two Ethernet/IPv4 layers at different depths
+                for (proto_name, result) in &parsed {
+                    if *proto_name == *table_name {
+                        builder.add_parsed_row(packet.frame_number, result);
+                        rows_added += 1;
+                        // NO break - include all occurrences for tunnel support
+                    }
                 }
             }
 
             Ok(())
         })?;
+
+        // Log batch scheduling information for debugging cache behavior
+        if packets_processed > 0 {
+            let seq = BATCH_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            debug!(
+                seq = seq,
+                table = %self.table_name,
+                first_frame = first_frame,
+                last_frame = last_frame,
+                packets = packets_processed,
+                rows = rows_added,
+                hits = batch_hits,
+                misses = batch_misses,
+                "batch_read"
+            );
+        }
 
         // Check if we've reached EOF
         if packets_processed == 0 {

@@ -170,12 +170,12 @@ impl<S: PacketSource + 'static> ProtocolStreamExec<S> {
     }
 
     fn compute_equivalence_properties(schema: &SchemaRef) -> EquivalenceProperties {
+        use datafusion::physical_expr::expressions::col;
+
         let mut eq_props = EquivalenceProperties::new(schema.clone());
 
-        // Declare that output is sorted by frame_number (if present in schema)
+        // Declare output sorted by frame_number for SortMergeJoin
         if schema.index_of("frame_number").is_ok() {
-            use datafusion::physical_expr::expressions::col;
-
             if let Ok(col_expr) = col("frame_number", schema) {
                 let sort_expr = PhysicalSortExpr {
                     expr: col_expr,
@@ -184,8 +184,7 @@ impl<S: PacketSource + 'static> ProtocolStreamExec<S> {
                         nulls_first: false,
                     },
                 };
-                // reorder() mutates in place and returns Result<bool>
-                let _ = eq_props.reorder(vec![sort_expr]);
+                eq_props.add_orderings(vec![vec![sort_expr]]);
             }
         }
 

@@ -54,10 +54,11 @@ async fn main() -> Result<()> {
             use std::sync::Arc;
             match MmapPacketSource::open(&pcap_file) {
                 Ok(source) => {
-                    QueryEngine::with_streaming_source_cached(
+                    QueryEngine::with_streaming_source_cached_opts(
                         Arc::new(source),
                         args.batch_size,
                         args.cache_size,
+                        !args.no_reader_eviction,
                     )
                     .await
                     .with_context(|| format!("Failed to open PCAP file: {}", pcap_file.display()))?
@@ -70,7 +71,7 @@ async fn main() -> Result<()> {
                     use pcapsql_core::FilePacketSource;
                     let source = Arc::new(FilePacketSource::open(&pcap_file)
                         .with_context(|| format!("Failed to open PCAP file: {}", pcap_file.display()))?);
-                    QueryEngine::with_streaming_source_cached(source, args.batch_size, args.cache_size)
+                    QueryEngine::with_streaming_source_cached_opts(source, args.batch_size, args.cache_size, !args.no_reader_eviction)
                         .await
                         .with_context(|| format!("Failed to create engine"))?
                 }
@@ -80,7 +81,7 @@ async fn main() -> Result<()> {
             use std::sync::Arc;
             let source = Arc::new(FilePacketSource::open(&pcap_file)
                 .with_context(|| format!("Failed to open PCAP file: {}", pcap_file.display()))?);
-            QueryEngine::with_streaming_source_cached(source, args.batch_size, args.cache_size)
+            QueryEngine::with_streaming_source_cached_opts(source, args.batch_size, args.cache_size, !args.no_reader_eviction)
                 .await
                 .with_context(|| format!("Failed to create engine"))?
         }

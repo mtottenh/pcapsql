@@ -131,18 +131,18 @@ impl<S: PacketSource + 'static> TableProvider for ProtocolTableProvider<S> {
                     .partitions(1)
                     .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
 
-                // Protocol Pruning Optimization:
-                // Compute required protocols for this table scan.
-                // This includes the table itself and all its dependencies (e.g., tcp requires ipv4/ipv6, ethernet).
-                // Parsing will stop once all required protocols have been parsed.
-                let required_protocols = Arc::new(compute_required_protocols(
-                    &[self.table_name.as_str()],
-                    registry,
-                ));
+                // Protocol pruning: only parse protocols needed for this table.
+                // Disabled when caching since cache entries need all protocols.
+                let required_protocols = if cache.is_none() {
+                    Some(Arc::new(compute_required_protocols(
+                        &[self.table_name.as_str()],
+                        registry,
+                    )))
+                } else {
+                    None
+                };
 
-                // Field Projection Optimization:
-                // Convert DataFusion projection indices to field names.
-                // This tells the parser to only extract needed fields, reducing CPU usage.
+                // Field projection: only extract fields in the SELECT list.
                 let field_projections = projection.map(|indices| {
                     let field_names: HashSet<String> = indices
                         .iter()
@@ -164,7 +164,7 @@ impl<S: PacketSource + 'static> TableProvider for ProtocolTableProvider<S> {
                     projection.cloned(),
                     cache.clone(),
                     limit,
-                    Some(required_protocols),
+                    required_protocols,
                     field_projections,
                 )))
             }

@@ -160,6 +160,21 @@ pub trait ParseCache: Send + Sync {
     /// Store parse result for a frame.
     fn put(&self, frame_number: u64, parsed: Arc<CachedParse>);
 
+    /// Get cached result or compute and cache it. Returns (result, was_hit).
+    fn get_or_insert_with(
+        &self,
+        frame_number: u64,
+        f: Box<dyn FnOnce() -> Arc<CachedParse> + '_>,
+    ) -> (Arc<CachedParse>, bool) {
+        // Default implementation: separate get/put (no coordination)
+        if let Some(cached) = self.get(frame_number) {
+            return (cached, true);
+        }
+        let result = f();
+        self.put(frame_number, result.clone());
+        (result, false)
+    }
+
     /// Hint that a reader has finished with frames up to this number.
     ///
     /// Used for eviction decisions. When all active readers have passed

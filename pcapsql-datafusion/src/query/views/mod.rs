@@ -27,6 +27,7 @@ mod quic;
 mod ssh;
 mod tcp;
 mod tls;
+mod tunneled;
 mod udp;
 mod vxlan;
 
@@ -50,6 +51,7 @@ pub use quic::quic_packets_view;
 pub use ssh::ssh_packets_view;
 pub use tcp::tcp_packets_view;
 pub use tls::tls_packets_view;
+pub use tunneled::{ip4_in_ip6_view, ip6_in_ip6_view, tunneled_packets_view};
 pub use udp::udp_packets_view;
 pub use vxlan::vxlan_packets_view;
 
@@ -88,6 +90,9 @@ pub fn all_views() -> Vec<ViewDefinition> {
         ipsec_packets_view(),
         bgp_packets_view(),
         ospf_packets_view(),
+        tunneled_packets_view(),
+        ip4_in_ip6_view(),
+        ip6_in_ip6_view(),
         packets_view(),
     ]
 }
@@ -121,6 +126,9 @@ pub fn all_view_names() -> Vec<&'static str> {
         "ipsec_packets",
         "bgp_packets",
         "ospf_packets",
+        "tunneled_packets",
+        "ip4_in_ip6",
+        "ip6_in_ip6",
         "packets",
     ]
 }

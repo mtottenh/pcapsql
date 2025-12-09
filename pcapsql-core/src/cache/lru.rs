@@ -45,6 +45,9 @@ pub struct LruParseCache {
     evictions_reader: AtomicU64,
     /// Peak entries ever held (high watermark)
     peak_entries: AtomicUsize,
+
+    /// Whether reader-based eviction is enabled
+    reader_eviction_enabled: bool,
 }
 
 impl LruParseCache {
@@ -53,6 +56,17 @@ impl LruParseCache {
     /// A good default is 10,000 entries, which at ~1KB per entry
     /// uses about 10MB of memory.
     pub fn new(max_entries: usize) -> Self {
+        Self::with_options(max_entries, true)
+    }
+
+    /// Create a new cache with configurable options.
+    ///
+    /// # Arguments
+    ///
+    /// * `max_entries` - Maximum number of entries to cache
+    /// * `reader_eviction_enabled` - If true, entries are evicted when all readers
+    ///   have passed them. If false, only LRU eviction is used.
+    pub fn with_options(max_entries: usize, reader_eviction_enabled: bool) -> Self {
         Self {
             max_entries,
             entries: RwLock::new(HashMap::with_capacity(max_entries.min(10000))),
@@ -64,11 +78,17 @@ impl LruParseCache {
             evictions_lru: AtomicU64::new(0),
             evictions_reader: AtomicU64::new(0),
             peak_entries: AtomicUsize::new(0),
+            reader_eviction_enabled,
         }
     }
 
     /// Evict entries that all readers have passed.
     fn evict_passed_entries(&self, entries: &mut HashMap<u64, (Arc<CachedParse>, u64)>) {
+        // Skip if reader-based eviction is disabled
+        if !self.reader_eviction_enabled {
+            return;
+        }
+
         let readers = self.readers.read().unwrap();
         if readers.is_empty() {
             return;
@@ -227,6 +247,45 @@ impl ParseCache for LruParseCache {
 
     fn stats(&self) -> Option<CacheStats> {
         Some(self.get_stats())
+    }
+
+    fn get_or_insert_with(
+        &self,
+        frame_number: u64,
+        f: Box<dyn FnOnce() -> Arc<CachedParse> + '_>,
+    ) -> (Arc<CachedParse>, bool) {
+        // Fast path: check if already cached (read lock only)
+        {
+            let entries = self.entries.read().unwrap();
+            if let Some((cached, _)) = entries.get(&frame_number) {
+                self.hits.fetch_add(1, Ordering::Relaxed);
+                return (cached.clone(), true);
+            }
+        }
+
+        // Not cached - parse and insert
+        self.misses.fetch_add(1, Ordering::Relaxed);
+        let result = f();
+
+        // Insert into cache
+        {
+            let mut entries = self.entries.write().unwrap();
+
+            // Evict if needed
+            if entries.len() >= self.max_entries {
+                self.evict_passed_entries(&mut entries);
+                if entries.len() >= self.max_entries {
+                    let target = (self.max_entries as f64 * 0.9) as usize;
+                    self.evict_lru(&mut entries, target);
+                }
+            }
+
+            let access_order = self.access_counter.fetch_add(1, Ordering::Relaxed);
+            entries.insert(frame_number, (result.clone(), access_order));
+            self.update_peak(entries.len());
+        }
+
+        (result, false)
     }
 }
 

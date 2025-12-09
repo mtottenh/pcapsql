@@ -42,6 +42,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::RecordBatch;
+use datafusion::config::ConfigOptions;
 use datafusion::prelude::*;
 use indicatif::{ProgressBar, ProgressStyle};
 
@@ -57,6 +58,21 @@ const STREAMING_THRESHOLD_BYTES: u64 = 100 * 1024 * 1024;
 
 /// Default cache size for streaming mode (number of parsed packets to cache).
 pub const DEFAULT_CACHE_SIZE: usize = 10_000;
+
+/// Configure DataFusion for SortMergeJoin on frame_number-sorted streams.
+fn create_session_context() -> SessionContext {
+    let mut config = ConfigOptions::default();
+
+    // SortMergeJoin requires target_partitions > 1
+    config.execution.target_partitions = 2;
+    // Use our declared sort order (by frame_number)
+    config.optimizer.prefer_existing_sort = true;
+    // Prefer SortMergeJoin - works better with our sorted streams
+    config.optimizer.prefer_hash_join = false;
+    config.optimizer.repartition_joins = true;
+
+    SessionContext::new_with_config(config.into())
+}
 
 /// Query engine for PCAP files.
 pub struct QueryEngine {
@@ -81,7 +97,7 @@ impl QueryEngine {
         show_progress: bool,
     ) -> Result<Self, Error> {
         let registry = default_registry();
-        let ctx = SessionContext::new();
+        let ctx = create_session_context();
 
         // Register all UDFs (network addresses, protocol names, utilities)
         udf::register_all_udfs(&ctx)?;
@@ -183,8 +199,18 @@ impl QueryEngine {
         batch_size: usize,
         cache_size: usize,
     ) -> Result<Self, Error> {
+        Self::with_streaming_source_cached_opts(source, batch_size, cache_size, true).await
+    }
+
+    /// Create a streaming QueryEngine with cache options.
+    pub async fn with_streaming_source_cached_opts<S: PacketSource + 'static>(
+        source: Arc<S>,
+        batch_size: usize,
+        cache_size: usize,
+        reader_eviction: bool,
+    ) -> Result<Self, Error> {
         if cache_size > 0 {
-            let cache = Arc::new(LruParseCache::new(cache_size));
+            let cache = Arc::new(LruParseCache::with_options(cache_size, reader_eviction));
             Self::with_streaming_source_and_cache(source, batch_size, Some(cache)).await
         } else {
             Self::with_streaming_source_and_cache::<S, NoCache>(source, batch_size, None).await
@@ -198,7 +224,7 @@ impl QueryEngine {
         cache: Option<Arc<C>>,
     ) -> Result<Self, Error> {
         let registry = Arc::new(default_registry());
-        let ctx = SessionContext::new();
+        let ctx = create_session_context();
 
         // Register all UDFs (network addresses, protocol names, utilities)
         udf::register_all_udfs(&ctx)?;
