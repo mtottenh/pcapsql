@@ -76,6 +76,7 @@
 
 mod dns;
 mod hex;
+mod histogram;
 mod icmp;
 mod ipv4;
 mod ipv6;
@@ -96,6 +97,12 @@ pub use tcp::{create_has_tcp_flag_udf, create_tcp_flags_str_udf};
 
 // Re-export utility UDFs
 pub use hex::{create_hex_udf, create_unhex_udf};
+
+// Re-export histogram UDAFs and UDFs
+pub use histogram::{
+    create_hdr_count_udf, create_hdr_histogram_udaf, create_hdr_max_udf, create_hdr_mean_udf,
+    create_hdr_min_udf, create_hdr_percentile_udf, create_hdr_stdev_udf,
+};
 
 use crate::error::Error;
 use datafusion::prelude::SessionContext;
@@ -148,13 +155,36 @@ pub fn register_utility_udfs(ctx: &SessionContext) -> Result<(), Error> {
     Ok(())
 }
 
+/// Register HdrHistogram UDAFs and UDFs with the DataFusion context.
+///
+/// Provides streaming histogram aggregation with constant memory footprint:
+/// - `hdr_histogram(value)` - UDAF that builds histogram from streamed values
+/// - `hdr_percentile(hist, p)` - Extract percentile from histogram
+/// - `hdr_count/min/max/mean/stdev(hist)` - Extract statistics
+pub fn register_histogram_udfs(ctx: &SessionContext) -> Result<(), Error> {
+    // Aggregate function for building histograms
+    ctx.register_udaf(create_hdr_histogram_udaf());
+
+    // Scalar functions for extracting values
+    ctx.register_udf(create_hdr_percentile_udf());
+    ctx.register_udf(create_hdr_count_udf());
+    ctx.register_udf(create_hdr_min_udf());
+    ctx.register_udf(create_hdr_max_udf());
+    ctx.register_udf(create_hdr_mean_udf());
+    ctx.register_udf(create_hdr_stdev_udf());
+
+    Ok(())
+}
+
 /// Register ALL UDFs with the DataFusion context.
 ///
-/// This is a convenience function that registers all network, protocol, and utility UDFs.
+/// This is a convenience function that registers all network, protocol, utility,
+/// and histogram UDFs.
 pub fn register_all_udfs(ctx: &SessionContext) -> Result<(), Error> {
     register_network_udfs(ctx)?;
     register_protocol_udfs(ctx)?;
     register_utility_udfs(ctx)?;
+    register_histogram_udfs(ctx)?;
     Ok(())
 }
 

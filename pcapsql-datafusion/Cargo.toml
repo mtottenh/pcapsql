@@ -52,6 +52,9 @@ tracing-subscriber.workspace = true
 # Needed for bytes in streaming
 bytes.workspace = true
 
+# HdrHistogram for latency analysis
+hdrhistogram.workspace = true
+
 [dev-dependencies]
 criterion.workspace = true
 tempfile.workspace = true
