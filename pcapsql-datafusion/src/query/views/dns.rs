@@ -12,7 +12,7 @@ use super::ViewDefinition;
 /// - `tcp` or `udp` (ports)
 /// - `tls` (for DoT detection)
 /// - `http` (for DoH detection)
-/// - `dns` (query details)
+/// - `dns` (query details including answer lists)
 pub fn dns_packets_view() -> ViewDefinition {
     ViewDefinition {
         name: "dns_packets",
@@ -47,7 +47,14 @@ SELECT
     dns.additional_count,
     dns.query_name,
     dns.query_type,
-    dns.query_class
+    dns.query_class,
+    dns.answer_ip4s,
+    dns.answer_ip6s,
+    dns.answer_cnames,
+    dns.answer_types,
+    dns.answer_ttls,
+    dns.has_edns,
+    dns.edns_udp_size
 FROM frames f
 LEFT JOIN ipv4 ip4 ON f.frame_number = ip4.frame_number
 LEFT JOIN ipv6 ip6 ON f.frame_number = ip6.frame_number
@@ -71,5 +78,9 @@ mod tests {
         assert!(view.sql.contains("JOIN dns"));
         assert!(view.sql.contains("query_name"));
         assert!(view.sql.contains("transport"));
+        // New answer fields
+        assert!(view.sql.contains("answer_ip4s"));
+        assert!(view.sql.contains("answer_cnames"));
+        assert!(view.sql.contains("has_edns"));
     }
 }

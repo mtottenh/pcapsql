@@ -26,6 +26,12 @@ enum DynamicBuilder {
     Binary(BinaryBuilder),
     FixedSizeBinary(FixedSizeBinaryBuilder),
     TimestampMicrosecond(TimestampMicrosecondBuilder),
+    // List builders for multi-valued fields (e.g., DNS answers)
+    ListOfUInt16(ListBuilder<UInt16Builder>),
+    ListOfUInt32(ListBuilder<UInt32Builder>),
+    ListOfUtf8(ListBuilder<StringBuilder>),
+    ListOfBinary(ListBuilder<BinaryBuilder>),
+    ListOfFixedSizeBinary(ListBuilder<FixedSizeBinaryBuilder>),
 }
 
 impl DynamicBuilder {
@@ -54,6 +60,30 @@ impl DynamicBuilder {
                     capacity,
                 ))
             }
+            // List types - match on inner type
+            DataType::List(field) => match field.data_type() {
+                DataType::UInt16 => DynamicBuilder::ListOfUInt16(ListBuilder::new(
+                    UInt16Builder::with_capacity(capacity),
+                )),
+                DataType::UInt32 => DynamicBuilder::ListOfUInt32(ListBuilder::new(
+                    UInt32Builder::with_capacity(capacity),
+                )),
+                DataType::Utf8 => DynamicBuilder::ListOfUtf8(ListBuilder::new(
+                    StringBuilder::with_capacity(capacity, capacity * 32),
+                )),
+                DataType::Binary => DynamicBuilder::ListOfBinary(ListBuilder::new(
+                    BinaryBuilder::with_capacity(capacity, capacity * 64),
+                )),
+                DataType::FixedSizeBinary(size) => {
+                    DynamicBuilder::ListOfFixedSizeBinary(ListBuilder::new(
+                        FixedSizeBinaryBuilder::with_capacity(capacity, *size),
+                    ))
+                }
+                // Default list to Utf8 for unsupported inner types
+                _ => DynamicBuilder::ListOfUtf8(ListBuilder::new(
+                    StringBuilder::with_capacity(capacity, capacity * 32),
+                )),
+            },
             // Default to Utf8 for unsupported types
             _ => DynamicBuilder::Utf8(StringBuilder::with_capacity(capacity, capacity * 32)),
         }
@@ -68,6 +98,11 @@ impl DynamicBuilder {
             DynamicBuilder::UInt64(b) => b.append_null(),
             DynamicBuilder::Int64(b) => b.append_null(),
             DynamicBuilder::Boolean(b) => b.append_null(),
+            DynamicBuilder::ListOfUInt16(b) => b.append_null(),
+            DynamicBuilder::ListOfUInt32(b) => b.append_null(),
+            DynamicBuilder::ListOfUtf8(b) => b.append_null(),
+            DynamicBuilder::ListOfBinary(b) => b.append_null(),
+            DynamicBuilder::ListOfFixedSizeBinary(b) => b.append_null(),
             DynamicBuilder::Utf8(b) => b.append_null(),
             DynamicBuilder::Binary(b) => b.append_null(),
             DynamicBuilder::FixedSizeBinary(b) => b.append_null(),
@@ -179,6 +214,89 @@ impl DynamicBuilder {
                 FieldValue::Null => b.append_null(),
                 _ => b.append_null(),
             },
+            // List builders
+            DynamicBuilder::ListOfUInt16(b) => match value {
+                FieldValue::List(items) => {
+                    let values: Vec<Option<u16>> = items
+                        .iter()
+                        .map(|v| match v {
+                            FieldValue::UInt16(n) => Some(*n),
+                            FieldValue::UInt8(n) => Some(*n as u16),
+                            _ => None,
+                        })
+                        .collect();
+                    b.append_value(values);
+                }
+                FieldValue::Null => b.append_null(),
+                _ => b.append_null(),
+            },
+            DynamicBuilder::ListOfUInt32(b) => match value {
+                FieldValue::List(items) => {
+                    let values: Vec<Option<u32>> = items
+                        .iter()
+                        .map(|v| match v {
+                            FieldValue::UInt32(n) => Some(*n),
+                            FieldValue::UInt16(n) => Some(*n as u32),
+                            FieldValue::UInt8(n) => Some(*n as u32),
+                            FieldValue::IpAddr(std::net::IpAddr::V4(v4)) => Some(u32::from(*v4)),
+                            _ => None,
+                        })
+                        .collect();
+                    b.append_value(values);
+                }
+                FieldValue::Null => b.append_null(),
+                _ => b.append_null(),
+            },
+            DynamicBuilder::ListOfUtf8(b) => match value {
+                FieldValue::List(items) => {
+                    let values: Vec<Option<String>> = items
+                        .iter()
+                        .map(|v| v.as_string())
+                        .collect();
+                    b.append_value(values);
+                }
+                FieldValue::Null => b.append_null(),
+                _ => b.append_null(),
+            },
+            DynamicBuilder::ListOfBinary(b) => match value {
+                FieldValue::List(items) => {
+                    let values: Vec<Option<Vec<u8>>> = items
+                        .iter()
+                        .map(|v| match v {
+                            FieldValue::Bytes(data) => Some(data.to_vec()),
+                            FieldValue::OwnedBytes(data) => Some(data.clone()),
+                            _ => None,
+                        })
+                        .collect();
+                    b.append_value(values);
+                }
+                FieldValue::Null => b.append_null(),
+                _ => b.append_null(),
+            },
+            DynamicBuilder::ListOfFixedSizeBinary(b) => match value {
+                FieldValue::List(items) => {
+                    for item in items {
+                        match item {
+                            FieldValue::Bytes(data) => {
+                                let _ = b.values().append_value(data);
+                            }
+                            FieldValue::OwnedBytes(data) => {
+                                let _ = b.values().append_value(data.as_slice());
+                            }
+                            FieldValue::IpAddr(std::net::IpAddr::V6(v6)) => {
+                                let _ = b.values().append_value(&v6.octets());
+                            }
+                            FieldValue::MacAddr(mac) => {
+                                let _ = b.values().append_value(mac.as_slice());
+                            }
+                            _ => b.values().append_null(),
+                        }
+                    }
+                    b.append(true);
+                }
+                FieldValue::Null => b.append_null(),
+                _ => b.append_null(),
+            },
         }
     }
 
@@ -216,6 +334,11 @@ impl DynamicBuilder {
             DynamicBuilder::Binary(b) => Arc::new(b.finish()),
             DynamicBuilder::FixedSizeBinary(b) => Arc::new(b.finish()),
             DynamicBuilder::TimestampMicrosecond(b) => Arc::new(b.finish()),
+            DynamicBuilder::ListOfUInt16(b) => Arc::new(b.finish()),
+            DynamicBuilder::ListOfUInt32(b) => Arc::new(b.finish()),
+            DynamicBuilder::ListOfUtf8(b) => Arc::new(b.finish()),
+            DynamicBuilder::ListOfBinary(b) => Arc::new(b.finish()),
+            DynamicBuilder::ListOfFixedSizeBinary(b) => Arc::new(b.finish()),
         }
     }
 
@@ -232,6 +355,11 @@ impl DynamicBuilder {
             DynamicBuilder::Binary(b) => b.len(),
             DynamicBuilder::FixedSizeBinary(b) => b.len(),
             DynamicBuilder::TimestampMicrosecond(b) => b.len(),
+            DynamicBuilder::ListOfUInt16(b) => b.len(),
+            DynamicBuilder::ListOfUInt32(b) => b.len(),
+            DynamicBuilder::ListOfUtf8(b) => b.len(),
+            DynamicBuilder::ListOfBinary(b) => b.len(),
+            DynamicBuilder::ListOfFixedSizeBinary(b) => b.len(),
         }
     }
 }

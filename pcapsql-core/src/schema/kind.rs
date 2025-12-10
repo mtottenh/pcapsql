@@ -6,7 +6,7 @@
 /// - Arrow: `DataType::*`
 /// - DuckDB: `LogicalType::*`
 /// - Parquet: Physical + Logical types
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DataKind {
     /// Boolean (true/false)
     Bool,
@@ -40,6 +40,9 @@ pub enum DataKind {
 
     /// Timestamp with microsecond precision (UTC)
     TimestampMicros,
+
+    /// Variable-length list of elements of the same type
+    List(Box<DataKind>),
 }
 
 impl DataKind {
@@ -61,6 +64,7 @@ impl DataKind {
                 _ => "fixed_binary",
             },
             DataKind::TimestampMicros => "timestamp",
+            DataKind::List(_) => "list",
         }
     }
 
@@ -76,7 +80,15 @@ impl DataKind {
             DataKind::Float64 => Some(8),
             DataKind::TimestampMicros => Some(8),
             DataKind::FixedBinary(n) => Some(*n),
-            DataKind::String | DataKind::Binary => None,
+            DataKind::String | DataKind::Binary | DataKind::List(_) => None,
+        }
+    }
+
+    /// Get the inner type for List, or None if not a List.
+    pub fn list_inner(&self) -> Option<&DataKind> {
+        match self {
+            DataKind::List(inner) => Some(inner),
+            _ => None,
         }
     }
 }
@@ -105,5 +117,18 @@ mod tests {
         assert_eq!(DataKind::UInt32.fixed_size(), Some(4));
         assert_eq!(DataKind::String.fixed_size(), None);
         assert_eq!(DataKind::FixedBinary(6).fixed_size(), Some(6));
+    }
+
+    #[test]
+    fn test_list_type() {
+        let list_u32 = DataKind::List(Box::new(DataKind::UInt32));
+        assert_eq!(list_u32.type_name(), "list");
+        assert_eq!(list_u32.fixed_size(), None);
+        assert_eq!(list_u32.list_inner(), Some(&DataKind::UInt32));
+
+        // Nested list
+        let list_list = DataKind::List(Box::new(DataKind::List(Box::new(DataKind::String))));
+        assert_eq!(list_list.type_name(), "list");
+        assert!(matches!(list_list.list_inner(), Some(DataKind::List(_))));
     }
 }

@@ -28,6 +28,7 @@ etherparse.workspace = true
 pcap-parser.workspace = true
 bytes.workspace = true
 httparse.workspace = true
+simple-dns.workspace = true
 
 # Compression (flate2 always included for gzip, others optional)
 flate2.workspace = true

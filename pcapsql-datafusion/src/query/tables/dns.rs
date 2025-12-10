@@ -2,6 +2,7 @@
 //!
 //! The `dns` table contains DNS (Domain Name System) query and response fields.
 
+use std::sync::Arc;
 use arrow::datatypes::{DataType, Field, Schema};
 
 /// Build the schema for the `dns` table.
@@ -23,6 +24,13 @@ use arrow::datatypes::{DataType, Field, Schema};
 /// - `query_name`: First query domain name
 /// - `query_type`: First query type (1 = A, 28 = AAAA, etc.)
 /// - `query_class`: First query class (1 = IN)
+/// - `answer_ip4s`: List of A record IP addresses (as u32)
+/// - `answer_ip6s`: List of AAAA record IP addresses (as 16-byte binary)
+/// - `answer_cnames`: List of CNAME record values
+/// - `answer_types`: List of answer record types
+/// - `answer_ttls`: List of answer TTL values
+/// - `has_edns`: Whether EDNS is present
+/// - `edns_udp_size`: EDNS UDP payload size
 pub fn dns_table_schema() -> Schema {
     Schema::new(vec![
         Field::new("frame_number", DataType::UInt64, false),
@@ -41,6 +49,35 @@ pub fn dns_table_schema() -> Schema {
         Field::new("query_name", DataType::Utf8, true),
         Field::new("query_type", DataType::UInt16, true),
         Field::new("query_class", DataType::UInt16, true),
+        // New list fields for DNS answers
+        Field::new(
+            "answer_ip4s",
+            DataType::List(Arc::new(Field::new("item", DataType::UInt32, true))),
+            true,
+        ),
+        Field::new(
+            "answer_ip6s",
+            DataType::List(Arc::new(Field::new("item", DataType::FixedSizeBinary(16), true))),
+            true,
+        ),
+        Field::new(
+            "answer_cnames",
+            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+            true,
+        ),
+        Field::new(
+            "answer_types",
+            DataType::List(Arc::new(Field::new("item", DataType::UInt16, true))),
+            true,
+        ),
+        Field::new(
+            "answer_ttls",
+            DataType::List(Arc::new(Field::new("item", DataType::UInt32, true))),
+            true,
+        ),
+        // EDNS fields
+        Field::new("has_edns", DataType::Boolean, true),
+        Field::new("edns_udp_size", DataType::UInt16, true),
     ])
 }
 
@@ -52,11 +89,20 @@ mod tests {
     fn test_dns_schema() {
         let schema = dns_table_schema();
 
-        assert_eq!(schema.fields().len(), 16);
+        // 16 original fields + 5 list fields + 2 EDNS fields = 23
+        assert_eq!(schema.fields().len(), 23);
         assert!(schema.field_with_name("frame_number").is_ok());
         assert!(schema.field_with_name("transaction_id").is_ok());
         assert!(schema.field_with_name("query_name").is_ok());
         assert!(schema.field_with_name("is_query").is_ok());
+        // New fields
+        assert!(schema.field_with_name("answer_ip4s").is_ok());
+        assert!(schema.field_with_name("answer_ip6s").is_ok());
+        assert!(schema.field_with_name("answer_cnames").is_ok());
+        assert!(schema.field_with_name("answer_types").is_ok());
+        assert!(schema.field_with_name("answer_ttls").is_ok());
+        assert!(schema.field_with_name("has_edns").is_ok());
+        assert!(schema.field_with_name("edns_udp_size").is_ok());
     }
 
     #[test]
@@ -68,6 +114,29 @@ mod tests {
                 "Field '{}' should not have protocol prefix",
                 field.name()
             );
+        }
+    }
+
+    #[test]
+    fn test_list_field_types() {
+        let schema = dns_table_schema();
+
+        // Check answer_ip4s is a List<UInt32>
+        let ip4s_field = schema.field_with_name("answer_ip4s").unwrap();
+        match ip4s_field.data_type() {
+            DataType::List(inner) => {
+                assert_eq!(inner.data_type(), &DataType::UInt32);
+            }
+            _ => panic!("answer_ip4s should be a List type"),
+        }
+
+        // Check answer_cnames is a List<Utf8>
+        let cnames_field = schema.field_with_name("answer_cnames").unwrap();
+        match cnames_field.data_type() {
+            DataType::List(inner) => {
+                assert_eq!(inner.data_type(), &DataType::Utf8);
+            }
+            _ => panic!("answer_cnames should be a List type"),
         }
     }
 }

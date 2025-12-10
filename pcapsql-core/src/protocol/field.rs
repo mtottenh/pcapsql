@@ -52,6 +52,10 @@ pub enum FieldValue<'data> {
     /// Owned bytes for constructed/decoded data.
     OwnedBytes(Vec<u8>),
 
+    /// List of values (for multi-valued fields like DNS answers).
+    /// All elements should be of the same type.
+    List(Vec<FieldValue<'data>>),
+
     /// Null/missing value
     Null,
 }
@@ -173,6 +177,22 @@ impl<'data> FieldValue<'data> {
         }
     }
 
+    /// Try to get as list reference.
+    pub fn as_list(&self) -> Option<&[FieldValue<'data>]> {
+        match self {
+            FieldValue::List(items) => Some(items.as_slice()),
+            _ => None,
+        }
+    }
+
+    /// Get the number of elements if this is a list, or None otherwise.
+    pub fn list_len(&self) -> Option<usize> {
+        match self {
+            FieldValue::List(items) => Some(items.len()),
+            _ => None,
+        }
+    }
+
     /// Convert to an owned version (for caching).
     /// Copies borrowed data into owned variants.
     pub fn to_owned(&self) -> FieldValue<'static> {
@@ -189,6 +209,9 @@ impl<'data> FieldValue<'data> {
             FieldValue::Bytes(b) => FieldValue::OwnedBytes(b.to_vec()),
             FieldValue::OwnedString(s) => FieldValue::OwnedString(s.clone()),
             FieldValue::OwnedBytes(b) => FieldValue::OwnedBytes(b.clone()),
+            FieldValue::List(items) => {
+                FieldValue::List(items.iter().map(|v| v.to_owned()).collect())
+            }
             FieldValue::Null => FieldValue::Null,
         }
     }
@@ -209,6 +232,16 @@ impl<'data> std::fmt::Display for FieldValue<'data> {
             FieldValue::OwnedBytes(b) => write!(f, "[{} bytes]", b.len()),
             FieldValue::IpAddr(addr) => write!(f, "{addr}"),
             FieldValue::MacAddr(mac) => write!(f, "{}", Self::format_mac(mac)),
+            FieldValue::List(items) => {
+                write!(f, "[")?;
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{item}")?;
+                }
+                write!(f, "]")
+            }
             FieldValue::Null => write!(f, "NULL"),
         }
     }
@@ -236,6 +269,10 @@ impl<'a, 'b> PartialEq<FieldValue<'b>> for FieldValue<'a> {
             (FieldValue::Bytes(a), FieldValue::OwnedBytes(b)) => *a == b.as_slice(),
             (FieldValue::OwnedBytes(a), FieldValue::Bytes(b)) => a.as_slice() == *b,
             (FieldValue::OwnedBytes(a), FieldValue::OwnedBytes(b)) => a == b,
+            // List comparison: element-wise
+            (FieldValue::List(a), FieldValue::List(b)) => {
+                a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x == y)
+            }
             (FieldValue::Null, FieldValue::Null) => true,
             _ => false,
         }
@@ -353,5 +390,82 @@ mod tests {
         assert_eq!(bytes_val.as_bytes(), Some(&[1u8, 2, 3][..]));
         assert_eq!(owned_val.as_bytes(), Some(&[4u8, 5, 6][..]));
         assert_eq!(int_val.as_bytes(), None);
+    }
+
+    #[test]
+    fn test_list_basic() {
+        let list = FieldValue::List(vec![
+            FieldValue::UInt32(1),
+            FieldValue::UInt32(2),
+            FieldValue::UInt32(3),
+        ]);
+
+        assert_eq!(list.list_len(), Some(3));
+        assert!(list.as_list().is_some());
+
+        let items = list.as_list().unwrap();
+        assert_eq!(items[0], FieldValue::UInt32(1));
+        assert_eq!(items[1], FieldValue::UInt32(2));
+        assert_eq!(items[2], FieldValue::UInt32(3));
+    }
+
+    #[test]
+    fn test_list_display() {
+        let list = FieldValue::List(vec![
+            FieldValue::UInt32(10),
+            FieldValue::UInt32(20),
+        ]);
+        assert_eq!(format!("{}", list), "[10, 20]");
+
+        let empty: FieldValue = FieldValue::List(vec![]);
+        assert_eq!(format!("{}", empty), "[]");
+
+        let string_list = FieldValue::List(vec![
+            FieldValue::OwnedString(CompactString::new("hello")),
+            FieldValue::OwnedString(CompactString::new("world")),
+        ]);
+        assert_eq!(format!("{}", string_list), "[hello, world]");
+    }
+
+    #[test]
+    fn test_list_equality() {
+        let list1 = FieldValue::List(vec![
+            FieldValue::UInt32(1),
+            FieldValue::UInt32(2),
+        ]);
+        let list2 = FieldValue::List(vec![
+            FieldValue::UInt32(1),
+            FieldValue::UInt32(2),
+        ]);
+        let list3 = FieldValue::List(vec![
+            FieldValue::UInt32(1),
+            FieldValue::UInt32(3),
+        ]);
+
+        assert_eq!(list1, list2);
+        assert_ne!(list1, list3);
+    }
+
+    #[test]
+    fn test_list_to_owned() {
+        let packet = b"test";
+        let list_with_borrowed: FieldValue = FieldValue::List(vec![
+            FieldValue::Str(std::str::from_utf8(packet).unwrap()),
+            FieldValue::UInt32(42),
+        ]);
+
+        let owned = list_with_borrowed.to_owned();
+
+        // Should still be equal
+        assert_eq!(list_with_borrowed, owned);
+
+        // Verify it's owned
+        match &owned {
+            FieldValue::List(items) => {
+                assert!(matches!(&items[0], FieldValue::OwnedString(_)));
+                assert!(matches!(&items[1], FieldValue::UInt32(42)));
+            }
+            _ => panic!("Expected List variant"),
+        }
     }
 }

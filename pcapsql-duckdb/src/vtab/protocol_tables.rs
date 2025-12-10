@@ -14,7 +14,7 @@
 //! SELECT * FROM read_tcp('capture.pcap');
 //! ```
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -25,14 +25,14 @@ use duckdb::Result as DuckResult;
 use parking_lot::Mutex;
 
 use pcapsql_core::{
-    default_registry, parse_packet, FieldValue, FilePacketReader, FilePacketSource, PacketReader,
-    PacketSource, Protocol, ProtocolRegistry,
+    default_registry, parse_packet, schema::DataKind, FieldValue, FilePacketReader,
+    FilePacketSource, PacketReader, PacketSource, Protocol, ProtocolRegistry,
 };
 
 use crate::duckdb_schema::to_duckdb_type;
 use crate::error::DuckDbError;
 
-use super::batch_builder;
+use super::batch_builder::{self, extract_list_values, ListColumnBuilder, ListExtract};
 
 /// Maximum rows per output chunk.
 const BATCH_SIZE: usize = 2048;
@@ -45,6 +45,8 @@ pub struct ProtocolBindData {
     pub protocol_name: &'static str,
     /// Mapping from field name to column index.
     pub field_indices: HashMap<String, usize>,
+    /// Set of column indices that are list types.
+    pub list_columns: HashSet<usize>,
 }
 
 // Safety: BindData is read-only after construction
@@ -83,18 +85,26 @@ fn bind_protocol(
     bind.add_result_column("frame_number", LogicalTypeHandle::from(LogicalTypeId::UBigint));
 
     let mut field_indices = HashMap::new();
+    let mut list_columns = HashSet::new();
     field_indices.insert("frame_number".to_string(), 0);
 
     // Add protocol-specific columns
     for (idx, fd) in proto.schema_fields().iter().enumerate() {
         bind.add_result_column(fd.name, to_duckdb_type(&fd.kind));
-        field_indices.insert(fd.name.to_string(), idx + 1);
+        let col_idx = idx + 1;
+        field_indices.insert(fd.name.to_string(), col_idx);
+
+        // Track list columns
+        if matches!(fd.kind, DataKind::List(_)) {
+            list_columns.insert(col_idx);
+        }
     }
 
     Ok(ProtocolBindData {
         file_path,
         protocol_name,
         field_indices,
+        list_columns,
     })
 }
 
@@ -144,6 +154,20 @@ fn func_protocol<T: VTab<InitData = ProtocolInitData, BindData = ProtocolBindDat
 
     let mut row_count = 0;
 
+    // Create list builders for each list column
+    let mut list_builders: HashMap<usize, ListColumnBuilder> = bind_data
+        .list_columns
+        .iter()
+        .map(|&col_idx| (col_idx, ListColumnBuilder::new()))
+        .collect();
+
+    // Track which rows have null lists
+    let mut null_list_rows: HashMap<usize, Vec<usize>> = bind_data
+        .list_columns
+        .iter()
+        .map(|&col_idx| (col_idx, Vec::new()))
+        .collect();
+
     // Process packets until we fill a batch or run out
     let result = reader.process_packets(BATCH_SIZE, |packet| {
         let frame_num = init_data.frame_number.fetch_add(1, Ordering::Relaxed) + 1;
@@ -159,6 +183,9 @@ fn func_protocol<T: VTab<InitData = ProtocolInitData, BindData = ProtocolBindDat
                     frame_num,
                     parsed,
                     &bind_data.field_indices,
+                    &bind_data.list_columns,
+                    &mut list_builders,
+                    &mut null_list_rows,
                 );
                 row_count += 1;
                 break;
@@ -190,6 +217,16 @@ fn func_protocol<T: VTab<InitData = ProtocolInitData, BindData = ProtocolBindDat
         _ => {}
     }
 
+    // Write list columns to output
+    for (&col_idx, builder) in &list_builders {
+        let mut list_vector = output.list_vector(col_idx);
+        let null_rows = null_list_rows
+            .get(&col_idx)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+        builder.write_to_list_vector(&mut list_vector, null_rows);
+    }
+
     output.set_len(row_count);
     Ok(())
 }
@@ -201,6 +238,9 @@ fn output_parsed_row(
     frame_number: u64,
     parsed: &pcapsql_core::ParseResult<'_>,
     field_indices: &HashMap<String, usize>,
+    list_columns: &HashSet<usize>,
+    list_builders: &mut HashMap<usize, ListColumnBuilder>,
+    null_list_rows: &mut HashMap<usize, Vec<usize>>,
 ) {
     // frame_number is always column 0
     {
@@ -218,6 +258,43 @@ fn output_parsed_row(
         // but parsed data uses short names (e.g., "src_port")
         let lookup_name = field_name.split('.').last().unwrap_or(field_name.as_str());
 
+        // Handle list columns specially - accumulate data in builders
+        if list_columns.contains(col_idx) {
+            if let Some(builder) = list_builders.get_mut(col_idx) {
+                if let Some(value) = parsed.get(lookup_name) {
+                    if let FieldValue::List(items) = value {
+                        match extract_list_values(items) {
+                            ListExtract::Empty => builder.push_empty(),
+                            ListExtract::UInt16(values) => builder.push_uint16_list(&values),
+                            ListExtract::UInt32(values) => builder.push_uint32_list(&values),
+                            ListExtract::String(values) => builder.push_string_list(&values),
+                            ListExtract::Binary(values) => builder.push_binary_list(&values),
+                            ListExtract::Unsupported => {
+                                builder.push_null();
+                                if let Some(nulls) = null_list_rows.get_mut(col_idx) {
+                                    nulls.push(row_idx);
+                                }
+                            }
+                        }
+                    } else {
+                        // Not a list value - treat as null list
+                        builder.push_null();
+                        if let Some(nulls) = null_list_rows.get_mut(col_idx) {
+                            nulls.push(row_idx);
+                        }
+                    }
+                } else {
+                    // Field not found - null list
+                    builder.push_null();
+                    if let Some(nulls) = null_list_rows.get_mut(col_idx) {
+                        nulls.push(row_idx);
+                    }
+                }
+            }
+            continue;
+        }
+
+        // Non-list columns
         let mut vector = output.flat_vector(*col_idx);
         if let Some(value) = parsed.get(lookup_name) {
             match value {
@@ -277,6 +354,10 @@ fn output_parsed_row(
                     } else {
                         vector.set_null(row_idx);
                     }
+                }
+                FieldValue::List(_) => {
+                    // List in non-list column (shouldn't happen) - set null
+                    vector.set_null(row_idx);
                 }
             }
         } else {

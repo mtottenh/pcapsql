@@ -1,8 +1,9 @@
-//! DNS protocol parser.
+//! DNS protocol parser using simple-dns library.
 
 use std::collections::HashSet;
 
 use compact_str::CompactString;
+use simple_dns::{Packet, PacketFlag, rdata::RData, OPCODE, RCODE};
 use smallvec::SmallVec;
 
 use super::{FieldValue, ParseContext, ParseResult, Protocol};
@@ -36,95 +37,32 @@ impl Protocol for DnsProtocol {
     }
 
     fn parse<'a>(&self, data: &'a [u8], _context: &ParseContext) -> ParseResult<'a> {
-        // DNS header is 12 bytes minimum
-        if data.len() < 12 {
-            return ParseResult::error("DNS header too short".to_string(), data);
-        }
+        // Parse using simple-dns
+        let packet = match Packet::parse(data) {
+            Ok(p) => p,
+            Err(e) => return ParseResult::error(format!("DNS parse error: {e}"), data),
+        };
 
         let mut fields = SmallVec::new();
 
-        // Transaction ID (2 bytes)
-        let transaction_id = u16::from_be_bytes([data[0], data[1]]);
-        fields.push(("transaction_id", FieldValue::UInt16(transaction_id)));
+        // Extract header fields
+        extract_header_fields(&packet, &mut fields);
 
-        // Flags (2 bytes)
-        let flags = u16::from_be_bytes([data[2], data[3]]);
+        // Extract question fields (first question only)
+        extract_question_fields(&packet, &mut fields);
 
-        // QR bit (bit 15) - 0 = query, 1 = response
-        let is_query = (flags & 0x8000) == 0;
-        fields.push(("is_query", FieldValue::Bool(is_query)));
+        // Extract answer fields (as lists)
+        extract_answer_fields(&packet, &mut fields);
 
-        // Opcode (bits 11-14)
-        let opcode = ((flags >> 11) & 0x0F) as u8;
-        fields.push(("opcode", FieldValue::UInt8(opcode)));
+        // Extract EDNS fields
+        extract_edns_fields(&packet, &mut fields);
 
-        // AA bit (bit 10) - Authoritative Answer
-        let is_authoritative = (flags & 0x0400) != 0;
-        fields.push(("is_authoritative", FieldValue::Bool(is_authoritative)));
-
-        // TC bit (bit 9) - Truncated
-        let is_truncated = (flags & 0x0200) != 0;
-        fields.push(("is_truncated", FieldValue::Bool(is_truncated)));
-
-        // RD bit (bit 8) - Recursion Desired
-        let recursion_desired = (flags & 0x0100) != 0;
-        fields.push(("recursion_desired", FieldValue::Bool(recursion_desired)));
-
-        // RA bit (bit 7) - Recursion Available
-        let recursion_available = (flags & 0x0080) != 0;
-        fields.push(("recursion_available", FieldValue::Bool(recursion_available)));
-
-        // RCODE (bits 0-3) - Response Code
-        let response_code = (flags & 0x000F) as u8;
-        fields.push(("response_code", FieldValue::UInt8(response_code)));
-
-        // Question count (2 bytes)
-        let query_count = u16::from_be_bytes([data[4], data[5]]);
-        fields.push(("query_count", FieldValue::UInt16(query_count)));
-
-        // Answer count (2 bytes)
-        let answer_count = u16::from_be_bytes([data[6], data[7]]);
-        fields.push(("answer_count", FieldValue::UInt16(answer_count)));
-
-        // Authority count (2 bytes)
-        let authority_count = u16::from_be_bytes([data[8], data[9]]);
-        fields.push(("authority_count", FieldValue::UInt16(authority_count)));
-
-        // Additional count (2 bytes)
-        let additional_count = u16::from_be_bytes([data[10], data[11]]);
-        fields.push(("additional_count", FieldValue::UInt16(additional_count)));
-
-        // Parse the first question section if present
-        if query_count > 0 {
-            match parse_question(&data[12..]) {
-                Ok((name, qtype, qclass, consumed)) => {
-                    fields.push(("query_name", FieldValue::OwnedString(CompactString::new(name))));
-                    fields.push(("query_type", FieldValue::UInt16(qtype)));
-                    fields.push(("query_class", FieldValue::UInt16(qclass)));
-
-                    // Return remaining bytes after the question section
-                    let remaining_offset = 12 + consumed;
-                    if remaining_offset <= data.len() {
-                        return ParseResult::success(
-                            fields,
-                            &data[remaining_offset..],
-                            SmallVec::new(),
-                        );
-                    }
-                }
-                Err(e) => {
-                    // Partial parse - we have header but couldn't fully parse question
-                    return ParseResult::partial(fields, &data[12..], e);
-                }
-            }
-        }
-
-        // No questions or couldn't parse them
-        ParseResult::success(fields, &data[12..], SmallVec::new())
+        ParseResult::success(fields, &[], SmallVec::new())
     }
 
     fn schema_fields(&self) -> Vec<FieldDescriptor> {
         vec![
+            // Header fields (cheap)
             FieldDescriptor::new("dns.transaction_id", DataKind::UInt16).set_nullable(true),
             FieldDescriptor::new("dns.is_query", DataKind::Bool).set_nullable(true),
             FieldDescriptor::new("dns.opcode", DataKind::UInt8).set_nullable(true),
@@ -137,9 +75,19 @@ impl Protocol for DnsProtocol {
             FieldDescriptor::new("dns.answer_count", DataKind::UInt16).set_nullable(true),
             FieldDescriptor::new("dns.authority_count", DataKind::UInt16).set_nullable(true),
             FieldDescriptor::new("dns.additional_count", DataKind::UInt16).set_nullable(true),
+            // Question fields (expensive)
             FieldDescriptor::new("dns.query_name", DataKind::String).set_nullable(true),
             FieldDescriptor::new("dns.query_type", DataKind::UInt16).set_nullable(true),
             FieldDescriptor::new("dns.query_class", DataKind::UInt16).set_nullable(true),
+            // Answer fields (lists) - NEW
+            FieldDescriptor::new("dns.answer_ip4s", DataKind::List(Box::new(DataKind::UInt32))).set_nullable(true),
+            FieldDescriptor::new("dns.answer_ip6s", DataKind::List(Box::new(DataKind::FixedBinary(16)))).set_nullable(true),
+            FieldDescriptor::new("dns.answer_cnames", DataKind::List(Box::new(DataKind::String))).set_nullable(true),
+            FieldDescriptor::new("dns.answer_types", DataKind::List(Box::new(DataKind::UInt16))).set_nullable(true),
+            FieldDescriptor::new("dns.answer_ttls", DataKind::List(Box::new(DataKind::UInt32))).set_nullable(true),
+            // EDNS fields - NEW
+            FieldDescriptor::new("dns.has_edns", DataKind::Bool).set_nullable(true),
+            FieldDescriptor::new("dns.edns_udp_size", DataKind::UInt16).set_nullable(true),
         ]
     }
 
@@ -155,113 +103,50 @@ impl Protocol for DnsProtocol {
         &self,
         data: &'a [u8],
         _context: &ParseContext,
-        fields: Option<&HashSet<String>>,
+        requested_fields: Option<&HashSet<String>>,
     ) -> ParseResult<'a> {
         // If no projection, use full parse
-        let fields = match fields {
+        let requested = match requested_fields {
             None => return self.parse(data, _context),
             Some(f) if f.is_empty() => return self.parse(data, _context),
             Some(f) => f,
         };
 
-        // DNS header is 12 bytes minimum
-        if data.len() < 12 {
-            return ParseResult::error("DNS header too short".to_string(), data);
+        // Parse using simple-dns
+        let packet = match Packet::parse(data) {
+            Ok(p) => p,
+            Err(e) => return ParseResult::error(format!("DNS parse error: {e}"), data),
+        };
+
+        let mut fields = SmallVec::new();
+
+        // Check which field categories are needed
+        let need_header = requested.iter().any(|f| is_header_field(f));
+        let need_question = requested.iter().any(|f| is_question_field(f));
+        let need_answers = requested.iter().any(|f| is_answer_field(f));
+        let need_edns = requested.iter().any(|f| is_edns_field(f));
+
+        if need_header {
+            extract_header_fields_projected(&packet, &mut fields, requested);
         }
 
-        let mut result_fields = SmallVec::new();
-
-        // Parse header fields (all cheap)
-        let transaction_id = u16::from_be_bytes([data[0], data[1]]);
-        let flags = u16::from_be_bytes([data[2], data[3]]);
-        let is_query = (flags & 0x8000) == 0;
-        let opcode = ((flags >> 11) & 0x0F) as u8;
-        let is_authoritative = (flags & 0x0400) != 0;
-        let is_truncated = (flags & 0x0200) != 0;
-        let recursion_desired = (flags & 0x0100) != 0;
-        let recursion_available = (flags & 0x0080) != 0;
-        let response_code = (flags & 0x000F) as u8;
-        let query_count = u16::from_be_bytes([data[4], data[5]]);
-        let answer_count = u16::from_be_bytes([data[6], data[7]]);
-        let authority_count = u16::from_be_bytes([data[8], data[9]]);
-        let additional_count = u16::from_be_bytes([data[10], data[11]]);
-
-        // Insert only requested header fields
-        if fields.contains("transaction_id") {
-            result_fields.push(("transaction_id", FieldValue::UInt16(transaction_id)));
-        }
-        if fields.contains("is_query") {
-            result_fields.push(("is_query", FieldValue::Bool(is_query)));
-        }
-        if fields.contains("opcode") {
-            result_fields.push(("opcode", FieldValue::UInt8(opcode)));
-        }
-        if fields.contains("is_authoritative") {
-            result_fields.push(("is_authoritative", FieldValue::Bool(is_authoritative)));
-        }
-        if fields.contains("is_truncated") {
-            result_fields.push(("is_truncated", FieldValue::Bool(is_truncated)));
-        }
-        if fields.contains("recursion_desired") {
-            result_fields.push(("recursion_desired", FieldValue::Bool(recursion_desired)));
-        }
-        if fields.contains("recursion_available") {
-            result_fields.push(("recursion_available", FieldValue::Bool(recursion_available)));
-        }
-        if fields.contains("response_code") {
-            result_fields.push(("response_code", FieldValue::UInt8(response_code)));
-        }
-        if fields.contains("query_count") {
-            result_fields.push(("query_count", FieldValue::UInt16(query_count)));
-        }
-        if fields.contains("answer_count") {
-            result_fields.push(("answer_count", FieldValue::UInt16(answer_count)));
-        }
-        if fields.contains("authority_count") {
-            result_fields.push(("authority_count", FieldValue::UInt16(authority_count)));
-        }
-        if fields.contains("additional_count") {
-            result_fields.push(("additional_count", FieldValue::UInt16(additional_count)));
+        if need_question {
+            extract_question_fields_projected(&packet, &mut fields, requested);
         }
 
-        // Only parse question section if any of the expensive fields are requested
-        let need_question = fields.contains("query_name")
-            || fields.contains("query_type")
-            || fields.contains("query_class");
-
-        if need_question && query_count > 0 {
-            match parse_question(&data[12..]) {
-                Ok((name, qtype, qclass, consumed)) => {
-                    if fields.contains("query_name") {
-                        result_fields.push(("query_name", FieldValue::OwnedString(CompactString::new(name))));
-                    }
-                    if fields.contains("query_type") {
-                        result_fields.push(("query_type", FieldValue::UInt16(qtype)));
-                    }
-                    if fields.contains("query_class") {
-                        result_fields.push(("query_class", FieldValue::UInt16(qclass)));
-                    }
-
-                    let remaining_offset = 12 + consumed;
-                    if remaining_offset <= data.len() {
-                        return ParseResult::success(
-                            result_fields,
-                            &data[remaining_offset..],
-                            SmallVec::new(),
-                        );
-                    }
-                }
-                Err(e) => {
-                    return ParseResult::partial(result_fields, &data[12..], e);
-                }
-            }
+        if need_answers {
+            extract_answer_fields_projected(&packet, &mut fields, requested);
         }
 
-        ParseResult::success(result_fields, &data[12..], SmallVec::new())
+        if need_edns {
+            extract_edns_fields_projected(&packet, &mut fields, requested);
+        }
+
+        ParseResult::success(fields, &[], SmallVec::new())
     }
 
     fn cheap_fields(&self) -> &'static [&'static str] {
-        // Header fields are all cheap - they come from the fixed 12-byte header
+        // Header fields are all cheap
         &[
             "transaction_id",
             "is_query",
@@ -275,93 +160,336 @@ impl Protocol for DnsProtocol {
             "answer_count",
             "authority_count",
             "additional_count",
+            "has_edns",
+            "edns_udp_size",
         ]
     }
 
     fn expensive_fields(&self) -> &'static [&'static str] {
-        // Question fields require parsing variable-length domain name
-        &["query_name", "query_type", "query_class"]
+        // Fields requiring parsing variable-length sections
+        &[
+            "query_name",
+            "query_type",
+            "query_class",
+            "answer_ip4s",
+            "answer_ip6s",
+            "answer_cnames",
+            "answer_types",
+            "answer_ttls",
+        ]
     }
 }
 
-/// Parse a DNS question section and return (name, qtype, qclass, bytes_consumed).
-fn parse_question(data: &[u8]) -> Result<(String, u16, u16, usize), String> {
-    let (name, name_len) = parse_domain_name(data)?;
-
-    // After the name, we need 4 more bytes for QTYPE (2) and QCLASS (2)
-    let qtype_start = name_len;
-    if data.len() < qtype_start + 4 {
-        return Err("Question section too short for QTYPE/QCLASS".to_string());
-    }
-
-    let qtype = u16::from_be_bytes([data[qtype_start], data[qtype_start + 1]]);
-    let qclass = u16::from_be_bytes([data[qtype_start + 2], data[qtype_start + 3]]);
-
-    Ok((name, qtype, qclass, qtype_start + 4))
+/// Check if field is a header field.
+fn is_header_field(field: &str) -> bool {
+    matches!(
+        field,
+        "transaction_id"
+            | "is_query"
+            | "opcode"
+            | "is_authoritative"
+            | "is_truncated"
+            | "recursion_desired"
+            | "recursion_available"
+            | "response_code"
+            | "query_count"
+            | "answer_count"
+            | "authority_count"
+            | "additional_count"
+    )
 }
 
-/// Parse a DNS domain name from the data.
-/// Returns (decoded_name, bytes_consumed).
-fn parse_domain_name(data: &[u8]) -> Result<(String, usize), String> {
-    // Typical domain has 2-4 labels (e.g., www.example.com)
-    let mut name_parts = Vec::with_capacity(4);
-    let mut pos = 0;
+/// Check if field is a question field.
+fn is_question_field(field: &str) -> bool {
+    matches!(field, "query_name" | "query_type" | "query_class")
+}
 
-    loop {
-        if pos >= data.len() {
-            return Err("Unexpected end of data while parsing domain name".to_string());
-        }
+/// Check if field is an answer field.
+fn is_answer_field(field: &str) -> bool {
+    matches!(
+        field,
+        "answer_ip4s" | "answer_ip6s" | "answer_cnames" | "answer_types" | "answer_ttls"
+    )
+}
 
-        let len = data[pos] as usize;
+/// Check if field is an EDNS field.
+fn is_edns_field(field: &str) -> bool {
+    matches!(field, "has_edns" | "edns_udp_size")
+}
 
-        if len == 0 {
-            // Null terminator
-            pos += 1;
-            break;
-        }
-
-        // Check for compression pointer (top 2 bits set)
-        if (len & 0xC0) == 0xC0 {
-            // DNS compression not fully supported in this simple parser
-            // Just skip the pointer and stop
-            pos += 2;
-            break;
-        }
-
-        // Check for invalid length
-        if len > 63 {
-            return Err(format!("Invalid label length: {len}"));
-        }
-
-        if pos + 1 + len > data.len() {
-            return Err("Label extends beyond data".to_string());
-        }
-
-        // Extract the label
-        let label = &data[pos + 1..pos + 1 + len];
-        match std::str::from_utf8(label) {
-            Ok(s) => name_parts.push(s.to_string()),
-            Err(_) => {
-                // Non-UTF8 label - represent as hex
-                name_parts.push(format!("[{len:02x}]"));
-            }
-        }
-
-        pos += 1 + len;
-
-        // Limit iterations to prevent infinite loops
-        if name_parts.len() > 128 {
-            return Err("Too many labels in domain name".to_string());
-        }
+/// Convert OPCODE to u8.
+fn opcode_to_u8(opcode: OPCODE) -> u8 {
+    match opcode {
+        OPCODE::StandardQuery => 0,
+        OPCODE::InverseQuery => 1,
+        OPCODE::ServerStatusRequest => 2,
+        OPCODE::Notify => 4,
+        OPCODE::Update => 5,
+        OPCODE::Reserved => 15, // Reserved
     }
+}
 
-    let name = if name_parts.is_empty() {
-        ".".to_string()
+/// Convert RCODE to u8.
+fn rcode_to_u8(rcode: RCODE) -> u8 {
+    match rcode {
+        RCODE::NoError => 0,
+        RCODE::FormatError => 1,
+        RCODE::ServerFailure => 2,
+        RCODE::NameError => 3,
+        RCODE::NotImplemented => 4,
+        RCODE::Refused => 5,
+        RCODE::YXDOMAIN => 6,
+        RCODE::YXRRSET => 7,
+        RCODE::NXRRSET => 8,
+        RCODE::NOTAUTH => 9,
+        RCODE::NOTZONE => 10,
+        RCODE::BADVERS => 16,
+        RCODE::Reserved => 15,
+    }
+}
+
+/// Extract header fields from a DNS packet.
+fn extract_header_fields(packet: &Packet, fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) {
+    fields.push(("transaction_id", FieldValue::UInt16(packet.id())));
+    fields.push(("is_query", FieldValue::Bool(!packet.has_flags(PacketFlag::RESPONSE))));
+    fields.push(("opcode", FieldValue::UInt8(opcode_to_u8(packet.opcode()))));
+    fields.push(("is_authoritative", FieldValue::Bool(packet.has_flags(PacketFlag::AUTHORITATIVE_ANSWER))));
+    fields.push(("is_truncated", FieldValue::Bool(packet.has_flags(PacketFlag::TRUNCATION))));
+    fields.push(("recursion_desired", FieldValue::Bool(packet.has_flags(PacketFlag::RECURSION_DESIRED))));
+    fields.push(("recursion_available", FieldValue::Bool(packet.has_flags(PacketFlag::RECURSION_AVAILABLE))));
+    fields.push(("response_code", FieldValue::UInt8(rcode_to_u8(packet.rcode()))));
+    fields.push(("query_count", FieldValue::UInt16(packet.questions.len() as u16)));
+    fields.push(("answer_count", FieldValue::UInt16(packet.answers.len() as u16)));
+    fields.push(("authority_count", FieldValue::UInt16(packet.name_servers.len() as u16)));
+    fields.push(("additional_count", FieldValue::UInt16(packet.additional_records.len() as u16)));
+}
+
+/// Extract header fields from a DNS packet (projected).
+fn extract_header_fields_projected(
+    packet: &Packet,
+    fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
+    requested: &HashSet<String>,
+) {
+    if requested.contains("transaction_id") {
+        fields.push(("transaction_id", FieldValue::UInt16(packet.id())));
+    }
+    if requested.contains("is_query") {
+        fields.push(("is_query", FieldValue::Bool(!packet.has_flags(PacketFlag::RESPONSE))));
+    }
+    if requested.contains("opcode") {
+        fields.push(("opcode", FieldValue::UInt8(opcode_to_u8(packet.opcode()))));
+    }
+    if requested.contains("is_authoritative") {
+        fields.push(("is_authoritative", FieldValue::Bool(packet.has_flags(PacketFlag::AUTHORITATIVE_ANSWER))));
+    }
+    if requested.contains("is_truncated") {
+        fields.push(("is_truncated", FieldValue::Bool(packet.has_flags(PacketFlag::TRUNCATION))));
+    }
+    if requested.contains("recursion_desired") {
+        fields.push(("recursion_desired", FieldValue::Bool(packet.has_flags(PacketFlag::RECURSION_DESIRED))));
+    }
+    if requested.contains("recursion_available") {
+        fields.push(("recursion_available", FieldValue::Bool(packet.has_flags(PacketFlag::RECURSION_AVAILABLE))));
+    }
+    if requested.contains("response_code") {
+        fields.push(("response_code", FieldValue::UInt8(rcode_to_u8(packet.rcode()))));
+    }
+    if requested.contains("query_count") {
+        fields.push(("query_count", FieldValue::UInt16(packet.questions.len() as u16)));
+    }
+    if requested.contains("answer_count") {
+        fields.push(("answer_count", FieldValue::UInt16(packet.answers.len() as u16)));
+    }
+    if requested.contains("authority_count") {
+        fields.push(("authority_count", FieldValue::UInt16(packet.name_servers.len() as u16)));
+    }
+    if requested.contains("additional_count") {
+        fields.push(("additional_count", FieldValue::UInt16(packet.additional_records.len() as u16)));
+    }
+}
+
+/// Extract question fields from a DNS packet.
+fn extract_question_fields(packet: &Packet, fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) {
+    if let Some(question) = packet.questions.first() {
+        fields.push((
+            "query_name",
+            FieldValue::OwnedString(CompactString::new(question.qname.to_string())),
+        ));
+        fields.push(("query_type", FieldValue::UInt16(question.qtype.into())));
+        fields.push(("query_class", FieldValue::UInt16(question.qclass.into())));
     } else {
-        name_parts.join(".")
-    };
+        fields.push(("query_name", FieldValue::Null));
+        fields.push(("query_type", FieldValue::Null));
+        fields.push(("query_class", FieldValue::Null));
+    }
+}
 
-    Ok((name, pos))
+/// Extract question fields from a DNS packet (projected).
+fn extract_question_fields_projected(
+    packet: &Packet,
+    fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
+    requested: &HashSet<String>,
+) {
+    if let Some(question) = packet.questions.first() {
+        if requested.contains("query_name") {
+            fields.push((
+                "query_name",
+                FieldValue::OwnedString(CompactString::new(question.qname.to_string())),
+            ));
+        }
+        if requested.contains("query_type") {
+            fields.push(("query_type", FieldValue::UInt16(question.qtype.into())));
+        }
+        if requested.contains("query_class") {
+            fields.push(("query_class", FieldValue::UInt16(question.qclass.into())));
+        }
+    } else {
+        if requested.contains("query_name") {
+            fields.push(("query_name", FieldValue::Null));
+        }
+        if requested.contains("query_type") {
+            fields.push(("query_type", FieldValue::Null));
+        }
+        if requested.contains("query_class") {
+            fields.push(("query_class", FieldValue::Null));
+        }
+    }
+}
+
+/// Extract answer fields from a DNS packet as lists.
+fn extract_answer_fields(packet: &Packet, fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) {
+    let mut ip4s: Vec<FieldValue> = Vec::new();
+    let mut ip6s: Vec<FieldValue> = Vec::new();
+    let mut cnames: Vec<FieldValue> = Vec::new();
+    let mut types: Vec<FieldValue> = Vec::new();
+    let mut ttls: Vec<FieldValue> = Vec::new();
+
+    for answer in &packet.answers {
+        // Record type
+        let rtype: u16 = answer.rdata.type_code().into();
+        types.push(FieldValue::UInt16(rtype));
+
+        // TTL
+        ttls.push(FieldValue::UInt32(answer.ttl));
+
+        // Extract type-specific data
+        match &answer.rdata {
+            RData::A(a) => {
+                let addr = a.address;
+                ip4s.push(FieldValue::UInt32(u32::from(addr)));
+            }
+            RData::AAAA(aaaa) => {
+                // AAAA stores address as u128, convert to big-endian bytes
+                let addr_bytes = aaaa.address.to_be_bytes();
+                ip6s.push(FieldValue::OwnedBytes(addr_bytes.to_vec()));
+            }
+            RData::CNAME(cname) => {
+                cnames.push(FieldValue::OwnedString(CompactString::new(cname.0.to_string())));
+            }
+            _ => {}
+        }
+    }
+
+    // Push list fields
+    fields.push(("answer_ip4s", FieldValue::List(ip4s)));
+    fields.push(("answer_ip6s", FieldValue::List(ip6s)));
+    fields.push(("answer_cnames", FieldValue::List(cnames)));
+    fields.push(("answer_types", FieldValue::List(types)));
+    fields.push(("answer_ttls", FieldValue::List(ttls)));
+}
+
+/// Extract answer fields from a DNS packet (projected).
+fn extract_answer_fields_projected(
+    packet: &Packet,
+    fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
+    requested: &HashSet<String>,
+) {
+    let need_ip4s = requested.contains("answer_ip4s");
+    let need_ip6s = requested.contains("answer_ip6s");
+    let need_cnames = requested.contains("answer_cnames");
+    let need_types = requested.contains("answer_types");
+    let need_ttls = requested.contains("answer_ttls");
+
+    let mut ip4s: Vec<FieldValue> = Vec::new();
+    let mut ip6s: Vec<FieldValue> = Vec::new();
+    let mut cnames: Vec<FieldValue> = Vec::new();
+    let mut types: Vec<FieldValue> = Vec::new();
+    let mut ttls: Vec<FieldValue> = Vec::new();
+
+    for answer in &packet.answers {
+        if need_types {
+            let rtype: u16 = answer.rdata.type_code().into();
+            types.push(FieldValue::UInt16(rtype));
+        }
+
+        if need_ttls {
+            ttls.push(FieldValue::UInt32(answer.ttl));
+        }
+
+        match &answer.rdata {
+            RData::A(a) if need_ip4s => {
+                let addr = a.address;
+                ip4s.push(FieldValue::UInt32(u32::from(addr)));
+            }
+            RData::AAAA(aaaa) if need_ip6s => {
+                // AAAA stores address as u128, convert to big-endian bytes
+                let addr_bytes = aaaa.address.to_be_bytes();
+                ip6s.push(FieldValue::OwnedBytes(addr_bytes.to_vec()));
+            }
+            RData::CNAME(cname) if need_cnames => {
+                cnames.push(FieldValue::OwnedString(CompactString::new(cname.0.to_string())));
+            }
+            _ => {}
+        }
+    }
+
+    if need_ip4s {
+        fields.push(("answer_ip4s", FieldValue::List(ip4s)));
+    }
+    if need_ip6s {
+        fields.push(("answer_ip6s", FieldValue::List(ip6s)));
+    }
+    if need_cnames {
+        fields.push(("answer_cnames", FieldValue::List(cnames)));
+    }
+    if need_types {
+        fields.push(("answer_types", FieldValue::List(types)));
+    }
+    if need_ttls {
+        fields.push(("answer_ttls", FieldValue::List(ttls)));
+    }
+}
+
+/// Extract EDNS fields from a DNS packet.
+fn extract_edns_fields(packet: &Packet, fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) {
+    if let Some(opt) = packet.opt() {
+        fields.push(("has_edns", FieldValue::Bool(true)));
+        fields.push(("edns_udp_size", FieldValue::UInt16(opt.udp_packet_size)));
+    } else {
+        fields.push(("has_edns", FieldValue::Bool(false)));
+        fields.push(("edns_udp_size", FieldValue::Null));
+    }
+}
+
+/// Extract EDNS fields from a DNS packet (projected).
+fn extract_edns_fields_projected(
+    packet: &Packet,
+    fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
+    requested: &HashSet<String>,
+) {
+    let has_edns = packet.opt().is_some();
+
+    if requested.contains("has_edns") {
+        fields.push(("has_edns", FieldValue::Bool(has_edns)));
+    }
+
+    if requested.contains("edns_udp_size") {
+        if let Some(opt) = packet.opt() {
+            fields.push(("edns_udp_size", FieldValue::UInt16(opt.udp_packet_size)));
+        } else {
+            fields.push(("edns_udp_size", FieldValue::Null));
+        }
+    }
 }
 
 /// DNS record types.
@@ -376,6 +504,7 @@ pub mod record_type {
     pub const TXT: u16 = 16;
     pub const AAAA: u16 = 28;
     pub const SRV: u16 = 33;
+    pub const OPT: u16 = 41;
     pub const ANY: u16 = 255;
 }
 
@@ -393,6 +522,20 @@ pub mod rcode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::Ipv4Addr;
+
+    /// Encode a domain name in DNS format.
+    fn encode_domain_name(name: &str) -> Vec<u8> {
+        let mut result = Vec::new();
+        for part in name.split('.') {
+            if !part.is_empty() {
+                result.push(part.len() as u8);
+                result.extend_from_slice(part.as_bytes());
+            }
+        }
+        result.push(0); // Null terminator
+        result
+    }
 
     /// Create a minimal DNS query header.
     fn create_dns_query(transaction_id: u16, query_name: &[u8]) -> Vec<u8> {
@@ -422,16 +565,15 @@ mod tests {
         packet
     }
 
-    /// Create a DNS response header.
-    fn create_dns_response(transaction_id: u16, rcode: u8) -> Vec<u8> {
+    /// Create a DNS response header with an A record answer.
+    fn create_dns_response_with_answer(transaction_id: u16, ip: [u8; 4]) -> Vec<u8> {
         let mut packet = Vec::new();
 
         // Transaction ID
         packet.extend_from_slice(&transaction_id.to_be_bytes());
 
         // Flags: Response (0x8180 = QR set, RD set, RA set)
-        let flags = 0x8180u16 | (rcode as u16);
-        packet.extend_from_slice(&flags.to_be_bytes());
+        packet.extend_from_slice(&[0x81, 0x80]);
 
         // Question count: 1
         packet.extend_from_slice(&[0x00, 0x01]);
@@ -452,20 +594,26 @@ mod tests {
         // QTYPE: A, QCLASS: IN
         packet.extend_from_slice(&[0x00, 0x01, 0x00, 0x01]);
 
-        packet
-    }
+        // Answer section
+        // Name: compression pointer to question name
+        packet.extend_from_slice(&[0xC0, 0x0C]);
 
-    /// Encode a domain name in DNS format.
-    fn encode_domain_name(name: &str) -> Vec<u8> {
-        let mut result = Vec::new();
-        for part in name.split('.') {
-            if !part.is_empty() {
-                result.push(part.len() as u8);
-                result.extend_from_slice(part.as_bytes());
-            }
-        }
-        result.push(0); // Null terminator
-        result
+        // TYPE: A (1)
+        packet.extend_from_slice(&[0x00, 0x01]);
+
+        // CLASS: IN (1)
+        packet.extend_from_slice(&[0x00, 0x01]);
+
+        // TTL: 300 seconds
+        packet.extend_from_slice(&[0x00, 0x00, 0x01, 0x2C]);
+
+        // RDLENGTH: 4
+        packet.extend_from_slice(&[0x00, 0x04]);
+
+        // RDATA: IP address
+        packet.extend_from_slice(&ip);
+
+        packet
     }
 
     #[test]
@@ -498,8 +646,8 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_dns_response() {
-        let packet = create_dns_response(0xABCD, 0);
+    fn test_parse_dns_response_with_answer() {
+        let packet = create_dns_response_with_answer(0xABCD, [93, 184, 216, 34]);
 
         let parser = DnsProtocol;
         let mut context = ParseContext::new(1);
@@ -515,26 +663,33 @@ mod tests {
         );
         assert_eq!(result.get("is_query"), Some(&FieldValue::Bool(false)));
         assert_eq!(result.get("answer_count"), Some(&FieldValue::UInt16(1)));
-        assert_eq!(result.get("recursion_available"), Some(&FieldValue::Bool(true)));
         assert_eq!(result.get("response_code"), Some(&FieldValue::UInt8(0)));
-    }
 
-    #[test]
-    fn test_parse_dns_nxdomain() {
-        let packet = create_dns_response(0x5678, rcode::NXDOMAIN);
+        // Check answer_ip4s list
+        if let Some(FieldValue::List(ip4s)) = result.get("answer_ip4s") {
+            assert_eq!(ip4s.len(), 1);
+            // 93.184.216.34 as u32: (93 << 24) | (184 << 16) | (216 << 8) | 34
+            let expected_ip = u32::from(Ipv4Addr::new(93, 184, 216, 34));
+            assert_eq!(ip4s[0], FieldValue::UInt32(expected_ip));
+        } else {
+            panic!("Expected answer_ip4s to be a list");
+        }
 
-        let parser = DnsProtocol;
-        let mut context = ParseContext::new(1);
-        context.insert_hint("src_port", 53);
-        context.parent_protocol = Some("udp");
+        // Check answer_types list
+        if let Some(FieldValue::List(types)) = result.get("answer_types") {
+            assert_eq!(types.len(), 1);
+            assert_eq!(types[0], FieldValue::UInt16(1)); // A record
+        } else {
+            panic!("Expected answer_types to be a list");
+        }
 
-        let result = parser.parse(&packet, &context);
-
-        assert!(result.is_ok());
-        assert_eq!(
-            result.get("response_code"),
-            Some(&FieldValue::UInt8(rcode::NXDOMAIN))
-        );
+        // Check answer_ttls list
+        if let Some(FieldValue::List(ttls)) = result.get("answer_ttls") {
+            assert_eq!(ttls.len(), 1);
+            assert_eq!(ttls[0], FieldValue::UInt32(300)); // 300 seconds TTL
+        } else {
+            panic!("Expected answer_ttls to be a list");
+        }
     }
 
     #[test]
@@ -576,28 +731,51 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_domain_name_simple() {
-        // "www.example.com" encoded
-        let data = [
-            0x03, b'w', b'w', b'w', // "www"
-            0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e', // "example"
-            0x03, b'c', b'o', b'm', // "com"
-            0x00, // null terminator
-        ];
+    fn test_dns_schema_fields() {
+        let parser = DnsProtocol;
+        let fields = parser.schema_fields();
 
-        let (name, len) = parse_domain_name(&data).unwrap();
-        assert_eq!(name, "www.example.com");
-        assert_eq!(len, 17);
+        assert!(!fields.is_empty());
+
+        let field_names: Vec<&str> = fields.iter().map(|f| f.name).collect();
+        assert!(field_names.contains(&"dns.transaction_id"));
+        assert!(field_names.contains(&"dns.is_query"));
+        assert!(field_names.contains(&"dns.query_name"));
+        assert!(field_names.contains(&"dns.query_type"));
+        // New fields
+        assert!(field_names.contains(&"dns.answer_ip4s"));
+        assert!(field_names.contains(&"dns.answer_ip6s"));
+        assert!(field_names.contains(&"dns.answer_cnames"));
+        assert!(field_names.contains(&"dns.has_edns"));
     }
 
     #[test]
-    fn test_parse_domain_name_root() {
-        // Root domain
-        let data = [0x00];
+    fn test_dns_projected_header_only() {
+        let query_name = encode_domain_name("example.com");
+        let packet = create_dns_query(0x1234, &query_name);
 
-        let (name, len) = parse_domain_name(&data).unwrap();
-        assert_eq!(name, ".");
-        assert_eq!(len, 1);
+        let parser = DnsProtocol;
+        let mut context = ParseContext::new(1);
+        context.insert_hint("dst_port", 53);
+
+        // Only request header fields - skip expensive parsing
+        let fields: HashSet<String> = ["transaction_id", "is_query", "response_code"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let result = parser.parse_projected(&packet, &context, Some(&fields));
+
+        assert!(result.is_ok());
+        // Requested fields are present
+        assert_eq!(
+            result.get("transaction_id"),
+            Some(&FieldValue::UInt16(0x1234))
+        );
+        assert_eq!(result.get("is_query"), Some(&FieldValue::Bool(true)));
+        assert_eq!(result.get("response_code"), Some(&FieldValue::UInt8(0)));
+        // Expensive fields are NOT present
+        assert!(result.get("query_name").is_none());
+        assert!(result.get("answer_ip4s").is_none());
     }
 
     #[test]
@@ -642,80 +820,5 @@ mod tests {
             result.get("query_type"),
             Some(&FieldValue::UInt16(record_type::AAAA))
         );
-    }
-
-    #[test]
-    fn test_dns_schema_fields() {
-        let parser = DnsProtocol;
-        let fields = parser.schema_fields();
-
-        assert!(!fields.is_empty());
-
-        let field_names: Vec<&str> = fields.iter().map(|f| f.name).collect();
-        assert!(field_names.contains(&"dns.transaction_id"));
-        assert!(field_names.contains(&"dns.is_query"));
-        assert!(field_names.contains(&"dns.query_name"));
-        assert!(field_names.contains(&"dns.query_type"));
-    }
-
-    #[test]
-    fn test_dns_projected_header_only() {
-        // Test that we can skip expensive query_name parsing
-        let query_name = encode_domain_name("example.com");
-        let packet = create_dns_query(0x1234, &query_name);
-
-        let parser = DnsProtocol;
-        let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 53);
-
-        // Only request header fields - skip expensive query_name parsing
-        let fields: HashSet<String> = ["transaction_id", "is_query", "response_code"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        let result = parser.parse_projected(&packet, &context, Some(&fields));
-
-        assert!(result.is_ok());
-        // Requested fields are present
-        assert_eq!(
-            result.get("transaction_id"),
-            Some(&FieldValue::UInt16(0x1234))
-        );
-        assert_eq!(result.get("is_query"), Some(&FieldValue::Bool(true)));
-        assert_eq!(result.get("response_code"), Some(&FieldValue::UInt8(0)));
-        // Expensive fields are NOT present (query_name was skipped)
-        assert!(result.get("query_name").is_none());
-        assert!(result.get("query_type").is_none());
-        assert!(result.get("query_class").is_none());
-    }
-
-    #[test]
-    fn test_dns_projected_with_query_name() {
-        let query_name = encode_domain_name("example.com");
-        let packet = create_dns_query(0x5678, &query_name);
-
-        let parser = DnsProtocol;
-        let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 53);
-
-        // Request query_name - this requires domain name parsing
-        let fields: HashSet<String> = ["transaction_id", "query_name"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        let result = parser.parse_projected(&packet, &context, Some(&fields));
-
-        assert!(result.is_ok());
-        assert_eq!(
-            result.get("transaction_id"),
-            Some(&FieldValue::UInt16(0x5678))
-        );
-        assert_eq!(
-            result.get("query_name"),
-            Some(&FieldValue::OwnedString(CompactString::new("example.com")))
-        );
-        // Other fields not requested
-        assert!(result.get("is_query").is_none());
-        assert!(result.get("query_type").is_none());
     }
 }

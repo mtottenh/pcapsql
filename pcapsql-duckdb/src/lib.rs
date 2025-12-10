@@ -29,9 +29,29 @@
 //! FROM read_tcp('capture.pcap') t
 //! JOIN read_dns('capture.pcap') d USING (frame_number);
 //! ```
+//!
+//! ## Formatting Macros
+//!
+//! IP addresses are stored as binary for efficient comparisons and joins.
+//! Use these macros to format them as readable strings:
+//!
+//! ```sql
+//! -- Format a single IPv4 (UInt32 -> string)
+//! SELECT format_ip4(src_ip) FROM read_ipv4('capture.pcap');
+//!
+//! -- Format a list of IPv4 addresses
+//! SELECT format_ip4_list("dns.answer_ip4s") FROM read_dns('capture.pcap');
+//!
+//! -- Format IPv6 addresses (16-byte blob -> string)
+//! SELECT format_ip6_list("dns.answer_ip6s") FROM read_dns('capture.pcap');
+//!
+//! -- Format MAC addresses (6-byte blob -> string)
+//! SELECT format_mac(src_mac) FROM read_ethernet('capture.pcap');
+//! ```
 
 mod duckdb_schema;
 mod error;
+mod macros;
 mod udf;
 mod vtab;
 
@@ -56,7 +76,7 @@ pub const EXTENSION_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Extension entry point called by DuckDB when loading.
 ///
-/// Registers all table functions and scalar functions.
+/// Registers all table functions, scalar functions, and macros.
 #[duckdb_entrypoint_c_api(ext_name = "pcapsql")]
 pub unsafe fn pcapsql_init(con: Connection) -> duckdb::Result<(), Box<dyn std::error::Error>> {
     // Log extension loading
@@ -71,6 +91,9 @@ pub unsafe fn pcapsql_init(con: Connection) -> duckdb::Result<(), Box<dyn std::e
 
     // Register all scalar functions (UDFs)
     udf::register_all(&con)?;
+
+    // Register SQL macros for convenience (format_ip4_list, etc.)
+    macros::register_all(&con)?;
 
     Ok(())
 }

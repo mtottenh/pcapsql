@@ -3,6 +3,8 @@
 //! This module provides the bridge between pcapsql-core's engine-agnostic
 //! schema types and Arrow's type system used by DataFusion.
 
+use std::sync::Arc;
+
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use pcapsql_core::schema::{DataKind, FieldDescriptor};
 use pcapsql_core::Protocol;
@@ -27,6 +29,10 @@ pub fn to_arrow_type(kind: &DataKind) -> DataType {
         DataKind::Binary => DataType::Binary,
         DataKind::FixedBinary(n) => DataType::FixedSizeBinary(*n as i32),
         DataKind::TimestampMicros => DataType::Timestamp(TimeUnit::Microsecond, None),
+        DataKind::List(inner) => {
+            let inner_type = to_arrow_type(inner);
+            DataType::List(Arc::new(Field::new("item", inner_type, true)))
+        }
     }
 }
 
@@ -123,6 +129,11 @@ pub fn field_value_to_scalar(value: &pcapsql_core::FieldValue) -> datafusion::sc
             // Store as string for now - UDFs handle the conversion
             ScalarValue::Utf8(Some(addr.to_string()))
         }
+        FieldValue::List(items) => {
+            // Convert list items to ScalarValues
+            let scalars: Vec<ScalarValue> = items.iter().map(field_value_to_scalar).collect();
+            ScalarValue::List(ScalarValue::new_list_nullable(&scalars, &DataType::Utf8))
+        }
         FieldValue::Null => ScalarValue::Null,
     }
 }
@@ -198,5 +209,66 @@ mod tests {
         assert_eq!(schema.field(0).name(), "id");
         assert_eq!(schema.field(1).name(), "name");
         assert_eq!(schema.field(2).name(), "active");
+    }
+
+    #[test]
+    fn test_list_type() {
+        // List of UInt32
+        let list_u32 = DataKind::List(Box::new(DataKind::UInt32));
+        let arrow_type = to_arrow_type(&list_u32);
+
+        match arrow_type {
+            DataType::List(field) => {
+                assert_eq!(field.name(), "item");
+                assert_eq!(field.data_type(), &DataType::UInt32);
+                assert!(field.is_nullable());
+            }
+            _ => panic!("Expected List type"),
+        }
+
+        // List of String
+        let list_string = DataKind::List(Box::new(DataKind::String));
+        let arrow_type = to_arrow_type(&list_string);
+
+        match arrow_type {
+            DataType::List(field) => {
+                assert_eq!(field.data_type(), &DataType::Utf8);
+            }
+            _ => panic!("Expected List type"),
+        }
+
+        // Nested list: List<List<UInt16>>
+        let nested_list = DataKind::List(Box::new(DataKind::List(Box::new(DataKind::UInt16))));
+        let arrow_type = to_arrow_type(&nested_list);
+
+        match arrow_type {
+            DataType::List(outer) => {
+                match outer.data_type() {
+                    DataType::List(inner) => {
+                        assert_eq!(inner.data_type(), &DataType::UInt16);
+                    }
+                    _ => panic!("Expected inner List type"),
+                }
+            }
+            _ => panic!("Expected outer List type"),
+        }
+    }
+
+    #[test]
+    fn test_list_field_descriptor() {
+        let fd = FieldDescriptor::nullable(
+            "answer_ips",
+            DataKind::List(Box::new(DataKind::UInt32)),
+        );
+        let arrow_field = to_arrow_field(&fd);
+
+        assert_eq!(arrow_field.name(), "answer_ips");
+        assert!(arrow_field.is_nullable());
+        match arrow_field.data_type() {
+            DataType::List(inner) => {
+                assert_eq!(inner.data_type(), &DataType::UInt32);
+            }
+            _ => panic!("Expected List type"),
+        }
     }
 }

@@ -21,6 +21,10 @@ pub fn to_duckdb_type(kind: &DataKind) -> LogicalTypeHandle {
         DataKind::FixedBinary(_) => LogicalTypeHandle::from(LogicalTypeId::Blob),
         // DuckDB uses TimestampS for seconds, we store microseconds as Bigint
         DataKind::TimestampMicros => LogicalTypeHandle::from(LogicalTypeId::Bigint),
+        DataKind::List(inner) => {
+            let inner_type = to_duckdb_type(inner);
+            LogicalTypeHandle::list(&inner_type)
+        }
     }
 }
 
