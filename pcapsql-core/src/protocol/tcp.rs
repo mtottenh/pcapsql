@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use smallvec::SmallVec;
 
-use etherparse::TcpHeaderSlice;
+use etherparse::{TcpHeaderSlice, TcpOptionElement};
 
 use super::{FieldValue, ParseContext, ParseResult, PayloadMode, Protocol};
 use crate::schema::{DataKind, FieldDescriptor};
@@ -23,6 +23,87 @@ pub mod flags {
     pub const ECE: u16 = 0x040;
     pub const CWR: u16 = 0x080;
     pub const NS: u16 = 0x100;
+}
+
+/// TCP option kinds.
+pub mod options {
+    pub const END_OF_LIST: u8 = 0;
+    pub const NOP: u8 = 1;
+    pub const MSS: u8 = 2;
+    pub const WINDOW_SCALE: u8 = 3;
+    pub const SACK_PERMITTED: u8 = 4;
+    pub const SACK: u8 = 5;
+    pub const TIMESTAMP: u8 = 8;
+}
+
+/// Parsed TCP options container.
+/// Uses zero-copy parsing via etherparse.
+#[derive(Debug, Clone, Default)]
+pub struct ParsedTcpOptions {
+    /// List of option names present (e.g., "MSS,WS,TS")
+    pub option_names: SmallVec<[&'static str; 4]>,
+    /// Maximum Segment Size (option 2)
+    pub mss: Option<u16>,
+    /// Window Scale factor (option 3)
+    pub window_scale: Option<u8>,
+    /// SACK Permitted (option 4)
+    pub sack_permitted: bool,
+    /// SACK block left edges (option 5) - parallel to sack_right_edges
+    pub sack_left_edges: SmallVec<[u32; 4]>,
+    /// SACK block right edges (option 5) - parallel to sack_left_edges
+    pub sack_right_edges: SmallVec<[u32; 4]>,
+    /// Timestamp value (TSval) - sender's timestamp (option 8)
+    pub ts_val: Option<u32>,
+    /// Timestamp echo reply (TSecr) - echoed timestamp from peer (option 8)
+    pub ts_ecr: Option<u32>,
+}
+
+/// Parse TCP options using etherparse's iterator.
+/// This is zero-copy for all options.
+fn parse_tcp_options(tcp: &TcpHeaderSlice<'_>) -> ParsedTcpOptions {
+    let mut result = ParsedTcpOptions::default();
+
+    for opt_result in tcp.options_iterator() {
+        let opt = match opt_result {
+            Ok(o) => o,
+            Err(_) => continue, // Skip malformed options
+        };
+
+        match opt {
+            TcpOptionElement::Noop => {
+                // NOP - skip, don't add to option names
+            }
+            TcpOptionElement::MaximumSegmentSize(mss) => {
+                result.mss = Some(mss);
+                result.option_names.push("MSS");
+            }
+            TcpOptionElement::WindowScale(scale) => {
+                result.window_scale = Some(scale);
+                result.option_names.push("WS");
+            }
+            TcpOptionElement::SelectiveAcknowledgementPermitted => {
+                result.sack_permitted = true;
+                result.option_names.push("SACK_PERM");
+            }
+            TcpOptionElement::SelectiveAcknowledgement(first, rest) => {
+                // Store SACK blocks as parallel lists of left/right edges
+                result.sack_left_edges.push(first.0);
+                result.sack_right_edges.push(first.1);
+                for block in rest.into_iter().flatten() {
+                    result.sack_left_edges.push(block.0);
+                    result.sack_right_edges.push(block.1);
+                }
+                result.option_names.push("SACK");
+            }
+            TcpOptionElement::Timestamp(ts_val, ts_ecr) => {
+                result.ts_val = Some(ts_val);
+                result.ts_ecr = Some(ts_ecr);
+                result.option_names.push("TS");
+            }
+        }
+    }
+
+    result
 }
 
 /// TCP protocol parser.
@@ -104,6 +185,83 @@ impl Protocol for TcpProtocol {
                 let options_len = header_len.saturating_sub(20);
                 fields.push(("options_length", FieldValue::UInt8(options_len as u8)));
 
+                // Parse all TCP options
+                if options_len > 0 {
+                    let opts = parse_tcp_options(&tcp);
+
+                    // Options list string
+                    if !opts.option_names.is_empty() {
+                        fields.push((
+                            "options",
+                            FieldValue::OwnedString(opts.option_names.join(",").into()),
+                        ));
+                    } else {
+                        fields.push(("options", FieldValue::Null));
+                    }
+
+                    // MSS
+                    if let Some(mss) = opts.mss {
+                        fields.push(("mss", FieldValue::UInt16(mss)));
+                    } else {
+                        fields.push(("mss", FieldValue::Null));
+                    }
+
+                    // Window Scale
+                    if let Some(ws) = opts.window_scale {
+                        fields.push(("window_scale", FieldValue::UInt8(ws)));
+                    } else {
+                        fields.push(("window_scale", FieldValue::Null));
+                    }
+
+                    // SACK Permitted
+                    if opts.sack_permitted {
+                        fields.push(("sack_permitted", FieldValue::Bool(true)));
+                    } else {
+                        fields.push(("sack_permitted", FieldValue::Null));
+                    }
+
+                    // SACK Blocks as parallel lists
+                    if !opts.sack_left_edges.is_empty() {
+                        let left_edges: Vec<FieldValue> = opts
+                            .sack_left_edges
+                            .iter()
+                            .map(|&v| FieldValue::UInt32(v))
+                            .collect();
+                        let right_edges: Vec<FieldValue> = opts
+                            .sack_right_edges
+                            .iter()
+                            .map(|&v| FieldValue::UInt32(v))
+                            .collect();
+                        fields.push(("sack_left_edges", FieldValue::List(left_edges)));
+                        fields.push(("sack_right_edges", FieldValue::List(right_edges)));
+                    } else {
+                        fields.push(("sack_left_edges", FieldValue::Null));
+                        fields.push(("sack_right_edges", FieldValue::Null));
+                    }
+
+                    // Timestamps
+                    if let Some(ts_val) = opts.ts_val {
+                        fields.push(("ts_val", FieldValue::UInt32(ts_val)));
+                    } else {
+                        fields.push(("ts_val", FieldValue::Null));
+                    }
+                    if let Some(ts_ecr) = opts.ts_ecr {
+                        fields.push(("ts_ecr", FieldValue::UInt32(ts_ecr)));
+                    } else {
+                        fields.push(("ts_ecr", FieldValue::Null));
+                    }
+                } else {
+                    // No options - all null
+                    fields.push(("options", FieldValue::Null));
+                    fields.push(("mss", FieldValue::Null));
+                    fields.push(("window_scale", FieldValue::Null));
+                    fields.push(("sack_permitted", FieldValue::Null));
+                    fields.push(("sack_left_edges", FieldValue::Null));
+                    fields.push(("sack_right_edges", FieldValue::Null));
+                    fields.push(("ts_val", FieldValue::Null));
+                    fields.push(("ts_ecr", FieldValue::Null));
+                }
+
                 let mut child_hints = SmallVec::new();
                 child_hints.push(("src_port", tcp.source_port() as u64));
                 child_hints.push(("dst_port", tcp.destination_port() as u64));
@@ -133,6 +291,31 @@ impl Protocol for TcpProtocol {
             FieldDescriptor::new("tcp.checksum", DataKind::UInt16).set_nullable(true),
             FieldDescriptor::new("tcp.urgent_ptr", DataKind::UInt16).set_nullable(true),
             FieldDescriptor::new("tcp.options_length", DataKind::UInt8).set_nullable(true),
+            // TCP options fields
+            FieldDescriptor::new("tcp.options", DataKind::String)
+                .set_nullable(true)
+                .with_description("Comma-separated list of TCP options present (e.g., MSS,WS,TS)"),
+            FieldDescriptor::new("tcp.mss", DataKind::UInt16)
+                .set_nullable(true)
+                .with_description("Maximum Segment Size (option 2)"),
+            FieldDescriptor::new("tcp.window_scale", DataKind::UInt8)
+                .set_nullable(true)
+                .with_description("Window scale factor (option 3)"),
+            FieldDescriptor::new("tcp.sack_permitted", DataKind::Bool)
+                .set_nullable(true)
+                .with_description("Selective ACK permitted (option 4)"),
+            FieldDescriptor::new("tcp.sack_left_edges", DataKind::List(Box::new(DataKind::UInt32)))
+                .set_nullable(true)
+                .with_description("SACK block left edges (option 5)"),
+            FieldDescriptor::new("tcp.sack_right_edges", DataKind::List(Box::new(DataKind::UInt32)))
+                .set_nullable(true)
+                .with_description("SACK block right edges (option 5)"),
+            FieldDescriptor::new("tcp.ts_val", DataKind::UInt32)
+                .set_nullable(true)
+                .with_description("TCP timestamp value (TSval) - sender's timestamp (option 8)"),
+            FieldDescriptor::new("tcp.ts_ecr", DataKind::UInt32)
+                .set_nullable(true)
+                .with_description("TCP timestamp echo reply (TSecr) - echoed timestamp (option 8)"),
         ]
     }
 
@@ -263,6 +446,126 @@ impl Protocol for TcpProtocol {
                     result_fields.push(("options_length", FieldValue::UInt8(options_len as u8)));
                 }
 
+                // Parse TCP options if any option field is requested
+                let need_options = fields.contains("options")
+                    || fields.contains("mss")
+                    || fields.contains("window_scale")
+                    || fields.contains("sack_permitted")
+                    || fields.contains("sack_left_edges")
+                    || fields.contains("sack_right_edges")
+                    || fields.contains("ts_val")
+                    || fields.contains("ts_ecr");
+
+                if need_options {
+                    let options_len = header_len.saturating_sub(20);
+                    if options_len > 0 {
+                        let opts = parse_tcp_options(&tcp);
+
+                        if fields.contains("options") {
+                            if !opts.option_names.is_empty() {
+                                result_fields.push((
+                                    "options",
+                                    FieldValue::OwnedString(opts.option_names.join(",").into()),
+                                ));
+                            } else {
+                                result_fields.push(("options", FieldValue::Null));
+                            }
+                        }
+                        if fields.contains("mss") {
+                            if let Some(mss) = opts.mss {
+                                result_fields.push(("mss", FieldValue::UInt16(mss)));
+                            } else {
+                                result_fields.push(("mss", FieldValue::Null));
+                            }
+                        }
+                        if fields.contains("window_scale") {
+                            if let Some(ws) = opts.window_scale {
+                                result_fields.push(("window_scale", FieldValue::UInt8(ws)));
+                            } else {
+                                result_fields.push(("window_scale", FieldValue::Null));
+                            }
+                        }
+                        if fields.contains("sack_permitted") {
+                            if opts.sack_permitted {
+                                result_fields.push(("sack_permitted", FieldValue::Bool(true)));
+                            } else {
+                                result_fields.push(("sack_permitted", FieldValue::Null));
+                            }
+                        }
+                        let need_sack_edges = fields.contains("sack_left_edges")
+                            || fields.contains("sack_right_edges");
+                        if need_sack_edges {
+                            if !opts.sack_left_edges.is_empty() {
+                                if fields.contains("sack_left_edges") {
+                                    let left_edges: Vec<FieldValue> = opts
+                                        .sack_left_edges
+                                        .iter()
+                                        .map(|&v| FieldValue::UInt32(v))
+                                        .collect();
+                                    result_fields
+                                        .push(("sack_left_edges", FieldValue::List(left_edges)));
+                                }
+                                if fields.contains("sack_right_edges") {
+                                    let right_edges: Vec<FieldValue> = opts
+                                        .sack_right_edges
+                                        .iter()
+                                        .map(|&v| FieldValue::UInt32(v))
+                                        .collect();
+                                    result_fields
+                                        .push(("sack_right_edges", FieldValue::List(right_edges)));
+                                }
+                            } else {
+                                if fields.contains("sack_left_edges") {
+                                    result_fields.push(("sack_left_edges", FieldValue::Null));
+                                }
+                                if fields.contains("sack_right_edges") {
+                                    result_fields.push(("sack_right_edges", FieldValue::Null));
+                                }
+                            }
+                        }
+                        if fields.contains("ts_val") {
+                            if let Some(ts_val) = opts.ts_val {
+                                result_fields.push(("ts_val", FieldValue::UInt32(ts_val)));
+                            } else {
+                                result_fields.push(("ts_val", FieldValue::Null));
+                            }
+                        }
+                        if fields.contains("ts_ecr") {
+                            if let Some(ts_ecr) = opts.ts_ecr {
+                                result_fields.push(("ts_ecr", FieldValue::UInt32(ts_ecr)));
+                            } else {
+                                result_fields.push(("ts_ecr", FieldValue::Null));
+                            }
+                        }
+                    } else {
+                        // No options - all null
+                        if fields.contains("options") {
+                            result_fields.push(("options", FieldValue::Null));
+                        }
+                        if fields.contains("mss") {
+                            result_fields.push(("mss", FieldValue::Null));
+                        }
+                        if fields.contains("window_scale") {
+                            result_fields.push(("window_scale", FieldValue::Null));
+                        }
+                        if fields.contains("sack_permitted") {
+                            result_fields.push(("sack_permitted", FieldValue::Null));
+                        }
+                        if fields.contains("sack_left_edges") {
+                            result_fields.push(("sack_left_edges", FieldValue::Null));
+                        }
+                        if fields.contains("sack_right_edges") {
+                            result_fields.push(("sack_right_edges", FieldValue::Null));
+                        }
+                        if fields.contains("ts_val") {
+                            result_fields.push(("ts_val", FieldValue::Null));
+                        }
+                        if fields.contains("ts_ecr") {
+                            result_fields.push(("ts_ecr", FieldValue::Null));
+                        }
+                    }
+                }
+
                 // Child hints always needed for protocol chaining
                 let mut child_hints = SmallVec::new();
                 child_hints.push(("src_port", src_port as u64));
@@ -298,7 +601,17 @@ impl Protocol for TcpProtocol {
 
     fn expensive_fields(&self) -> &'static [&'static str] {
         // Options require computing data_offset and variable-length parsing
-        &["options_length"]
+        &[
+            "options_length",
+            "options",
+            "mss",
+            "window_scale",
+            "sack_permitted",
+            "sack_left_edges",
+            "sack_right_edges",
+            "ts_val",
+            "ts_ecr",
+        ]
     }
 }
 
@@ -611,5 +924,300 @@ mod tests {
         assert!(result.get("flags").is_some());
         assert!(result.get("flag_syn").is_some());
         assert!(result.get("window").is_some());
+    }
+
+    #[test]
+    fn test_parse_tcp_timestamp_option() {
+        // TCP packet with timestamp option
+        // Header: 32 bytes (20 base + 12 options)
+        let header = [
+            0x00, 0x50, // Src port: 80
+            0x1f, 0x90, // Dst port: 8080
+            0x00, 0x00, 0x00, 0x01, // Seq: 1
+            0x00, 0x00, 0x00, 0x02, // Ack: 2
+            0x80, // Data offset: 8 (32 bytes)
+            0x10, // Flags: ACK
+            0x72, 0x10, // Window: 29200
+            0x00, 0x00, // Checksum
+            0x00, 0x00, // Urgent pointer
+            // TCP Options (12 bytes):
+            0x01, // NOP
+            0x01, // NOP
+            0x08, // Timestamp option kind
+            0x0a, // Timestamp option length (10)
+            0x12, 0x34, 0x56, 0x78, // TSval: 0x12345678 = 305419896
+            0x9a, 0xbc, 0xde, 0xf0, // TSecr: 0x9abcdef0 = 2596069104
+        ];
+
+        let parser = TcpProtocol;
+        let mut context = ParseContext::new(1);
+        context.insert_hint("ip_protocol", 6);
+
+        let result = parser.parse(&header, &context);
+
+        assert!(result.is_ok());
+        assert_eq!(result.get("options_length"), Some(&FieldValue::UInt8(12)));
+        assert_eq!(result.get("ts_val"), Some(&FieldValue::UInt32(0x12345678)));
+        assert_eq!(result.get("ts_ecr"), Some(&FieldValue::UInt32(0x9abcdef0)));
+    }
+
+    #[test]
+    fn test_parse_tcp_no_timestamp() {
+        // TCP packet without timestamp option (20 byte header)
+        let header = [
+            0x00, 0x50, // Src port: 80
+            0x1f, 0x90, // Dst port: 8080
+            0x00, 0x00, 0x00, 0x01, // Seq: 1
+            0x00, 0x00, 0x00, 0x00, // Ack: 0
+            0x50, // Data offset: 5 (20 bytes)
+            0x02, // Flags: SYN
+            0x72, 0x10, // Window: 29200
+            0x00, 0x00, // Checksum
+            0x00, 0x00, // Urgent pointer
+        ];
+
+        let parser = TcpProtocol;
+        let mut context = ParseContext::new(1);
+        context.insert_hint("ip_protocol", 6);
+
+        let result = parser.parse(&header, &context);
+
+        assert!(result.is_ok());
+        assert_eq!(result.get("options_length"), Some(&FieldValue::UInt8(0)));
+        assert_eq!(result.get("ts_val"), Some(&FieldValue::Null));
+        assert_eq!(result.get("ts_ecr"), Some(&FieldValue::Null));
+    }
+
+    #[test]
+    fn test_parse_tcp_mss_option() {
+        // TCP SYN packet with MSS option
+        // Header: 24 bytes (20 base + 4 options)
+        let header = [
+            0x00, 0x50, // Src port: 80
+            0x1f, 0x90, // Dst port: 8080
+            0x00, 0x00, 0x00, 0x01, // Seq: 1
+            0x00, 0x00, 0x00, 0x00, // Ack: 0
+            0x60, // Data offset: 6 (24 bytes)
+            0x02, // Flags: SYN
+            0x72, 0x10, // Window: 29200
+            0x00, 0x00, // Checksum
+            0x00, 0x00, // Urgent pointer
+            // TCP Options (4 bytes):
+            0x02, 0x04, 0x05, 0xb4, // MSS = 1460
+        ];
+
+        let parser = TcpProtocol;
+        let mut context = ParseContext::new(1);
+        context.insert_hint("ip_protocol", 6);
+
+        let result = parser.parse(&header, &context);
+
+        assert!(result.is_ok());
+        assert_eq!(result.get("options_length"), Some(&FieldValue::UInt8(4)));
+        assert_eq!(result.get("mss"), Some(&FieldValue::UInt16(1460)));
+        // Check options string contains MSS
+        if let Some(FieldValue::OwnedString(s)) = result.get("options") {
+            assert!(s.contains("MSS"));
+        } else {
+            panic!("Expected OwnedString for options");
+        }
+    }
+
+    #[test]
+    fn test_parse_tcp_window_scale_option() {
+        // TCP SYN packet with Window Scale option
+        // Header: 24 bytes (20 base + 4 options, padded)
+        let header = [
+            0x00, 0x50, // Src port: 80
+            0x1f, 0x90, // Dst port: 8080
+            0x00, 0x00, 0x00, 0x01, // Seq: 1
+            0x00, 0x00, 0x00, 0x00, // Ack: 0
+            0x60, // Data offset: 6 (24 bytes)
+            0x02, // Flags: SYN
+            0x72, 0x10, // Window: 29200
+            0x00, 0x00, // Checksum
+            0x00, 0x00, // Urgent pointer
+            // TCP Options (4 bytes):
+            0x03, 0x03, 0x07, // Window Scale = 7
+            0x00, // Padding (End of options)
+        ];
+
+        let parser = TcpProtocol;
+        let mut context = ParseContext::new(1);
+        context.insert_hint("ip_protocol", 6);
+
+        let result = parser.parse(&header, &context);
+
+        assert!(result.is_ok());
+        assert_eq!(result.get("window_scale"), Some(&FieldValue::UInt8(7)));
+    }
+
+    #[test]
+    fn test_parse_tcp_sack_permitted_option() {
+        // TCP SYN packet with SACK Permitted option
+        // Header: 24 bytes (20 base + 4 options, padded)
+        let header = [
+            0x00, 0x50, // Src port: 80
+            0x1f, 0x90, // Dst port: 8080
+            0x00, 0x00, 0x00, 0x01, // Seq: 1
+            0x00, 0x00, 0x00, 0x00, // Ack: 0
+            0x60, // Data offset: 6 (24 bytes)
+            0x02, // Flags: SYN
+            0x72, 0x10, // Window: 29200
+            0x00, 0x00, // Checksum
+            0x00, 0x00, // Urgent pointer
+            // TCP Options (4 bytes):
+            0x04, 0x02, // SACK Permitted
+            0x01, 0x00, // NOP + padding
+        ];
+
+        let parser = TcpProtocol;
+        let mut context = ParseContext::new(1);
+        context.insert_hint("ip_protocol", 6);
+
+        let result = parser.parse(&header, &context);
+
+        assert!(result.is_ok());
+        assert_eq!(result.get("sack_permitted"), Some(&FieldValue::Bool(true)));
+    }
+
+    #[test]
+    fn test_parse_tcp_sack_blocks() {
+        // TCP packet with SACK blocks (during retransmission)
+        // Header: 32 bytes (20 base + 12 options)
+        let header = [
+            0x00, 0x50, // Src port: 80
+            0x1f, 0x90, // Dst port: 8080
+            0x00, 0x00, 0x00, 0x01, // Seq: 1
+            0x00, 0x00, 0x00, 0x02, // Ack: 2
+            0x80, // Data offset: 8 (32 bytes)
+            0x10, // Flags: ACK
+            0x72, 0x10, // Window: 29200
+            0x00, 0x00, // Checksum
+            0x00, 0x00, // Urgent pointer
+            // TCP Options (12 bytes):
+            0x01, // NOP
+            0x01, // NOP
+            // SACK option with 1 block
+            0x05, 0x0a, // SACK, length 10 (2 + 8 bytes)
+            0x00, 0x00, 0x10, 0x00, // Left edge: 4096
+            0x00, 0x00, 0x20, 0x00, // Right edge: 8192
+        ];
+
+        let parser = TcpProtocol;
+        let mut context = ParseContext::new(1);
+        context.insert_hint("ip_protocol", 6);
+
+        let result = parser.parse(&header, &context);
+
+        assert!(result.is_ok());
+
+        // Check SACK left edges
+        if let Some(FieldValue::List(edges)) = result.get("sack_left_edges") {
+            assert_eq!(edges.len(), 1);
+            assert_eq!(edges[0], FieldValue::UInt32(4096));
+        } else {
+            panic!("Expected List for sack_left_edges");
+        }
+
+        // Check SACK right edges
+        if let Some(FieldValue::List(edges)) = result.get("sack_right_edges") {
+            assert_eq!(edges.len(), 1);
+            assert_eq!(edges[0], FieldValue::UInt32(8192));
+        } else {
+            panic!("Expected List for sack_right_edges");
+        }
+    }
+
+    #[test]
+    fn test_parse_tcp_multiple_options() {
+        // TCP SYN packet with MSS, SACK Permitted, Timestamps, Window Scale
+        // This is a typical SYN packet with all common options
+        // Header: 40 bytes (20 base + 20 options)
+        let header = [
+            0x00, 0x50, // Src port: 80
+            0x1f, 0x90, // Dst port: 8080
+            0x00, 0x00, 0x00, 0x01, // Seq: 1
+            0x00, 0x00, 0x00, 0x00, // Ack: 0
+            0xa0, // Data offset: 10 (40 bytes)
+            0x02, // Flags: SYN
+            0x72, 0x10, // Window: 29200
+            0x00, 0x00, // Checksum
+            0x00, 0x00, // Urgent pointer
+            // TCP Options (20 bytes):
+            0x02, 0x04, 0x05, 0xb4, // MSS 1460
+            0x04, 0x02, // SACK Permitted
+            0x08, 0x0a, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, // Timestamps
+            0x01, // NOP
+            0x03, 0x03, 0x07, // Window Scale 7
+        ];
+
+        let parser = TcpProtocol;
+        let mut context = ParseContext::new(1);
+        context.insert_hint("ip_protocol", 6);
+
+        let result = parser.parse(&header, &context);
+
+        assert!(result.is_ok());
+        assert_eq!(result.get("mss"), Some(&FieldValue::UInt16(1460)));
+        assert_eq!(result.get("sack_permitted"), Some(&FieldValue::Bool(true)));
+        assert_eq!(result.get("window_scale"), Some(&FieldValue::UInt8(7)));
+        assert_eq!(result.get("ts_val"), Some(&FieldValue::UInt32(1)));
+        assert_eq!(result.get("ts_ecr"), Some(&FieldValue::UInt32(0)));
+
+        // Check options string contains all options
+        if let Some(FieldValue::OwnedString(s)) = result.get("options") {
+            assert!(s.contains("MSS"), "options should contain MSS: {}", s);
+            assert!(
+                s.contains("SACK_PERM"),
+                "options should contain SACK_PERM: {}",
+                s
+            );
+            assert!(s.contains("TS"), "options should contain TS: {}", s);
+            assert!(s.contains("WS"), "options should contain WS: {}", s);
+        } else {
+            panic!("Expected OwnedString for options");
+        }
+    }
+
+    #[test]
+    fn test_parse_tcp_timestamp_projected() {
+        // TCP packet with timestamp option
+        let header = [
+            0x00, 0x50, // Src port: 80
+            0x1f, 0x90, // Dst port: 8080
+            0x00, 0x00, 0x00, 0x01, // Seq: 1
+            0x00, 0x00, 0x00, 0x02, // Ack: 2
+            0x80, // Data offset: 8 (32 bytes)
+            0x10, // Flags: ACK
+            0x72, 0x10, // Window: 29200
+            0x00, 0x00, // Checksum
+            0x00, 0x00, // Urgent pointer
+            // TCP Options:
+            0x01, // NOP
+            0x01, // NOP
+            0x08, // Timestamp option kind
+            0x0a, // Timestamp option length
+            0xaa, 0xbb, 0xcc, 0xdd, // TSval
+            0x11, 0x22, 0x33, 0x44, // TSecr
+        ];
+
+        let parser = TcpProtocol;
+        let mut context = ParseContext::new(1);
+        context.insert_hint("ip_protocol", 6);
+
+        // Project to only timestamp fields
+        let fields: HashSet<String> = ["ts_val", "ts_ecr"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let result = parser.parse_projected(&header, &context, Some(&fields));
+
+        assert!(result.is_ok());
+        assert_eq!(result.get("ts_val"), Some(&FieldValue::UInt32(0xaabbccdd)));
+        assert_eq!(result.get("ts_ecr"), Some(&FieldValue::UInt32(0x11223344)));
+        // Other fields not present
+        assert!(result.get("src_port").is_none());
+        assert!(result.get("seq").is_none());
     }
 }
