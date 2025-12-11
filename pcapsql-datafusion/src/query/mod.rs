@@ -26,6 +26,7 @@ mod filter;
 mod frames;
 mod provider;
 pub mod providers;
+pub mod stream_tables;
 pub mod tables;
 pub mod udf;
 pub mod udtf;
@@ -48,8 +49,8 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::error::{Error, QueryError};
 use pcapsql_core::{
-    default_registry, parse_packet, CacheStats, FilePacketSource, LruParseCache, MmapPacketSource,
-    NoCache, PacketSource, ParseCache, PcapReader, ProtocolRegistry,
+    default_registry, parse_packet, CacheStats, FilePacketSource, KeyLog, LruParseCache,
+    MmapPacketSource, NoCache, PacketSource, ParseCache, PcapReader, ProtocolRegistry,
 };
 
 /// File size threshold for automatic streaming mode selection.
@@ -140,6 +141,93 @@ impl QueryEngine {
         Self::register_cross_layer_views(&ctx).await?;
 
         // Register cache_stats() table function (returns default stats in in-memory mode)
+        let stats_fn = udtf::CacheStatsFunction::new(|| None);
+        ctx.register_udtf("cache_stats", Arc::new(stats_fn));
+
+        Ok(Self {
+            ctx,
+            registry,
+            cache: None,
+        })
+    }
+
+    /// Create a query engine with TLS decryption support.
+    ///
+    /// This enables decryption of TLS traffic using the provided SSLKEYLOGFILE,
+    /// allowing queries on decrypted protocols like HTTP/2.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to the PCAP file
+    /// * `keylog` - TLS keylog for decryption (from SSLKEYLOGFILE)
+    /// * `batch_size` - Number of packets per RecordBatch
+    pub async fn with_keylog<P: AsRef<Path>>(
+        path: P,
+        keylog: Arc<KeyLog>,
+        batch_size: usize,
+    ) -> Result<Self, Error> {
+        let registry = default_registry();
+        let ctx = create_session_context();
+
+        // Register all UDFs
+        udf::register_all_udfs(&ctx)?;
+
+        // Load all packets into normalized per-protocol tables
+        let protocol_batches =
+            Self::load_normalized_packets(&path, &registry, batch_size, false)?;
+
+        // Check if we got any frames
+        let frames_batches = protocol_batches
+            .get("frames")
+            .ok_or_else(|| Error::Query(QueryError::Execution("No frames table".to_string())))?;
+
+        if frames_batches.is_empty() {
+            return Err(Error::Query(QueryError::Execution(
+                "No packets found in PCAP file".to_string(),
+            )));
+        }
+
+        // Register all protocol tables
+        for (table_name, batches) in &protocol_batches {
+            if batches.is_empty() {
+                if let Some(schema) = tables::get_table_schema(table_name) {
+                    let empty_provider =
+                        provider::PcapTableProvider::new(Arc::new(schema), vec![]);
+                    ctx.register_table(table_name.as_str(), Arc::new(empty_provider))
+                        .map_err(|e| Error::Query(QueryError::Execution(e.to_string())))?;
+                }
+            } else {
+                let schema = batches[0].schema();
+                let table_provider =
+                    provider::PcapTableProvider::new(schema, batches.clone());
+                ctx.register_table(table_name.as_str(), Arc::new(table_provider))
+                    .map_err(|e| Error::Query(QueryError::Execution(e.to_string())))?;
+            }
+        }
+
+        // Process streams with TLS decryption to populate HTTP/2 table
+        let path_str = path.as_ref().to_string_lossy().to_string();
+        let mut stream_builder = stream_tables::StreamTableBuilder::new(Some(keylog));
+        stream_builder.process_pcap(&path_str)?;
+
+        // Get HTTP/2 batches from stream processing
+        let http2_batches = stream_builder.http2_batches(batch_size)?;
+
+        // Replace the http2 table with stream-parsed data
+        if !http2_batches.is_empty() {
+            let schema = http2_batches[0].schema();
+            let http2_provider = provider::PcapTableProvider::new(schema, http2_batches);
+            // Deregister the empty http2 table and register with data
+            ctx.deregister_table("http2")
+                .map_err(|e| Error::Query(QueryError::Execution(e.to_string())))?;
+            ctx.register_table("http2", Arc::new(http2_provider))
+                .map_err(|e| Error::Query(QueryError::Execution(e.to_string())))?;
+        }
+
+        // Register cross-layer views
+        Self::register_cross_layer_views(&ctx).await?;
+
+        // Register cache_stats() table function
         let stats_fn = udtf::CacheStatsFunction::new(|| None);
         ctx.register_udtf("cache_stats", Arc::new(stats_fn));
 

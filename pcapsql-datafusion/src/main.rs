@@ -2,6 +2,7 @@
 
 use std::io;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -11,7 +12,7 @@ use pcapsql_datafusion::cli::{
     Args, ExportFormat, Exporter, OutputFormatter, Repl, ReplCommand, ReplInput,
 };
 use pcapsql_datafusion::query::{tables, views, QueryEngine};
-use pcapsql_core::{default_registry, Protocol};
+use pcapsql_core::{default_registry, KeyLog, Protocol};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -40,18 +41,31 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Load keylog for TLS decryption (if provided)
+    let keylog = load_keylog(&args);
+    if args.verbose > 0 {
+        print_tls_status(&keylog);
+    }
+
     // Require a PCAP file for query operations
     let pcap_file = args
         .file
         .context("PCAP file required. Use --help for usage.")?;
 
-    // Create query engine - choose mode based on flags
-    let engine = if args.streaming {
+    // Create query engine - choose mode based on flags and keylog
+    let engine = if let Some(kl) = keylog {
+        // TLS decryption enabled - use with_keylog for stream processing
+        if args.verbose > 0 {
+            eprintln!("Processing TCP streams for TLS decryption...");
+        }
+        QueryEngine::with_keylog(&pcap_file, kl, args.batch_size)
+            .await
+            .with_context(|| format!("Failed to open PCAP file: {}", pcap_file.display()))?
+    } else if args.streaming {
         // Explicit streaming mode with cache
         if args.mmap {
             // Try mmap first
             use pcapsql_core::MmapPacketSource;
-            use std::sync::Arc;
             match MmapPacketSource::open(&pcap_file) {
                 Ok(source) => {
                     QueryEngine::with_streaming_source_cached_opts(
@@ -78,7 +92,6 @@ async fn main() -> Result<()> {
             }
         } else {
             use pcapsql_core::FilePacketSource;
-            use std::sync::Arc;
             let source = Arc::new(FilePacketSource::open(&pcap_file)
                 .with_context(|| format!("Failed to open PCAP file: {}", pcap_file.display()))?);
             QueryEngine::with_streaming_source_cached_opts(source, args.batch_size, args.cache_size, !args.no_reader_eviction)
@@ -365,4 +378,67 @@ fn print_tables() {
     for view in views::all_views() {
         println!("  {:20} - {}", view.name, view.description);
     }
+}
+
+/// Get the keylog path from CLI argument or environment variable.
+///
+/// Priority:
+/// 1. --keylog CLI argument
+/// 2. PCAPSQL_KEYLOG environment variable
+/// 3. SSLKEYLOGFILE environment variable (standard)
+fn get_keylog_path(args: &Args) -> Option<PathBuf> {
+    // CLI argument takes precedence
+    if let Some(path) = &args.keylog {
+        return Some(path.clone());
+    }
+
+    // Fall back to environment variables
+    std::env::var("PCAPSQL_KEYLOG")
+        .ok()
+        .or_else(|| std::env::var("SSLKEYLOGFILE").ok())
+        .map(PathBuf::from)
+}
+
+/// Load SSLKEYLOGFILE for TLS decryption.
+///
+/// Returns None if no keylog is provided or if loading fails.
+/// Errors are logged as warnings but don't cause failure.
+fn load_keylog(args: &Args) -> Option<Arc<KeyLog>> {
+    let path = get_keylog_path(args)?;
+
+    match KeyLog::from_file(&path) {
+        Ok(keylog) => {
+            if keylog.is_empty() {
+                eprintln!("Warning: SSLKEYLOGFILE is empty: {}", path.display());
+                return None;
+            }
+            Some(Arc::new(keylog))
+        }
+        Err(e) => {
+            eprintln!("Warning: Failed to load SSLKEYLOGFILE: {}", e);
+            eprintln!("         Path: {}", path.display());
+            eprintln!("         TLS decryption will be disabled.");
+            None
+        }
+    }
+}
+
+/// Print TLS decryption status.
+fn print_tls_status(keylog: &Option<Arc<KeyLog>>) {
+    match keylog {
+        Some(kl) => {
+            eprintln!("TLS decryption: enabled");
+            eprintln!("  Keylog sessions: {}", kl.session_count());
+            eprintln!("  Keylog entries:  {}", kl.entry_count());
+            eprintln!();
+            eprintln!("  Note: SSLKEYLOGFILE contains sensitive key material.");
+            eprintln!("        Do not share or commit these files.");
+        }
+        None => {
+            eprintln!("TLS decryption: disabled");
+            eprintln!("  Hint: Use --keylog /path/to/sslkeylog.txt to decrypt TLS traffic");
+            eprintln!("        Or set SSLKEYLOGFILE environment variable");
+        }
+    }
+    eprintln!();
 }

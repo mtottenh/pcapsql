@@ -159,6 +159,28 @@ impl Connection {
             self.key.port_a
         }
     }
+
+    /// Determine direction based on source IP/port.
+    /// This correctly accounts for which endpoint is the client.
+    pub fn direction(&self, src_ip: IpAddr, src_port: u16) -> Direction {
+        let is_from_a = src_ip == self.key.ip_a && src_port == self.key.port_a;
+
+        if self.client_is_a {
+            // A is client, B is server
+            if is_from_a {
+                Direction::ToServer // Client sending to server
+            } else {
+                Direction::ToClient // Server sending to client
+            }
+        } else {
+            // B is client, A is server
+            if is_from_a {
+                Direction::ToClient // Server sending to client
+            } else {
+                Direction::ToServer // Client sending to server
+            }
+        }
+    }
 }
 
 /// Tracks TCP connections.
@@ -189,7 +211,6 @@ impl ConnectionTracker {
         timestamp: i64,
     ) -> (&mut Connection, Direction) {
         let key = ConnectionKey::new(src_ip, src_port, dst_ip, dst_port);
-        let direction = key.direction(src_ip, src_port);
 
         if !self.connections.contains_key(&key) {
             // Determine who is client based on SYN
@@ -228,6 +249,9 @@ impl ConnectionTracker {
         let conn = self.connections.get_mut(&key).unwrap();
         conn.last_activity = timestamp;
         conn.last_frame = frame_number;
+
+        // Compute direction using the connection's knowledge of client/server roles
+        let direction = conn.direction(src_ip, src_port);
 
         (conn, direction)
     }

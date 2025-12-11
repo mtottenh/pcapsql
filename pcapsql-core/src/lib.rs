@@ -89,6 +89,7 @@ pub mod prelude;
 pub mod protocol;
 pub mod schema;
 pub mod stream;
+pub mod tls;
 
 // Re-export commonly used types at crate root for convenience
 pub use cache::{CacheStats, CachedParse, LruParseCache, NoCache, OwnedParseResult, ParseCache};
@@ -110,6 +111,13 @@ pub use schema::{DataKind, FieldDescriptor, ProtocolSchema};
 pub use stream::{
     Connection, ConnectionState, ConnectionTracker, Direction, ParsedMessage, StreamConfig,
     StreamContext, StreamManager, StreamParser, StreamParseResult, StreamRegistry, TcpFlags,
+};
+pub use tls::{
+    derive_tls12_keys, derive_tls13_keys, extract_tls13_inner_content_type, hash_for_cipher_suite,
+    tls12_prf, AeadAlgorithm, DecryptionContext, DecryptionError, Direction as TlsDirection,
+    HandshakeData, HashAlgorithm, KeyDerivationError, KeyLog, KeyLogEntries, KeyLogEntry,
+    KeyLogError, SessionError, SessionState, Tls12KeyMaterial, Tls13KeyMaterial, TlsSession,
+    TlsVersion,
 };
 
 /// Library version.

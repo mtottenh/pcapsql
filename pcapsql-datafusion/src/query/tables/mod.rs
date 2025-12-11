@@ -17,6 +17,7 @@ mod frames;
 mod gre;
 mod gtp;
 mod http;
+mod http2;
 mod http_messages;
 mod icmp;
 mod icmpv6;
@@ -46,6 +47,7 @@ pub use frames::frames_table_schema;
 pub use gre::gre_table_schema;
 pub use gtp::gtp_table_schema;
 pub use http::http_table_schema;
+pub use http2::http2_table_schema;
 pub use http_messages::{build_http_messages_batch, http_messages_schema};
 pub use icmp::icmp_table_schema;
 pub use icmpv6::icmpv6_table_schema;
@@ -101,7 +103,7 @@ pub fn all_table_names() -> Vec<&'static str> {
     vec![
         "frames", "ethernet", "arp", "vlan", "mpls", "ipv4", "ipv6", "tcp", "udp", "icmp", "icmpv6",
         "gre", "vxlan", "gtp", "ipsec", "bgp", "ospf",
-        "dns", "dhcp", "ntp", "http", "tls", "ssh", "quic",
+        "dns", "dhcp", "ntp", "http", "http2", "tls", "ssh", "quic",
     ]
 }
 
@@ -134,6 +136,7 @@ pub fn get_table_schema(name: &str) -> Option<Schema> {
         "dhcp" => Some(with_encap_fields(dhcp_table_schema())),
         "ntp" => Some(with_encap_fields(ntp_table_schema())),
         "http" => Some(with_encap_fields(http_table_schema())),
+        "http2" => Some(with_encap_fields(http2_table_schema())),
         "tls" => Some(with_encap_fields(tls_table_schema())),
         "ssh" => Some(with_encap_fields(ssh_table_schema())),
         "quic" => Some(with_encap_fields(quic_table_schema())),

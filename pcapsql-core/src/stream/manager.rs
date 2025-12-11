@@ -1,10 +1,13 @@
 use std::net::IpAddr;
+use std::sync::Arc;
 
 use crate::error::Error;
+use crate::tls::KeyLog;
 
 use super::{
     Connection, ConnectionTracker, Direction, ParsedMessage, StreamContext, StreamParseResult,
     StreamRegistry, TcpFlags, TcpReassembler,
+    parsers::DecryptingTlsStreamParser,
 };
 
 /// Configuration for the StreamManager.
@@ -36,6 +39,8 @@ pub struct StreamManager {
     config: StreamConfig,
     /// Current total memory usage.
     total_memory: usize,
+    /// Optional keylog for TLS decryption.
+    keylog: Option<Arc<KeyLog>>,
 }
 
 impl StreamManager {
@@ -46,12 +51,52 @@ impl StreamManager {
             stream_registry: StreamRegistry::new(),
             config,
             total_memory: 0,
+            keylog: None,
         }
     }
 
     /// Create with default config and register default parsers.
     pub fn with_defaults() -> Self {
         Self::new(StreamConfig::default())
+    }
+
+    /// Enable TLS decryption with the provided keylog.
+    ///
+    /// This registers a `DecryptingTlsStreamParser` that will attempt to
+    /// decrypt TLS application data when matching keys are found in the keylog.
+    ///
+    /// The keylog should be in SSLKEYLOGFILE format, as used by Wireshark
+    /// and browsers.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use pcapsql_core::stream::{StreamConfig, StreamManager};
+    /// use pcapsql_core::tls::KeyLog;
+    ///
+    /// let keylog = KeyLog::from_file("sslkeylog.txt").unwrap();
+    /// let manager = StreamManager::new(StreamConfig::default())
+    ///     .with_keylog(keylog);
+    /// ```
+    pub fn with_keylog(mut self, keylog: KeyLog) -> Self {
+        let keylog = Arc::new(keylog);
+        self.keylog = Some(Arc::clone(&keylog));
+
+        // Register the decrypting TLS parser (before any other TLS parser)
+        let parser = DecryptingTlsStreamParser::with_keylog(keylog);
+        self.stream_registry.register(parser);
+
+        self
+    }
+
+    /// Check if TLS decryption is enabled.
+    pub fn has_keylog(&self) -> bool {
+        self.keylog.is_some()
+    }
+
+    /// Get the keylog if available.
+    pub fn keylog(&self) -> Option<&KeyLog> {
+        self.keylog.as_ref().map(|k| k.as_ref())
     }
 
     /// Get mutable access to the stream registry for parser registration.
@@ -579,5 +624,53 @@ mod tests {
             .unwrap();
 
         assert_eq!(manager.connections().count(), 2);
+    }
+
+    // Test 9: StreamManager with keylog
+    #[test]
+    fn test_with_keylog() {
+        let keylog = KeyLog::new();
+        let manager = StreamManager::new(StreamConfig::default()).with_keylog(keylog);
+
+        assert!(manager.has_keylog());
+        assert!(manager.keylog().is_some());
+
+        // Should have the decrypting TLS parser registered
+        let parser_names: Vec<_> = manager.stream_registry.parser_names().into_iter().collect();
+        assert!(parser_names.contains(&"tls_decrypt"));
+    }
+
+    // Test 10: StreamManager without keylog
+    #[test]
+    fn test_without_keylog() {
+        let manager = StreamManager::with_defaults();
+
+        assert!(!manager.has_keylog());
+        assert!(manager.keylog().is_none());
+    }
+
+    // Test 11: TLS decryption parser is registered and prioritized
+    #[test]
+    fn test_tls_parser_registered() {
+        let keylog = KeyLog::new();
+        let manager = StreamManager::new(StreamConfig::default()).with_keylog(keylog);
+
+        // Create a context for port 443
+        let ctx = StreamContext {
+            connection_id: 1,
+            direction: Direction::ToServer,
+            src_ip: ip(192, 168, 1, 1),
+            dst_ip: ip(192, 168, 1, 2),
+            src_port: 54321,
+            dst_port: 443,
+            bytes_parsed: 0,
+            messages_parsed: 0,
+            alpn: None,
+        };
+
+        // Should find the decrypting TLS parser
+        let parser = manager.stream_registry.find_parser(&ctx);
+        assert!(parser.is_some());
+        assert_eq!(parser.unwrap().name(), "tls_decrypt");
     }
 }

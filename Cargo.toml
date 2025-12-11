@@ -70,6 +70,19 @@ smallvec = "1.13"
 # Compact strings (inline up to 24 bytes)
 compact_str = "0.8"
 
+# TLS parsing (Rusticata project - zero-copy TLS parser for passive analysis)
+tls-parser = "0.12"
+nom = "7"  # Required by tls-parser
+
+# Hash functions for JA3 fingerprinting
+md5 = "0.7"
+
+# Cryptographic primitives for TLS decryption
+ring = "0.17"
+
+# HTTP/2 HPACK header compression (RFC 7541)
+hpack = "0.3"
+
 [profile.release]
 lto = true
 codegen-units = 1

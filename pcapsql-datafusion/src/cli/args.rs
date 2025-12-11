@@ -137,9 +137,17 @@ pub struct Args {
 
     /// Path to SSLKEYLOGFILE for TLS decryption.
     ///
-    /// Format: One key per line, e.g.:
-    ///   CLIENT_RANDOM <hex> <hex_master_secret>
-    ///   CLIENT_TRAFFIC_SECRET_0 <hex> <hex_secret>
+    /// Enables decryption of TLS 1.2 and TLS 1.3 traffic when the corresponding
+    /// session keys are available. The http2 table becomes queryable for decrypted
+    /// HTTP/2 frames.
+    ///
+    /// Format: NSS Key Log format (one key per line):
+    ///   CLIENT_RANDOM <hex> <hex_master_secret>       (TLS 1.2)
+    ///   CLIENT_TRAFFIC_SECRET_0 <hex> <hex_secret>    (TLS 1.3)
+    ///
+    /// Generate with: SSLKEYLOGFILE=/tmp/keys.log curl https://example.com
+    ///
+    /// Falls back to PCAPSQL_KEYLOG or SSLKEYLOGFILE environment variables.
     #[arg(long = "keylog", value_name = "FILE")]
     pub keylog: Option<PathBuf>,
 
@@ -234,5 +242,39 @@ mod tests {
         assert!(args.keylog.is_none());
         assert_eq!(args.max_stream_memory, 1024 * 1024 * 1024); // 1G default
         assert_eq!(args.stream_timeout_secs, 300); // 5 min default
+    }
+
+    // Test 5: Keylog argument parsing
+    #[test]
+    fn test_keylog_argument() {
+        let args = Args::try_parse_from([
+            "pcapsql",
+            "test.pcap",
+            "--keylog",
+            "/tmp/sslkeylog.txt",
+            "-e",
+            "SELECT 1",
+        ])
+        .unwrap();
+
+        assert_eq!(args.keylog, Some(PathBuf::from("/tmp/sslkeylog.txt")));
+    }
+
+    // Test 6: Keylog with verbose
+    #[test]
+    fn test_keylog_with_verbose() {
+        let args = Args::try_parse_from([
+            "pcapsql",
+            "test.pcap",
+            "--keylog",
+            "/path/to/keys.log",
+            "-v",
+            "-e",
+            "SELECT * FROM http2",
+        ])
+        .unwrap();
+
+        assert_eq!(args.keylog, Some(PathBuf::from("/path/to/keys.log")));
+        assert_eq!(args.verbose, 1);
     }
 }
