@@ -121,7 +121,7 @@ impl DecryptingTlsStreamParser {
         state: &mut ConnectionTlsState,
         handshake: &TlsMessageHandshake,
         _direction: Direction,
-        fields: &mut HashMap<String, OwnedFieldValue>,
+        fields: &mut HashMap<&'static str, OwnedFieldValue>,
     ) {
         match handshake {
             TlsMessageHandshake::ClientHello(ch) => {
@@ -131,7 +131,7 @@ impl DecryptingTlsStreamParser {
                 state.session.process_client_hello(client_random);
 
                 fields.insert(
-                    "handshake_type".to_string(),
+                    "handshake_type",
                     FieldValue::Str("ClientHello"),
                 );
 
@@ -146,7 +146,7 @@ impl DecryptingTlsStreamParser {
                                             // Host name
                                             if let Ok(sni) = std::str::from_utf8(name) {
                                                 fields.insert(
-                                                    "sni".to_string(),
+                                                    "sni",
                                                     FieldValue::OwnedString(CompactString::new(sni)),
                                                 );
                                             }
@@ -160,7 +160,7 @@ impl DecryptingTlsStreamParser {
                                         .collect();
                                     if !protocols.is_empty() {
                                         fields.insert(
-                                            "alpn".to_string(),
+                                            "alpn",
                                             FieldValue::OwnedString(CompactString::new(
                                                 protocols.join(","),
                                             )),
@@ -196,17 +196,17 @@ impl DecryptingTlsStreamParser {
                     .process_server_hello(server_random, cipher_suite, version);
 
                 fields.insert(
-                    "handshake_type".to_string(),
+                    "handshake_type",
                     FieldValue::Str("ServerHello"),
                 );
                 fields.insert(
-                    "cipher_suite".to_string(),
+                    "cipher_suite",
                     FieldValue::UInt16(cipher_suite),
                 );
 
                 if let Some(name) = state.session.cipher_suite_name() {
                     fields.insert(
-                        "cipher_suite_name".to_string(),
+                        "cipher_suite_name",
                         FieldValue::OwnedString(CompactString::new(name)),
                     );
                 }
@@ -226,7 +226,7 @@ impl DecryptingTlsStreamParser {
         state: &mut ConnectionTlsState,
         handshake_data: &[u8],
         direction: Direction,
-        fields: &mut HashMap<String, OwnedFieldValue>,
+        fields: &mut HashMap<&'static str, OwnedFieldValue>,
     ) {
         // Parse handshake message header (type + length)
         if handshake_data.len() < 4 {
@@ -250,7 +250,7 @@ impl DecryptingTlsStreamParser {
         };
 
         fields.insert(
-            "encrypted_hs_type".to_string(),
+            "encrypted_hs_type",
             FieldValue::OwnedString(CompactString::new(hs_type_name)),
         );
 
@@ -262,7 +262,7 @@ impl DecryptingTlsStreamParser {
                     // Server finished
                     state.session.mark_server_finished();
                     fields.insert(
-                        "hs_finished".to_string(),
+                        "hs_finished",
                         FieldValue::Str("server"),
                     );
                 }
@@ -271,7 +271,7 @@ impl DecryptingTlsStreamParser {
                     state.session.mark_client_finished();
                     state.handshake_complete = true;
                     fields.insert(
-                        "hs_finished".to_string(),
+                        "hs_finished",
                         FieldValue::Str("client"),
                     );
                 }
@@ -355,14 +355,14 @@ impl StreamParser for DecryptingTlsStreamParser {
 
             let mut fields = HashMap::new();
             fields.insert(
-                "version".to_string(),
+                "version",
                 FieldValue::OwnedString(CompactString::new(version_name(version))),
             );
 
             match content_type {
                 22 => {
                     // Handshake
-                    fields.insert("record_type".to_string(), FieldValue::Str("Handshake"));
+                    fields.insert("record_type", FieldValue::Str("Handshake"));
 
                     // Parse handshake using tls-parser
                     if let Ok((_, record)) = parse_tls_plaintext(&record_data) {
@@ -382,7 +382,7 @@ impl StreamParser for DecryptingTlsStreamParser {
                 23 => {
                     // ApplicationData (in TLS 1.3, this can also be encrypted handshake)
                     fields.insert(
-                        "record_type".to_string(),
+                        "record_type",
                         FieldValue::Str("ApplicationData"),
                     );
 
@@ -396,7 +396,7 @@ impl StreamParser for DecryptingTlsStreamParser {
                                     // During handshake phase, process inner content
                                     if let Some((inner_type, inner_data)) = extract_tls13_inner_content_type(&plaintext) {
                                         fields.insert(
-                                            "inner_content_type".to_string(),
+                                            "inner_content_type",
                                             FieldValue::UInt8(inner_type),
                                         );
 
@@ -425,7 +425,7 @@ impl StreamParser for DecryptingTlsStreamParser {
                                             // Handle post-handshake messages (NewSessionTicket, etc.)
                                             else if inner_type == 22 {
                                                 fields.insert(
-                                                    "inner_content_type".to_string(),
+                                                    "inner_content_type",
                                                     FieldValue::UInt8(inner_type),
                                                 );
                                             }
@@ -437,21 +437,21 @@ impl StreamParser for DecryptingTlsStreamParser {
                                 }
 
                                 fields.insert(
-                                    "decrypted_length".to_string(),
+                                    "decrypted_length",
                                     FieldValue::UInt64(plaintext.len() as u64),
                                 );
                             }
                             Err(e) => {
                                 // Decryption failed - log but continue
                                 fields.insert(
-                                    "decrypt_error".to_string(),
+                                    "decrypt_error",
                                     FieldValue::OwnedString(CompactString::new(e.to_string())),
                                 );
                             }
                         }
                     } else {
                         fields.insert(
-                            "encrypted_length".to_string(),
+                            "encrypted_length",
                             FieldValue::UInt16(length as u16),
                         );
                     }
@@ -460,7 +460,7 @@ impl StreamParser for DecryptingTlsStreamParser {
                 20 => {
                     // ChangeCipherSpec
                     fields.insert(
-                        "record_type".to_string(),
+                        "record_type",
                         FieldValue::Str("ChangeCipherSpec"),
                     );
                     state.change_cipher_spec_seen = true;
@@ -468,11 +468,11 @@ impl StreamParser for DecryptingTlsStreamParser {
 
                 21 => {
                     // Alert
-                    fields.insert("record_type".to_string(), FieldValue::Str("Alert"));
+                    fields.insert("record_type", FieldValue::Str("Alert"));
                     if payload.len() >= 2 {
-                        fields.insert("alert_level".to_string(), FieldValue::UInt8(payload[0]));
+                        fields.insert("alert_level", FieldValue::UInt8(payload[0]));
                         fields.insert(
-                            "alert_description".to_string(),
+                            "alert_description",
                             FieldValue::UInt8(payload[1]),
                         );
                     }
@@ -481,7 +481,7 @@ impl StreamParser for DecryptingTlsStreamParser {
                 _ => {
                     // Unknown content type
                     fields.insert(
-                        "record_type".to_string(),
+                        "record_type",
                         FieldValue::OwnedString(CompactString::new(format!("Unknown({})", content_type))),
                     );
                 }

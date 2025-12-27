@@ -118,7 +118,7 @@ pub fn build_http_messages_batch(messages: &[ParsedMessage]) -> Result<RecordBat
 
 fn append_string(
     builder: &mut StringBuilder,
-    fields: &HashMap<String, FieldValue>,
+    fields: &HashMap<&'static str, FieldValue>,
     key: &str,
 ) {
     match fields.get(key) {

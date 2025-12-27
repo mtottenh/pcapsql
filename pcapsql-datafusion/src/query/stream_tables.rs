@@ -366,7 +366,7 @@ fn build_http2_batch(schema: &Arc<Schema>, messages: &[ParsedMessage]) -> Result
 }
 
 // Helper functions to extract values from FieldValue
-fn get_str<'a>(fields: &'a HashMap<String, FieldValue>, key: &str) -> Option<&'a str> {
+fn get_str<'a>(fields: &'a HashMap<&'static str, FieldValue>, key: &str) -> Option<&'a str> {
     match fields.get(key) {
         Some(FieldValue::Str(s)) => Some(s),
         Some(FieldValue::OwnedString(s)) => Some(s.as_str()),
@@ -374,35 +374,35 @@ fn get_str<'a>(fields: &'a HashMap<String, FieldValue>, key: &str) -> Option<&'a
     }
 }
 
-fn get_u64(fields: &HashMap<String, FieldValue>, key: &str) -> Option<u64> {
+fn get_u64(fields: &HashMap<&'static str, FieldValue>, key: &str) -> Option<u64> {
     match fields.get(key) {
         Some(FieldValue::UInt64(v)) => Some(*v),
         _ => None,
     }
 }
 
-fn get_u32(fields: &HashMap<String, FieldValue>, key: &str) -> Option<u32> {
+fn get_u32(fields: &HashMap<&'static str, FieldValue>, key: &str) -> Option<u32> {
     match fields.get(key) {
         Some(FieldValue::UInt32(v)) => Some(*v),
         _ => None,
     }
 }
 
-fn get_u16(fields: &HashMap<String, FieldValue>, key: &str) -> Option<u16> {
+fn get_u16(fields: &HashMap<&'static str, FieldValue>, key: &str) -> Option<u16> {
     match fields.get(key) {
         Some(FieldValue::UInt16(v)) => Some(*v),
         _ => None,
     }
 }
 
-fn get_u8(fields: &HashMap<String, FieldValue>, key: &str) -> Option<u8> {
+fn get_u8(fields: &HashMap<&'static str, FieldValue>, key: &str) -> Option<u8> {
     match fields.get(key) {
         Some(FieldValue::UInt8(v)) => Some(*v),
         _ => None,
     }
 }
 
-fn get_bool(fields: &HashMap<String, FieldValue>, key: &str) -> Option<bool> {
+fn get_bool(fields: &HashMap<&'static str, FieldValue>, key: &str) -> Option<bool> {
     match fields.get(key) {
         Some(FieldValue::Bool(v)) => Some(*v),
         _ => None,

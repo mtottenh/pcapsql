@@ -70,6 +70,7 @@ pub enum StreamParseResult {
 /// A parsed application-layer message.
 ///
 /// All field values are owned since stream parsing may outlive the original packet data.
+/// Field names are always static strings from protocol definitions.
 #[derive(Debug, Clone)]
 pub struct ParsedMessage {
     pub protocol: &'static str,
@@ -77,5 +78,5 @@ pub struct ParsedMessage {
     pub message_id: u32,
     pub direction: Direction,
     pub frame_number: u64,
-    pub fields: HashMap<String, OwnedFieldValue>,
+    pub fields: HashMap<&'static str, OwnedFieldValue>,
 }

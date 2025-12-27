@@ -402,7 +402,7 @@ mod tests {
         });
         let parsed2 = Arc::new(CachedParse {
             frame_number: 1,
-            protocols: vec![("test".to_string(), super::super::OwnedParseResult {
+            protocols: vec![("test", super::super::OwnedParseResult {
                 fields: std::collections::HashMap::new(),
                 error: None,
                 encap_depth: 0,

@@ -358,20 +358,20 @@ impl Http2StreamParser {
         payload: &[u8],
         direction: Direction,
         frame_number: u64,
-    ) -> HashMap<String, OwnedFieldValue> {
+    ) -> HashMap<&'static str, OwnedFieldValue> {
         let mut fields = HashMap::new();
 
         fields.insert(
-            "frame_type".to_string(),
+            "frame_type",
             FieldValue::Str(header.frame_type.as_str()),
         );
         fields.insert(
-            "stream_id".to_string(),
+            "stream_id",
             FieldValue::UInt32(header.stream_id),
         );
-        fields.insert("flags".to_string(), FieldValue::UInt8(header.flags));
+        fields.insert("flags", FieldValue::UInt8(header.flags));
         fields.insert(
-            "length".to_string(),
+            "length",
             FieldValue::UInt32(header.length),
         );
 
@@ -408,7 +408,7 @@ impl Http2StreamParser {
             }
             FrameType::Unknown(t) => {
                 fields.insert(
-                    "unknown_type".to_string(),
+                    "unknown_type",
                     FieldValue::UInt8(t),
                 );
             }
@@ -418,7 +418,7 @@ impl Http2StreamParser {
         if header.stream_id != 0 {
             if let Some(stream) = state.streams.get(&header.stream_id) {
                 fields.insert(
-                    "stream_state".to_string(),
+                    "stream_state",
                     FieldValue::Str(stream.state.as_str()),
                 );
             }
@@ -433,7 +433,7 @@ impl Http2StreamParser {
         payload: &[u8],
         direction: Direction,
         frame_number: u64,
-        fields: &mut HashMap<String, OwnedFieldValue>,
+        fields: &mut HashMap<&'static str, OwnedFieldValue>,
     ) {
         let (data, pad_len) = if header.is_padded() && !payload.is_empty() {
             let pad_len = payload[0] as usize;
@@ -447,17 +447,17 @@ impl Http2StreamParser {
         };
 
         fields.insert(
-            "data_length".to_string(),
+            "data_length",
             FieldValue::UInt64(data.len() as u64),
         );
         if pad_len > 0 {
             fields.insert(
-                "padding_length".to_string(),
+                "padding_length",
                 FieldValue::UInt8(pad_len as u8),
             );
         }
         fields.insert(
-            "end_stream".to_string(),
+            "end_stream",
             FieldValue::Bool(header.is_end_stream()),
         );
 
@@ -491,7 +491,7 @@ impl Http2StreamParser {
         payload: &[u8],
         direction: Direction,
         frame_number: u64,
-        fields: &mut HashMap<String, OwnedFieldValue>,
+        fields: &mut HashMap<&'static str, OwnedFieldValue>,
     ) {
         let mut offset = 0;
         let mut pad_len = 0;
@@ -515,15 +515,15 @@ impl Http2StreamParser {
             offset += 5;
 
             fields.insert(
-                "priority_exclusive".to_string(),
+                "priority_exclusive",
                 FieldValue::Bool(exclusive),
             );
             fields.insert(
-                "priority_dependency".to_string(),
+                "priority_dependency",
                 FieldValue::UInt32(dep),
             );
             fields.insert(
-                "priority_weight".to_string(),
+                "priority_weight",
                 FieldValue::UInt8(weight),
             );
         }
@@ -532,11 +532,11 @@ impl Http2StreamParser {
         let header_block = &payload[offset.min(header_block_end)..header_block_end];
 
         fields.insert(
-            "end_stream".to_string(),
+            "end_stream",
             FieldValue::Bool(header.is_end_stream()),
         );
         fields.insert(
-            "end_headers".to_string(),
+            "end_headers",
             FieldValue::Bool(header.is_end_headers()),
         );
 
@@ -580,7 +580,7 @@ impl Http2StreamParser {
         headers: &[(Vec<u8>, Vec<u8>)],
         direction: Direction,
         frame_number: u64,
-        fields: &mut HashMap<String, OwnedFieldValue>,
+        fields: &mut HashMap<&'static str, OwnedFieldValue>,
     ) {
         let mut header_strs = Vec::new();
 
@@ -593,28 +593,28 @@ impl Http2StreamParser {
                 ":method" => {
                     stream.method = Some(value_str.clone());
                     fields.insert(
-                        "method".to_string(),
+                        "method",
                         FieldValue::OwnedString(CompactString::new(&value_str)),
                     );
                 }
                 ":path" => {
                     stream.path = Some(value_str.clone());
                     fields.insert(
-                        "path".to_string(),
+                        "path",
                         FieldValue::OwnedString(CompactString::new(&value_str)),
                     );
                 }
                 ":authority" => {
                     stream.authority = Some(value_str.clone());
                     fields.insert(
-                        "authority".to_string(),
+                        "authority",
                         FieldValue::OwnedString(CompactString::new(&value_str)),
                     );
                 }
                 ":scheme" => {
                     stream.scheme = Some(value_str.clone());
                     fields.insert(
-                        "scheme".to_string(),
+                        "scheme",
                         FieldValue::OwnedString(CompactString::new(&value_str)),
                     );
                 }
@@ -622,23 +622,23 @@ impl Http2StreamParser {
                     if let Ok(status) = value_str.parse::<u16>() {
                         stream.status = Some(status);
                         stream.response_frame = Some(frame_number);
-                        fields.insert("status".to_string(), FieldValue::UInt16(status));
+                        fields.insert("status", FieldValue::UInt16(status));
                     }
                 }
                 "content-type" => {
                     fields.insert(
-                        "content_type".to_string(),
+                        "content_type",
                         FieldValue::OwnedString(CompactString::new(&value_str)),
                     );
                 }
                 "content-length" => {
                     if let Ok(len) = value_str.parse::<u64>() {
-                        fields.insert("content_length".to_string(), FieldValue::UInt64(len));
+                        fields.insert("content_length", FieldValue::UInt64(len));
                     }
                 }
                 "user-agent" => {
                     fields.insert(
-                        "user_agent".to_string(),
+                        "user_agent",
                         FieldValue::OwnedString(CompactString::new(&value_str)),
                     );
                 }
@@ -660,19 +660,19 @@ impl Http2StreamParser {
             let headers_str = header_strs.join("; ");
             if direction == Direction::ToServer || stream.status.is_none() {
                 fields.insert(
-                    "request_headers".to_string(),
+                    "request_headers",
                     FieldValue::OwnedString(CompactString::new(&headers_str)),
                 );
             } else {
                 fields.insert(
-                    "response_headers".to_string(),
+                    "response_headers",
                     FieldValue::OwnedString(CompactString::new(&headers_str)),
                 );
             }
         }
     }
 
-    fn parse_priority_frame(payload: &[u8], fields: &mut HashMap<String, OwnedFieldValue>) {
+    fn parse_priority_frame(payload: &[u8], fields: &mut HashMap<&'static str, OwnedFieldValue>) {
         if payload.len() >= 5 {
             let dep = u32::from_be_bytes([
                 payload[0] & 0x7F,
@@ -684,15 +684,15 @@ impl Http2StreamParser {
             let weight = payload[4];
 
             fields.insert(
-                "priority_exclusive".to_string(),
+                "priority_exclusive",
                 FieldValue::Bool(exclusive),
             );
             fields.insert(
-                "priority_dependency".to_string(),
+                "priority_dependency",
                 FieldValue::UInt32(dep),
             );
             fields.insert(
-                "priority_weight".to_string(),
+                "priority_weight",
                 FieldValue::UInt8(weight),
             );
         }
@@ -702,13 +702,13 @@ impl Http2StreamParser {
         state: &mut Http2ConnectionState,
         header: &FrameHeader,
         payload: &[u8],
-        fields: &mut HashMap<String, OwnedFieldValue>,
+        fields: &mut HashMap<&'static str, OwnedFieldValue>,
     ) {
         if payload.len() >= 4 {
             let error_code = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
-            fields.insert("error_code".to_string(), FieldValue::UInt32(error_code));
+            fields.insert("error_code", FieldValue::UInt32(error_code));
             fields.insert(
-                "error_name".to_string(),
+                "error_name",
                 FieldValue::Str(error_codes::name(error_code)),
             );
         }
@@ -722,9 +722,9 @@ impl Http2StreamParser {
     fn parse_settings_frame(
         header: &FrameHeader,
         payload: &[u8],
-        fields: &mut HashMap<String, OwnedFieldValue>,
+        fields: &mut HashMap<&'static str, OwnedFieldValue>,
     ) {
-        fields.insert("ack".to_string(), FieldValue::Bool(header.is_ack()));
+        fields.insert("ack", FieldValue::Bool(header.is_ack()));
 
         if !header.is_ack() {
             let mut settings_strs = Vec::new();
@@ -745,24 +745,24 @@ impl Http2StreamParser {
                 match id {
                     settings::HEADER_TABLE_SIZE => {
                         fields.insert(
-                            "header_table_size".to_string(),
+                            "header_table_size",
                             FieldValue::UInt32(value),
                         );
                     }
                     settings::MAX_CONCURRENT_STREAMS => {
                         fields.insert(
-                            "max_concurrent_streams".to_string(),
+                            "max_concurrent_streams",
                             FieldValue::UInt32(value),
                         );
                     }
                     settings::INITIAL_WINDOW_SIZE => {
                         fields.insert(
-                            "initial_window_size".to_string(),
+                            "initial_window_size",
                             FieldValue::UInt32(value),
                         );
                     }
                     settings::MAX_FRAME_SIZE => {
-                        fields.insert("max_frame_size".to_string(), FieldValue::UInt32(value));
+                        fields.insert("max_frame_size", FieldValue::UInt32(value));
                     }
                     _ => {}
                 }
@@ -770,7 +770,7 @@ impl Http2StreamParser {
 
             if !settings_strs.is_empty() {
                 fields.insert(
-                    "settings".to_string(),
+                    "settings",
                     FieldValue::OwnedString(CompactString::new(&settings_strs.join(", "))),
                 );
             }
@@ -782,7 +782,7 @@ impl Http2StreamParser {
         header: &FrameHeader,
         payload: &[u8],
         direction: Direction,
-        fields: &mut HashMap<String, OwnedFieldValue>,
+        fields: &mut HashMap<&'static str, OwnedFieldValue>,
     ) {
         let mut offset = 0;
         let mut pad_len = 0;
@@ -802,7 +802,7 @@ impl Http2StreamParser {
             offset += 4;
 
             fields.insert(
-                "promised_stream_id".to_string(),
+                "promised_stream_id",
                 FieldValue::UInt32(promised_stream_id),
             );
 
@@ -825,18 +825,18 @@ impl Http2StreamParser {
     fn parse_ping_frame(
         header: &FrameHeader,
         payload: &[u8],
-        fields: &mut HashMap<String, OwnedFieldValue>,
+        fields: &mut HashMap<&'static str, OwnedFieldValue>,
     ) {
-        fields.insert("ack".to_string(), FieldValue::Bool(header.is_ack()));
+        fields.insert("ack", FieldValue::Bool(header.is_ack()));
 
         if payload.len() >= 8 {
             let mut data = [0u8; 8];
             data.copy_from_slice(&payload[..8]);
-            fields.insert("ping_data".to_string(), FieldValue::OwnedBytes(data.to_vec()));
+            fields.insert("ping_data", FieldValue::OwnedBytes(data.to_vec()));
         }
     }
 
-    fn parse_goaway_frame(payload: &[u8], fields: &mut HashMap<String, OwnedFieldValue>) {
+    fn parse_goaway_frame(payload: &[u8], fields: &mut HashMap<&'static str, OwnedFieldValue>) {
         if payload.len() >= 8 {
             let last_stream_id = u32::from_be_bytes([
                 payload[0] & 0x7F,
@@ -848,31 +848,31 @@ impl Http2StreamParser {
                 u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]);
 
             fields.insert(
-                "last_stream_id".to_string(),
+                "last_stream_id",
                 FieldValue::UInt32(last_stream_id),
             );
-            fields.insert("error_code".to_string(), FieldValue::UInt32(error_code));
+            fields.insert("error_code", FieldValue::UInt32(error_code));
             fields.insert(
-                "error_name".to_string(),
+                "error_name",
                 FieldValue::Str(error_codes::name(error_code)),
             );
 
             if payload.len() > 8 {
                 let debug_data = String::from_utf8_lossy(&payload[8..]).to_string();
                 fields.insert(
-                    "debug_data".to_string(),
+                    "debug_data",
                     FieldValue::OwnedString(CompactString::new(&debug_data)),
                 );
             }
         }
     }
 
-    fn parse_window_update_frame(payload: &[u8], fields: &mut HashMap<String, OwnedFieldValue>) {
+    fn parse_window_update_frame(payload: &[u8], fields: &mut HashMap<&'static str, OwnedFieldValue>) {
         if payload.len() >= 4 {
             let increment =
                 u32::from_be_bytes([payload[0] & 0x7F, payload[1], payload[2], payload[3]]);
             fields.insert(
-                "window_increment".to_string(),
+                "window_increment",
                 FieldValue::UInt32(increment),
             );
         }
@@ -883,10 +883,10 @@ impl Http2StreamParser {
         header: &FrameHeader,
         payload: &[u8],
         direction: Direction,
-        fields: &mut HashMap<String, OwnedFieldValue>,
+        fields: &mut HashMap<&'static str, OwnedFieldValue>,
     ) {
         fields.insert(
-            "end_headers".to_string(),
+            "end_headers",
             FieldValue::Bool(header.is_end_headers()),
         );
 

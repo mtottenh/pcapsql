@@ -110,10 +110,10 @@ impl TlsStreamParser {
     }
 
     /// Parse ClientHello message.
-    fn parse_client_hello(&self, data: &[u8]) -> HashMap<String, OwnedFieldValue> {
+    fn parse_client_hello(&self, data: &[u8]) -> HashMap<&'static str, OwnedFieldValue> {
         let mut fields = HashMap::new();
         fields.insert(
-            "handshake_type".to_string(),
+            "handshake_type",
             FieldValue::Str("ClientHello"),
         );
 
@@ -123,7 +123,7 @@ impl TlsStreamParser {
 
         // Client version (2 bytes)
         let version = u16::from_be_bytes([data[0], data[1]]);
-        fields.insert("client_version".to_string(), FieldValue::UInt16(version));
+        fields.insert("client_version", FieldValue::UInt16(version));
 
         // Skip random (32 bytes) and session ID
         let mut pos = 34;
@@ -145,7 +145,7 @@ impl TlsStreamParser {
         }
         let cipher_count = cipher_suites_len / 2;
         fields.insert(
-            "cipher_suite_count".to_string(),
+            "cipher_suite_count",
             FieldValue::UInt16(cipher_count as u16),
         );
         pos += cipher_suites_len;
@@ -167,10 +167,10 @@ impl TlsStreamParser {
         if pos + ext_len <= data.len() {
             let extensions = &data[pos..pos + ext_len];
             if let Some(sni) = Self::extract_sni(extensions) {
-                fields.insert("sni".to_string(), FieldValue::OwnedString(CompactString::new(sni)));
+                fields.insert("sni", FieldValue::OwnedString(CompactString::new(sni)));
             }
             if let Some(alpn) = Self::extract_alpn(extensions) {
-                fields.insert("alpn".to_string(), FieldValue::OwnedString(CompactString::new(alpn)));
+                fields.insert("alpn", FieldValue::OwnedString(CompactString::new(alpn)));
             }
         }
 
@@ -178,10 +178,10 @@ impl TlsStreamParser {
     }
 
     /// Parse ServerHello message.
-    fn parse_server_hello(&self, data: &[u8]) -> HashMap<String, OwnedFieldValue> {
+    fn parse_server_hello(&self, data: &[u8]) -> HashMap<&'static str, OwnedFieldValue> {
         let mut fields = HashMap::new();
         fields.insert(
-            "handshake_type".to_string(),
+            "handshake_type",
             FieldValue::Str("ServerHello"),
         );
 
@@ -191,7 +191,7 @@ impl TlsStreamParser {
 
         // Server version
         let version = u16::from_be_bytes([data[0], data[1]]);
-        fields.insert("server_version".to_string(), FieldValue::UInt16(version));
+        fields.insert("server_version", FieldValue::UInt16(version));
 
         // Skip random (32 bytes) and session ID
         let mut pos = 34;
@@ -204,9 +204,9 @@ impl TlsStreamParser {
         // Selected cipher suite
         if pos + 2 <= data.len() {
             let cipher = u16::from_be_bytes([data[pos], data[pos + 1]]);
-            fields.insert("cipher_suite".to_string(), FieldValue::UInt16(cipher));
+            fields.insert("cipher_suite", FieldValue::UInt16(cipher));
             fields.insert(
-                "cipher_suite_name".to_string(),
+                "cipher_suite_name",
                 FieldValue::OwnedString(CompactString::new(cipher_suite_name(cipher))),
             );
         }
@@ -271,10 +271,10 @@ impl StreamParser for TlsStreamParser {
 
         let mut fields = HashMap::new();
         fields.insert(
-            "version".to_string(),
+            "version",
             FieldValue::Str(Self::version_name(version)),
         );
-        fields.insert("version_raw".to_string(), FieldValue::UInt16(version));
+        fields.insert("version_raw", FieldValue::UInt16(version));
 
         match content_type {
             content_type::HANDSHAKE => {
@@ -294,7 +294,7 @@ impl StreamParser for TlsStreamParser {
                             _ => {
                                 let mut f = HashMap::new();
                                 f.insert(
-                                    "handshake_type_id".to_string(),
+                                    "handshake_type_id",
                                     FieldValue::UInt8(hs_type),
                                 );
                                 f
@@ -306,29 +306,29 @@ impl StreamParser for TlsStreamParser {
                 }
 
                 fields.insert(
-                    "record_type".to_string(),
+                    "record_type",
                     FieldValue::Str("Handshake"),
                 );
             }
 
             content_type::APPLICATION_DATA => {
                 fields.insert(
-                    "record_type".to_string(),
+                    "record_type",
                     FieldValue::Str("ApplicationData"),
                 );
-                fields.insert("encrypted_length".to_string(), FieldValue::UInt16(length));
+                fields.insert("encrypted_length", FieldValue::UInt16(length));
             }
 
             content_type::ALERT => {
                 fields.insert(
-                    "record_type".to_string(),
+                    "record_type",
                     FieldValue::Str("Alert"),
                 );
             }
 
             content_type::CHANGE_CIPHER_SPEC => {
                 fields.insert(
-                    "record_type".to_string(),
+                    "record_type",
                     FieldValue::Str("ChangeCipherSpec"),
                 );
             }

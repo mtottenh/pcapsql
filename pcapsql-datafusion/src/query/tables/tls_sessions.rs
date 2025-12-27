@@ -83,7 +83,7 @@ pub fn build_tls_sessions_batch(messages: &[ParsedMessage]) -> Result<RecordBatc
 
 fn append_string_field(
     builder: &mut StringBuilder,
-    fields: &HashMap<String, FieldValue>,
+    fields: &HashMap<&'static str, FieldValue>,
     key: &str,
 ) {
     match fields.get(key) {

@@ -23,7 +23,8 @@ use crate::protocol::{FieldValue, OwnedFieldValue, TunnelType};
 #[derive(Clone, Debug)]
 pub struct OwnedParseResult {
     /// Extracted field values, keyed by field name.
-    pub fields: HashMap<String, OwnedFieldValue>,
+    /// Field names are always static strings from protocol definitions.
+    pub fields: HashMap<&'static str, OwnedFieldValue>,
     /// Parse error if partial parsing occurred.
     pub error: Option<String>,
     /// Encapsulation depth when this protocol was parsed (0 = outer layer).
@@ -44,7 +45,7 @@ impl OwnedParseResult {
         Self {
             fields: fields
                 .iter()
-                .map(|(k, v)| (k.to_string(), v.to_owned()))
+                .map(|(k, v)| (*k, v.to_owned()))
                 .collect(),
             error: error.cloned(),
             encap_depth: 0,
@@ -59,7 +60,7 @@ impl OwnedParseResult {
             fields: result
                 .fields
                 .iter()
-                .map(|(k, v)| (k.to_string(), v.to_owned()))
+                .map(|(k, v)| (*k, v.to_owned()))
                 .collect(),
             error: result.error.clone(),
             encap_depth: result.encap_depth,
@@ -83,7 +84,8 @@ pub struct CachedParse {
     /// Frame number this parse result belongs to
     pub frame_number: u64,
     /// Parsed protocol results (protocol_name -> OwnedParseResult)
-    pub protocols: Vec<(String, OwnedParseResult)>,
+    /// Protocol name is always a static string from the registry.
+    pub protocols: Vec<(&'static str, OwnedParseResult)>,
 }
 
 impl CachedParse {
@@ -96,7 +98,7 @@ impl CachedParse {
             .iter()
             .map(|(name, result)| {
                 (
-                    name.to_string(),
+                    *name,
                     OwnedParseResult::from_parse_result(result),
                 )
             })
@@ -116,7 +118,7 @@ impl CachedParse {
     pub fn get_protocol(&self, name: &str) -> Option<&OwnedParseResult> {
         self.protocols
             .iter()
-            .find(|(n, _)| n == name)
+            .find(|(n, _)| *n == name)
             .map(|(_, r)| r)
     }
 
@@ -127,7 +129,7 @@ impl CachedParse {
     pub fn get_all_protocols<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a OwnedParseResult> + 'a {
         self.protocols
             .iter()
-            .filter(move |(n, _)| n == name)
+            .filter(move |(n, _)| *n == name)
             .map(|(_, r)| r)
     }
 
@@ -135,17 +137,17 @@ impl CachedParse {
     ///
     /// Returns 0 if the protocol is not present.
     pub fn count_protocol(&self, name: &str) -> usize {
-        self.protocols.iter().filter(|(n, _)| n == name).count()
+        self.protocols.iter().filter(|(n, _)| *n == name).count()
     }
 
     /// Check if a specific protocol is present in the cached results.
     pub fn has_protocol(&self, name: &str) -> bool {
-        self.protocols.iter().any(|(n, _)| n == name)
+        self.protocols.iter().any(|(n, _)| *n == name)
     }
 
     /// Iterate over all protocol results.
-    pub fn iter(&self) -> impl Iterator<Item = (&str, &OwnedParseResult)> {
-        self.protocols.iter().map(|(n, r)| (n.as_str(), r))
+    pub fn iter(&self) -> impl Iterator<Item = (&'static str, &OwnedParseResult)> {
+        self.protocols.iter().map(|(n, r)| (*n, r))
     }
 }
 
@@ -343,7 +345,7 @@ mod tests {
             frame_number: 1,
             protocols: vec![
                 (
-                    "ethernet".to_string(),
+                    "ethernet",
                     OwnedParseResult {
                         fields: HashMap::new(),
                         error: None,
@@ -353,7 +355,7 @@ mod tests {
                     },
                 ),
                 (
-                    "ipv4".to_string(),
+                    "ipv4",
                     OwnedParseResult {
                         fields: HashMap::new(),
                         error: None,
@@ -377,7 +379,7 @@ mod tests {
             frame_number: 1,
             protocols: vec![
                 (
-                    "ethernet".to_string(),
+                    "ethernet",
                     OwnedParseResult {
                         fields: HashMap::new(),
                         error: None,
@@ -387,11 +389,11 @@ mod tests {
                     },
                 ),
                 (
-                    "ipv4".to_string(),
+                    "ipv4",
                     OwnedParseResult {
                         fields: {
                             let mut f = HashMap::new();
-                            f.insert("src_ip".to_string(), OwnedFieldValue::OwnedString(compact_str::CompactString::new("10.0.0.1")));
+                            f.insert("src_ip", OwnedFieldValue::OwnedString(compact_str::CompactString::new("10.0.0.1")));
                             f
                         },
                         error: None,
@@ -401,11 +403,11 @@ mod tests {
                     },
                 ),
                 (
-                    "vxlan".to_string(),
+                    "vxlan",
                     OwnedParseResult {
                         fields: {
                             let mut f = HashMap::new();
-                            f.insert("vni".to_string(), OwnedFieldValue::UInt32(100));
+                            f.insert("vni", OwnedFieldValue::UInt32(100));
                             f
                         },
                         error: None,
@@ -415,7 +417,7 @@ mod tests {
                     },
                 ),
                 (
-                    "ethernet".to_string(),
+                    "ethernet",
                     OwnedParseResult {
                         fields: HashMap::new(),
                         error: None,
@@ -425,11 +427,11 @@ mod tests {
                     },
                 ),
                 (
-                    "ipv4".to_string(),
+                    "ipv4",
                     OwnedParseResult {
                         fields: {
                             let mut f = HashMap::new();
-                            f.insert("src_ip".to_string(), OwnedFieldValue::OwnedString(compact_str::CompactString::new("192.168.1.1")));
+                            f.insert("src_ip", OwnedFieldValue::OwnedString(compact_str::CompactString::new("192.168.1.1")));
                             f
                         },
                         error: None,
@@ -484,11 +486,11 @@ mod tests {
         use std::net::{IpAddr, Ipv4Addr};
 
         let mut fields = HashMap::new();
-        fields.insert("src_ip".to_string(), OwnedFieldValue::IpAddr(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
-        fields.insert("dst_port".to_string(), OwnedFieldValue::UInt16(443));
-        fields.insert("payload".to_string(), OwnedFieldValue::OwnedBytes(vec![0x48, 0x65, 0x6c, 0x6c, 0x6f]));
-        fields.insert("flags".to_string(), OwnedFieldValue::UInt8(0x18));
-        fields.insert("is_syn".to_string(), OwnedFieldValue::Bool(false));
+        fields.insert("src_ip", OwnedFieldValue::IpAddr(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
+        fields.insert("dst_port", OwnedFieldValue::UInt16(443));
+        fields.insert("payload", OwnedFieldValue::OwnedBytes(vec![0x48, 0x65, 0x6c, 0x6c, 0x6f]));
+        fields.insert("flags", OwnedFieldValue::UInt8(0x18));
+        fields.insert("is_syn", OwnedFieldValue::Bool(false));
 
         let result = OwnedParseResult {
             fields,
@@ -513,7 +515,7 @@ mod tests {
     #[test]
     fn test_owned_parse_result_with_error() {
         let mut fields = HashMap::new();
-        fields.insert("partial_field".to_string(), OwnedFieldValue::UInt32(42));
+        fields.insert("partial_field", OwnedFieldValue::UInt32(42));
 
         let result = OwnedParseResult {
             fields,
@@ -553,11 +555,11 @@ mod tests {
             frame_number: 42,
             protocols: vec![
                 (
-                    "ethernet".to_string(),
+                    "ethernet",
                     OwnedParseResult {
                         fields: {
                             let mut f = HashMap::new();
-                            f.insert("src_mac".to_string(), OwnedFieldValue::MacAddr([0x00; 6]));
+                            f.insert("src_mac", OwnedFieldValue::MacAddr([0x00; 6]));
                             f
                         },
                         error: None,
@@ -567,11 +569,11 @@ mod tests {
                     },
                 ),
                 (
-                    "ipv4".to_string(),
+                    "ipv4",
                     OwnedParseResult {
                         fields: {
                             let mut f = HashMap::new();
-                            f.insert("ttl".to_string(), OwnedFieldValue::UInt8(64));
+                            f.insert("ttl", OwnedFieldValue::UInt8(64));
                             f
                         },
                         error: None,
@@ -604,9 +606,9 @@ mod tests {
         let cached = CachedParse {
             frame_number: 1,
             protocols: vec![
-                ("ethernet".to_string(), OwnedParseResult { fields: HashMap::new(), error: None, encap_depth: 0, tunnel_type: TunnelType::None, tunnel_id: None }),
-                ("ipv4".to_string(), OwnedParseResult { fields: HashMap::new(), error: None, encap_depth: 0, tunnel_type: TunnelType::None, tunnel_id: None }),
-                ("tcp".to_string(), OwnedParseResult { fields: HashMap::new(), error: None, encap_depth: 0, tunnel_type: TunnelType::None, tunnel_id: None }),
+                ("ethernet", OwnedParseResult { fields: HashMap::new(), error: None, encap_depth: 0, tunnel_type: TunnelType::None, tunnel_id: None }),
+                ("ipv4", OwnedParseResult { fields: HashMap::new(), error: None, encap_depth: 0, tunnel_type: TunnelType::None, tunnel_id: None }),
+                ("tcp", OwnedParseResult { fields: HashMap::new(), error: None, encap_depth: 0, tunnel_type: TunnelType::None, tunnel_id: None }),
             ],
         };
 

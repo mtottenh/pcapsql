@@ -29,79 +29,61 @@ impl HttpStreamParser {
     }
 
     /// Extract headers from httparse header array into fields map.
-    fn extract_headers(headers: &[httparse::Header], fields: &mut HashMap<String, FieldValue>) {
+    /// Uses eq_ignore_ascii_case() for zero-allocation case-insensitive matching.
+    fn extract_headers(headers: &[httparse::Header], fields: &mut HashMap<&'static str, FieldValue>) {
         for header in headers.iter().filter(|h| !h.name.is_empty()) {
-            let name_lower = header.name.to_ascii_lowercase();
+            let name = header.name;
             let value = String::from_utf8_lossy(header.value).to_string();
 
-            match name_lower.as_str() {
-                "host" => {
-                    fields.insert("host".to_string(), FieldValue::OwnedString(CompactString::new(value)));
+            if name.eq_ignore_ascii_case("host") {
+                fields.insert("host", FieldValue::OwnedString(CompactString::new(value)));
+            } else if name.eq_ignore_ascii_case("content-type") {
+                fields.insert("content_type", FieldValue::OwnedString(CompactString::new(value)));
+            } else if name.eq_ignore_ascii_case("content-length") {
+                if let Ok(len) = value.parse::<u64>() {
+                    fields.insert("content_length", FieldValue::UInt64(len));
                 }
-                "content-type" => {
-                    fields.insert("content_type".to_string(), FieldValue::OwnedString(CompactString::new(value)));
-                }
-                "content-length" => {
-                    if let Ok(len) = value.parse::<u64>() {
-                        fields.insert("content_length".to_string(), FieldValue::UInt64(len));
-                    }
-                }
-                "user-agent" => {
-                    fields.insert("user_agent".to_string(), FieldValue::OwnedString(CompactString::new(value)));
-                }
-                "server" => {
-                    fields.insert("server".to_string(), FieldValue::OwnedString(CompactString::new(value)));
-                }
-                "transfer-encoding" => {
-                    fields.insert("transfer_encoding".to_string(), FieldValue::OwnedString(CompactString::new(value)));
-                }
-                "connection" => {
-                    fields.insert("connection".to_string(), FieldValue::OwnedString(CompactString::new(value)));
-                }
-                "cookie" => {
-                    fields.insert("cookie".to_string(), FieldValue::OwnedString(CompactString::new(value)));
-                }
-                "set-cookie" => {
-                    fields
-                        .entry("set_cookie".to_string())
-                        .or_insert(FieldValue::OwnedString(CompactString::new(value)));
-                }
-                "referer" | "referrer" => {
-                    fields.insert("referer".to_string(), FieldValue::OwnedString(CompactString::new(value)));
-                }
-                "accept" => {
-                    fields.insert("accept".to_string(), FieldValue::OwnedString(CompactString::new(value)));
-                }
-                "accept-encoding" => {
-                    fields.insert("accept_encoding".to_string(), FieldValue::OwnedString(CompactString::new(value)));
-                }
-                "accept-language" => {
-                    fields.insert("accept_language".to_string(), FieldValue::OwnedString(CompactString::new(value)));
-                }
-                "cache-control" => {
-                    fields.insert("cache_control".to_string(), FieldValue::OwnedString(CompactString::new(value)));
-                }
-                "authorization" => {
-                    // Store auth type only for security
-                    let auth_type = value.split_whitespace().next().unwrap_or(&value);
-                    fields.insert("authorization".to_string(), FieldValue::OwnedString(CompactString::new(auth_type)));
-                }
-                "location" => {
-                    fields.insert("location".to_string(), FieldValue::OwnedString(CompactString::new(value)));
-                }
-                "x-forwarded-for" => {
-                    fields.insert("x_forwarded_for".to_string(), FieldValue::OwnedString(CompactString::new(value)));
-                }
-                "x-real-ip" => {
-                    fields.insert("x_real_ip".to_string(), FieldValue::OwnedString(CompactString::new(value)));
-                }
-                _ => {}
+            } else if name.eq_ignore_ascii_case("user-agent") {
+                fields.insert("user_agent", FieldValue::OwnedString(CompactString::new(value)));
+            } else if name.eq_ignore_ascii_case("server") {
+                fields.insert("server", FieldValue::OwnedString(CompactString::new(value)));
+            } else if name.eq_ignore_ascii_case("transfer-encoding") {
+                fields.insert("transfer_encoding", FieldValue::OwnedString(CompactString::new(value)));
+            } else if name.eq_ignore_ascii_case("connection") {
+                fields.insert("connection", FieldValue::OwnedString(CompactString::new(value)));
+            } else if name.eq_ignore_ascii_case("cookie") {
+                fields.insert("cookie", FieldValue::OwnedString(CompactString::new(value)));
+            } else if name.eq_ignore_ascii_case("set-cookie") {
+                fields
+                    .entry("set_cookie")
+                    .or_insert(FieldValue::OwnedString(CompactString::new(value)));
+            } else if name.eq_ignore_ascii_case("referer") || name.eq_ignore_ascii_case("referrer") {
+                fields.insert("referer", FieldValue::OwnedString(CompactString::new(value)));
+            } else if name.eq_ignore_ascii_case("accept") {
+                fields.insert("accept", FieldValue::OwnedString(CompactString::new(value)));
+            } else if name.eq_ignore_ascii_case("accept-encoding") {
+                fields.insert("accept_encoding", FieldValue::OwnedString(CompactString::new(value)));
+            } else if name.eq_ignore_ascii_case("accept-language") {
+                fields.insert("accept_language", FieldValue::OwnedString(CompactString::new(value)));
+            } else if name.eq_ignore_ascii_case("cache-control") {
+                fields.insert("cache_control", FieldValue::OwnedString(CompactString::new(value)));
+            } else if name.eq_ignore_ascii_case("authorization") {
+                // Store auth type only for security
+                let auth_type = value.split_whitespace().next().unwrap_or(&value);
+                fields.insert("authorization", FieldValue::OwnedString(CompactString::new(auth_type)));
+            } else if name.eq_ignore_ascii_case("location") {
+                fields.insert("location", FieldValue::OwnedString(CompactString::new(value)));
+            } else if name.eq_ignore_ascii_case("x-forwarded-for") {
+                fields.insert("x_forwarded_for", FieldValue::OwnedString(CompactString::new(value)));
+            } else if name.eq_ignore_ascii_case("x-real-ip") {
+                fields.insert("x_real_ip", FieldValue::OwnedString(CompactString::new(value)));
             }
+            // Unknown headers are ignored
         }
     }
 
     /// Check if transfer encoding is chunked.
-    fn is_chunked(fields: &HashMap<String, FieldValue>) -> bool {
+    fn is_chunked(fields: &HashMap<&'static str, FieldValue>) -> bool {
         fields
             .get("transfer_encoding")
             .and_then(|v| v.as_str())
@@ -110,7 +92,7 @@ impl HttpStreamParser {
     }
 
     /// Get Content-Length from fields.
-    fn get_content_length(fields: &HashMap<String, FieldValue>) -> Option<usize> {
+    fn get_content_length(fields: &HashMap<&'static str, FieldValue>) -> Option<usize> {
         fields.get("content_length").and_then(|v| {
             if let FieldValue::UInt64(len) = v {
                 Some(*len as usize)
@@ -196,19 +178,19 @@ impl StreamParser for HttpStreamParser {
 
         match req.parse(data) {
             Ok(Status::Complete(header_len)) => {
-                fields.insert("is_request".to_string(), FieldValue::Bool(true));
+                fields.insert("is_request", FieldValue::Bool(true));
 
                 if let Some(method) = req.method {
-                    fields.insert("method".to_string(), FieldValue::OwnedString(CompactString::new(method)));
+                    fields.insert("method", FieldValue::OwnedString(CompactString::new(method)));
                 }
 
                 if let Some(path) = req.path {
-                    fields.insert("uri".to_string(), FieldValue::OwnedString(CompactString::new(path)));
+                    fields.insert("uri", FieldValue::OwnedString(CompactString::new(path)));
                 }
 
                 if let Some(version) = req.version {
                     let version_str = format!("HTTP/1.{}", version);
-                    fields.insert("http_version".to_string(), FieldValue::OwnedString(CompactString::new(version_str)));
+                    fields.insert("http_version", FieldValue::OwnedString(CompactString::new(version_str)));
                 }
 
                 Self::extract_headers(&headers, &mut fields);
@@ -270,19 +252,19 @@ impl StreamParser for HttpStreamParser {
 
         match resp.parse(data) {
             Ok(Status::Complete(header_len)) => {
-                fields.insert("is_request".to_string(), FieldValue::Bool(false));
+                fields.insert("is_request", FieldValue::Bool(false));
 
                 if let Some(version) = resp.version {
                     let version_str = format!("HTTP/1.{}", version);
-                    fields.insert("http_version".to_string(), FieldValue::OwnedString(CompactString::new(version_str)));
+                    fields.insert("http_version", FieldValue::OwnedString(CompactString::new(version_str)));
                 }
 
                 if let Some(code) = resp.code {
-                    fields.insert("status_code".to_string(), FieldValue::UInt16(code));
+                    fields.insert("status_code", FieldValue::UInt16(code));
                 }
 
                 if let Some(reason) = resp.reason {
-                    fields.insert("status_text".to_string(), FieldValue::OwnedString(CompactString::new(reason)));
+                    fields.insert("status_text", FieldValue::OwnedString(CompactString::new(reason)));
                 }
 
                 Self::extract_headers(&headers, &mut fields);
