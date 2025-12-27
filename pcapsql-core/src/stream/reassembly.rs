@@ -64,7 +64,37 @@ impl StreamBuffer {
         self.expected_seq = seq.wrapping_add(1); // SYN consumes one seq
     }
 
-    /// Add a segment to the buffer.
+    /// Fast path for in-order segment - avoids intermediate Vec allocation.
+    /// Returns true if the segment was handled (in-order with no pending segments).
+    /// Returns false if the segment needs to be handled by the slow path.
+    ///
+    /// This copies data directly into the reassembled buffer, avoiding the
+    /// intermediate `Segment { data: data.to_vec(), ... }` allocation that
+    /// the slow path requires.
+    #[inline]
+    pub fn add_inorder_data(
+        &mut self,
+        seq: u32,
+        data: &[u8],
+        _frame_number: u64,
+        _timestamp: i64,
+    ) -> bool {
+        // Fast path: segment is in-order and no pending segments exist
+        // This avoids allocating an intermediate Vec for the Segment struct
+        if self.initial_seq.is_some()
+            && seq == self.expected_seq
+            && self.pending.is_empty()
+        {
+            self.segment_count += 1;
+            self.reassembled.extend_from_slice(data);
+            self.expected_seq = seq_add(seq, data.len());
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Add a segment to the buffer (slow path - takes ownership).
     pub fn add_segment(&mut self, segment: Segment) {
         self.segment_count += 1;
 
@@ -265,12 +295,17 @@ impl TcpReassembler {
         }
 
         let buffer = self.get_or_create(connection_id, direction);
-        buffer.add_segment(Segment {
-            seq,
-            data: data.to_vec(),
-            frame_number,
-            timestamp,
-        });
+
+        // Try fast path first (no allocation for in-order segments)
+        if !buffer.add_inorder_data(seq, data, frame_number, timestamp) {
+            // Fall back to slow path with copy
+            buffer.add_segment(Segment {
+                seq,
+                data: data.to_vec(),
+                frame_number,
+                timestamp,
+            });
+        }
     }
 
     /// Get contiguous data for a stream.
@@ -550,5 +585,60 @@ mod tests {
 
         reassembler.mark_fin(1, Direction::ToServer);
         assert!(reassembler.is_complete(1, Direction::ToServer));
+    }
+
+    // Test 13: Fast path (add_inorder_data) works correctly
+    #[test]
+    fn test_inorder_fast_path() {
+        let mut buffer = StreamBuffer::new();
+
+        // First segment - no initial_seq yet, fast path returns false
+        assert!(!buffer.add_inorder_data(1000, b"Hello", 1, 0));
+
+        // Set up initial state via slow path
+        buffer.add_segment(Segment {
+            seq: 1000,
+            data: b"Hello".to_vec(),
+            frame_number: 1,
+            timestamp: 0,
+        });
+        assert_eq!(buffer.get_contiguous(), b"Hello");
+        assert_eq!(buffer.segment_count, 1);
+
+        // Second segment - should use fast path
+        assert!(buffer.add_inorder_data(1005, b" World", 2, 1));
+        assert_eq!(buffer.get_contiguous(), b"Hello World");
+        assert_eq!(buffer.segment_count, 2);
+
+        // Third segment - also fast path
+        assert!(buffer.add_inorder_data(1011, b"!", 3, 2));
+        assert_eq!(buffer.get_contiguous(), b"Hello World!");
+        assert_eq!(buffer.segment_count, 3);
+    }
+
+    // Test 14: Fast path skipped when pending segments exist
+    #[test]
+    fn test_inorder_fast_path_skipped_with_pending() {
+        let mut buffer = StreamBuffer::new();
+
+        // Set up initial state
+        buffer.add_segment(Segment {
+            seq: 1000,
+            data: b"Hello".to_vec(),
+            frame_number: 1,
+            timestamp: 0,
+        });
+
+        // Add out-of-order segment (creates pending)
+        buffer.add_segment(Segment {
+            seq: 1010,
+            data: b"World".to_vec(),
+            frame_number: 3,
+            timestamp: 2,
+        });
+
+        // Now even if we have in-order data, fast path should return false
+        // because there are pending segments
+        assert!(!buffer.add_inorder_data(1005, b"_____", 2, 1));
     }
 }
