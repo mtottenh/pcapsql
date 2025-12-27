@@ -58,6 +58,44 @@ pub struct ParsedTcpOptions {
     pub ts_ecr: Option<u32>,
 }
 
+/// Get a static string for common TCP option combinations.
+/// Returns None for uncommon combinations, which fall back to dynamic allocation.
+fn get_options_static(opts: &ParsedTcpOptions) -> Option<&'static str> {
+    // Build bitmask: MSS=1, WS=2, SACK_PERM=4, SACK=8, TS=16
+    let mut mask: u8 = 0;
+    for name in &opts.option_names {
+        match *name {
+            "MSS" => mask |= 1,
+            "WS" => mask |= 2,
+            "SACK_PERM" => mask |= 4,
+            "SACK" => mask |= 8,
+            "TS" => mask |= 16,
+            _ => return None, // Unknown option, fall back to dynamic
+        }
+    }
+
+    // Lookup common combinations (in order options appear in parse_tcp_options)
+    match mask {
+        0b00001 => Some("MSS"),
+        0b00010 => Some("WS"),
+        0b00011 => Some("MSS,WS"),
+        0b00100 => Some("SACK_PERM"),
+        0b00101 => Some("MSS,SACK_PERM"),
+        0b00111 => Some("MSS,WS,SACK_PERM"),
+        0b01000 => Some("SACK"),
+        0b10000 => Some("TS"),
+        0b10001 => Some("MSS,TS"),
+        0b10010 => Some("WS,TS"),
+        0b10011 => Some("MSS,WS,TS"),
+        0b10100 => Some("SACK_PERM,TS"),
+        0b10101 => Some("MSS,SACK_PERM,TS"),
+        0b10111 => Some("MSS,WS,SACK_PERM,TS"),
+        0b11000 => Some("SACK,TS"),
+        0b11111 => Some("MSS,WS,SACK_PERM,SACK,TS"),
+        _ => None, // Uncommon combination
+    }
+}
+
 /// Parse TCP options using etherparse's iterator.
 /// This is zero-copy for all options.
 fn parse_tcp_options(tcp: &TcpHeaderSlice<'_>) -> ParsedTcpOptions {
@@ -189,12 +227,14 @@ impl Protocol for TcpProtocol {
                 if options_len > 0 {
                     let opts = parse_tcp_options(&tcp);
 
-                    // Options list string
+                    // Options list string - use static lookup for common combinations
                     if !opts.option_names.is_empty() {
-                        fields.push((
-                            "options",
-                            FieldValue::OwnedString(opts.option_names.join(",").into()),
-                        ));
+                        let options_str = if let Some(static_str) = get_options_static(&opts) {
+                            FieldValue::Str(static_str) // Zero-copy static string
+                        } else {
+                            FieldValue::OwnedString(opts.option_names.join(",").into())
+                        };
+                        fields.push(("options", options_str));
                     } else {
                         fields.push(("options", FieldValue::Null));
                     }
@@ -463,10 +503,12 @@ impl Protocol for TcpProtocol {
 
                         if fields.contains("options") {
                             if !opts.option_names.is_empty() {
-                                result_fields.push((
-                                    "options",
-                                    FieldValue::OwnedString(opts.option_names.join(",").into()),
-                                ));
+                                let options_str = if let Some(static_str) = get_options_static(&opts) {
+                                    FieldValue::Str(static_str)
+                                } else {
+                                    FieldValue::OwnedString(opts.option_names.join(",").into())
+                                };
+                                result_fields.push(("options", options_str));
                             } else {
                                 result_fields.push(("options", FieldValue::Null));
                             }
@@ -618,6 +660,29 @@ impl Protocol for TcpProtocol {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_options_static_lookup() {
+        // Test that common option combinations return static strings
+        let mut opts = ParsedTcpOptions::default();
+        opts.option_names.push("MSS");
+        opts.option_names.push("WS");
+        opts.option_names.push("SACK_PERM");
+        opts.option_names.push("TS");
+
+        let result = get_options_static(&opts);
+        assert_eq!(result, Some("MSS,WS,SACK_PERM,TS"));
+
+        // Test single options
+        let mut opts_mss = ParsedTcpOptions::default();
+        opts_mss.option_names.push("MSS");
+        assert_eq!(get_options_static(&opts_mss), Some("MSS"));
+
+        // Test uncommon combination returns None
+        let mut opts_unknown = ParsedTcpOptions::default();
+        opts_unknown.option_names.push("UNKNOWN");
+        assert_eq!(get_options_static(&opts_unknown), None);
+    }
 
     #[test]
     fn test_parse_tcp_syn() {
@@ -1015,11 +1080,11 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.get("options_length"), Some(&FieldValue::UInt8(4)));
         assert_eq!(result.get("mss"), Some(&FieldValue::UInt16(1460)));
-        // Check options string contains MSS
-        if let Some(FieldValue::OwnedString(s)) = result.get("options") {
-            assert!(s.contains("MSS"));
-        } else {
-            panic!("Expected OwnedString for options");
+        // Check options string contains MSS (may be static or owned)
+        match result.get("options") {
+            Some(FieldValue::Str(s)) => assert!(s.contains("MSS")),
+            Some(FieldValue::OwnedString(s)) => assert!(s.contains("MSS")),
+            _ => panic!("Expected string for options"),
         }
     }
 
@@ -1165,19 +1230,16 @@ mod tests {
         assert_eq!(result.get("ts_val"), Some(&FieldValue::UInt32(1)));
         assert_eq!(result.get("ts_ecr"), Some(&FieldValue::UInt32(0)));
 
-        // Check options string contains all options
-        if let Some(FieldValue::OwnedString(s)) = result.get("options") {
-            assert!(s.contains("MSS"), "options should contain MSS: {}", s);
-            assert!(
-                s.contains("SACK_PERM"),
-                "options should contain SACK_PERM: {}",
-                s
-            );
-            assert!(s.contains("TS"), "options should contain TS: {}", s);
-            assert!(s.contains("WS"), "options should contain WS: {}", s);
-        } else {
-            panic!("Expected OwnedString for options");
-        }
+        // Check options string contains all options (may be static or owned)
+        let opts_str = match result.get("options") {
+            Some(FieldValue::Str(s)) => *s,
+            Some(FieldValue::OwnedString(s)) => s.as_str(),
+            _ => panic!("Expected string for options"),
+        };
+        assert!(opts_str.contains("MSS"), "options should contain MSS: {}", opts_str);
+        assert!(opts_str.contains("SACK_PERM"), "options should contain SACK_PERM: {}", opts_str);
+        assert!(opts_str.contains("TS"), "options should contain TS: {}", opts_str);
+        assert!(opts_str.contains("WS"), "options should contain WS: {}", opts_str);
     }
 
     #[test]
