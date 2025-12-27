@@ -12,7 +12,7 @@ use arrow::record_batch::RecordBatch;
 
 use crate::error::{Error, QueryError};
 use crate::query::tables;
-use pcapsql_core::{FieldValue, OwnedFieldValue, OwnedParseResult, ParseResult, RawPacket, TunnelType};
+use pcapsql_core::{FieldValue, OwnedParseResult, ParseResult, RawPacket};
 
 /// Dynamic array builder that can hold different builder types.
 enum DynamicBuilder {
@@ -50,16 +50,12 @@ impl DynamicBuilder {
             DataType::Binary => {
                 DynamicBuilder::Binary(BinaryBuilder::with_capacity(capacity, capacity * 64))
             }
-            DataType::FixedSizeBinary(size) => {
-                DynamicBuilder::FixedSizeBinary(FixedSizeBinaryBuilder::with_capacity(
-                    capacity, *size,
-                ))
-            }
-            DataType::Timestamp(TimeUnit::Microsecond, _) => {
-                DynamicBuilder::TimestampMicrosecond(TimestampMicrosecondBuilder::with_capacity(
-                    capacity,
-                ))
-            }
+            DataType::FixedSizeBinary(size) => DynamicBuilder::FixedSizeBinary(
+                FixedSizeBinaryBuilder::with_capacity(capacity, *size),
+            ),
+            DataType::Timestamp(TimeUnit::Microsecond, _) => DynamicBuilder::TimestampMicrosecond(
+                TimestampMicrosecondBuilder::with_capacity(capacity),
+            ),
             // List types - match on inner type
             DataType::List(field) => match field.data_type() {
                 DataType::UInt16 => DynamicBuilder::ListOfUInt16(ListBuilder::new(
@@ -74,15 +70,14 @@ impl DynamicBuilder {
                 DataType::Binary => DynamicBuilder::ListOfBinary(ListBuilder::new(
                     BinaryBuilder::with_capacity(capacity, capacity * 64),
                 )),
-                DataType::FixedSizeBinary(size) => {
-                    DynamicBuilder::ListOfFixedSizeBinary(ListBuilder::new(
-                        FixedSizeBinaryBuilder::with_capacity(capacity, *size),
-                    ))
-                }
+                DataType::FixedSizeBinary(size) => DynamicBuilder::ListOfFixedSizeBinary(
+                    ListBuilder::new(FixedSizeBinaryBuilder::with_capacity(capacity, *size)),
+                ),
                 // Default list to Utf8 for unsupported inner types
-                _ => DynamicBuilder::ListOfUtf8(ListBuilder::new(
-                    StringBuilder::with_capacity(capacity, capacity * 32),
-                )),
+                _ => DynamicBuilder::ListOfUtf8(ListBuilder::new(StringBuilder::with_capacity(
+                    capacity,
+                    capacity * 32,
+                ))),
             },
             // Default to Utf8 for unsupported types
             _ => DynamicBuilder::Utf8(StringBuilder::with_capacity(capacity, capacity * 32)),
@@ -249,10 +244,7 @@ impl DynamicBuilder {
             },
             DynamicBuilder::ListOfUtf8(b) => match value {
                 FieldValue::List(items) => {
-                    let values: Vec<Option<String>> = items
-                        .iter()
-                        .map(|v| v.as_string())
-                        .collect();
+                    let values: Vec<Option<String>> = items.iter().map(|v| v.as_string()).collect();
                     b.append_value(values);
                 }
                 FieldValue::Null => b.append_null(),
@@ -624,8 +616,7 @@ impl ProtocolBatchBuilder {
     }
 
     fn build_batch(&mut self) -> Result<RecordBatch, Error> {
-        let arrays: Vec<Arc<dyn Array>> =
-            self.builders.iter_mut().map(|b| b.finish()).collect();
+        let arrays: Vec<Arc<dyn Array>> = self.builders.iter_mut().map(|b| b.finish()).collect();
 
         let batch = RecordBatch::try_new(self.schema.clone(), arrays)
             .map_err(|e: ArrowError| Error::Query(QueryError::Arrow(e.to_string())))?;

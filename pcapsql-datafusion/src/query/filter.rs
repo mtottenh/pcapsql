@@ -7,7 +7,7 @@
 use datafusion::common::ScalarValue;
 use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
 
-use pcapsql_core::{FieldValue, ParseResult, TunnelType};
+use pcapsql_core::{FieldValue, ParseResult};
 
 /// Comparison operators for predicates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,18 +127,24 @@ fn get_field_value<'a, 'b>(
         "eth_dst" => find_field(parsed, "ethernet", "dst_mac"),
         "eth_type" => find_field(parsed, "ethernet", "ethertype"),
         // IP fields
-        "src_ip" => find_field(parsed, "ipv4", "src_ip")
-            .or_else(|| find_field(parsed, "ipv6", "src_ip")),
-        "dst_ip" => find_field(parsed, "ipv4", "dst_ip")
-            .or_else(|| find_field(parsed, "ipv6", "dst_ip")),
-        "ip_ttl" => find_field(parsed, "ipv4", "ttl").or_else(|| find_field(parsed, "ipv6", "hop_limit")),
+        "src_ip" => {
+            find_field(parsed, "ipv4", "src_ip").or_else(|| find_field(parsed, "ipv6", "src_ip"))
+        }
+        "dst_ip" => {
+            find_field(parsed, "ipv4", "dst_ip").or_else(|| find_field(parsed, "ipv6", "dst_ip"))
+        }
+        "ip_ttl" => {
+            find_field(parsed, "ipv4", "ttl").or_else(|| find_field(parsed, "ipv6", "hop_limit"))
+        }
         "ip_protocol" => find_field(parsed, "ipv4", "protocol")
             .or_else(|| find_field(parsed, "ipv6", "next_header")),
         // Port fields
-        "src_port" => find_field(parsed, "tcp", "src_port")
-            .or_else(|| find_field(parsed, "udp", "src_port")),
-        "dst_port" => find_field(parsed, "tcp", "dst_port")
-            .or_else(|| find_field(parsed, "udp", "dst_port")),
+        "src_port" => {
+            find_field(parsed, "tcp", "src_port").or_else(|| find_field(parsed, "udp", "src_port"))
+        }
+        "dst_port" => {
+            find_field(parsed, "tcp", "dst_port").or_else(|| find_field(parsed, "udp", "dst_port"))
+        }
         // TCP fields
         "tcp_flags" => find_field(parsed, "tcp", "flags"),
         "tcp_seq" => find_field(parsed, "tcp", "seq"),
@@ -379,13 +385,25 @@ mod tests {
         use std::net::{IpAddr, Ipv4Addr};
 
         let mut eth_fields = SmallVec::new();
-        eth_fields.push(("src_mac", FieldValue::MacAddr([0x00, 0x11, 0x22, 0x33, 0x44, 0x55])));
-        eth_fields.push(("dst_mac", FieldValue::MacAddr([0xff, 0xff, 0xff, 0xff, 0xff, 0xff])));
+        eth_fields.push((
+            "src_mac",
+            FieldValue::MacAddr([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
+        ));
+        eth_fields.push((
+            "dst_mac",
+            FieldValue::MacAddr([0xff, 0xff, 0xff, 0xff, 0xff, 0xff]),
+        ));
         eth_fields.push(("ethertype", FieldValue::UInt16(0x0800)));
 
         let mut ipv4_fields = SmallVec::new();
-        ipv4_fields.push(("src_ip", FieldValue::IpAddr(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)))));
-        ipv4_fields.push(("dst_ip", FieldValue::IpAddr(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 2)))));
+        ipv4_fields.push((
+            "src_ip",
+            FieldValue::IpAddr(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))),
+        ));
+        ipv4_fields.push((
+            "dst_ip",
+            FieldValue::IpAddr(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 2))),
+        ));
         ipv4_fields.push(("ttl", FieldValue::UInt8(64)));
         ipv4_fields.push(("protocol", FieldValue::UInt8(6)));
 

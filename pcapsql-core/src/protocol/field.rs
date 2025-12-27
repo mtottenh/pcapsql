@@ -54,6 +54,7 @@ pub enum FieldValue<'data> {
 
     /// List of values (for multi-valued fields like DNS answers).
     /// All elements should be of the same type.
+    /// Note: Uses Vec because FieldValue is recursive (SmallVec inline storage causes infinite size).
     List(Vec<FieldValue<'data>>),
 
     /// Null/missing value

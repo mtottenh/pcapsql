@@ -12,7 +12,7 @@ use pcapsql_core::Protocol;
 /// Convert a FieldDescriptor to an Arrow Field.
 pub fn to_arrow_field(fd: &FieldDescriptor) -> Field {
     let data_type = to_arrow_type(&fd.kind);
-    Field::new(fd.name.clone(), data_type, fd.nullable)
+    Field::new(fd.name, data_type, fd.nullable)
 }
 
 /// Convert a DataKind to an Arrow DataType.
@@ -38,7 +38,11 @@ pub fn to_arrow_type(kind: &DataKind) -> DataType {
 
 /// Convert a protocol's schema to Arrow Schema.
 pub fn protocol_to_arrow_schema(protocol: &dyn Protocol) -> Schema {
-    let fields: Vec<Field> = protocol.schema_fields().iter().map(to_arrow_field).collect();
+    let fields: Vec<Field> = protocol
+        .schema_fields()
+        .iter()
+        .map(to_arrow_field)
+        .collect();
     Schema::new(fields)
 }
 
@@ -87,7 +91,15 @@ pub fn detect_arrow_address_column(field: &Field) -> Option<pcapsql_core::Addres
 }
 
 fn is_ipv4_column_name(name: &str) -> bool {
-    let exact_matches = ["router", "server_id", "subnet_mask", "ciaddr", "yiaddr", "siaddr", "giaddr"];
+    let exact_matches = [
+        "router",
+        "server_id",
+        "subnet_mask",
+        "ciaddr",
+        "yiaddr",
+        "siaddr",
+        "giaddr",
+    ];
     if exact_matches.contains(&name) {
         return true;
     }
@@ -101,7 +113,10 @@ fn is_ipv4_column_name(name: &str) -> bool {
 }
 
 fn is_ipv6_column_name(name: &str) -> bool {
-    name.ends_with("_ip") || name.contains("_ip_") || name.ends_with("_address") || name.ends_with("_prefix")
+    name.ends_with("_ip")
+        || name.contains("_ip_")
+        || name.ends_with("_address")
+        || name.ends_with("_prefix")
 }
 
 fn is_mac_column_name(name: &str) -> bool {
@@ -242,24 +257,20 @@ mod tests {
         let arrow_type = to_arrow_type(&nested_list);
 
         match arrow_type {
-            DataType::List(outer) => {
-                match outer.data_type() {
-                    DataType::List(inner) => {
-                        assert_eq!(inner.data_type(), &DataType::UInt16);
-                    }
-                    _ => panic!("Expected inner List type"),
+            DataType::List(outer) => match outer.data_type() {
+                DataType::List(inner) => {
+                    assert_eq!(inner.data_type(), &DataType::UInt16);
                 }
-            }
+                _ => panic!("Expected inner List type"),
+            },
             _ => panic!("Expected outer List type"),
         }
     }
 
     #[test]
     fn test_list_field_descriptor() {
-        let fd = FieldDescriptor::nullable(
-            "answer_ips",
-            DataKind::List(Box::new(DataKind::UInt32)),
-        );
+        let fd =
+            FieldDescriptor::nullable("answer_ips", DataKind::List(Box::new(DataKind::UInt32)));
         let arrow_field = to_arrow_field(&fd);
 
         assert_eq!(arrow_field.name(), "answer_ips");
