@@ -12,9 +12,9 @@ default-members = ["pcapsql-datafusion"]
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-authors = ["pcapsql contributors"]
+authors = ["Max Tottenham"]
 license = "MIT"
-repository = "https://github.com/your-org/pcapsql"
+repository = "https://github.com/mtottenh/pcapsql"
 
 [workspace.dependencies]
 # Core dependencies (used by pcapsql-core)
