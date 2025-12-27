@@ -379,9 +379,8 @@ fn extract_answer_fields(packet: &Packet, fields: &mut SmallVec<[(&'static str, 
                 ip4s.push(FieldValue::UInt32(u32::from(addr)));
             }
             RData::AAAA(aaaa) => {
-                // AAAA stores address as u128, convert to big-endian bytes
-                let addr_bytes = aaaa.address.to_be_bytes();
-                ip6s.push(FieldValue::OwnedBytes(addr_bytes.to_vec()));
+                // Use IpAddr to avoid heap allocation for IPv6 address
+                ip6s.push(FieldValue::IpAddr(std::net::IpAddr::V6(std::net::Ipv6Addr::from(aaaa.address))));
             }
             RData::CNAME(cname) => {
                 cnames.push(FieldValue::OwnedString(CompactString::new(cname.0.to_string())));
@@ -432,9 +431,8 @@ fn extract_answer_fields_projected(
                 ip4s.push(FieldValue::UInt32(u32::from(addr)));
             }
             RData::AAAA(aaaa) if need_ip6s => {
-                // AAAA stores address as u128, convert to big-endian bytes
-                let addr_bytes = aaaa.address.to_be_bytes();
-                ip6s.push(FieldValue::OwnedBytes(addr_bytes.to_vec()));
+                // Use IpAddr to avoid heap allocation for IPv6 address
+                ip6s.push(FieldValue::IpAddr(std::net::IpAddr::V6(std::net::Ipv6Addr::from(aaaa.address))));
             }
             RData::CNAME(cname) if need_cnames => {
                 cnames.push(FieldValue::OwnedString(CompactString::new(cname.0.to_string())));
