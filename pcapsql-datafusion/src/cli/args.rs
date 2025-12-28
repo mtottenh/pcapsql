@@ -1,9 +1,18 @@
-//! Command-line argument definitions.
+// Command-line argument definitions.
 
 use clap::{Parser, ValueEnum};
 use std::path::{Path, PathBuf};
 
-use super::OutputFormat;
+/// Supported output formats for query results.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum OutputFormat {
+    /// Pretty-printed table (default)
+    Table,
+    /// Comma-separated values
+    Csv,
+    /// JSON Lines (one JSON object per row)
+    Json,
+}
 
 /// Parse size string like "512M" or "1G" into bytes.
 pub fn parse_size(s: &str) -> Result<usize, String> {
@@ -42,6 +51,9 @@ pub enum ExportFormat {
 
 impl ExportFormat {
     /// Infer export format from file extension.
+    // Allow dead_code: This function is used in main.rs but the build script
+    // includes this file via include!(), causing a false positive warning.
+    #[allow(dead_code)]
     pub fn from_extension(path: &Path) -> Option<Self> {
         path.extension()
             .and_then(|ext| ext.to_str())
@@ -179,18 +191,6 @@ pub struct Args {
 /// Value parser for size arguments (e.g., "512M", "1G").
 fn parse_size_arg(s: &str) -> Result<usize, String> {
     parse_size(s)
-}
-
-impl Args {
-    /// Check if we should enter interactive REPL mode.
-    pub fn is_interactive(&self) -> bool {
-        self.file.is_some() && self.query.is_none() && self.query_file.is_none()
-    }
-
-    /// Check if this is an info-only command (no PCAP file needed).
-    pub fn is_info_only(&self) -> bool {
-        self.list_protocols || self.show_schema
-    }
 }
 
 #[cfg(test)]

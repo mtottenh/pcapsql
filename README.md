@@ -1,5 +1,9 @@
 # pcapsql
 
+[![CI](https://github.com/mtottenh/pcapsql/actions/workflows/ci.yml/badge.svg)](https://github.com/mtottenh/pcapsql/actions/workflows/ci.yml)
+[![Release](https://github.com/mtottenh/pcapsql/actions/workflows/release.yml/badge.svg)](https://github.com/mtottenh/pcapsql/actions/workflows/release.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 Query PCAP files using SQL. Built on Apache Arrow and DataFusion.
 
 ## Quick Start

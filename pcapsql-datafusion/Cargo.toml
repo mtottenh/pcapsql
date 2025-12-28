@@ -62,6 +62,35 @@ hex.workspace = true
 smallvec.workspace = true
 compact_str.workspace = true
 
+[build-dependencies]
+clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
+clap_mangen = "0.2"
+
+[package.metadata.deb]
+maintainer = "Max Tottenham <max@tottenham.io>"
+copyright = "2024-2025 Max Tottenham"
+license-file = ["../LICENSE", "0"]
+depends = "$auto"
+section = "utils"
+priority = "optional"
+assets = [
+    ["../target/release/pcapsql", "usr/bin/", "755"],
+    ["../target/assets/pcapsql.1", "usr/share/man/man1/", "644"],
+    ["../target/assets/pcapsql.bash", "usr/share/bash-completion/completions/pcapsql", "644"],
+    ["../target/assets/pcapsql.zsh", "usr/share/zsh/vendor-completions/_pcapsql", "644"],
+    ["../target/assets/pcapsql.fish", "usr/share/fish/vendor_completions.d/pcapsql.fish", "644"],
+]
+
+[package.metadata.generate-rpm]
+assets = [
+    { source = "../target/release/pcapsql", dest = "/usr/bin/pcapsql", mode = "755" },
+    { source = "../target/assets/pcapsql.1", dest = "/usr/share/man/man1/pcapsql.1", mode = "644", doc = true },
+    { source = "../target/assets/pcapsql.bash", dest = "/usr/share/bash-completion/completions/pcapsql", mode = "644" },
+    { source = "../target/assets/pcapsql.zsh", dest = "/usr/share/zsh/site-functions/_pcapsql", mode = "644" },
+    { source = "../target/assets/pcapsql.fish", dest = "/usr/share/fish/vendor_completions.d/pcapsql.fish", mode = "644" },
+]
+
 [[bench]]
 name = "parsing"
 harness = false

@@ -9,21 +9,12 @@ use std::sync::Arc;
 
 use arrow::array::{Array, FixedSizeBinaryArray, RecordBatch, UInt32Array};
 use arrow::datatypes::Schema;
-use clap::ValueEnum;
 
 use crate::query::arrow_schema::detect_arrow_address_column;
 use pcapsql_core::{format_ipv4, format_ipv6, format_mac, AddressKind};
 
-/// Supported output formats.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum OutputFormat {
-    /// Pretty-printed table (default)
-    Table,
-    /// Comma-separated values
-    Csv,
-    /// JSON Lines (one JSON object per row)
-    Json,
-}
+// Re-export OutputFormat from args (where it's defined for build.rs compatibility)
+pub use super::args::OutputFormat;
 
 /// Formats query results for output.
 pub struct OutputFormatter {
