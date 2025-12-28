@@ -1,9 +1,18 @@
-//! Command-line argument definitions.
+// Command-line argument definitions.
 
 use clap::{Parser, ValueEnum};
 use std::path::{Path, PathBuf};
 
-use super::OutputFormat;
+/// Supported output formats for query results.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum OutputFormat {
+    /// Pretty-printed table (default)
+    Table,
+    /// Comma-separated values
+    Csv,
+    /// JSON Lines (one JSON object per row)
+    Json,
+}
 
 /// Parse size string like "512M" or "1G" into bytes.
 pub fn parse_size(s: &str) -> Result<usize, String> {
