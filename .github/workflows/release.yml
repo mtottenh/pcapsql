@@ -72,7 +72,8 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          dnf install -y gcc curl openssl-devel
+          # Note: curl-minimal is pre-installed and sufficient for rustup
+          dnf install -y gcc openssl-devel
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 
       - name: Build release binary and .rpm package
