@@ -10,7 +10,6 @@ use super::{FieldValue, ParseContext, ParseResult, Protocol};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// SSH default port.
-#[allow(dead_code)]
 pub const SSH_PORT: u16 = 22;
 
 /// SSH message types.
@@ -59,9 +58,9 @@ impl Protocol for SshProtocol {
         let src_port = context.hint("src_port");
         let dst_port = context.hint("dst_port");
 
-        // Check for SSH port 22
+        // Check for SSH port
         match (src_port, dst_port) {
-            (Some(22), _) | (_, Some(22)) => Some(50),
+            (Some(p), _) | (_, Some(p)) if p == SSH_PORT as u64 => Some(50),
             _ => None,
         }
     }
@@ -82,7 +81,7 @@ impl Protocol for SshProtocol {
         let packet_length = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
 
         // Sanity check on packet length - SSH packets shouldn't exceed 35000 bytes typically
-        if packet_length > 35000 || packet_length < 2 {
+        if !(2..=35000).contains(&packet_length) {
             // This might be encrypted traffic or not an SSH packet
             fields.push(("encrypted", FieldValue::Bool(true)));
             let remaining_start = data.len().min(4 + packet_length);
@@ -182,9 +181,7 @@ fn parse_protocol_identification<'a>(
 
     // Parse "SSH-protoversion-softwareversion SP comments"
     if let Ok(line_str) = std::str::from_utf8(line) {
-        if line_str.starts_with("SSH-") {
-            let content = &line_str[4..]; // Skip "SSH-"
-
+        if let Some(content) = line_str.strip_prefix("SSH-") {
             if let Some(dash_pos) = content.find('-') {
                 let proto_version = &content[..dash_pos];
                 fields.push((
@@ -435,7 +432,7 @@ fn format_msg_type(msg_type: u8) -> FieldValue<'static> {
         msg_type::SSH_MSG_CHANNEL_REQUEST => FieldValue::Str("CHANNEL_REQUEST"),
         msg_type::SSH_MSG_CHANNEL_SUCCESS => FieldValue::Str("CHANNEL_SUCCESS"),
         msg_type::SSH_MSG_CHANNEL_FAILURE => FieldValue::Str("CHANNEL_FAILURE"),
-        _ => FieldValue::OwnedString(CompactString::new(format!("UNKNOWN({})", msg_type))),
+        _ => FieldValue::OwnedString(CompactString::new(format!("UNKNOWN({msg_type})"))),
     }
 }
 

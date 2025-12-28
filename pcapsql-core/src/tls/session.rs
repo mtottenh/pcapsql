@@ -502,7 +502,7 @@ mod tests {
     fn create_test_keylog() -> Arc<KeyLog> {
         // Create a keylog with test data
         let content = "CLIENT_RANDOM 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f";
-        Arc::new(KeyLog::from_str(content).unwrap())
+        Arc::new(KeyLog::parse(content).unwrap())
     }
 
     fn create_test_keylog_tls13() -> Arc<KeyLog> {
@@ -512,7 +512,7 @@ SERVER_HANDSHAKE_TRAFFIC_SECRET 0123456789abcdef0123456789abcdef0123456789abcdef
 CLIENT_TRAFFIC_SECRET_0 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef aabbccdd00112233445566778899aabbccddeeff00112233445566778899aabb
 SERVER_TRAFFIC_SECRET_0 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef 11223344556677889900aabbccddeeff00112233445566778899aabbccddeeff
 "#;
-        Arc::new(KeyLog::from_str(content).unwrap())
+        Arc::new(KeyLog::parse(content).unwrap())
     }
 
     #[test]

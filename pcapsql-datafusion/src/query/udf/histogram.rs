@@ -160,8 +160,7 @@ impl HdrHistogramAccumulator {
             .deserialize(&mut std::io::Cursor::new(bytes))
             .map_err(|e| {
                 datafusion::error::DataFusionError::Execution(format!(
-                    "histogram deserialize error: {}",
-                    e
+                    "histogram deserialize error: {e}"
                 ))
             })
     }
@@ -232,8 +231,7 @@ impl Accumulator for HdrHistogramAccumulator {
                     let other = Self::deserialize(bytes)?;
                     self.histogram.add(&other).map_err(|e| {
                         datafusion::error::DataFusionError::Execution(format!(
-                            "histogram merge error: {}",
-                            e
+                            "histogram merge error: {e}"
                         ))
                     })?;
                 }

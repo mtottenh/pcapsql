@@ -10,6 +10,7 @@
 use compact_str::CompactString;
 use smallvec::SmallVec;
 
+use super::ethernet::ethertype;
 use super::{FieldValue, ParseContext, ParseResult, Protocol, TunnelType};
 use crate::schema::{DataKind, FieldDescriptor};
 
@@ -211,11 +212,11 @@ impl Protocol for GtpProtocol {
 
             match ip_version {
                 4 => {
-                    child_hints.push(("ethertype", 0x0800u64)); // IPv4
+                    child_hints.push(("ethertype", ethertype::IPV4 as u64));
                     child_hints.push(("ip_version", 4u64));
                 }
                 6 => {
-                    child_hints.push(("ethertype", 0x86DDu64)); // IPv6
+                    child_hints.push(("ethertype", ethertype::IPV6 as u64));
                     child_hints.push(("ip_version", 6u64));
                 }
                 _ => {}

@@ -113,8 +113,7 @@ impl ReplCommand {
             ReplCommand::StatsReset
         } else {
             ReplCommand::Unknown(format!(
-                "Unknown stats subcommand: '{}'. Use '.stats' or '.stats reset'",
-                rest
+                "Unknown stats subcommand: '{rest}'. Use '.stats' or '.stats reset'"
             ))
         }
     }

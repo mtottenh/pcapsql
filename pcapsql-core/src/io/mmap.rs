@@ -172,7 +172,7 @@ impl MmapPacketSource {
         let mut header = [0u8; 24];
         decoder.read_exact(&mut header).map_err(|e| {
             Error::Pcap(PcapError::InvalidFormat {
-                reason: format!("Failed to read compressed header: {}", e),
+                reason: format!("Failed to read compressed header: {e}"),
             })
         })?;
 
@@ -283,7 +283,7 @@ impl MmapPacketReader {
         let cursor = Cursor::new(slice);
         let decompress = DecompressReader::new(cursor, compression).map_err(|e| {
             Error::Pcap(PcapError::InvalidFormat {
-                reason: format!("Failed to create decompressor: {}", e),
+                reason: format!("Failed to create decompressor: {e}"),
             })
         })?;
         let inner = GenericPcapReader::with_format(decompress, pcap_format)?;

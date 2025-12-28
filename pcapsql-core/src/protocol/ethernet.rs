@@ -11,10 +11,10 @@ use crate::schema::{DataKind, FieldDescriptor};
 pub const LINKTYPE_ETHERNET: u16 = 1;
 
 /// Well-known EtherTypes.
-#[allow(dead_code)]
 pub mod ethertype {
     pub const IPV4: u16 = 0x0800;
     pub const ARP: u16 = 0x0806;
+    #[allow(dead_code)] // RFC constant for VLAN tagging
     pub const VLAN: u16 = 0x8100;
     pub const IPV6: u16 = 0x86DD;
 }
@@ -105,7 +105,7 @@ mod tests {
             Some(&FieldValue::UInt16(ethertype::IPV4))
         );
         assert_eq!(result.remaining.len(), 2); // IPv4 header bytes
-        assert_eq!(result.hint("ethertype"), Some(0x0800u64));
+        assert_eq!(result.hint("ethertype"), Some(ethertype::IPV4 as u64));
     }
 
     #[test]
@@ -125,7 +125,7 @@ mod tests {
             result.get("ethertype"),
             Some(&FieldValue::UInt16(ethertype::IPV6))
         );
-        assert_eq!(result.hint("ethertype"), Some(0x86DDu64));
+        assert_eq!(result.hint("ethertype"), Some(ethertype::IPV6 as u64));
     }
 
     #[test]

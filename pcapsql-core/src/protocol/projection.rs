@@ -74,7 +74,7 @@ impl ProjectionConfig {
         let field_set = self
             .protocol_fields
             .entry(protocol.to_string())
-            .or_insert_with(HashSet::new);
+            .or_default();
 
         for field in fields {
             field_set.insert(field.as_ref().to_string());

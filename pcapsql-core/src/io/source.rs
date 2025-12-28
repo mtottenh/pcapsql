@@ -87,7 +87,7 @@ impl PacketRange {
             && self
                 .end
                 .as_ref()
-                .map_or(true, |e| frame_number < e.frame_number)
+                .is_none_or(|e| frame_number < e.frame_number)
     }
 }
 

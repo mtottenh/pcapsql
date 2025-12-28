@@ -7,7 +7,6 @@ use crate::schema::{DataKind, FieldDescriptor};
 use crate::stream::{ParsedMessage, StreamContext, StreamParseResult, StreamParser};
 
 /// TLS content types.
-#[allow(dead_code)]
 mod content_type {
     pub const CHANGE_CIPHER_SPEC: u8 = 20;
     pub const ALERT: u8 = 21;
@@ -16,16 +15,22 @@ mod content_type {
 }
 
 /// TLS handshake types.
-#[allow(dead_code)]
 mod handshake_type {
     pub const CLIENT_HELLO: u8 = 1;
     pub const SERVER_HELLO: u8 = 2;
+    #[allow(dead_code)] // RFC 5246 constant
     pub const CERTIFICATE: u8 = 11;
+    #[allow(dead_code)] // RFC 5246 constant
     pub const SERVER_KEY_EXCHANGE: u8 = 12;
+    #[allow(dead_code)] // RFC 5246 constant
     pub const CERTIFICATE_REQUEST: u8 = 13;
+    #[allow(dead_code)] // RFC 5246 constant
     pub const SERVER_HELLO_DONE: u8 = 14;
+    #[allow(dead_code)] // RFC 5246 constant
     pub const CERTIFICATE_VERIFY: u8 = 15;
+    #[allow(dead_code)] // RFC 5246 constant
     pub const CLIENT_KEY_EXCHANGE: u8 = 16;
+    #[allow(dead_code)] // RFC 5246 constant
     pub const FINISHED: u8 = 20;
 }
 

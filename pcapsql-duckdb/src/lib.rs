@@ -77,6 +77,11 @@ pub const EXTENSION_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Extension entry point called by DuckDB when loading.
 ///
 /// Registers all table functions, scalar functions, and macros.
+///
+/// # Safety
+///
+/// This function is called by DuckDB's C API during extension loading.
+/// The caller must ensure that the Connection handle is valid.
 #[duckdb_entrypoint_c_api(ext_name = "pcapsql")]
 pub unsafe fn pcapsql_init(con: Connection) -> duckdb::Result<(), Box<dyn std::error::Error>> {
     // Log extension loading

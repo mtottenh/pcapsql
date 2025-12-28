@@ -1,7 +1,7 @@
 //! Command-line argument definitions.
 
 use clap::{Parser, ValueEnum};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::OutputFormat;
 
@@ -42,7 +42,7 @@ pub enum ExportFormat {
 
 impl ExportFormat {
     /// Infer export format from file extension.
-    pub fn from_extension(path: &PathBuf) -> Option<Self> {
+    pub fn from_extension(path: &Path) -> Option<Self> {
         path.extension()
             .and_then(|ext| ext.to_str())
             .map(|ext| ext.to_lowercase())

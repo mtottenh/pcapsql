@@ -114,8 +114,7 @@ impl VTab for ReadPcapVTab {
             let protocol = registry.get_parser(&protocol_name).ok_or_else(|| {
                 let available: Vec<_> = registry.all_parsers().map(|p| p.name()).collect();
                 DuckDbError::InvalidParameter(format!(
-                    "Unknown protocol: '{}'. Available: {:?}",
-                    protocol_name, available
+                    "Unknown protocol: '{protocol_name}'. Available: {available:?}"
                 ))
             })?;
 
@@ -155,12 +154,12 @@ impl VTab for ReadPcapVTab {
 
         // Open the PCAP file
         let source = FilePacketSource::open(&bind_data.file_path)
-            .map_err(|e| DuckDbError::Extension(format!("Failed to open PCAP file: {}", e)))?;
+            .map_err(|e| DuckDbError::Extension(format!("Failed to open PCAP file: {e}")))?;
 
         // Create reader
         let reader = source
             .reader(None)
-            .map_err(|e| DuckDbError::Extension(format!("Failed to create reader: {}", e)))?;
+            .map_err(|e| DuckDbError::Extension(format!("Failed to create reader: {e}")))?;
 
         Ok(ReadPcapInitData {
             reader: Mutex::new(Some(reader)),
@@ -260,7 +259,7 @@ impl VTab for ReadPcapVTab {
 
         // Check if we've reached end of file
         match result {
-            Ok(count) if count == 0 => {
+            Ok(0) => {
                 init_data.done.store(true, Ordering::Relaxed);
             }
             Err(e) if e.to_string().contains("batch full") => {
@@ -333,6 +332,7 @@ fn output_frame_row(
 }
 
 /// Output a parsed protocol row.
+#[allow(clippy::too_many_arguments)]
 fn output_parsed_row(
     output: &mut DataChunkHandle,
     row_idx: usize,
@@ -359,7 +359,10 @@ fn output_parsed_row(
 
         // Schema field names are like "arp.hardware_type" but parsed data uses "hardware_type"
         // Strip the protocol prefix to get the actual field name used in ParseResult
-        let lookup_name = field_name.split('.').last().unwrap_or(field_name.as_str());
+        let lookup_name = field_name
+            .split('.')
+            .next_back()
+            .unwrap_or(field_name.as_str());
 
         // Handle list columns specially - accumulate data in builders
         if list_columns.contains(col_idx) {

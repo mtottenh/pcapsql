@@ -13,7 +13,6 @@ use crate::schema::{DataKind, FieldDescriptor};
 pub const IP_PROTO_TCP: u8 = 6;
 
 /// TCP flags bit positions.
-#[allow(dead_code)]
 pub mod flags {
     pub const FIN: u16 = 0x001;
     pub const SYN: u16 = 0x002;

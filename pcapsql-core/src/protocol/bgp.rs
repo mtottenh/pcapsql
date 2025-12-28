@@ -27,7 +27,6 @@ pub mod message_type {
 }
 
 /// BGP path attribute type codes.
-#[allow(dead_code)]
 pub mod path_attr_type {
     pub const ORIGIN: u8 = 1;
     pub const AS_PATH: u8 = 2;
@@ -179,8 +178,8 @@ impl Protocol for BgpProtocol {
         let length = u16::from_be_bytes([data[16], data[17]]);
         fields.push(("length", FieldValue::UInt16(length)));
 
-        if length < 19 || length > 4096 {
-            return ParseResult::error(format!("BGP: invalid length {}", length), data);
+        if !(19..=4096).contains(&length) {
+            return ParseResult::error(format!("BGP: invalid length {length}"), data);
         }
 
         // Byte 18: Type
@@ -514,16 +513,15 @@ impl BgpProtocol {
             offset += 1;
 
             // Calculate how many bytes the prefix occupies
-            let prefix_bytes = (prefix_len_bits + 7) / 8;
+            let prefix_bytes = prefix_len_bits.div_ceil(8);
             if offset + prefix_bytes > data.len() {
                 break;
             }
 
             // Build the prefix (pad with zeros to make 4 bytes for IPv4)
             let mut prefix = [0u8; 4];
-            for i in 0..prefix_bytes.min(4) {
-                prefix[i] = data[offset + i];
-            }
+            let copy_len = prefix_bytes.min(4);
+            prefix[..copy_len].copy_from_slice(&data[offset..offset + copy_len]);
 
             let prefix_str = format!(
                 "{}.{}.{}.{}/{}",

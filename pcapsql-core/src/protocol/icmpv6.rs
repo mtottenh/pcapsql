@@ -703,7 +703,7 @@ mod tests {
         let context = create_context_icmpv6();
 
         // Router Solicitation with Source Link-Layer Address option
-        let mut data = vec![
+        let data = vec![
             0x85, // Type: Router Solicitation (133)
             0x00, // Code: 0
             0x00, 0x00, // Checksum

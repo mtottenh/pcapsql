@@ -80,6 +80,7 @@ pub struct ProtocolBatchStream<R: PacketReader> {
 }
 
 impl<R: PacketReader> ProtocolBatchStream<R> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         table_name: String,
         schema: SchemaRef,
@@ -117,6 +118,7 @@ impl<R: PacketReader> ProtocolBatchStream<R> {
     ///
     /// * `field_projections` - Per-protocol field sets. Key is protocol name,
     ///   value is set of field names to extract.
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_field_projections(
         table_name: String,
         schema: SchemaRef,

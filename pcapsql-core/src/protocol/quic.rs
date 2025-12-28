@@ -434,13 +434,13 @@ fn format_version(ver: u32) -> String {
         v if (v & 0xff000000) == 0xff000000 => {
             format!("Draft-{}", v & 0xff)
         }
-        _ => format!("0x{:08x}", ver),
+        _ => format!("0x{ver:08x}"),
     }
 }
 
 /// Encode bytes as hex string.
 fn hex_encode(data: &[u8]) -> String {
-    data.iter().map(|b| format!("{:02x}", b)).collect()
+    data.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 #[cfg(test)]

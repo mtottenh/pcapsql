@@ -10,7 +10,6 @@ use super::{FieldValue, ParseContext, ParseResult, Protocol};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// DNS well-known port.
-#[allow(dead_code)]
 pub const DNS_PORT: u16 = 53;
 
 /// DNS protocol parser.
@@ -27,12 +26,12 @@ impl Protocol for DnsProtocol {
     }
 
     fn can_parse(&self, context: &ParseContext) -> Option<u32> {
-        // Check for DNS port (53) in either src_port or dst_port
+        // Check for DNS port in either src_port or dst_port
         let src_port = context.hint("src_port");
         let dst_port = context.hint("dst_port");
 
         match (src_port, dst_port) {
-            (Some(53), _) | (_, Some(53)) => Some(100),
+            (Some(p), _) | (_, Some(p)) if p == DNS_PORT as u64 => Some(100),
             _ => None,
         }
     }
@@ -459,8 +458,7 @@ fn extract_answer_fields(packet: &Packet, fields: &mut SmallVec<[(&'static str, 
         // Extract type-specific data
         match &answer.rdata {
             RData::A(a) => {
-                let addr = a.address;
-                ip4s.push(FieldValue::UInt32(u32::from(addr)));
+                ip4s.push(FieldValue::UInt32(a.address));
             }
             RData::AAAA(aaaa) => {
                 // Use IpAddr to avoid heap allocation for IPv6 address
@@ -515,8 +513,7 @@ fn extract_answer_fields_projected(
 
         match &answer.rdata {
             RData::A(a) if need_ip4s => {
-                let addr = a.address;
-                ip4s.push(FieldValue::UInt32(u32::from(addr)));
+                ip4s.push(FieldValue::UInt32(a.address));
             }
             RData::AAAA(aaaa) if need_ip6s => {
                 // Use IpAddr to avoid heap allocation for IPv6 address

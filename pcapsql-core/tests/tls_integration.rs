@@ -66,7 +66,7 @@ fn test_keylog_parsing_tls12() {
         hex::encode(TEST_MASTER_SECRET)
     );
 
-    let keylog = KeyLog::from_str(&keylog_content).expect("Failed to parse keylog");
+    let keylog = KeyLog::parse(&keylog_content).expect("Failed to parse keylog");
 
     assert_eq!(keylog.session_count(), 1);
     assert_eq!(keylog.entry_count(), 1);
@@ -88,7 +88,7 @@ fn test_keylog_parsing_tls13() {
         hex::encode(TEST_TRAFFIC_SECRET_32),
     );
 
-    let keylog = KeyLog::from_str(&keylog_content).expect("Failed to parse keylog");
+    let keylog = KeyLog::parse(&keylog_content).expect("Failed to parse keylog");
 
     assert_eq!(keylog.session_count(), 1);
     assert_eq!(keylog.entry_count(), 2);
@@ -120,7 +120,7 @@ fn test_keylog_parsing_mixed() {
         hex::encode(TEST_TRAFFIC_SECRET_32),
     );
 
-    let keylog = KeyLog::from_str(&keylog_content).expect("Failed to parse keylog");
+    let keylog = KeyLog::parse(&keylog_content).expect("Failed to parse keylog");
 
     assert_eq!(keylog.session_count(), 2);
     assert_eq!(keylog.entry_count(), 3);
@@ -296,7 +296,7 @@ fn test_session_tls12_full_handshake() {
         hex::encode(TEST_CLIENT_RANDOM),
         hex::encode(TEST_MASTER_SECRET)
     );
-    let keylog = Arc::new(KeyLog::from_str(&keylog_content).unwrap());
+    let keylog = Arc::new(KeyLog::parse(&keylog_content).unwrap());
 
     let mut session = TlsSession::new(keylog);
 
@@ -334,7 +334,7 @@ fn test_session_tls13_full_handshake() {
         hex::encode(TEST_CLIENT_RANDOM),
         hex::encode(TEST_TRAFFIC_SECRET_32),
     );
-    let keylog = Arc::new(KeyLog::from_str(&keylog_content).unwrap());
+    let keylog = Arc::new(KeyLog::parse(&keylog_content).unwrap());
 
     let mut session = TlsSession::new(keylog);
 
@@ -383,7 +383,7 @@ fn test_session_unsupported_cipher_suite() {
         hex::encode(TEST_CLIENT_RANDOM),
         hex::encode(TEST_MASTER_SECRET)
     );
-    let keylog = Arc::new(KeyLog::from_str(&keylog_content).unwrap());
+    let keylog = Arc::new(KeyLog::parse(&keylog_content).unwrap());
 
     let mut session = TlsSession::new(keylog);
     session.process_client_hello(TEST_CLIENT_RANDOM);
@@ -542,7 +542,7 @@ fn test_full_pipeline_with_synthetic_data() {
         hex::encode(TEST_CLIENT_RANDOM),
         hex::encode(TEST_MASTER_SECRET)
     );
-    let keylog = Arc::new(KeyLog::from_str(&keylog_content).unwrap());
+    let keylog = Arc::new(KeyLog::parse(&keylog_content).unwrap());
 
     // Create session
     let mut session = TlsSession::new(keylog.clone());
@@ -633,28 +633,28 @@ fn test_keylog_file_not_found() {
 
 #[test]
 fn test_keylog_empty_file() {
-    let keylog = KeyLog::from_str("").unwrap();
+    let keylog = KeyLog::parse("").unwrap();
     assert!(keylog.is_empty());
     assert_eq!(keylog.session_count(), 0);
 }
 
 #[test]
 fn test_keylog_comments_only() {
-    let keylog = KeyLog::from_str("# This is a comment\n# Another comment\n").unwrap();
+    let keylog = KeyLog::parse("# This is a comment\n# Another comment\n").unwrap();
     assert!(keylog.is_empty());
 }
 
 #[test]
 fn test_keylog_invalid_hex() {
     // Invalid hex in client_random
-    let result = KeyLog::from_str("CLIENT_RANDOM ZZZZ 0000");
+    let result = KeyLog::parse("CLIENT_RANDOM ZZZZ 0000");
     assert!(result.is_err(), "Should fail with invalid hex");
 }
 
 #[test]
 fn test_keylog_wrong_length() {
     // Client random too short (should be 32 bytes = 64 hex chars)
-    let result = KeyLog::from_str("CLIENT_RANDOM 0102030405 0102030405");
+    let result = KeyLog::parse("CLIENT_RANDOM 0102030405 0102030405");
     assert!(result.is_err(), "Should fail with wrong length");
 }
 

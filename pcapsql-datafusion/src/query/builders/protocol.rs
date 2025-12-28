@@ -195,7 +195,7 @@ impl DynamicBuilder {
                 FieldValue::IpAddr(addr) => {
                     // For IPv6, store as 16 bytes
                     if let std::net::IpAddr::V6(v6) = addr {
-                        let _ = b.append_value(&v6.octets());
+                        let _ = b.append_value(v6.octets());
                     } else {
                         b.append_null();
                     }
@@ -276,7 +276,7 @@ impl DynamicBuilder {
                                 let _ = b.values().append_value(data.as_slice());
                             }
                             FieldValue::IpAddr(std::net::IpAddr::V6(v6)) => {
-                                let _ = b.values().append_value(&v6.octets());
+                                let _ = b.values().append_value(v6.octets());
                             }
                             FieldValue::MacAddr(mac) => {
                                 let _ = b.values().append_value(mac.as_slice());
@@ -335,6 +335,7 @@ impl DynamicBuilder {
     }
 
     /// Get the current row count.
+    #[allow(dead_code)]
     fn len(&self) -> usize {
         match self {
             DynamicBuilder::UInt8(b) => b.len(),
@@ -642,6 +643,7 @@ impl ProtocolBatchBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pcapsql_core::TunnelType;
     use smallvec::SmallVec;
 
     #[test]

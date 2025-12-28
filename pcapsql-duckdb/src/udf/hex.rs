@@ -5,6 +5,9 @@
 //!
 //! Named `pcap_hex` and `pcap_unhex` to avoid conflict with DuckDB's built-in functions.
 
+// Loop indices needed for both null checks and slice access
+#![allow(clippy::needless_range_loop)]
+
 use duckdb::core::{DataChunkHandle, Inserter, LogicalTypeHandle, LogicalTypeId};
 use duckdb::types::DuckString;
 use duckdb::vscalar::{ScalarFunctionSignature, VScalar};

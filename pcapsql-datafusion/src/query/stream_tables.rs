@@ -61,7 +61,7 @@ impl StreamTableBuilder {
         // and feed it to the stream manager
         loop {
             let processed = reader.process_packets(1000, |packet| {
-                self.process_packet(packet.data, packet.frame_number as u64, packet.timestamp_us)?;
+                self.process_packet(packet.data, packet.frame_number, packet.timestamp_us)?;
                 Ok(())
             })?;
 
@@ -166,8 +166,7 @@ impl StreamTableBuilder {
             )
             .map_err(|e| {
                 Error::Query(QueryError::Execution(format!(
-                    "Stream processing error: {}",
-                    e
+                    "Stream processing error: {e}"
                 )))
             })?;
 
@@ -217,10 +216,10 @@ impl StreamTableBuilder {
             if protocol == "tls" && !msgs.is_empty() {
                 for (i, msg) in msgs.iter().take(5).enumerate() {
                     if let Some(ht) = msg.fields.get("handshake_type") {
-                        eprintln!("      [{i}] handshake_type: {:?}", ht);
+                        eprintln!("      [{i}] handshake_type: {ht:?}");
                     }
                     if let Some(rt) = msg.fields.get("record_type") {
-                        eprintln!("      [{i}] record_type: {:?}", rt);
+                        eprintln!("      [{i}] record_type: {rt:?}");
                     }
                 }
             }
@@ -383,12 +382,8 @@ fn build_http2_batch(
         Arc::new(promised_stream_id.finish()),
     ];
 
-    RecordBatch::try_new(schema.clone(), columns).map_err(|e| {
-        Error::Query(QueryError::Execution(format!(
-            "Failed to build batch: {}",
-            e
-        )))
-    })
+    RecordBatch::try_new(schema.clone(), columns)
+        .map_err(|e| Error::Query(QueryError::Execution(format!("Failed to build batch: {e}"))))
 }
 
 // Helper functions to extract values from FieldValue

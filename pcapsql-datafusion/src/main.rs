@@ -1,7 +1,7 @@
 //! pcapsql CLI entry point.
 
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -77,8 +77,7 @@ async fn main() -> Result<()> {
                 .with_context(|| format!("Failed to open PCAP file: {}", pcap_file.display()))?,
                 Err(e) => {
                     eprintln!(
-                        "Warning: mmap not supported for this file ({}), falling back to file source",
-                        e
+                        "Warning: mmap not supported for this file ({e}), falling back to file source"
                     );
                     use pcapsql_core::FilePacketSource;
                     let source =
@@ -92,7 +91,7 @@ async fn main() -> Result<()> {
                         !args.no_reader_eviction,
                     )
                     .await
-                    .with_context(|| format!("Failed to create engine"))?
+                    .with_context(|| "Failed to create engine".to_string())?
                 }
             }
         } else {
@@ -108,7 +107,7 @@ async fn main() -> Result<()> {
                 !args.no_reader_eviction,
             )
             .await
-            .with_context(|| format!("Failed to create engine"))?
+            .with_context(|| "Failed to create engine".to_string())?
         }
     } else {
         // In-memory mode (default for small files)
@@ -220,7 +219,7 @@ fn show_schema() {
 
     // Show each protocol table
     for (table_name, schema) in tables::all_table_schemas() {
-        println!("Table: {}", table_name);
+        println!("Table: {table_name}");
         println!("{:-<70}", "");
         println!("{:<30} {:<30} Nullable", "Column", "Type");
         println!("{:-<70}", "");
@@ -250,7 +249,7 @@ fn show_schema() {
 async fn run_repl(
     engine: &QueryEngine,
     formatter: &OutputFormatter,
-    pcap_file: &PathBuf,
+    pcap_file: &Path,
 ) -> Result<()> {
     use arrow::array::RecordBatch;
 
@@ -380,7 +379,7 @@ fn print_help() {
 fn print_tables() {
     println!("Protocol Tables (use frame_number for JOINs):");
     for table_name in tables::all_table_names() {
-        println!("  {}", table_name);
+        println!("  {table_name}");
     }
 
     println!();
@@ -425,7 +424,7 @@ fn load_keylog(args: &Args) -> Option<Arc<KeyLog>> {
             Some(Arc::new(keylog))
         }
         Err(e) => {
-            eprintln!("Warning: Failed to load SSLKEYLOGFILE: {}", e);
+            eprintln!("Warning: Failed to load SSLKEYLOGFILE: {e}");
             eprintln!("         Path: {}", path.display());
             eprintln!("         TLS decryption will be disabled.");
             None

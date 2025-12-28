@@ -135,7 +135,7 @@ mod tests {
 
         let parser = Ipv4Protocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", 0x0800);
+        context.insert_hint("ethertype", ethertype::IPV4 as u64);
 
         let result = parser.parse(&header, &context);
 
@@ -162,7 +162,7 @@ mod tests {
 
         let parser = Ipv4Protocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", 0x0800);
+        context.insert_hint("ethertype", ethertype::IPV4 as u64);
 
         let result = parser.parse(&header, &context);
 
@@ -190,7 +190,7 @@ mod tests {
 
         let parser = Ipv4Protocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", 0x0800);
+        context.insert_hint("ethertype", ethertype::IPV4 as u64);
 
         let result = parser.parse(&header, &context);
 
@@ -218,7 +218,7 @@ mod tests {
 
         let parser = Ipv4Protocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", 0x0800);
+        context.insert_hint("ethertype", ethertype::IPV4 as u64);
 
         let result = parser.parse(&packet, &context);
 
@@ -236,12 +236,12 @@ mod tests {
 
         // With IPv6 ethertype
         let mut ctx2 = ParseContext::new(1);
-        ctx2.insert_hint("ethertype", 0x86DD);
+        ctx2.insert_hint("ethertype", ethertype::IPV6 as u64);
         assert!(parser.can_parse(&ctx2).is_none());
 
         // With IPv4 ethertype
         let mut ctx3 = ParseContext::new(1);
-        ctx3.insert_hint("ethertype", 0x0800);
+        ctx3.insert_hint("ethertype", ethertype::IPV4 as u64);
         assert!(parser.can_parse(&ctx3).is_some());
     }
 
@@ -251,7 +251,7 @@ mod tests {
 
         let parser = Ipv4Protocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", 0x0800);
+        context.insert_hint("ethertype", ethertype::IPV4 as u64);
 
         let result = parser.parse(&short_header, &context);
 
@@ -271,7 +271,7 @@ mod tests {
 
         let parser = Ipv4Protocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", 0x0800);
+        context.insert_hint("ethertype", ethertype::IPV4 as u64);
 
         let result = parser.parse(&header, &context);
 
@@ -303,7 +303,7 @@ mod tests {
 
         let parser = Ipv4Protocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", 0x0800);
+        context.insert_hint("ethertype", ethertype::IPV4 as u64);
 
         let result = parser.parse(&header, &context);
 
@@ -326,7 +326,7 @@ mod tests {
 
         let parser = Ipv4Protocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", 0x0800);
+        context.insert_hint("ethertype", ethertype::IPV4 as u64);
 
         let result = parser.parse(&header, &context);
 

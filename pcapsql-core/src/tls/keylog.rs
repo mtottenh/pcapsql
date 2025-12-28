@@ -208,7 +208,7 @@ impl KeyLog {
     }
 
     /// Parse a KeyLog from a string.
-    pub fn from_str(content: &str) -> Result<Self, KeyLogError> {
+    pub fn parse(content: &str) -> Result<Self, KeyLogError> {
         Self::from_reader(content.as_bytes())
     }
 
@@ -401,7 +401,7 @@ fn parse_hex_48(hex: &str, line: usize) -> Result<[u8; 48], KeyLogError> {
 
 /// Parse a hex string into a Vec<u8>.
 fn parse_hex_vec(hex: &str, line: usize) -> Result<Vec<u8>, KeyLogError> {
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         return Err(KeyLogError::InvalidHex {
             line,
             message: "hex string has odd length".to_string(),
@@ -414,11 +414,11 @@ fn parse_hex_vec(hex: &str, line: usize) -> Result<Vec<u8>, KeyLogError> {
     while let (Some(h), Some(l)) = (chars.next(), chars.next()) {
         let high = hex_digit(h).ok_or_else(|| KeyLogError::InvalidHex {
             line,
-            message: format!("invalid hex character: {}", h),
+            message: format!("invalid hex character: {h}"),
         })?;
         let low = hex_digit(l).ok_or_else(|| KeyLogError::InvalidHex {
             line,
-            message: format!("invalid hex character: {}", l),
+            message: format!("invalid hex character: {l}"),
         })?;
         bytes.push((high << 4) | low);
     }
@@ -444,7 +444,7 @@ mod tests {
     fn test_parse_client_random() {
         let content = "CLIENT_RANDOM 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f";
 
-        let keylog = KeyLog::from_str(content).unwrap();
+        let keylog = KeyLog::parse(content).unwrap();
 
         assert_eq!(keylog.session_count(), 1);
         assert_eq!(keylog.entry_count(), 1);
@@ -474,7 +474,7 @@ CLIENT_TRAFFIC_SECRET_0 00000000000000000000000000000000000000000000000000000000
 SERVER_TRAFFIC_SECRET_0 0000000000000000000000000000000000000000000000000000000000000001 cafebabe12345678deadbeef87654321abcdef01234567890abcdef012345678
 "#;
 
-        let keylog = KeyLog::from_str(content).unwrap();
+        let keylog = KeyLog::parse(content).unwrap();
 
         assert_eq!(keylog.session_count(), 1);
         assert_eq!(keylog.entry_count(), 4);
@@ -504,7 +504,7 @@ CLIENT_RANDOM bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb 1
 CLIENT_RANDOM cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc 202122232425262728292a2b2c2d2e2f000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
 "#;
 
-        let keylog = KeyLog::from_str(content).unwrap();
+        let keylog = KeyLog::parse(content).unwrap();
 
         assert_eq!(keylog.session_count(), 3);
         assert_eq!(keylog.entry_count(), 3);
@@ -532,7 +532,7 @@ CLIENT_RANDOM 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef 0
 # Another comment
 "#;
 
-        let keylog = KeyLog::from_str(content).unwrap();
+        let keylog = KeyLog::parse(content).unwrap();
         assert_eq!(keylog.session_count(), 1);
     }
 
@@ -540,7 +540,7 @@ CLIENT_RANDOM 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef 0
     fn test_lookup_slice() {
         let content = "CLIENT_RANDOM 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f";
 
-        let keylog = KeyLog::from_str(content).unwrap();
+        let keylog = KeyLog::parse(content).unwrap();
 
         let client_random: [u8; 32] = [
             0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab,
@@ -560,7 +560,7 @@ CLIENT_RANDOM 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef 0
         // Client random too short
         let content = "CLIENT_RANDOM 0123456789abcdef 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f";
 
-        let result = KeyLog::from_str(content);
+        let result = KeyLog::parse(content);
         assert!(matches!(
             result,
             Err(KeyLogError::InvalidHex { line: 1, .. })
@@ -571,7 +571,7 @@ CLIENT_RANDOM 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef 0
     fn test_invalid_hex_char() {
         let content = "CLIENT_RANDOM zzzz456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f";
 
-        let result = KeyLog::from_str(content);
+        let result = KeyLog::parse(content);
         assert!(matches!(
             result,
             Err(KeyLogError::InvalidHex { line: 1, .. })
@@ -582,7 +582,7 @@ CLIENT_RANDOM 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef 0
     fn test_unknown_key_type() {
         let content = "UNKNOWN_TYPE 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef deadbeef";
 
-        let result = KeyLog::from_str(content);
+        let result = KeyLog::parse(content);
         assert!(matches!(
             result,
             Err(KeyLogError::UnknownKeyType {
@@ -596,7 +596,7 @@ CLIENT_RANDOM 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef 0
     fn test_invalid_format_wrong_fields() {
         let content = "CLIENT_RANDOM only_two_fields";
 
-        let result = KeyLog::from_str(content);
+        let result = KeyLog::parse(content);
         assert!(matches!(
             result,
             Err(KeyLogError::InvalidFormat { line: 1, .. })
@@ -607,7 +607,7 @@ CLIENT_RANDOM 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef 0
     fn test_case_insensitive_hex() {
         let content = "CLIENT_RANDOM AABBCCDD00112233445566778899aabbccddeeff00112233445566778899AABB 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f";
 
-        let keylog = KeyLog::from_str(content).unwrap();
+        let keylog = KeyLog::parse(content).unwrap();
         assert_eq!(keylog.session_count(), 1);
     }
 
@@ -618,7 +618,7 @@ CLIENT_RANDOM aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 0
 CLIENT_RANDOM bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb 101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f000102030405060708090a0b0c0d0e0f
 "#;
 
-        let keylog = KeyLog::from_str(content).unwrap();
+        let keylog = KeyLog::parse(content).unwrap();
 
         let randoms: Vec<_> = keylog.client_randoms().collect();
         assert_eq!(randoms.len(), 2);
@@ -627,7 +627,7 @@ CLIENT_RANDOM bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb 1
     #[test]
     fn test_empty_keylog() {
         let content = "# Just comments\n\n";
-        let keylog = KeyLog::from_str(content).unwrap();
+        let keylog = KeyLog::parse(content).unwrap();
         assert!(keylog.is_empty());
         assert_eq!(keylog.session_count(), 0);
         assert_eq!(keylog.entry_count(), 0);
@@ -638,7 +638,7 @@ CLIENT_RANDOM bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb 1
         // SHA-384 produces 48-byte secrets
         let content = "CLIENT_TRAFFIC_SECRET_0 0000000000000000000000000000000000000000000000000000000000000001 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f";
 
-        let keylog = KeyLog::from_str(content).unwrap();
+        let keylog = KeyLog::parse(content).unwrap();
 
         let client_random: [u8; 32] = {
             let mut arr = [0u8; 32];

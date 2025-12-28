@@ -7,6 +7,9 @@
 //! - `ip_proto_name(proto)` -> String (e.g., "TCP", "UDP")
 //! - `ethertype_name(type)` -> String (e.g., "IPv4", "ARP")
 
+// Loop indices needed for both null checks and slice access
+#![allow(clippy::needless_range_loop)]
+
 use duckdb::core::{DataChunkHandle, Inserter, LogicalTypeHandle, LogicalTypeId};
 use duckdb::types::DuckString;
 use duckdb::vscalar::{ScalarFunctionSignature, VScalar};
@@ -357,7 +360,7 @@ fn dns_type_to_string(qtype: u16) -> String {
         255 => "ANY".to_string(),
         256 => "URI".to_string(),
         257 => "CAA".to_string(),
-        _ => format!("TYPE{}", qtype),
+        _ => format!("TYPE{qtype}"),
     }
 }
 
@@ -375,7 +378,7 @@ fn dns_rcode_to_string(rcode: u16) -> String {
         8 => "NXRRSET".to_string(),
         9 => "NOTAUTH".to_string(),
         10 => "NOTZONE".to_string(),
-        _ => format!("RCODE{}", rcode),
+        _ => format!("RCODE{rcode}"),
     }
 }
 
@@ -393,7 +396,7 @@ fn ip_proto_to_string(proto: u8) -> String {
         58 => "ICMPv6".to_string(),
         89 => "OSPF".to_string(),
         132 => "SCTP".to_string(),
-        _ => format!("PROTO{}", proto),
+        _ => format!("PROTO{proto}"),
     }
 }
 
@@ -409,7 +412,7 @@ fn ethertype_to_string(etype: u16) -> String {
         0x88A8 => "QinQ".to_string(),
         0x88CC => "LLDP".to_string(),
         0x88E5 => "MACsec".to_string(),
-        _ => format!("0x{:04X}", etype),
+        _ => format!("0x{etype:04X}"),
     }
 }
 

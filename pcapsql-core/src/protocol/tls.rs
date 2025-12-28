@@ -28,6 +28,7 @@ use super::{FieldValue, ParseContext, ParseResult, Protocol};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// TLS/HTTPS port.
+#[allow(dead_code)]
 pub const TLS_PORT: u16 = 443;
 
 /// Common TLS ports for priority matching.
@@ -141,7 +142,7 @@ impl Protocol for TlsProtocol {
 
                 ParseResult::partial(fields, &data[5..], "TLS record incomplete".to_string())
             }
-            Err(e) => ParseResult::error(format!("TLS parse error: {:?}", e), data),
+            Err(e) => ParseResult::error(format!("TLS parse error: {e:?}"), data),
         }
     }
 
@@ -638,19 +639,19 @@ fn format_tls_version(version: TlsVersion) -> String {
         0x0303 => "TLS 1.2".to_string(),
         0x0304 => "TLS 1.3".to_string(),
         v if is_grease_value(v) => "GREASE".to_string(),
-        v => format!("Unknown (0x{:04x})", v),
+        v => format!("Unknown (0x{v:04x})"),
     }
 }
 
 /// Get cipher suite name from ID using tls-parser's IANA database.
 fn cipher_suite_name(id: u16) -> String {
     if is_grease_value(id) {
-        return format!("GREASE (0x{:04x})", id);
+        return format!("GREASE (0x{id:04x})");
     }
 
     TlsCipherSuite::from_id(id)
         .map(|cs| cs.name.to_string())
-        .unwrap_or_else(|| format!("0x{:04X}", id))
+        .unwrap_or_else(|| format!("0x{id:04X}"))
 }
 
 /// Format compression method.
@@ -659,7 +660,7 @@ fn format_compression_method(method: u8) -> String {
         0 => "null".to_string(),
         1 => "DEFLATE".to_string(),
         64 => "LZS".to_string(),
-        _ => format!("0x{:02x}", method),
+        _ => format!("0x{method:02x}"),
     }
 }
 
@@ -683,7 +684,7 @@ fn format_signature_algorithm(alg: u16) -> String {
         0x080a => "rsa_pss_pss_sha384".to_string(),
         0x080b => "rsa_pss_pss_sha512".to_string(),
         v if is_grease_value(v) => "GREASE".to_string(),
-        _ => format!("0x{:04x}", alg),
+        _ => format!("0x{alg:04x}"),
     }
 }
 
@@ -726,17 +727,17 @@ fn format_named_group(group: u16) -> String {
         259 => "ffdhe6144".to_string(),
         260 => "ffdhe8192".to_string(),
         v if is_grease_value(v) => "GREASE".to_string(),
-        _ => format!("0x{:04x}", group),
+        _ => format!("0x{group:04x}"),
     }
 }
 
 /// Format EC point format.
-fn format_ec_point_format(format: u8) -> String {
-    match format {
+fn format_ec_point_format(fmt: u8) -> String {
+    match fmt {
         0 => "uncompressed".to_string(),
         1 => "ansiX962_compressed_prime".to_string(),
         2 => "ansiX962_compressed_char2".to_string(),
-        _ => format!("0x{:02x}", format),
+        _ => format!("0x{fmt:02x}"),
     }
 }
 

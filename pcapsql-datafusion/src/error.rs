@@ -78,10 +78,7 @@ impl From<Error> for pcapsql_core::Error {
     fn from(err: Error) -> Self {
         match err {
             Error::Core(e) => e,
-            Error::Query(e) => pcapsql_core::Error::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            )),
+            Error::Query(e) => pcapsql_core::Error::Io(std::io::Error::other(e.to_string())),
             Error::Io(e) => pcapsql_core::Error::Io(e),
         }
     }

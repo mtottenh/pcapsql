@@ -9,6 +9,7 @@
 use compact_str::CompactString;
 use smallvec::SmallVec;
 
+use super::ethernet::ethertype;
 use super::{FieldValue, ParseContext, ParseResult, Protocol, TunnelType};
 use crate::schema::{DataKind, FieldDescriptor};
 
@@ -108,7 +109,7 @@ impl Protocol for MplsProtocol {
             // Check stack depth limit for safety
             if stack_depth >= MAX_LABEL_STACK_DEPTH {
                 return ParseResult::error(
-                    format!("MPLS: label stack too deep (max {})", MAX_LABEL_STACK_DEPTH),
+                    format!("MPLS: label stack too deep (max {MAX_LABEL_STACK_DEPTH})"),
                     data,
                 );
             }
@@ -179,11 +180,11 @@ impl Protocol for MplsProtocol {
 
             match version {
                 4 => {
-                    child_hints.push(("ethertype", 0x0800u64)); // IPv4
+                    child_hints.push(("ethertype", ethertype::IPV4 as u64));
                     child_hints.push(("ip_version", 4u64));
                 }
                 6 => {
-                    child_hints.push(("ethertype", 0x86DDu64)); // IPv6
+                    child_hints.push(("ethertype", ethertype::IPV6 as u64));
                     child_hints.push(("ip_version", 6u64));
                 }
                 _ => {
@@ -246,7 +247,7 @@ mod tests {
 
         // With IPv4 ethertype
         let mut ctx2 = ParseContext::new(1);
-        ctx2.insert_hint("ethertype", 0x0800);
+        ctx2.insert_hint("ethertype", ethertype::IPV4 as u64);
         assert!(parser.can_parse(&ctx2).is_none());
 
         // With MPLS unicast ethertype
@@ -399,7 +400,7 @@ mod tests {
 
         let result_ipv4 = parser.parse(&data_ipv4, &context);
         assert!(result_ipv4.is_ok());
-        assert_eq!(result_ipv4.hint("ethertype"), Some(0x0800u64));
+        assert_eq!(result_ipv4.hint("ethertype"), Some(ethertype::IPV4 as u64));
         assert_eq!(result_ipv4.hint("ip_version"), Some(4u64));
 
         // IPv6 inner (version nibble = 6)
@@ -409,7 +410,7 @@ mod tests {
 
         let result_ipv6 = parser.parse(&data_ipv6, &context);
         assert!(result_ipv6.is_ok());
-        assert_eq!(result_ipv6.hint("ethertype"), Some(0x86DDu64));
+        assert_eq!(result_ipv6.hint("ethertype"), Some(ethertype::IPV6 as u64));
         assert_eq!(result_ipv6.hint("ip_version"), Some(6u64));
     }
 

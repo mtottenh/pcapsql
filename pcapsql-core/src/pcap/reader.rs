@@ -78,7 +78,7 @@ impl PcapReader {
         // Create decoder
         let decoder = FileDecoder::new(file, compression).map_err(|e| {
             Error::Pcap(OurPcapError::InvalidFormat {
-                reason: format!("Failed to create decoder: {}", e),
+                reason: format!("Failed to create decoder: {e}"),
             })
         })?;
 
@@ -101,7 +101,7 @@ impl PcapReader {
         let file = File::open(path)?;
         let decoder = FileDecoder::new(file, compression).map_err(|e| {
             Error::Pcap(OurPcapError::InvalidFormat {
-                reason: format!("Failed to create decoder: {}", e),
+                reason: format!("Failed to create decoder: {e}"),
             })
         })?;
 

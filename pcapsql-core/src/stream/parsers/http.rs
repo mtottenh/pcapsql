@@ -232,7 +232,7 @@ impl StreamParser for HttpStreamParser {
                 }
 
                 if let Some(version) = req.version {
-                    let version_str = format!("HTTP/1.{}", version);
+                    let version_str = format!("HTTP/1.{version}");
                     fields.insert(
                         "http_version",
                         FieldValue::OwnedString(CompactString::new(version_str)),
@@ -301,7 +301,7 @@ impl StreamParser for HttpStreamParser {
                 fields.insert("is_request", FieldValue::Bool(false));
 
                 if let Some(version) = resp.version {
-                    let version_str = format!("HTTP/1.{}", version);
+                    let version_str = format!("HTTP/1.{version}");
                     fields.insert(
                         "http_version",
                         FieldValue::OwnedString(CompactString::new(version_str)),

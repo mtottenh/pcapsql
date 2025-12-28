@@ -116,7 +116,7 @@ impl<S: PacketSource + 'static> TableProvider for ProtocolTableProvider<S> {
     ) -> DFResult<Arc<dyn ExecutionPlan>> {
         match &self.mode {
             TableMode::InMemory { batches } => Ok(MemorySourceConfig::try_new_exec(
-                &[batches.clone()],
+                std::slice::from_ref(batches),
                 self.schema.clone(),
                 projection.cloned(),
             )? as Arc<dyn ExecutionPlan>),

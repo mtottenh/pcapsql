@@ -316,8 +316,7 @@ impl QueryEngine {
         for table_name in tables::all_table_names() {
             let schema = Arc::new(tables::get_table_schema(table_name).ok_or_else(|| {
                 Error::Query(QueryError::Execution(format!(
-                    "Unknown table: {}",
-                    table_name
+                    "Unknown table: {table_name}"
                 )))
             })?);
 
@@ -458,7 +457,7 @@ impl QueryEngine {
 
             // Update progress bar
             if let Some(ref pb) = progress {
-                pb.set_message(format!("{} packets loaded", packet_count));
+                pb.set_message(format!("{packet_count} packets loaded"));
                 pb.tick();
             }
 
@@ -470,7 +469,7 @@ impl QueryEngine {
 
         // Finish progress bar
         if let Some(pb) = progress {
-            pb.finish_with_message(format!("{} packets loaded", packet_count));
+            pb.finish_with_message(format!("{packet_count} packets loaded"));
         }
 
         // Finish and return all batches

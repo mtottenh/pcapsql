@@ -107,7 +107,7 @@ impl SimplePredicate {
             SimplePredicate::ProtocolEquals { value } => {
                 // Check transport protocol name
                 let protocol = get_protocol_name(parsed);
-                protocol.map_or(false, |p| p.eq_ignore_ascii_case(value))
+                protocol.is_some_and(|p| p.eq_ignore_ascii_case(value))
             }
             SimplePredicate::And(left, right) => left.matches(parsed) && right.matches(parsed),
             SimplePredicate::AlwaysTrue => true,
@@ -379,6 +379,7 @@ mod tests {
     use super::*;
     use datafusion::logical_expr::col;
     use datafusion::prelude::lit;
+    use pcapsql_core::TunnelType;
     use smallvec::SmallVec;
 
     fn create_tcp_parsed() -> Vec<(&'static str, ParseResult<'static>)> {

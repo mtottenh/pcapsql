@@ -10,7 +10,6 @@ use super::{FieldValue, ParseContext, ParseResult, Protocol};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// NTP port.
-#[allow(dead_code)]
 pub const NTP_PORT: u16 = 123;
 
 /// NTP header size.
@@ -30,12 +29,12 @@ impl Protocol for NtpProtocol {
     }
 
     fn can_parse(&self, context: &ParseContext) -> Option<u32> {
-        // Check for NTP port 123
+        // Check for NTP port
         let src_port = context.hint("src_port");
         let dst_port = context.hint("dst_port");
 
         match (src_port, dst_port) {
-            (Some(123), _) | (_, Some(123)) => Some(100),
+            (Some(p), _) | (_, Some(p)) if p == NTP_PORT as u64 => Some(100),
             _ => None,
         }
     }

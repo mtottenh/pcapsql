@@ -90,6 +90,7 @@ impl DecryptingTlsStreamParser {
     }
 
     /// Get or create TLS state for a connection.
+    #[allow(dead_code)]
     fn get_or_create_state(&self, connection_id: u64) -> ConnectionTlsState {
         let mut sessions = self.sessions.lock().unwrap();
         sessions
@@ -99,6 +100,7 @@ impl DecryptingTlsStreamParser {
     }
 
     /// Update state after processing.
+    #[allow(dead_code)]
     fn update_state(&self, connection_id: u64, state: ConnectionTlsState) {
         let mut sessions = self.sessions.lock().unwrap();
         sessions.insert(connection_id, state);
@@ -290,6 +292,7 @@ fn detect_tls13_from_extensions(ext_data: &[u8]) -> Option<TlsVersion> {
 
 impl ConnectionTlsState {
     /// Clone state for processing (needed due to borrow checker)
+    #[allow(dead_code)]
     fn clone_state(&self) -> Self {
         // We can't truly clone TlsSession, so we create a lightweight view
         // For now, we'll use a different approach - keep state in Arc<Mutex<>>
@@ -461,8 +464,7 @@ impl StreamParser for DecryptingTlsStreamParser {
                     fields.insert(
                         "record_type",
                         FieldValue::OwnedString(CompactString::new(format!(
-                            "Unknown({})",
-                            content_type
+                            "Unknown({content_type})"
                         ))),
                     );
                 }
@@ -708,7 +710,7 @@ mod tests {
         let ctx = test_context();
 
         // Two small records
-        let mut data = vec![
+        let data = vec![
             // First record (ChangeCipherSpec)
             20, 3, 3, 0, 1, 1, // Second record (ApplicationData)
             23, 3, 3, 0, 5, 1, 2, 3, 4, 5,

@@ -352,6 +352,7 @@ impl StreamManager {
     }
 
     /// Finalize a closed connection.
+    #[allow(clippy::ptr_arg)]
     fn finalize_connection(
         &mut self,
         connection_id: u64,

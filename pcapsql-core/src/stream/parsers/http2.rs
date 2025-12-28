@@ -200,6 +200,7 @@ impl FrameHeader {
 
 /// Priority data for HEADERS and PRIORITY frames
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct PriorityData {
     pub exclusive: bool,
     pub stream_dependency: u32,
@@ -211,6 +212,7 @@ pub struct PriorityData {
 pub enum StreamState {
     Idle,
     Open,
+    #[allow(dead_code)] // RFC 7540 state - not yet implemented
     HalfClosedLocal,
     HalfClosedRemote,
     Closed,
@@ -231,6 +233,7 @@ impl StreamState {
 /// HTTP/2 stream tracking
 #[derive(Debug, Clone)]
 pub struct Http2Stream {
+    #[allow(dead_code)] // Used in Debug output and future features
     pub stream_id: u32,
     pub state: StreamState,
 
@@ -272,6 +275,7 @@ impl Http2Stream {
     }
 
     /// Extract common header value
+    #[allow(dead_code)]
     pub fn get_header(&self, name: &str) -> Option<&str> {
         // Check request headers first, then response
         for (n, v) in &self.request_headers {
@@ -630,7 +634,7 @@ impl Http2StreamParser {
                     .push((name_str.clone(), value_str.clone()));
             }
 
-            header_strs.push(format!("{}: {}", name_str, value_str));
+            header_strs.push(format!("{name_str}: {value_str}"));
         }
 
         // Store all headers as a semicolon-separated string
@@ -723,7 +727,7 @@ impl Http2StreamParser {
             if !settings_strs.is_empty() {
                 fields.insert(
                     "settings",
-                    FieldValue::OwnedString(CompactString::new(&settings_strs.join(", "))),
+                    FieldValue::OwnedString(CompactString::new(settings_strs.join(", "))),
                 );
             }
         }

@@ -10,11 +10,9 @@ use super::{FieldValue, ParseContext, ParseResult, Protocol};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// DHCP server port.
-#[allow(dead_code)]
 pub const DHCP_SERVER_PORT: u16 = 67;
 
 /// DHCP client port.
-#[allow(dead_code)]
 pub const DHCP_CLIENT_PORT: u16 = 68;
 
 /// DHCP magic cookie (0x63825363).
@@ -37,12 +35,15 @@ impl Protocol for DhcpProtocol {
     }
 
     fn can_parse(&self, context: &ParseContext) -> Option<u32> {
-        // Check for DHCP ports (67 or 68) in either direction
+        // Check for DHCP ports in either direction
         let src_port = context.hint("src_port");
         let dst_port = context.hint("dst_port");
 
+        let is_dhcp_port = |p: u64| p == DHCP_SERVER_PORT as u64 || p == DHCP_CLIENT_PORT as u64;
+
         match (src_port, dst_port) {
-            (Some(67), _) | (_, Some(67)) | (Some(68), _) | (_, Some(68)) => Some(100),
+            (Some(p), _) if is_dhcp_port(p) => Some(100),
+            (_, Some(p)) if is_dhcp_port(p) => Some(100),
             _ => None,
         }
     }
@@ -185,7 +186,7 @@ fn format_ip(bytes: &[u8]) -> String {
 fn format_mac(bytes: &[u8]) -> String {
     bytes
         .iter()
-        .map(|b| format!("{:02x}", b))
+        .map(|b| format!("{b:02x}"))
         .collect::<Vec<_>>()
         .join(":")
 }

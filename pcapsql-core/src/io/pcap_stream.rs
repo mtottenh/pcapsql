@@ -65,7 +65,7 @@ impl PcapFormat {
             0x4d3cb2a1 => Ok(PcapFormat::LegacyBeNano),
             0x0a0d0d0a => Ok(PcapFormat::PcapNg),
             _ => Err(Error::Pcap(PcapError::InvalidFormat {
-                reason: format!("Unknown PCAP magic: 0x{:08x}", magic),
+                reason: format!("Unknown PCAP magic: 0x{magic:08x}"),
             })),
         }
     }
@@ -108,14 +108,14 @@ impl<R: Read> GenericPcapReader<R> {
         let inner = if format.is_pcapng() {
             let reader = PcapNGReader::new(BUFFER_SIZE, buf_reader).map_err(|e| {
                 Error::Pcap(PcapError::InvalidFormat {
-                    reason: format!("Failed to parse PCAPNG: {}", e),
+                    reason: format!("Failed to parse PCAPNG: {e}"),
                 })
             })?;
             ReaderInner::Ng(reader)
         } else {
             let reader = LegacyPcapReader::new(BUFFER_SIZE, buf_reader).map_err(|e| {
                 Error::Pcap(PcapError::InvalidFormat {
-                    reason: format!("Failed to parse legacy PCAP: {}", e),
+                    reason: format!("Failed to parse legacy PCAP: {e}"),
                 })
             })?;
             ReaderInner::Legacy(reader)
@@ -217,14 +217,14 @@ fn read_legacy_packet<S: Read>(
             Err(PcapParserError::Incomplete(_)) => {
                 reader.refill().map_err(|e| {
                     Error::Pcap(PcapError::InvalidFormat {
-                        reason: format!("Legacy PCAP refill error: {}", e),
+                        reason: format!("Legacy PCAP refill error: {e}"),
                     })
                 })?;
                 continue;
             }
             Err(e) => {
                 return Err(Error::Pcap(PcapError::InvalidFormat {
-                    reason: format!("Legacy PCAP parse error: {}", e),
+                    reason: format!("Legacy PCAP parse error: {e}"),
                 }));
             }
         }
@@ -298,14 +298,14 @@ fn read_pcapng_packet<S: Read>(
             Err(PcapParserError::Incomplete(_)) => {
                 reader.refill().map_err(|e| {
                     Error::Pcap(PcapError::InvalidFormat {
-                        reason: format!("PCAPNG refill error: {}", e),
+                        reason: format!("PCAPNG refill error: {e}"),
                     })
                 })?;
                 continue;
             }
             Err(e) => {
                 return Err(Error::Pcap(PcapError::InvalidFormat {
-                    reason: format!("PCAPNG parse error: {}", e),
+                    reason: format!("PCAPNG parse error: {e}"),
                 }));
             }
         }
@@ -371,14 +371,14 @@ where
             Err(PcapParserError::Incomplete(_)) => {
                 reader.refill().map_err(|e| {
                     Error::Pcap(PcapError::InvalidFormat {
-                        reason: format!("Legacy PCAP refill error: {}", e),
+                        reason: format!("Legacy PCAP refill error: {e}"),
                     })
                 })?;
                 continue;
             }
             Err(e) => {
                 return Err(Error::Pcap(PcapError::InvalidFormat {
-                    reason: format!("Legacy PCAP parse error: {}", e),
+                    reason: format!("Legacy PCAP parse error: {e}"),
                 }));
             }
         }
@@ -475,14 +475,14 @@ where
             Err(PcapParserError::Incomplete(_)) => {
                 reader.refill().map_err(|e| {
                     Error::Pcap(PcapError::InvalidFormat {
-                        reason: format!("PCAPNG refill error: {}", e),
+                        reason: format!("PCAPNG refill error: {e}"),
                     })
                 })?;
                 continue;
             }
             Err(e) => {
                 return Err(Error::Pcap(PcapError::InvalidFormat {
-                    reason: format!("PCAPNG parse error: {}", e),
+                    reason: format!("PCAPNG parse error: {e}"),
                 }));
             }
         }
