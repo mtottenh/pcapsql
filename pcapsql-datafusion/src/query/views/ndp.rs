@@ -62,7 +62,9 @@ mod tests {
         let view = ndp_packets_view();
         assert_eq!(view.name, "ndp_packets");
         assert!(view.sql.contains("JOIN icmpv6"));
-        assert!(view.sql.contains("WHERE icmpv6.type IN (133, 134, 135, 136, 137)"));
+        assert!(view
+            .sql
+            .contains("WHERE icmpv6.type IN (133, 134, 135, 136, 137)"));
         assert!(view.sql.contains("ndp_target_address"));
         assert!(view.sql.contains("ndp_router_flag"));
     }

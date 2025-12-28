@@ -93,13 +93,13 @@ pub mod tls;
 
 // Re-export commonly used types at crate root for convenience
 pub use cache::{CacheStats, CachedParse, LruParseCache, NoCache, OwnedParseResult, ParseCache};
-pub use protocol::OwnedFieldValue;
 pub use error::{Error, PcapError, ProtocolError, Result};
 pub use format::{detect_address_column, format_ipv4, format_ipv6, format_mac, AddressKind};
 pub use io::{FilePacketReader, FilePacketSource, PacketReader, PacketSource, RawPacket};
 #[cfg(feature = "mmap")]
 pub use io::{MmapPacketReader, MmapPacketSource};
 pub use pcap::PcapReader;
+pub use protocol::OwnedFieldValue;
 pub use protocol::{
     chain_fields_for_protocol, compute_required_protocols, default_registry,
     merge_with_chain_fields, parse_packet, parse_packet_projected, parse_packet_pruned,
@@ -110,7 +110,7 @@ pub use protocol::{
 pub use schema::{DataKind, FieldDescriptor, ProtocolSchema};
 pub use stream::{
     Connection, ConnectionState, ConnectionTracker, Direction, ParsedMessage, StreamConfig,
-    StreamContext, StreamManager, StreamParser, StreamParseResult, StreamRegistry, TcpFlags,
+    StreamContext, StreamManager, StreamParseResult, StreamParser, StreamRegistry, TcpFlags,
 };
 pub use tls::{
     derive_tls12_keys, derive_tls13_keys, extract_tls13_inner_content_type, hash_for_cipher_suite,

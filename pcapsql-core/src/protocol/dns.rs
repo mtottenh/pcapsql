@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use compact_str::CompactString;
-use simple_dns::{Packet, PacketFlag, rdata::RData, OPCODE, RCODE};
+use simple_dns::{rdata::RData, Packet, PacketFlag, OPCODE, RCODE};
 use smallvec::SmallVec;
 
 use super::{FieldValue, ParseContext, ParseResult, Protocol};
@@ -80,11 +80,31 @@ impl Protocol for DnsProtocol {
             FieldDescriptor::new("dns.query_type", DataKind::UInt16).set_nullable(true),
             FieldDescriptor::new("dns.query_class", DataKind::UInt16).set_nullable(true),
             // Answer fields (lists) - NEW
-            FieldDescriptor::new("dns.answer_ip4s", DataKind::List(Box::new(DataKind::UInt32))).set_nullable(true),
-            FieldDescriptor::new("dns.answer_ip6s", DataKind::List(Box::new(DataKind::FixedBinary(16)))).set_nullable(true),
-            FieldDescriptor::new("dns.answer_cnames", DataKind::List(Box::new(DataKind::String))).set_nullable(true),
-            FieldDescriptor::new("dns.answer_types", DataKind::List(Box::new(DataKind::UInt16))).set_nullable(true),
-            FieldDescriptor::new("dns.answer_ttls", DataKind::List(Box::new(DataKind::UInt32))).set_nullable(true),
+            FieldDescriptor::new(
+                "dns.answer_ip4s",
+                DataKind::List(Box::new(DataKind::UInt32)),
+            )
+            .set_nullable(true),
+            FieldDescriptor::new(
+                "dns.answer_ip6s",
+                DataKind::List(Box::new(DataKind::FixedBinary(16))),
+            )
+            .set_nullable(true),
+            FieldDescriptor::new(
+                "dns.answer_cnames",
+                DataKind::List(Box::new(DataKind::String)),
+            )
+            .set_nullable(true),
+            FieldDescriptor::new(
+                "dns.answer_types",
+                DataKind::List(Box::new(DataKind::UInt16)),
+            )
+            .set_nullable(true),
+            FieldDescriptor::new(
+                "dns.answer_ttls",
+                DataKind::List(Box::new(DataKind::UInt32)),
+            )
+            .set_nullable(true),
             // EDNS fields - NEW
             FieldDescriptor::new("dns.has_edns", DataKind::Bool).set_nullable(true),
             FieldDescriptor::new("dns.edns_udp_size", DataKind::UInt16).set_nullable(true),
@@ -251,17 +271,47 @@ fn rcode_to_u8(rcode: RCODE) -> u8 {
 /// Extract header fields from a DNS packet.
 fn extract_header_fields(packet: &Packet, fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) {
     fields.push(("transaction_id", FieldValue::UInt16(packet.id())));
-    fields.push(("is_query", FieldValue::Bool(!packet.has_flags(PacketFlag::RESPONSE))));
+    fields.push((
+        "is_query",
+        FieldValue::Bool(!packet.has_flags(PacketFlag::RESPONSE)),
+    ));
     fields.push(("opcode", FieldValue::UInt8(opcode_to_u8(packet.opcode()))));
-    fields.push(("is_authoritative", FieldValue::Bool(packet.has_flags(PacketFlag::AUTHORITATIVE_ANSWER))));
-    fields.push(("is_truncated", FieldValue::Bool(packet.has_flags(PacketFlag::TRUNCATION))));
-    fields.push(("recursion_desired", FieldValue::Bool(packet.has_flags(PacketFlag::RECURSION_DESIRED))));
-    fields.push(("recursion_available", FieldValue::Bool(packet.has_flags(PacketFlag::RECURSION_AVAILABLE))));
-    fields.push(("response_code", FieldValue::UInt8(rcode_to_u8(packet.rcode()))));
-    fields.push(("query_count", FieldValue::UInt16(packet.questions.len() as u16)));
-    fields.push(("answer_count", FieldValue::UInt16(packet.answers.len() as u16)));
-    fields.push(("authority_count", FieldValue::UInt16(packet.name_servers.len() as u16)));
-    fields.push(("additional_count", FieldValue::UInt16(packet.additional_records.len() as u16)));
+    fields.push((
+        "is_authoritative",
+        FieldValue::Bool(packet.has_flags(PacketFlag::AUTHORITATIVE_ANSWER)),
+    ));
+    fields.push((
+        "is_truncated",
+        FieldValue::Bool(packet.has_flags(PacketFlag::TRUNCATION)),
+    ));
+    fields.push((
+        "recursion_desired",
+        FieldValue::Bool(packet.has_flags(PacketFlag::RECURSION_DESIRED)),
+    ));
+    fields.push((
+        "recursion_available",
+        FieldValue::Bool(packet.has_flags(PacketFlag::RECURSION_AVAILABLE)),
+    ));
+    fields.push((
+        "response_code",
+        FieldValue::UInt8(rcode_to_u8(packet.rcode())),
+    ));
+    fields.push((
+        "query_count",
+        FieldValue::UInt16(packet.questions.len() as u16),
+    ));
+    fields.push((
+        "answer_count",
+        FieldValue::UInt16(packet.answers.len() as u16),
+    ));
+    fields.push((
+        "authority_count",
+        FieldValue::UInt16(packet.name_servers.len() as u16),
+    ));
+    fields.push((
+        "additional_count",
+        FieldValue::UInt16(packet.additional_records.len() as u16),
+    ));
 }
 
 /// Extract header fields from a DNS packet (projected).
@@ -274,42 +324,75 @@ fn extract_header_fields_projected(
         fields.push(("transaction_id", FieldValue::UInt16(packet.id())));
     }
     if requested.contains("is_query") {
-        fields.push(("is_query", FieldValue::Bool(!packet.has_flags(PacketFlag::RESPONSE))));
+        fields.push((
+            "is_query",
+            FieldValue::Bool(!packet.has_flags(PacketFlag::RESPONSE)),
+        ));
     }
     if requested.contains("opcode") {
         fields.push(("opcode", FieldValue::UInt8(opcode_to_u8(packet.opcode()))));
     }
     if requested.contains("is_authoritative") {
-        fields.push(("is_authoritative", FieldValue::Bool(packet.has_flags(PacketFlag::AUTHORITATIVE_ANSWER))));
+        fields.push((
+            "is_authoritative",
+            FieldValue::Bool(packet.has_flags(PacketFlag::AUTHORITATIVE_ANSWER)),
+        ));
     }
     if requested.contains("is_truncated") {
-        fields.push(("is_truncated", FieldValue::Bool(packet.has_flags(PacketFlag::TRUNCATION))));
+        fields.push((
+            "is_truncated",
+            FieldValue::Bool(packet.has_flags(PacketFlag::TRUNCATION)),
+        ));
     }
     if requested.contains("recursion_desired") {
-        fields.push(("recursion_desired", FieldValue::Bool(packet.has_flags(PacketFlag::RECURSION_DESIRED))));
+        fields.push((
+            "recursion_desired",
+            FieldValue::Bool(packet.has_flags(PacketFlag::RECURSION_DESIRED)),
+        ));
     }
     if requested.contains("recursion_available") {
-        fields.push(("recursion_available", FieldValue::Bool(packet.has_flags(PacketFlag::RECURSION_AVAILABLE))));
+        fields.push((
+            "recursion_available",
+            FieldValue::Bool(packet.has_flags(PacketFlag::RECURSION_AVAILABLE)),
+        ));
     }
     if requested.contains("response_code") {
-        fields.push(("response_code", FieldValue::UInt8(rcode_to_u8(packet.rcode()))));
+        fields.push((
+            "response_code",
+            FieldValue::UInt8(rcode_to_u8(packet.rcode())),
+        ));
     }
     if requested.contains("query_count") {
-        fields.push(("query_count", FieldValue::UInt16(packet.questions.len() as u16)));
+        fields.push((
+            "query_count",
+            FieldValue::UInt16(packet.questions.len() as u16),
+        ));
     }
     if requested.contains("answer_count") {
-        fields.push(("answer_count", FieldValue::UInt16(packet.answers.len() as u16)));
+        fields.push((
+            "answer_count",
+            FieldValue::UInt16(packet.answers.len() as u16),
+        ));
     }
     if requested.contains("authority_count") {
-        fields.push(("authority_count", FieldValue::UInt16(packet.name_servers.len() as u16)));
+        fields.push((
+            "authority_count",
+            FieldValue::UInt16(packet.name_servers.len() as u16),
+        ));
     }
     if requested.contains("additional_count") {
-        fields.push(("additional_count", FieldValue::UInt16(packet.additional_records.len() as u16)));
+        fields.push((
+            "additional_count",
+            FieldValue::UInt16(packet.additional_records.len() as u16),
+        ));
     }
 }
 
 /// Extract question fields from a DNS packet.
-fn extract_question_fields(packet: &Packet, fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) {
+fn extract_question_fields(
+    packet: &Packet,
+    fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
+) {
     if let Some(question) = packet.questions.first() {
         fields.push((
             "query_name",
@@ -380,10 +463,14 @@ fn extract_answer_fields(packet: &Packet, fields: &mut SmallVec<[(&'static str, 
             }
             RData::AAAA(aaaa) => {
                 // Use IpAddr to avoid heap allocation for IPv6 address
-                ip6s.push(FieldValue::IpAddr(std::net::IpAddr::V6(std::net::Ipv6Addr::from(aaaa.address))));
+                ip6s.push(FieldValue::IpAddr(std::net::IpAddr::V6(
+                    std::net::Ipv6Addr::from(aaaa.address),
+                )));
             }
             RData::CNAME(cname) => {
-                cnames.push(FieldValue::OwnedString(CompactString::new(cname.0.to_string())));
+                cnames.push(FieldValue::OwnedString(CompactString::new(
+                    cname.0.to_string(),
+                )));
             }
             _ => {}
         }
@@ -432,10 +519,14 @@ fn extract_answer_fields_projected(
             }
             RData::AAAA(aaaa) if need_ip6s => {
                 // Use IpAddr to avoid heap allocation for IPv6 address
-                ip6s.push(FieldValue::IpAddr(std::net::IpAddr::V6(std::net::Ipv6Addr::from(aaaa.address))));
+                ip6s.push(FieldValue::IpAddr(std::net::IpAddr::V6(
+                    std::net::Ipv6Addr::from(aaaa.address),
+                )));
             }
             RData::CNAME(cname) if need_cnames => {
-                cnames.push(FieldValue::OwnedString(CompactString::new(cname.0.to_string())));
+                cnames.push(FieldValue::OwnedString(CompactString::new(
+                    cname.0.to_string(),
+                )));
             }
             _ => {}
         }
@@ -634,7 +725,10 @@ mod tests {
         assert_eq!(result.get("is_query"), Some(&FieldValue::Bool(true)));
         assert_eq!(result.get("query_count"), Some(&FieldValue::UInt16(1)));
         assert_eq!(result.get("answer_count"), Some(&FieldValue::UInt16(0)));
-        assert_eq!(result.get("recursion_desired"), Some(&FieldValue::Bool(true)));
+        assert_eq!(
+            result.get("recursion_desired"),
+            Some(&FieldValue::Bool(true))
+        );
         assert_eq!(
             result.get("query_name"),
             Some(&FieldValue::OwnedString(CompactString::new("example.com")))
@@ -812,7 +906,9 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(
             result.get("query_name"),
-            Some(&FieldValue::OwnedString(CompactString::new("ipv6.google.com")))
+            Some(&FieldValue::OwnedString(CompactString::new(
+                "ipv6.google.com"
+            )))
         );
         assert_eq!(
             result.get("query_type"),

@@ -5,9 +5,8 @@ use crate::error::Error;
 use crate::tls::KeyLog;
 
 use super::{
-    Connection, ConnectionTracker, Direction, ParsedMessage, StreamContext, StreamParseResult,
-    StreamRegistry, TcpFlags, TcpReassembler,
-    parsers::DecryptingTlsStreamParser,
+    parsers::DecryptingTlsStreamParser, Connection, ConnectionTracker, Direction, ParsedMessage,
+    StreamContext, StreamParseResult, StreamRegistry, TcpFlags, TcpReassembler,
 };
 
 /// Configuration for the StreamManager.
@@ -148,8 +147,14 @@ impl StreamManager {
         // 4. Add payload to reassembler
         if !payload.is_empty() {
             ConnectionTracker::add_bytes(conn, direction, payload.len());
-            self.reassembler
-                .add_segment(connection_id, direction, seq, payload, frame_number, timestamp);
+            self.reassembler.add_segment(
+                connection_id,
+                direction,
+                seq,
+                payload,
+                frame_number,
+                timestamp,
+            );
             self.total_memory += payload.len();
         }
 
@@ -289,7 +294,10 @@ impl StreamManager {
 
     /// Build a StreamContext for the given connection.
     fn build_context(&self, connection_id: u64, direction: Direction) -> StreamContext {
-        let conn = self.connections.connections().find(|c| c.id == connection_id);
+        let conn = self
+            .connections
+            .connections()
+            .find(|c| c.id == connection_id);
 
         if let Some(conn) = conn {
             let (src_ip, dst_ip, src_port, dst_port) = match direction {

@@ -146,10 +146,7 @@ fn parse_long_header<'a>(
         long_packet_type::RETRY => "Retry",
         _ => "Unknown",
     };
-    fields.push((
-        "long_packet_type",
-        FieldValue::Str(packet_type_name),
-    ));
+    fields.push(("long_packet_type", FieldValue::Str(packet_type_name)));
 
     // Version (4 bytes)
     let quic_version = u32::from_be_bytes([data[1], data[2], data[3], data[4]]);
@@ -175,7 +172,10 @@ fn parse_long_header<'a>(
     }
     if dcid_len > 0 {
         let dcid = &data[offset..offset + dcid_len];
-        fields.push(("dcid", FieldValue::OwnedString(CompactString::new(hex_encode(dcid)))));
+        fields.push((
+            "dcid",
+            FieldValue::OwnedString(CompactString::new(hex_encode(dcid))),
+        ));
     }
     offset += dcid_len;
 
@@ -201,7 +201,10 @@ fn parse_long_header<'a>(
     }
     if scid_len > 0 {
         let scid = &data[offset..offset + scid_len];
-        fields.push(("scid", FieldValue::OwnedString(CompactString::new(hex_encode(scid)))));
+        fields.push((
+            "scid",
+            FieldValue::OwnedString(CompactString::new(hex_encode(scid))),
+        ));
     }
     offset += scid_len;
 
@@ -254,7 +257,10 @@ fn parse_short_header<'a>(
 }
 
 /// Parse Initial packet payload to extract token and potentially SNI.
-fn parse_initial_packet<'a>(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue<'a>); 16]>) {
+fn parse_initial_packet<'a>(
+    data: &[u8],
+    fields: &mut SmallVec<[(&'static str, FieldValue<'a>); 16]>,
+) {
     // Initial packet has:
     // - Token Length (variable-length integer)
     // - Token
@@ -558,10 +564,7 @@ mod tests {
         let result = parser.parse(&packet, &context);
 
         assert!(result.is_ok());
-        assert_eq!(
-            result.get("header_form"),
-            Some(&FieldValue::Str("long"))
-        );
+        assert_eq!(result.get("header_form"), Some(&FieldValue::Str("long")));
     }
 
     #[test]
@@ -577,10 +580,7 @@ mod tests {
         let result = parser.parse(&packet, &context);
 
         assert!(result.is_ok());
-        assert_eq!(
-            result.get("header_form"),
-            Some(&FieldValue::Str("short"))
-        );
+        assert_eq!(result.get("header_form"), Some(&FieldValue::Str("short")));
     }
 
     #[test]
@@ -697,7 +697,9 @@ mod tests {
         );
         assert_eq!(
             result.get("version_name"),
-            Some(&FieldValue::OwnedString(CompactString::new("Version Negotiation")))
+            Some(&FieldValue::OwnedString(CompactString::new(
+                "Version Negotiation"
+            )))
         );
     }
 
@@ -780,10 +782,7 @@ mod tests {
         assert_eq!(parse_varint(&[0x7f, 0xff]), Some((0x3fff, 2)));
 
         // 4-byte varint (prefix 10)
-        assert_eq!(
-            parse_varint(&[0x80, 0x00, 0x00, 0x01]),
-            Some((0x01, 4))
-        );
+        assert_eq!(parse_varint(&[0x80, 0x00, 0x00, 0x01]), Some((0x01, 4)));
 
         // Empty data
         assert_eq!(parse_varint(&[]), None);
@@ -793,7 +792,10 @@ mod tests {
     fn test_version_formatting() {
         assert_eq!(format_version(version::QUIC_V1), "QUIC v1");
         assert_eq!(format_version(version::QUIC_V2), "QUIC v2");
-        assert_eq!(format_version(version::VERSION_NEGOTIATION), "Version Negotiation");
+        assert_eq!(
+            format_version(version::VERSION_NEGOTIATION),
+            "Version Negotiation"
+        );
         assert_eq!(format_version(0xff00001d), "Draft-29");
         assert_eq!(format_version(0x12345678), "0x12345678");
     }

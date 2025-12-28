@@ -561,7 +561,10 @@ CLIENT_RANDOM 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef 0
         let content = "CLIENT_RANDOM 0123456789abcdef 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f";
 
         let result = KeyLog::from_str(content);
-        assert!(matches!(result, Err(KeyLogError::InvalidHex { line: 1, .. })));
+        assert!(matches!(
+            result,
+            Err(KeyLogError::InvalidHex { line: 1, .. })
+        ));
     }
 
     #[test]
@@ -569,7 +572,10 @@ CLIENT_RANDOM 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef 0
         let content = "CLIENT_RANDOM zzzz456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f";
 
         let result = KeyLog::from_str(content);
-        assert!(matches!(result, Err(KeyLogError::InvalidHex { line: 1, .. })));
+        assert!(matches!(
+            result,
+            Err(KeyLogError::InvalidHex { line: 1, .. })
+        ));
     }
 
     #[test]

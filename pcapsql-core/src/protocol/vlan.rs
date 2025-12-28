@@ -98,9 +98,7 @@ mod tests {
         let mut tag = Vec::with_capacity(4);
 
         // Build TCI
-        let tci = ((priority as u16 & 0x07) << 13)
-            | ((dei as u16) << 12)
-            | (vlan_id & 0x0FFF);
+        let tci = ((priority as u16 & 0x07) << 13) | ((dei as u16) << 12) | (vlan_id & 0x0FFF);
 
         tag.extend_from_slice(&tci.to_be_bytes());
         tag.extend_from_slice(&inner_ethertype.to_be_bytes());
@@ -124,7 +122,10 @@ mod tests {
         assert_eq!(result.get("vlan_id"), Some(&FieldValue::UInt16(100)));
         assert_eq!(result.get("priority"), Some(&FieldValue::UInt8(0)));
         assert_eq!(result.get("dei"), Some(&FieldValue::Bool(false)));
-        assert_eq!(result.get("inner_ethertype"), Some(&FieldValue::UInt16(0x0800)));
+        assert_eq!(
+            result.get("inner_ethertype"),
+            Some(&FieldValue::UInt16(0x0800))
+        );
     }
 
     #[test]
@@ -143,7 +144,10 @@ mod tests {
         assert_eq!(result.get("vlan_id"), Some(&FieldValue::UInt16(200)));
         assert_eq!(result.get("priority"), Some(&FieldValue::UInt8(5)));
         assert_eq!(result.get("dei"), Some(&FieldValue::Bool(true)));
-        assert_eq!(result.get("inner_ethertype"), Some(&FieldValue::UInt16(0x86DD)));
+        assert_eq!(
+            result.get("inner_ethertype"),
+            Some(&FieldValue::UInt16(0x86DD))
+        );
     }
 
     #[test]

@@ -105,10 +105,7 @@ impl Protocol for SshProtocol {
 
         let msg_type = data[5];
         fields.push(("msg_type", FieldValue::UInt8(msg_type)));
-        fields.push((
-            "msg_type_name",
-            format_msg_type(msg_type),
-        ));
+        fields.push(("msg_type_name", format_msg_type(msg_type)));
 
         // Parse specific message types
         let payload = &data[5..5 + payload_length];
@@ -206,10 +203,16 @@ fn parse_protocol_identification<'a>(
                         FieldValue::OwnedString(CompactString::new(software_version)),
                     ));
                     if !comments.is_empty() {
-                        fields.push(("comments", FieldValue::OwnedString(CompactString::new(comments))));
+                        fields.push((
+                            "comments",
+                            FieldValue::OwnedString(CompactString::new(comments)),
+                        ));
                     }
                 } else {
-                    fields.push(("software_version", FieldValue::OwnedString(CompactString::new(rest))));
+                    fields.push((
+                        "software_version",
+                        FieldValue::OwnedString(CompactString::new(rest)),
+                    ));
                 }
             }
         }
@@ -239,9 +242,8 @@ fn parse_kexinit_message(payload: &[u8], fields: &mut SmallVec<[(&'static str, F
         if *off + 4 > data.len() {
             return None;
         }
-        let len =
-            u32::from_be_bytes([data[*off], data[*off + 1], data[*off + 2], data[*off + 3]])
-                as usize;
+        let len = u32::from_be_bytes([data[*off], data[*off + 1], data[*off + 2], data[*off + 3]])
+            as usize;
         *off += 4;
         if *off + len > data.len() {
             return None;
@@ -255,19 +257,28 @@ fn parse_kexinit_message(payload: &[u8], fields: &mut SmallVec<[(&'static str, F
 
     if let Some(kex_algs) = read_name_list(payload, &mut offset) {
         if !kex_algs.is_empty() {
-            fields.push(("kex_algorithms", FieldValue::OwnedString(CompactString::new(kex_algs))));
+            fields.push((
+                "kex_algorithms",
+                FieldValue::OwnedString(CompactString::new(kex_algs)),
+            ));
         }
     }
 
     if let Some(host_key_algs) = read_name_list(payload, &mut offset) {
         if !host_key_algs.is_empty() {
-            fields.push(("host_key_algorithms", FieldValue::OwnedString(CompactString::new(host_key_algs))));
+            fields.push((
+                "host_key_algorithms",
+                FieldValue::OwnedString(CompactString::new(host_key_algs)),
+            ));
         }
     }
 
     if let Some(enc_c2s) = read_name_list(payload, &mut offset) {
         if !enc_c2s.is_empty() {
-            fields.push(("encryption_algorithms", FieldValue::OwnedString(CompactString::new(enc_c2s))));
+            fields.push((
+                "encryption_algorithms",
+                FieldValue::OwnedString(CompactString::new(enc_c2s)),
+            ));
         }
     }
 
@@ -276,7 +287,10 @@ fn parse_kexinit_message(payload: &[u8], fields: &mut SmallVec<[(&'static str, F
 
     if let Some(mac_c2s) = read_name_list(payload, &mut offset) {
         if !mac_c2s.is_empty() {
-            fields.push(("mac_algorithms", FieldValue::OwnedString(CompactString::new(mac_c2s))));
+            fields.push((
+                "mac_algorithms",
+                FieldValue::OwnedString(CompactString::new(mac_c2s)),
+            ));
         }
     }
 
@@ -285,7 +299,10 @@ fn parse_kexinit_message(payload: &[u8], fields: &mut SmallVec<[(&'static str, F
 
     if let Some(comp_c2s) = read_name_list(payload, &mut offset) {
         if !comp_c2s.is_empty() {
-            fields.push(("compression_algorithms", FieldValue::OwnedString(CompactString::new(comp_c2s))));
+            fields.push((
+                "compression_algorithms",
+                FieldValue::OwnedString(CompactString::new(comp_c2s)),
+            ));
         }
     }
 }
@@ -302,9 +319,8 @@ fn parse_userauth_request(payload: &[u8], fields: &mut SmallVec<[(&'static str, 
         if *off + 4 > data.len() {
             return None;
         }
-        let len =
-            u32::from_be_bytes([data[*off], data[*off + 1], data[*off + 2], data[*off + 3]])
-                as usize;
+        let len = u32::from_be_bytes([data[*off], data[*off + 1], data[*off + 2], data[*off + 3]])
+            as usize;
         *off += 4;
         if *off + len > data.len() {
             return None;
@@ -318,19 +334,28 @@ fn parse_userauth_request(payload: &[u8], fields: &mut SmallVec<[(&'static str, 
 
     if let Some(username) = read_string(payload, &mut offset) {
         if !username.is_empty() {
-            fields.push(("auth_username", FieldValue::OwnedString(CompactString::new(username))));
+            fields.push((
+                "auth_username",
+                FieldValue::OwnedString(CompactString::new(username)),
+            ));
         }
     }
 
     if let Some(service) = read_string(payload, &mut offset) {
         if !service.is_empty() {
-            fields.push(("auth_service", FieldValue::OwnedString(CompactString::new(service))));
+            fields.push((
+                "auth_service",
+                FieldValue::OwnedString(CompactString::new(service)),
+            ));
         }
     }
 
     if let Some(method) = read_string(payload, &mut offset) {
         if !method.is_empty() {
-            fields.push(("auth_method", FieldValue::OwnedString(CompactString::new(method))));
+            fields.push((
+                "auth_method",
+                FieldValue::OwnedString(CompactString::new(method)),
+            ));
         }
     }
 }
@@ -347,9 +372,12 @@ fn parse_channel_open(payload: &[u8], fields: &mut SmallVec<[(&'static str, Fiel
     if offset + 4 > payload.len() {
         return;
     }
-    let len =
-        u32::from_be_bytes([payload[offset], payload[offset + 1], payload[offset + 2], payload[offset + 3]])
-            as usize;
+    let len = u32::from_be_bytes([
+        payload[offset],
+        payload[offset + 1],
+        payload[offset + 2],
+        payload[offset + 3],
+    ]) as usize;
     offset += 4;
 
     if offset + len > payload.len() {
@@ -358,7 +386,10 @@ fn parse_channel_open(payload: &[u8], fields: &mut SmallVec<[(&'static str, Fiel
 
     if let Ok(channel_type) = std::str::from_utf8(&payload[offset..offset + len]) {
         if !channel_type.is_empty() {
-            fields.push(("channel_type", FieldValue::OwnedString(CompactString::new(channel_type))));
+            fields.push((
+                "channel_type",
+                FieldValue::OwnedString(CompactString::new(channel_type)),
+            ));
         }
     }
     offset += len;
@@ -459,7 +490,10 @@ mod tests {
             buf.extend_from_slice(list.as_bytes());
         };
 
-        write_name_list(&mut payload, "curve25519-sha256,diffie-hellman-group14-sha256");
+        write_name_list(
+            &mut payload,
+            "curve25519-sha256,diffie-hellman-group14-sha256",
+        );
         write_name_list(&mut payload, "ssh-ed25519,rsa-sha2-512");
         write_name_list(
             &mut payload,
@@ -520,11 +554,15 @@ mod tests {
         );
         assert_eq!(
             result.get("software_version"),
-            Some(&FieldValue::OwnedString(CompactString::new("OpenSSH_8.9p1")))
+            Some(&FieldValue::OwnedString(CompactString::new(
+                "OpenSSH_8.9p1"
+            )))
         );
         assert_eq!(
             result.get("comments"),
-            Some(&FieldValue::OwnedString(CompactString::new("Ubuntu-3ubuntu0.1")))
+            Some(&FieldValue::OwnedString(CompactString::new(
+                "Ubuntu-3ubuntu0.1"
+            )))
         );
     }
 
@@ -545,7 +583,9 @@ mod tests {
         );
         assert_eq!(
             result.get("software_version"),
-            Some(&FieldValue::OwnedString(CompactString::new("libssh2_1.10.0")))
+            Some(&FieldValue::OwnedString(CompactString::new(
+                "libssh2_1.10.0"
+            )))
         );
         assert!(result.get("comments").is_none());
     }
@@ -567,7 +607,9 @@ mod tests {
         );
         assert_eq!(
             result.get("software_version"),
-            Some(&FieldValue::OwnedString(CompactString::new("dropbear_2022.83")))
+            Some(&FieldValue::OwnedString(CompactString::new(
+                "dropbear_2022.83"
+            )))
         );
     }
 
@@ -599,7 +641,9 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(
             result.get("software_version"),
-            Some(&FieldValue::OwnedString(CompactString::new("PuTTY_Release_0.78")))
+            Some(&FieldValue::OwnedString(CompactString::new(
+                "PuTTY_Release_0.78"
+            )))
         );
     }
 
@@ -762,7 +806,9 @@ mod tests {
         );
         assert_eq!(
             result.get("auth_service"),
-            Some(&FieldValue::OwnedString(CompactString::new("ssh-connection")))
+            Some(&FieldValue::OwnedString(CompactString::new(
+                "ssh-connection"
+            )))
         );
         assert_eq!(
             result.get("auth_method"),

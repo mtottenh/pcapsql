@@ -100,7 +100,8 @@ impl Protocol for GreProtocol {
         fields.push(("version", FieldValue::UInt8(version)));
 
         // Version validation (RFC 2784: Version MUST be 0, RFC 2637: Version 1 for PPTP)
-        let version_valid = version == gre_version::STANDARD || version == gre_version::PPTP_ENHANCED;
+        let version_valid =
+            version == gre_version::STANDARD || version == gre_version::PPTP_ENHANCED;
         fields.push(("version_valid", FieldValue::Bool(version_valid)));
 
         // Add version name for convenience
@@ -150,7 +151,12 @@ impl Protocol for GreProtocol {
             if data.len() < offset + 4 {
                 return ParseResult::error("GRE: missing key field".to_string(), data);
             }
-            let key = u32::from_be_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]]);
+            let key = u32::from_be_bytes([
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ]);
             fields.push(("key", FieldValue::UInt32(key)));
             key_value = Some(key);
             offset += 4;
@@ -161,13 +167,21 @@ impl Protocol for GreProtocol {
             if data.len() < offset + 4 {
                 return ParseResult::error("GRE: missing sequence field".to_string(), data);
             }
-            let sequence = u32::from_be_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]]);
+            let sequence = u32::from_be_bytes([
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ]);
             fields.push(("sequence", FieldValue::UInt32(sequence)));
             offset += 4;
         }
 
         // Store header length
-        fields.push(("header_length", FieldValue::UInt8((offset - header_start) as u8)));
+        fields.push((
+            "header_length",
+            FieldValue::UInt8((offset - header_start) as u8),
+        ));
 
         // Set up child hints for the encapsulated protocol
         let mut child_hints = SmallVec::new();
@@ -273,7 +287,7 @@ mod tests {
     #[test]
     fn test_basic_gre_header_parsing() {
         let mut header = create_gre_header(false, false, false, 0x0800); // IPv4
-        // Add some payload
+                                                                         // Add some payload
         header.extend_from_slice(&[0x45, 0x00, 0x00, 0x28]);
 
         let parser = GreProtocol;
@@ -283,9 +297,15 @@ mod tests {
         let result = parser.parse(&header, &context);
 
         assert!(result.is_ok());
-        assert_eq!(result.get("checksum_present"), Some(&FieldValue::Bool(false)));
+        assert_eq!(
+            result.get("checksum_present"),
+            Some(&FieldValue::Bool(false))
+        );
         assert_eq!(result.get("key_present"), Some(&FieldValue::Bool(false)));
-        assert_eq!(result.get("sequence_present"), Some(&FieldValue::Bool(false)));
+        assert_eq!(
+            result.get("sequence_present"),
+            Some(&FieldValue::Bool(false))
+        );
         assert_eq!(result.get("version"), Some(&FieldValue::UInt8(0)));
         assert_eq!(result.get("protocol"), Some(&FieldValue::UInt16(0x0800)));
 
@@ -314,7 +334,10 @@ mod tests {
         let result = parser.parse(&header, &context);
 
         assert!(result.is_ok());
-        assert_eq!(result.get("checksum_present"), Some(&FieldValue::Bool(true)));
+        assert_eq!(
+            result.get("checksum_present"),
+            Some(&FieldValue::Bool(true))
+        );
         assert_eq!(result.get("checksum"), Some(&FieldValue::UInt16(0xABCD)));
         assert_eq!(result.remaining.len(), 2);
     }
@@ -357,8 +380,14 @@ mod tests {
         let result = parser.parse(&header, &context);
 
         assert!(result.is_ok());
-        assert_eq!(result.get("sequence_present"), Some(&FieldValue::Bool(true)));
-        assert_eq!(result.get("sequence"), Some(&FieldValue::UInt32(0xDEADBEEF)));
+        assert_eq!(
+            result.get("sequence_present"),
+            Some(&FieldValue::Bool(true))
+        );
+        assert_eq!(
+            result.get("sequence"),
+            Some(&FieldValue::UInt32(0xDEADBEEF))
+        );
         assert_eq!(result.remaining.len(), 2);
     }
 
@@ -366,7 +395,7 @@ mod tests {
     #[test]
     fn test_gre_with_all_optional_fields() {
         let mut header = create_gre_header(true, true, true, 0x86DD); // IPv6
-        // Add checksum and reserved
+                                                                      // Add checksum and reserved
         header.extend_from_slice(&[0x12, 0x34, 0x00, 0x00]);
         // Add key
         header.extend_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD]);
@@ -382,9 +411,15 @@ mod tests {
         let result = parser.parse(&header, &context);
 
         assert!(result.is_ok());
-        assert_eq!(result.get("checksum_present"), Some(&FieldValue::Bool(true)));
+        assert_eq!(
+            result.get("checksum_present"),
+            Some(&FieldValue::Bool(true))
+        );
         assert_eq!(result.get("key_present"), Some(&FieldValue::Bool(true)));
-        assert_eq!(result.get("sequence_present"), Some(&FieldValue::Bool(true)));
+        assert_eq!(
+            result.get("sequence_present"),
+            Some(&FieldValue::Bool(true))
+        );
         assert_eq!(result.get("checksum"), Some(&FieldValue::UInt16(0x1234)));
         assert_eq!(result.get("key"), Some(&FieldValue::UInt32(0xAABBCCDD)));
         assert_eq!(result.get("sequence"), Some(&FieldValue::UInt32(1)));
@@ -476,9 +511,15 @@ mod tests {
         let result = parser.parse(&header, &context);
 
         assert!(result.is_ok());
-        assert_eq!(result.get("version"), Some(&FieldValue::UInt8(gre_version::STANDARD)));
+        assert_eq!(
+            result.get("version"),
+            Some(&FieldValue::UInt8(gre_version::STANDARD))
+        );
         assert_eq!(result.get("version_valid"), Some(&FieldValue::Bool(true)));
-        assert_eq!(result.get("version_name"), Some(&FieldValue::Str("Standard")));
+        assert_eq!(
+            result.get("version_name"),
+            Some(&FieldValue::Str("Standard"))
+        );
     }
 
     // Test 12: Version 1 (PPTP Enhanced GRE) validation
@@ -497,9 +538,15 @@ mod tests {
         let result = parser.parse(&header, &context);
 
         assert!(result.is_ok());
-        assert_eq!(result.get("version"), Some(&FieldValue::UInt8(gre_version::PPTP_ENHANCED)));
+        assert_eq!(
+            result.get("version"),
+            Some(&FieldValue::UInt8(gre_version::PPTP_ENHANCED))
+        );
         assert_eq!(result.get("version_valid"), Some(&FieldValue::Bool(true)));
-        assert_eq!(result.get("version_name"), Some(&FieldValue::Str("PPTP-Enhanced")));
+        assert_eq!(
+            result.get("version_name"),
+            Some(&FieldValue::Str("PPTP-Enhanced"))
+        );
     }
 
     // Test 13: Invalid version (version 2-7)
@@ -519,9 +566,15 @@ mod tests {
             let result = parser.parse(&header, &context);
 
             assert!(result.is_ok()); // Still parses (lenient)
-            assert_eq!(result.get("version"), Some(&FieldValue::UInt8(version as u8)));
+            assert_eq!(
+                result.get("version"),
+                Some(&FieldValue::UInt8(version as u8))
+            );
             assert_eq!(result.get("version_valid"), Some(&FieldValue::Bool(false)));
-            assert_eq!(result.get("version_name"), Some(&FieldValue::Str("Unknown")));
+            assert_eq!(
+                result.get("version_name"),
+                Some(&FieldValue::Str("Unknown"))
+            );
         }
     }
 
@@ -554,7 +607,10 @@ mod tests {
         let result = parser.parse(&packet, &context);
 
         assert!(result.is_ok());
-        assert_eq!(result.get("checksum_present"), Some(&FieldValue::Bool(true)));
+        assert_eq!(
+            result.get("checksum_present"),
+            Some(&FieldValue::Bool(true))
+        );
         assert_eq!(result.get("checksum_valid"), Some(&FieldValue::Bool(true)));
     }
 
@@ -580,7 +636,10 @@ mod tests {
         let result = parser.parse(&packet, &context);
 
         assert!(result.is_ok()); // Still parses (lenient)
-        assert_eq!(result.get("checksum_present"), Some(&FieldValue::Bool(true)));
+        assert_eq!(
+            result.get("checksum_present"),
+            Some(&FieldValue::Bool(true))
+        );
         assert_eq!(result.get("checksum_valid"), Some(&FieldValue::Bool(false)));
     }
 

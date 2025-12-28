@@ -9,11 +9,11 @@ use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use async_trait::async_trait;
 use datafusion::catalog::Session;
 use datafusion::common::Result;
-use datafusion_catalog::TableFunctionImpl;
 use datafusion::datasource::{TableProvider, TableType};
-use datafusion_datasource::memory::MemorySourceConfig;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::Expr;
+use datafusion_catalog::TableFunctionImpl;
+use datafusion_datasource::memory::MemorySourceConfig;
 
 use pcapsql_core::CacheStats;
 
@@ -120,11 +120,10 @@ impl TableProvider for CacheStatsTable {
         let schema = self.schema();
 
         // Let MemorySourceConfig handle the projection - pass full batch and schema
-        Ok(MemorySourceConfig::try_new_exec(
-            &[vec![batch]],
-            schema,
-            projection.cloned(),
-        )? as Arc<dyn ExecutionPlan>)
+        Ok(
+            MemorySourceConfig::try_new_exec(&[vec![batch]], schema, projection.cloned())?
+                as Arc<dyn ExecutionPlan>,
+        )
     }
 }
 

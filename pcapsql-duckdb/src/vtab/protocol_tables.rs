@@ -82,7 +82,10 @@ fn bind_protocol(
     })?;
 
     // Add frame_number column first
-    bind.add_result_column("frame_number", LogicalTypeHandle::from(LogicalTypeId::UBigint));
+    bind.add_result_column(
+        "frame_number",
+        LogicalTypeHandle::from(LogicalTypeId::UBigint),
+    );
 
     let mut field_indices = HashMap::new();
     let mut list_columns = HashSet::new();
@@ -117,9 +120,9 @@ fn init_protocol(init: &InitInfo) -> DuckResult<ProtocolInitData, Box<dyn std::e
         .map_err(|e| DuckDbError::Extension(format!("Failed to open PCAP file: {}", e)))?;
 
     // Create reader
-    let reader = source.reader(None).map_err(|e| {
-        DuckDbError::Extension(format!("Failed to create reader: {}", e))
-    })?;
+    let reader = source
+        .reader(None)
+        .map_err(|e| DuckDbError::Extension(format!("Failed to create reader: {}", e)))?;
 
     Ok(ProtocolInitData {
         reader: Mutex::new(Some(reader)),

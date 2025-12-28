@@ -123,15 +123,13 @@ impl QueryEngine {
             if batches.is_empty() {
                 // Register an empty table with the correct schema
                 if let Some(schema) = tables::get_table_schema(table_name) {
-                    let empty_provider =
-                        provider::PcapTableProvider::new(Arc::new(schema), vec![]);
+                    let empty_provider = provider::PcapTableProvider::new(Arc::new(schema), vec![]);
                     ctx.register_table(table_name.as_str(), Arc::new(empty_provider))
                         .map_err(|e| Error::Query(QueryError::Execution(e.to_string())))?;
                 }
             } else {
                 let schema = batches[0].schema();
-                let table_provider =
-                    provider::PcapTableProvider::new(schema, batches.clone());
+                let table_provider = provider::PcapTableProvider::new(schema, batches.clone());
                 ctx.register_table(table_name.as_str(), Arc::new(table_provider))
                     .map_err(|e| Error::Query(QueryError::Execution(e.to_string())))?;
             }
@@ -173,8 +171,7 @@ impl QueryEngine {
         udf::register_all_udfs(&ctx)?;
 
         // Load all packets into normalized per-protocol tables
-        let protocol_batches =
-            Self::load_normalized_packets(&path, &registry, batch_size, false)?;
+        let protocol_batches = Self::load_normalized_packets(&path, &registry, batch_size, false)?;
 
         // Check if we got any frames
         let frames_batches = protocol_batches
@@ -191,15 +188,13 @@ impl QueryEngine {
         for (table_name, batches) in &protocol_batches {
             if batches.is_empty() {
                 if let Some(schema) = tables::get_table_schema(table_name) {
-                    let empty_provider =
-                        provider::PcapTableProvider::new(Arc::new(schema), vec![]);
+                    let empty_provider = provider::PcapTableProvider::new(Arc::new(schema), vec![]);
                     ctx.register_table(table_name.as_str(), Arc::new(empty_provider))
                         .map_err(|e| Error::Query(QueryError::Execution(e.to_string())))?;
                 }
             } else {
                 let schema = batches[0].schema();
-                let table_provider =
-                    provider::PcapTableProvider::new(schema, batches.clone());
+                let table_provider = provider::PcapTableProvider::new(schema, batches.clone());
                 ctx.register_table(table_name.as_str(), Arc::new(table_provider))
                     .map_err(|e| Error::Query(QueryError::Execution(e.to_string())))?;
             }
@@ -253,10 +248,7 @@ impl QueryEngine {
     /// This method is generic over the packet source, but defaults to
     /// `FilePacketSource`. Future backends (mmap, S3) can use
     /// `with_streaming_source()` directly.
-    pub async fn with_streaming<P: AsRef<Path>>(
-        path: P,
-        batch_size: usize,
-    ) -> Result<Self, Error> {
+    pub async fn with_streaming<P: AsRef<Path>>(path: P, batch_size: usize) -> Result<Self, Error> {
         let source = FilePacketSource::open(path)?;
         Self::with_streaming_source(Arc::new(source), batch_size).await
     }
@@ -322,14 +314,12 @@ impl QueryEngine {
 
         // Register streaming provider for each protocol table
         for table_name in tables::all_table_names() {
-            let schema = Arc::new(
-                tables::get_table_schema(table_name).ok_or_else(|| {
-                    Error::Query(QueryError::Execution(format!(
-                        "Unknown table: {}",
-                        table_name
-                    )))
-                })?,
-            );
+            let schema = Arc::new(tables::get_table_schema(table_name).ok_or_else(|| {
+                Error::Query(QueryError::Execution(format!(
+                    "Unknown table: {}",
+                    table_name
+                )))
+            })?);
 
             let provider = if let Some(ref cache) = cache_dyn {
                 providers::ProtocolTableProvider::<S>::streaming_cached(
@@ -359,9 +349,8 @@ impl QueryEngine {
 
         // Register cache_stats() table function
         let cache_for_udtf = cache_dyn.clone();
-        let stats_fn = udtf::CacheStatsFunction::new(move || {
-            cache_for_udtf.as_ref().and_then(|c| c.stats())
-        });
+        let stats_fn =
+            udtf::CacheStatsFunction::new(move || cache_for_udtf.as_ref().and_then(|c| c.stats()));
         ctx.register_udtf("cache_stats", Arc::new(stats_fn));
 
         Ok(Self {
@@ -536,14 +525,12 @@ impl QueryEngine {
         // Register all cross-layer views from the views module
         for view_def in views::all_views() {
             let sql = format!("CREATE VIEW {} AS {}", view_def.name, view_def.sql);
-            ctx.sql(&sql)
-                .await
-                .map_err(|e| {
-                    Error::Query(QueryError::Execution(format!(
-                        "Failed to create view '{}': {}",
-                        view_def.name, e
-                    )))
-                })?;
+            ctx.sql(&sql).await.map_err(|e| {
+                Error::Query(QueryError::Execution(format!(
+                    "Failed to create view '{}': {}",
+                    view_def.name, e
+                )))
+            })?;
         }
 
         Ok(())

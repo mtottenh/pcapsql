@@ -50,7 +50,9 @@ mod tests {
         let view = mld_packets_view();
         assert_eq!(view.name, "mld_packets");
         assert!(view.sql.contains("JOIN icmpv6"));
-        assert!(view.sql.contains("WHERE icmpv6.type IN (130, 131, 132, 143)"));
+        assert!(view
+            .sql
+            .contains("WHERE icmpv6.type IN (130, 131, 132, 143)"));
         assert!(view.sql.contains("mld_multicast_address"));
         assert!(view.sql.contains("mld_max_response_delay"));
     }

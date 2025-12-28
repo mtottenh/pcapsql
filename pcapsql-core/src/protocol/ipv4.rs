@@ -49,7 +49,10 @@ impl Protocol for Ipv4Protocol {
                 fields.push(("identification", FieldValue::UInt16(ipv4.identification())));
                 fields.push(("dont_fragment", FieldValue::Bool(ipv4.dont_fragment())));
                 fields.push(("more_fragments", FieldValue::Bool(ipv4.more_fragments())));
-                fields.push(("fragment_offset", FieldValue::UInt16(ipv4.fragments_offset().value())));
+                fields.push((
+                    "fragment_offset",
+                    FieldValue::UInt16(ipv4.fragments_offset().value()),
+                ));
                 fields.push(("ttl", FieldValue::UInt8(ipv4.ttl())));
                 fields.push(("protocol", FieldValue::UInt8(ipv4.protocol().0)));
                 fields.push(("checksum", FieldValue::UInt16(ipv4.header_checksum())));
@@ -307,17 +310,18 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.get("more_fragments"), Some(&FieldValue::Bool(true)));
         assert_eq!(result.get("dont_fragment"), Some(&FieldValue::Bool(false)));
-        assert_eq!(result.get("identification"), Some(&FieldValue::UInt16(0x1234)));
+        assert_eq!(
+            result.get("identification"),
+            Some(&FieldValue::UInt16(0x1234))
+        );
     }
 
     #[test]
     fn test_ipv4_child_hints() {
         let header = [
-            0x45, 0x00, 0x00, 0x14,
-            0x00, 0x00, 0x00, 0x00,
-            0x40, 0x06, 0x00, 0x00, // Protocol: TCP (6)
-            0xc0, 0xa8, 0x01, 0x01,
-            0xc0, 0xa8, 0x01, 0x02,
+            0x45, 0x00, 0x00, 0x14, 0x00, 0x00, 0x00, 0x00, 0x40, 0x06, 0x00,
+            0x00, // Protocol: TCP (6)
+            0xc0, 0xa8, 0x01, 0x01, 0xc0, 0xa8, 0x01, 0x02,
         ];
 
         let parser = Ipv4Protocol;

@@ -120,7 +120,10 @@ impl VTab for ReadPcapVTab {
             })?;
 
             // Add frame_number column first
-            bind.add_result_column("frame_number", LogicalTypeHandle::from(LogicalTypeId::UBigint));
+            bind.add_result_column(
+                "frame_number",
+                LogicalTypeHandle::from(LogicalTypeId::UBigint),
+            );
             column_names.push("frame_number".to_string());
             field_indices.insert("frame_number".to_string(), 0);
 
@@ -155,9 +158,9 @@ impl VTab for ReadPcapVTab {
             .map_err(|e| DuckDbError::Extension(format!("Failed to open PCAP file: {}", e)))?;
 
         // Create reader
-        let reader = source.reader(None).map_err(|e| {
-            DuckDbError::Extension(format!("Failed to create reader: {}", e))
-        })?;
+        let reader = source
+            .reader(None)
+            .map_err(|e| DuckDbError::Extension(format!("Failed to create reader: {}", e)))?;
 
         Ok(ReadPcapInitData {
             reader: Mutex::new(Some(reader)),
@@ -223,11 +226,7 @@ impl VTab for ReadPcapVTab {
                 row_count += 1;
             } else {
                 // Parse and check if this packet contains our protocol
-                let results = parse_packet(
-                    &init_data.registry,
-                    packet.link_type,
-                    packet.data,
-                );
+                let results = parse_packet(&init_data.registry, packet.link_type, packet.data);
 
                 // Add ALL occurrences of the protocol (supports tunneled traffic)
                 for (proto_name, parsed) in &results {
@@ -277,7 +276,10 @@ impl VTab for ReadPcapVTab {
         // Write list columns to output
         for (&col_idx, builder) in &list_builders {
             let mut list_vector = output.list_vector(col_idx);
-            let null_rows = null_list_rows.get(&col_idx).map(|v| v.as_slice()).unwrap_or(&[]);
+            let null_rows = null_list_rows
+                .get(&col_idx)
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
             builder.write_to_list_vector(&mut list_vector, null_rows);
         }
 
@@ -357,10 +359,7 @@ fn output_parsed_row(
 
         // Schema field names are like "arp.hardware_type" but parsed data uses "hardware_type"
         // Strip the protocol prefix to get the actual field name used in ParseResult
-        let lookup_name = field_name
-            .split('.')
-            .last()
-            .unwrap_or(field_name.as_str());
+        let lookup_name = field_name.split('.').last().unwrap_or(field_name.as_str());
 
         // Handle list columns specially - accumulate data in builders
         if list_columns.contains(col_idx) {

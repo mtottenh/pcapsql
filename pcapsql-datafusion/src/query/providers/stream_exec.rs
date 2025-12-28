@@ -72,15 +72,7 @@ impl<S: PacketSource + 'static> ProtocolStreamExec<S> {
         limit: Option<usize>,
     ) -> Self {
         Self::new_with_pruning(
-            table_name,
-            schema,
-            source,
-            registry,
-            partitions,
-            batch_size,
-            projection,
-            cache,
-            limit,
+            table_name, schema, source, registry, partitions, batch_size, projection, cache, limit,
             None,
         )
     }
@@ -273,7 +265,9 @@ impl<S: PacketSource> ProtocolStreamExec<S> {
 impl<S: PacketSource> DisplayAs for ProtocolStreamExec<S> {
     fn fmt_as(&self, t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
         match t {
-            DisplayFormatType::Default | DisplayFormatType::Verbose | DisplayFormatType::TreeRender => {
+            DisplayFormatType::Default
+            | DisplayFormatType::Verbose
+            | DisplayFormatType::TreeRender => {
                 write!(
                     f,
                     "ProtocolStreamExec: table={}, partitions={}, batch_size={}",

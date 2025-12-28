@@ -81,10 +81,7 @@ impl Protocol for NtpProtocol {
         let ref_id_bytes = &data[12..16];
         let reference_id = if stratum == 0 || stratum == 1 {
             // For stratum 0-1, it's ASCII (e.g., "GPS", "PPS")
-            CompactString::new(
-                String::from_utf8_lossy(ref_id_bytes)
-                    .trim_end_matches('\0')
-            )
+            CompactString::new(String::from_utf8_lossy(ref_id_bytes).trim_end_matches('\0'))
         } else {
             // For stratum 2+, it's an IP address
             CompactString::new(format!(

@@ -35,7 +35,10 @@ pub fn to_duckdb_column(fd: &FieldDescriptor) -> (&'static str, LogicalTypeHandl
 
 /// Get all column definitions for a protocol, prefixed with frame_number.
 pub fn protocol_columns(protocol: &dyn Protocol) -> Vec<(&'static str, LogicalTypeHandle)> {
-    let mut columns = vec![("frame_number", LogicalTypeHandle::from(LogicalTypeId::UBigint))];
+    let mut columns = vec![(
+        "frame_number",
+        LogicalTypeHandle::from(LogicalTypeId::UBigint),
+    )];
     columns.extend(protocol.schema_fields().iter().map(to_duckdb_column));
     columns
 }

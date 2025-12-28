@@ -362,7 +362,10 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.get("protocol"), Some(&FieldValue::Str("ESP")));
         assert_eq!(result.get("spi"), Some(&FieldValue::UInt32(0x12345678)));
-        assert_eq!(result.get("sequence"), Some(&FieldValue::UInt32(0xABCDEF01)));
+        assert_eq!(
+            result.get("sequence"),
+            Some(&FieldValue::UInt32(0xABCDEF01))
+        );
     }
 
     // Test 4: AH header parsing
@@ -402,7 +405,10 @@ mod tests {
             let result = parser.parse(&header, &context);
 
             assert!(result.is_ok());
-            assert_eq!(result.get("ah_next_header"), Some(&FieldValue::UInt8(next_header)));
+            assert_eq!(
+                result.get("ah_next_header"),
+                Some(&FieldValue::UInt8(next_header))
+            );
             assert_eq!(result.hint("ip_protocol"), Some(next_header as u64));
         }
     }
@@ -472,7 +478,10 @@ mod tests {
             let result = parser.parse(&header, &context);
 
             assert!(result.is_ok());
-            assert_eq!(result.get("ah_icv_length"), Some(&FieldValue::UInt8(icv_len as u8)));
+            assert_eq!(
+                result.get("ah_icv_length"),
+                Some(&FieldValue::UInt8(icv_len as u8))
+            );
         }
     }
 

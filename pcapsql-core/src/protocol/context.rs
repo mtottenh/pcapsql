@@ -140,7 +140,10 @@ impl ParseContext {
 
     /// Get the innermost tunnel type, if inside a tunnel.
     pub fn current_tunnel_type(&self) -> TunnelType {
-        self.tunnel_stack.last().map(|t| t.tunnel_type).unwrap_or(TunnelType::None)
+        self.tunnel_stack
+            .last()
+            .map(|t| t.tunnel_type)
+            .unwrap_or(TunnelType::None)
     }
 
     /// Get the innermost tunnel ID, if inside a tunnel with an ID.

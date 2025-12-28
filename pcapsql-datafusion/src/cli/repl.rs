@@ -112,7 +112,10 @@ impl ReplCommand {
         } else if rest.eq_ignore_ascii_case("reset") {
             ReplCommand::StatsReset
         } else {
-            ReplCommand::Unknown(format!("Unknown stats subcommand: '{}'. Use '.stats' or '.stats reset'", rest))
+            ReplCommand::Unknown(format!(
+                "Unknown stats subcommand: '{}'. Use '.stats' or '.stats reset'",
+                rest
+            ))
         }
     }
 
@@ -275,7 +278,9 @@ mod tests {
             )
         );
         assert_eq!(
-            ReplCommand::parse(".export data.json SELECT src_ip, dst_ip FROM packets WHERE protocol = 'TCP'"),
+            ReplCommand::parse(
+                ".export data.json SELECT src_ip, dst_ip FROM packets WHERE protocol = 'TCP'"
+            ),
             ReplCommand::Export(
                 "data.json".to_string(),
                 Some("SELECT src_ip, dst_ip FROM packets WHERE protocol = 'TCP'".to_string())

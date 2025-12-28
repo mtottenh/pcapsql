@@ -112,10 +112,7 @@ impl TlsStreamParser {
     /// Parse ClientHello message.
     fn parse_client_hello(&self, data: &[u8]) -> HashMap<&'static str, OwnedFieldValue> {
         let mut fields = HashMap::new();
-        fields.insert(
-            "handshake_type",
-            FieldValue::Str("ClientHello"),
-        );
+        fields.insert("handshake_type", FieldValue::Str("ClientHello"));
 
         if data.len() < 38 {
             return fields;
@@ -180,10 +177,7 @@ impl TlsStreamParser {
     /// Parse ServerHello message.
     fn parse_server_hello(&self, data: &[u8]) -> HashMap<&'static str, OwnedFieldValue> {
         let mut fields = HashMap::new();
-        fields.insert(
-            "handshake_type",
-            FieldValue::Str("ServerHello"),
-        );
+        fields.insert("handshake_type", FieldValue::Str("ServerHello"));
 
         if data.len() < 38 {
             return fields;
@@ -270,10 +264,7 @@ impl StreamParser for TlsStreamParser {
         }
 
         let mut fields = HashMap::new();
-        fields.insert(
-            "version",
-            FieldValue::Str(Self::version_name(version)),
-        );
+        fields.insert("version", FieldValue::Str(Self::version_name(version)));
         fields.insert("version_raw", FieldValue::UInt16(version));
 
         match content_type {
@@ -293,10 +284,7 @@ impl StreamParser for TlsStreamParser {
                             handshake_type::SERVER_HELLO => self.parse_server_hello(hs_body),
                             _ => {
                                 let mut f = HashMap::new();
-                                f.insert(
-                                    "handshake_type_id",
-                                    FieldValue::UInt8(hs_type),
-                                );
+                                f.insert("handshake_type_id", FieldValue::UInt8(hs_type));
                                 f
                             }
                         };
@@ -305,32 +293,20 @@ impl StreamParser for TlsStreamParser {
                     }
                 }
 
-                fields.insert(
-                    "record_type",
-                    FieldValue::Str("Handshake"),
-                );
+                fields.insert("record_type", FieldValue::Str("Handshake"));
             }
 
             content_type::APPLICATION_DATA => {
-                fields.insert(
-                    "record_type",
-                    FieldValue::Str("ApplicationData"),
-                );
+                fields.insert("record_type", FieldValue::Str("ApplicationData"));
                 fields.insert("encrypted_length", FieldValue::UInt16(length));
             }
 
             content_type::ALERT => {
-                fields.insert(
-                    "record_type",
-                    FieldValue::Str("Alert"),
-                );
+                fields.insert("record_type", FieldValue::Str("Alert"));
             }
 
             content_type::CHANGE_CIPHER_SPEC => {
-                fields.insert(
-                    "record_type",
-                    FieldValue::Str("ChangeCipherSpec"),
-                );
+                fields.insert("record_type", FieldValue::Str("ChangeCipherSpec"));
             }
 
             _ => {
@@ -413,14 +389,15 @@ mod tests {
         let record_len = 1 + 3 + hs_len; // type + length + body
 
         let mut record = vec![
-            22,                          // Handshake
-            3, 3,                        // TLS 1.2
-            (record_len >> 8) as u8,     // Length high
-            (record_len & 0xff) as u8,   // Length low
-            1,                           // ClientHello
-            0,                           // Handshake length high
-            (hs_len >> 8) as u8,         // Handshake length mid
-            (hs_len & 0xff) as u8,       // Handshake length low
+            22, // Handshake
+            3,
+            3,                         // TLS 1.2
+            (record_len >> 8) as u8,   // Length high
+            (record_len & 0xff) as u8, // Length low
+            1,                         // ClientHello
+            0,                         // Handshake length high
+            (hs_len >> 8) as u8,       // Handshake length mid
+            (hs_len & 0xff) as u8,     // Handshake length low
         ];
         record.extend_from_slice(&hs_body);
 
@@ -450,14 +427,15 @@ mod tests {
         let record_len = 1 + 3 + hs_len; // type + length + body
 
         let mut record = vec![
-            22,                          // Handshake
-            3, 3,                        // TLS 1.2
-            (record_len >> 8) as u8,     // Length high
-            (record_len & 0xff) as u8,   // Length low
-            2,                           // ServerHello
-            0,                           // Handshake length high
-            (hs_len >> 8) as u8,         // Handshake length mid
-            (hs_len & 0xff) as u8,       // Handshake length low
+            22, // Handshake
+            3,
+            3,                         // TLS 1.2
+            (record_len >> 8) as u8,   // Length high
+            (record_len & 0xff) as u8, // Length low
+            2,                         // ServerHello
+            0,                         // Handshake length high
+            (hs_len >> 8) as u8,       // Handshake length mid
+            (hs_len & 0xff) as u8,     // Handshake length low
         ];
         record.extend_from_slice(&hs_body);
 
@@ -479,7 +457,7 @@ mod tests {
         let parser = TlsStreamParser::new();
 
         let record = vec![
-            22, 3, 3, 0, 4, // Handshake record, 4 bytes
+            22, 3, 3, 0, 4,  // Handshake record, 4 bytes
             11, // Certificate type
             0, 0, 0, // Length 0 (empty cert for test)
         ];

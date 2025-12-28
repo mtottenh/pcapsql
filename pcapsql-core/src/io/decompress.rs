@@ -8,9 +8,9 @@
 //! - `Cursor<MmapSlice>` for memory-mapped files
 //! - Any other `Read` source (e.g., network streams, S3)
 
-use std::io::{self, Read};
 #[cfg(feature = "compress-zstd")]
 use std::io::BufReader;
+use std::io::{self, Read};
 #[cfg(feature = "mmap")]
 use std::sync::Arc;
 

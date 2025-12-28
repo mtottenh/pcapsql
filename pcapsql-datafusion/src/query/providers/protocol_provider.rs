@@ -11,8 +11,8 @@ use datafusion::catalog::Session;
 use datafusion::datasource::{TableProvider, TableType};
 use datafusion::error::Result as DFResult;
 use datafusion::logical_expr::Expr;
-use datafusion_datasource::memory::MemorySourceConfig;
 use datafusion::physical_plan::ExecutionPlan;
+use datafusion_datasource::memory::MemorySourceConfig;
 
 use pcapsql_core::{compute_required_protocols, PacketSource, ParseCache, ProtocolRegistry};
 

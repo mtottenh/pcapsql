@@ -74,7 +74,12 @@ impl StreamTableBuilder {
     }
 
     /// Process a single packet's data.
-    fn process_packet(&mut self, data: &[u8], frame_number: u64, timestamp: i64) -> Result<(), Error> {
+    fn process_packet(
+        &mut self,
+        data: &[u8],
+        frame_number: u64,
+        timestamp: i64,
+    ) -> Result<(), Error> {
         // Parse Ethernet header
         if data.len() < 14 {
             return Ok(());
@@ -106,10 +111,16 @@ impl StreamTableBuilder {
         }
 
         let src_ip = IpAddr::V4(std::net::Ipv4Addr::new(
-            ip_data[12], ip_data[13], ip_data[14], ip_data[15],
+            ip_data[12],
+            ip_data[13],
+            ip_data[14],
+            ip_data[15],
         ));
         let dst_ip = IpAddr::V4(std::net::Ipv4Addr::new(
-            ip_data[16], ip_data[17], ip_data[18], ip_data[19],
+            ip_data[16],
+            ip_data[17],
+            ip_data[18],
+            ip_data[19],
         ));
 
         let tcp_data = &ip_data[ihl..];
@@ -139,18 +150,26 @@ impl StreamTableBuilder {
         };
 
         // Process through stream manager
-        let messages = self.manager.process_segment(
-            src_ip,
-            dst_ip,
-            src_port,
-            dst_port,
-            seq,
-            ack,
-            flags,
-            payload,
-            frame_number,
-            timestamp,
-        ).map_err(|e| Error::Query(QueryError::Execution(format!("Stream processing error: {}", e))))?;
+        let messages = self
+            .manager
+            .process_segment(
+                src_ip,
+                dst_ip,
+                src_port,
+                dst_port,
+                seq,
+                ack,
+                flags,
+                payload,
+                frame_number,
+                timestamp,
+            )
+            .map_err(|e| {
+                Error::Query(QueryError::Execution(format!(
+                    "Stream processing error: {}",
+                    e
+                )))
+            })?;
 
         // Collect messages by protocol
         for msg in messages {
@@ -260,7 +279,10 @@ fn http2_arrow_schema() -> Arc<Schema> {
 }
 
 /// Build an Arrow RecordBatch from HTTP/2 messages.
-fn build_http2_batch(schema: &Arc<Schema>, messages: &[ParsedMessage]) -> Result<RecordBatch, Error> {
+fn build_http2_batch(
+    schema: &Arc<Schema>,
+    messages: &[ParsedMessage],
+) -> Result<RecordBatch, Error> {
     let mut frame_number = UInt64Builder::new();
     let mut connection_id = UInt64Builder::new();
     let mut frame_type = StringBuilder::new();
@@ -361,8 +383,12 @@ fn build_http2_batch(schema: &Arc<Schema>, messages: &[ParsedMessage]) -> Result
         Arc::new(promised_stream_id.finish()),
     ];
 
-    RecordBatch::try_new(schema.clone(), columns)
-        .map_err(|e| Error::Query(QueryError::Execution(format!("Failed to build batch: {}", e))))
+    RecordBatch::try_new(schema.clone(), columns).map_err(|e| {
+        Error::Query(QueryError::Execution(format!(
+            "Failed to build batch: {}",
+            e
+        )))
+    })
 }
 
 // Helper functions to extract values from FieldValue

@@ -5,7 +5,9 @@
 //! - AES-256-GCM
 //! - ChaCha20-Poly1305
 
-use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_128_GCM, AES_256_GCM, CHACHA20_POLY1305};
+use ring::aead::{
+    Aad, LessSafeKey, Nonce, UnboundKey, AES_128_GCM, AES_256_GCM, CHACHA20_POLY1305,
+};
 use thiserror::Error;
 
 use super::kdf::{AeadAlgorithm, Tls12KeyMaterial, Tls13KeyMaterial};
@@ -85,11 +87,7 @@ impl DecryptionContext {
     }
 
     /// Create a new decryption context from raw key material.
-    pub fn new(
-        algorithm: AeadAlgorithm,
-        key: &[u8],
-        iv: &[u8],
-    ) -> Result<Self, DecryptionError> {
+    pub fn new(algorithm: AeadAlgorithm, key: &[u8], iv: &[u8]) -> Result<Self, DecryptionError> {
         let ring_algo = match algorithm {
             AeadAlgorithm::Aes128Gcm => &AES_128_GCM,
             AeadAlgorithm::Aes256Gcm => &AES_256_GCM,
@@ -104,8 +102,8 @@ impl DecryptionContext {
             });
         }
 
-        let unbound_key = UnboundKey::new(ring_algo, key)
-            .map_err(|_| DecryptionError::InvalidKeyLength {
+        let unbound_key =
+            UnboundKey::new(ring_algo, key).map_err(|_| DecryptionError::InvalidKeyLength {
                 expected: expected_key_len,
                 actual: key.len(),
             })?;
@@ -178,7 +176,8 @@ impl DecryptionContext {
 
         // Decrypt in place
         let mut buffer = encrypted_with_tag.to_vec();
-        let plaintext = self.key
+        let plaintext = self
+            .key
             .open_in_place(nonce, aad, &mut buffer)
             .map_err(|_| DecryptionError::AuthenticationFailed)?;
 
@@ -228,7 +227,8 @@ impl DecryptionContext {
 
         // Decrypt in place
         let mut buffer = ciphertext.to_vec();
-        let plaintext = self.key
+        let plaintext = self
+            .key
             .open_in_place(nonce, aad, &mut buffer)
             .map_err(|_| DecryptionError::AuthenticationFailed)?;
 
@@ -339,7 +339,10 @@ mod tests {
         let iv = [0x01u8; 12];
 
         let result = DecryptionContext::new(AeadAlgorithm::Aes128Gcm, &key, &iv);
-        assert!(matches!(result, Err(DecryptionError::InvalidKeyLength { .. })));
+        assert!(matches!(
+            result,
+            Err(DecryptionError::InvalidKeyLength { .. })
+        ));
     }
 
     #[test]
@@ -348,13 +351,21 @@ mod tests {
         let client_random = [0x01u8; 32];
         let server_random = [0x02u8; 32];
 
-        let keys = derive_tls12_keys(&master_secret, &client_random, &server_random, 0xC02F)
-            .unwrap();
+        let keys =
+            derive_tls12_keys(&master_secret, &client_random, &server_random, 0xC02F).unwrap();
 
-        let ctx = DecryptionContext::new_tls12(&keys, AeadAlgorithm::Aes128Gcm, Direction::ClientToServer);
+        let ctx = DecryptionContext::new_tls12(
+            &keys,
+            AeadAlgorithm::Aes128Gcm,
+            Direction::ClientToServer,
+        );
         assert!(ctx.is_ok());
 
-        let ctx = DecryptionContext::new_tls12(&keys, AeadAlgorithm::Aes128Gcm, Direction::ServerToClient);
+        let ctx = DecryptionContext::new_tls12(
+            &keys,
+            AeadAlgorithm::Aes128Gcm,
+            Direction::ServerToClient,
+        );
         assert!(ctx.is_ok());
     }
 
@@ -443,7 +454,10 @@ mod tests {
         // Too short: need at least 8 (explicit nonce) + 16 (tag) = 24 bytes
         let ciphertext = [0u8; 20];
         let result = ctx.decrypt_tls12_record(23, 0x0303, &ciphertext);
-        assert!(matches!(result, Err(DecryptionError::CiphertextTooShort { .. })));
+        assert!(matches!(
+            result,
+            Err(DecryptionError::CiphertextTooShort { .. })
+        ));
     }
 
     #[test]
@@ -457,7 +471,10 @@ mod tests {
         let ciphertext = [0u8; 10];
         let header = [0x17, 0x03, 0x03, 0x00, 0x0A];
         let result = ctx.decrypt_tls13_record(&ciphertext, &header);
-        assert!(matches!(result, Err(DecryptionError::CiphertextTooShort { .. })));
+        assert!(matches!(
+            result,
+            Err(DecryptionError::CiphertextTooShort { .. })
+        ));
     }
 
     // Note: We can't easily test successful decryption without a known test vector

@@ -15,7 +15,9 @@ use tls_parser::{
 use crate::protocol::{FieldValue, OwnedFieldValue};
 use crate::schema::{DataKind, FieldDescriptor};
 use crate::stream::{Direction, ParsedMessage, StreamContext, StreamParseResult, StreamParser};
-use crate::tls::{extract_tls13_inner_content_type, KeyLog, TlsSession, TlsVersion, Direction as TlsDirection};
+use crate::tls::{
+    extract_tls13_inner_content_type, Direction as TlsDirection, KeyLog, TlsSession, TlsVersion,
+};
 
 /// Standard TLS ports.
 const TLS_PORTS: &[u16] = &[
@@ -130,10 +132,7 @@ impl DecryptingTlsStreamParser {
                 client_random.copy_from_slice(ch.random);
                 state.session.process_client_hello(client_random);
 
-                fields.insert(
-                    "handshake_type",
-                    FieldValue::Str("ClientHello"),
-                );
+                fields.insert("handshake_type", FieldValue::Str("ClientHello"));
 
                 // Extract SNI and ALPN from extensions
                 if let Some(ext_data) = &ch.ext {
@@ -147,7 +146,9 @@ impl DecryptingTlsStreamParser {
                                             if let Ok(sni) = std::str::from_utf8(name) {
                                                 fields.insert(
                                                     "sni",
-                                                    FieldValue::OwnedString(CompactString::new(sni)),
+                                                    FieldValue::OwnedString(CompactString::new(
+                                                        sni,
+                                                    )),
                                                 );
                                             }
                                         }
@@ -195,14 +196,8 @@ impl DecryptingTlsStreamParser {
                     .session
                     .process_server_hello(server_random, cipher_suite, version);
 
-                fields.insert(
-                    "handshake_type",
-                    FieldValue::Str("ServerHello"),
-                );
-                fields.insert(
-                    "cipher_suite",
-                    FieldValue::UInt16(cipher_suite),
-                );
+                fields.insert("handshake_type", FieldValue::Str("ServerHello"));
+                fields.insert("cipher_suite", FieldValue::UInt16(cipher_suite));
 
                 if let Some(name) = state.session.cipher_suite_name() {
                     fields.insert(
@@ -234,7 +229,9 @@ impl DecryptingTlsStreamParser {
         }
 
         let hs_type = handshake_data[0];
-        let _hs_len = u32::from_be_bytes([0, handshake_data[1], handshake_data[2], handshake_data[3]]) as usize;
+        let _hs_len =
+            u32::from_be_bytes([0, handshake_data[1], handshake_data[2], handshake_data[3]])
+                as usize;
 
         let hs_type_name = match hs_type {
             1 => "ClientHello",
@@ -261,19 +258,13 @@ impl DecryptingTlsStreamParser {
                 Direction::ToClient => {
                     // Server finished
                     state.session.mark_server_finished();
-                    fields.insert(
-                        "hs_finished",
-                        FieldValue::Str("server"),
-                    );
+                    fields.insert("hs_finished", FieldValue::Str("server"));
                 }
                 Direction::ToServer => {
                     // Client finished - this triggers transition to application data
                     state.session.mark_client_finished();
                     state.handshake_complete = true;
-                    fields.insert(
-                        "hs_finished",
-                        FieldValue::Str("client"),
-                    );
+                    fields.insert("hs_finished", FieldValue::Str("client"));
                 }
             }
         }
@@ -368,12 +359,7 @@ impl StreamParser for DecryptingTlsStreamParser {
                     if let Ok((_, record)) = parse_tls_plaintext(&record_data) {
                         for msg in &record.msg {
                             if let TlsMessage::Handshake(hs) = msg {
-                                Self::process_handshake(
-                                    state,
-                                    hs,
-                                    context.direction,
-                                    &mut fields,
-                                );
+                                Self::process_handshake(state, hs, context.direction, &mut fields);
                             }
                         }
                     }
@@ -381,10 +367,7 @@ impl StreamParser for DecryptingTlsStreamParser {
 
                 23 => {
                     // ApplicationData (in TLS 1.3, this can also be encrypted handshake)
-                    fields.insert(
-                        "record_type",
-                        FieldValue::Str("ApplicationData"),
-                    );
+                    fields.insert("record_type", FieldValue::Str("ApplicationData"));
 
                     // Try to decrypt if session is ready
                     if state.session.can_decrypt() {
@@ -394,7 +377,9 @@ impl StreamParser for DecryptingTlsStreamParser {
                                 // For TLS 1.3, extract the inner content type
                                 if state.session.is_tls13_handshake_phase() {
                                     // During handshake phase, process inner content
-                                    if let Some((inner_type, inner_data)) = extract_tls13_inner_content_type(&plaintext) {
+                                    if let Some((inner_type, inner_data)) =
+                                        extract_tls13_inner_content_type(&plaintext)
+                                    {
                                         fields.insert(
                                             "inner_content_type",
                                             FieldValue::UInt8(inner_type),
@@ -418,7 +403,9 @@ impl StreamParser for DecryptingTlsStreamParser {
                                     // or use directly for TLS 1.2
                                     let version = state.session.handshake().effective_version();
                                     if version == Some(TlsVersion::Tls13) {
-                                        if let Some((inner_type, inner_data)) = extract_tls13_inner_content_type(&plaintext) {
+                                        if let Some((inner_type, inner_data)) =
+                                            extract_tls13_inner_content_type(&plaintext)
+                                        {
                                             if inner_type == 23 {
                                                 decrypted_data.extend_from_slice(inner_data);
                                             }
@@ -450,19 +437,13 @@ impl StreamParser for DecryptingTlsStreamParser {
                             }
                         }
                     } else {
-                        fields.insert(
-                            "encrypted_length",
-                            FieldValue::UInt16(length as u16),
-                        );
+                        fields.insert("encrypted_length", FieldValue::UInt16(length as u16));
                     }
                 }
 
                 20 => {
                     // ChangeCipherSpec
-                    fields.insert(
-                        "record_type",
-                        FieldValue::Str("ChangeCipherSpec"),
-                    );
+                    fields.insert("record_type", FieldValue::Str("ChangeCipherSpec"));
                     state.change_cipher_spec_seen = true;
                 }
 
@@ -471,10 +452,7 @@ impl StreamParser for DecryptingTlsStreamParser {
                     fields.insert("record_type", FieldValue::Str("Alert"));
                     if payload.len() >= 2 {
                         fields.insert("alert_level", FieldValue::UInt8(payload[0]));
-                        fields.insert(
-                            "alert_description",
-                            FieldValue::UInt8(payload[1]),
-                        );
+                        fields.insert("alert_description", FieldValue::UInt8(payload[1]));
                     }
                 }
 
@@ -482,7 +460,10 @@ impl StreamParser for DecryptingTlsStreamParser {
                     // Unknown content type
                     fields.insert(
                         "record_type",
-                        FieldValue::OwnedString(CompactString::new(format!("Unknown({})", content_type))),
+                        FieldValue::OwnedString(CompactString::new(format!(
+                            "Unknown({})",
+                            content_type
+                        ))),
                     );
                 }
             }
@@ -635,10 +616,10 @@ mod tests {
 
         // Build a minimal ClientHello-like handshake record
         let mut record = vec![
-            22,   // Handshake
+            22, // Handshake
             3, 3, // TLS 1.2
             0, 44, // Length (44 bytes)
-            1,    // ClientHello type
+            1,  // ClientHello type
             0, 0, 40, // Handshake length (40 bytes)
             3, 3, // Client version
         ];
@@ -673,7 +654,7 @@ mod tests {
 
         // Application data record
         let record = vec![
-            23,   // ApplicationData
+            23, // ApplicationData
             3, 3, // TLS 1.2
             0, 10, // Length
             0, 1, 2, 3, 4, 5, 6, 7, 8, 9, // Encrypted data
@@ -701,7 +682,7 @@ mod tests {
 
         // Alert record
         let record = vec![
-            21,   // Alert
+            21, // Alert
             3, 3, // TLS 1.2
             0, 2, // Length
             1, 0, // Warning, close_notify
@@ -729,8 +710,7 @@ mod tests {
         // Two small records
         let mut data = vec![
             // First record (ChangeCipherSpec)
-            20, 3, 3, 0, 1, 1,
-            // Second record (ApplicationData)
+            20, 3, 3, 0, 1, 1, // Second record (ApplicationData)
             23, 3, 3, 0, 5, 1, 2, 3, 4, 5,
         ];
 

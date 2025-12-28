@@ -40,7 +40,9 @@ pub use connection::{Connection, ConnectionKey, ConnectionState, ConnectionTrack
 pub use context::{Direction, ParsedMessage, StreamContext, StreamParseResult};
 pub use manager::{StreamConfig, StreamManager};
 pub use parser::StreamParser;
-pub use parsers::{HttpStreamParser, Http2StreamParser, TlsStreamParser, DecryptingTlsStreamParser};
+pub use parsers::{
+    DecryptingTlsStreamParser, Http2StreamParser, HttpStreamParser, TlsStreamParser,
+};
 pub use reassembly::{Segment, SequenceGap, StreamBuffer, StreamKey, StreamStats, TcpReassembler};
 pub use registry::StreamRegistry;
 

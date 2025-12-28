@@ -20,8 +20,8 @@
 use compact_str::CompactString;
 use smallvec::SmallVec;
 use tls_parser::{
-    parse_tls_extensions, parse_tls_plaintext, TlsCipherSuite, TlsExtension,
-    TlsMessage, TlsMessageHandshake, TlsVersion,
+    parse_tls_extensions, parse_tls_plaintext, TlsCipherSuite, TlsExtension, TlsMessage,
+    TlsMessageHandshake, TlsVersion,
 };
 
 use super::{FieldValue, ParseContext, ParseResult, Protocol};
@@ -82,14 +82,8 @@ impl Protocol for TlsProtocol {
         match parse_tls_plaintext(data) {
             Ok((remaining, record)) => {
                 // Record header fields
-                fields.push((
-                    "record_type",
-                    FieldValue::UInt8(record.hdr.record_type.0),
-                ));
-                fields.push((
-                    "record_version",
-                    FieldValue::UInt16(record.hdr.version.0),
-                ));
+                fields.push(("record_type", FieldValue::UInt8(record.hdr.record_type.0)));
+                fields.push(("record_version", FieldValue::UInt16(record.hdr.version.0)));
                 fields.push((
                     "version",
                     FieldValue::OwnedString(CompactString::new(format_tls_version(
@@ -214,17 +208,17 @@ impl Protocol for TlsProtocol {
 }
 
 /// Parse a TLS handshake message.
-fn parse_handshake(handshake: &TlsMessageHandshake, fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) {
+fn parse_handshake(
+    handshake: &TlsMessageHandshake,
+    fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
+) {
     match handshake {
         TlsMessageHandshake::ClientHello(ch) => {
             fields.push(("handshake_type", FieldValue::UInt8(1)));
             fields.push(("handshake_version", FieldValue::UInt16(ch.version.0)));
 
             // Decryption foundation: client_random (32 bytes)
-            fields.push((
-                "client_random",
-                FieldValue::OwnedBytes(ch.random.to_vec()),
-            ));
+            fields.push(("client_random", FieldValue::OwnedBytes(ch.random.to_vec())));
 
             // Session ID (for session resumption tracking)
             if let Some(session_id) = ch.session_id {
@@ -233,10 +227,7 @@ fn parse_handshake(handshake: &TlsMessageHandshake, fields: &mut SmallVec<[(&'st
                     FieldValue::UInt8(session_id.len() as u8),
                 ));
                 if !session_id.is_empty() {
-                    fields.push((
-                        "session_id",
-                        FieldValue::OwnedBytes(session_id.to_vec()),
-                    ));
+                    fields.push(("session_id", FieldValue::OwnedBytes(session_id.to_vec())));
                 }
             } else {
                 fields.push(("session_id_length", FieldValue::UInt8(0)));
@@ -302,10 +293,7 @@ fn parse_handshake(handshake: &TlsMessageHandshake, fields: &mut SmallVec<[(&'st
             fields.push(("handshake_version", FieldValue::UInt16(sh.version.0)));
 
             // Decryption foundation: server_random (32 bytes)
-            fields.push((
-                "server_random",
-                FieldValue::OwnedBytes(sh.random.to_vec()),
-            ));
+            fields.push(("server_random", FieldValue::OwnedBytes(sh.random.to_vec())));
 
             // Session ID
             if let Some(session_id) = sh.session_id {
@@ -314,10 +302,7 @@ fn parse_handshake(handshake: &TlsMessageHandshake, fields: &mut SmallVec<[(&'st
                     FieldValue::UInt8(session_id.len() as u8),
                 ));
                 if !session_id.is_empty() {
-                    fields.push((
-                        "session_id",
-                        FieldValue::OwnedBytes(session_id.to_vec()),
-                    ));
+                    fields.push(("session_id", FieldValue::OwnedBytes(session_id.to_vec())));
                 }
             } else {
                 fields.push(("session_id_length", FieldValue::UInt8(0)));
@@ -451,10 +436,8 @@ fn parse_extensions(
                     }
                 }
                 TlsExtension::SupportedVersions(versions) => {
-                    let vers: Vec<String> = versions
-                        .iter()
-                        .map(|v| format_tls_version(*v))
-                        .collect();
+                    let vers: Vec<String> =
+                        versions.iter().map(|v| format_tls_version(*v)).collect();
                     if !vers.is_empty() {
                         fields.push((
                             "supported_versions",
@@ -475,10 +458,8 @@ fn parse_extensions(
                     }
                 }
                 TlsExtension::EllipticCurves(curves) => {
-                    let curve_names: Vec<String> = curves
-                        .iter()
-                        .map(|c| format_named_group(c.0))
-                        .collect();
+                    let curve_names: Vec<String> =
+                        curves.iter().map(|c| format_named_group(c.0)).collect();
                     if !curve_names.is_empty() {
                         fields.push((
                             "supported_groups",
@@ -487,10 +468,8 @@ fn parse_extensions(
                     }
                 }
                 TlsExtension::EcPointFormats(formats) => {
-                    let format_names: Vec<String> = formats
-                        .iter()
-                        .map(|f| format_ec_point_format(*f))
-                        .collect();
+                    let format_names: Vec<String> =
+                        formats.iter().map(|f| format_ec_point_format(*f)).collect();
                     if !format_names.is_empty() {
                         fields.push((
                             "ec_point_formats",
@@ -590,9 +569,21 @@ fn compute_ja3(ch: &tls_parser::TlsClientHelloContents) -> String {
         "{},{},{},{},{}",
         version,
         ciphers.join("-"),
-        ext_types.iter().map(|t| t.to_string()).collect::<Vec<_>>().join("-"),
-        curves.iter().map(|c| c.to_string()).collect::<Vec<_>>().join("-"),
-        point_formats.iter().map(|p| p.to_string()).collect::<Vec<_>>().join("-"),
+        ext_types
+            .iter()
+            .map(|t| t.to_string())
+            .collect::<Vec<_>>()
+            .join("-"),
+        curves
+            .iter()
+            .map(|c| c.to_string())
+            .collect::<Vec<_>>()
+            .join("-"),
+        point_formats
+            .iter()
+            .map(|p| p.to_string())
+            .collect::<Vec<_>>()
+            .join("-"),
     )
 }
 
@@ -624,7 +615,11 @@ fn compute_ja3s(sh: &tls_parser::TlsServerHelloContents) -> String {
         "{},{},{}",
         version,
         cipher,
-        ext_types.iter().map(|t| t.to_string()).collect::<Vec<_>>().join("-"),
+        ext_types
+            .iter()
+            .map(|t| t.to_string())
+            .collect::<Vec<_>>()
+            .join("-"),
     )
 }
 
@@ -928,7 +923,7 @@ mod tests {
     /// Create a TLS Alert record.
     fn create_tls_alert() -> Vec<u8> {
         vec![
-            21,   // Record type: Alert
+            21, // Record type: Alert
             0x03, 0x03, // Version: TLS 1.2
             0x00, 0x02, // Length: 2
             0x02, // Level: Fatal
@@ -1050,7 +1045,10 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.get("record_type"), Some(&FieldValue::UInt8(21)));
         assert_eq!(result.get("alert_level"), Some(&FieldValue::UInt8(2)));
-        assert_eq!(result.get("alert_description"), Some(&FieldValue::UInt8(40)));
+        assert_eq!(
+            result.get("alert_description"),
+            Some(&FieldValue::UInt8(40))
+        );
         assert_eq!(
             result.get("alert_description_str"),
             Some(&FieldValue::OwnedString(CompactString::new(
@@ -1071,14 +1069,8 @@ mod tests {
     #[test]
     fn test_cipher_suite_names() {
         // Test that common cipher suites are properly named via tls-parser
-        assert_eq!(
-            cipher_suite_name(0x1301),
-            "TLS_AES_128_GCM_SHA256"
-        );
-        assert_eq!(
-            cipher_suite_name(0x1302),
-            "TLS_AES_256_GCM_SHA384"
-        );
+        assert_eq!(cipher_suite_name(0x1301), "TLS_AES_128_GCM_SHA256");
+        assert_eq!(cipher_suite_name(0x1302), "TLS_AES_256_GCM_SHA384");
         assert_eq!(
             cipher_suite_name(0xC02F),
             "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"

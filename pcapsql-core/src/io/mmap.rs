@@ -35,7 +35,9 @@ use crate::error::{Error, PcapError};
 
 use super::decompress::{Compression, DecompressReader, MmapSlice};
 use super::pcap_stream::{GenericPcapReader, PcapFormat};
-use super::{PacketPosition, PacketRange, PacketReader, PacketRef, PacketSource, PacketSourceMetadata};
+use super::{
+    PacketPosition, PacketRange, PacketReader, PacketRef, PacketSource, PacketSourceMetadata,
+};
 
 /// Memory-mapped packet source.
 ///
@@ -384,12 +386,14 @@ mod tests {
         let mut reader = source.reader(None).unwrap();
 
         let mut found_packet = false;
-        reader.process_packets(1, |packet| {
-            assert_eq!(packet.frame_number, 1);
-            assert!(!packet.data.is_empty());
-            found_packet = true;
-            Ok(())
-        }).unwrap();
+        reader
+            .process_packets(1, |packet| {
+                assert_eq!(packet.frame_number, 1);
+                assert!(!packet.data.is_empty());
+                found_packet = true;
+                Ok(())
+            })
+            .unwrap();
         assert!(found_packet);
     }
 
@@ -405,10 +409,12 @@ mod tests {
 
         let mut count = 0;
         loop {
-            let processed = reader.process_packets(100, |_| {
-                count += 1;
-                Ok(())
-            }).unwrap();
+            let processed = reader
+                .process_packets(100, |_| {
+                    count += 1;
+                    Ok(())
+                })
+                .unwrap();
             if processed == 0 {
                 break;
             }
@@ -471,23 +477,25 @@ mod tests {
         let mut reader = source.reader(None).unwrap();
 
         // Read first packet and validate Ethernet header structure
-        reader.process_packets(1, |packet| {
-            // Minimum Ethernet frame is 14 bytes (MAC dst + MAC src + EtherType)
-            assert!(packet.data.len() >= 14, "Packet too small for Ethernet");
+        reader
+            .process_packets(1, |packet| {
+                // Minimum Ethernet frame is 14 bytes (MAC dst + MAC src + EtherType)
+                assert!(packet.data.len() >= 14, "Packet too small for Ethernet");
 
-            // captured_len should match data length
-            assert_eq!(packet.captured_len as usize, packet.data.len());
+                // captured_len should match data length
+                assert_eq!(packet.captured_len as usize, packet.data.len());
 
-            // original_len should be >= captured_len
-            assert!(packet.original_len >= packet.captured_len);
+                // original_len should be >= captured_len
+                assert!(packet.original_len >= packet.captured_len);
 
-            // Frame number should start at 1
-            assert_eq!(packet.frame_number, 1);
+                // Frame number should start at 1
+                assert_eq!(packet.frame_number, 1);
 
-            // Timestamp should be positive (after Unix epoch)
-            assert!(packet.timestamp_us > 0);
-            Ok(())
-        }).unwrap();
+                // Timestamp should be positive (after Unix epoch)
+                assert!(packet.timestamp_us > 0);
+                Ok(())
+            })
+            .unwrap();
     }
 
     #[test]
@@ -504,18 +512,20 @@ mod tests {
         let mut count = 0;
 
         loop {
-            let processed = reader.process_packets(100, |packet| {
-                // Frame numbers should be sequential
-                assert_eq!(packet.frame_number, prev_frame + 1);
-                prev_frame = packet.frame_number;
+            let processed = reader
+                .process_packets(100, |packet| {
+                    // Frame numbers should be sequential
+                    assert_eq!(packet.frame_number, prev_frame + 1);
+                    prev_frame = packet.frame_number;
 
-                // Basic sanity checks
-                assert!(packet.data.len() <= 65535, "Packet exceeds max size");
-                assert_eq!(packet.captured_len as usize, packet.data.len());
+                    // Basic sanity checks
+                    assert!(packet.data.len() <= 65535, "Packet exceeds max size");
+                    assert_eq!(packet.captured_len as usize, packet.data.len());
 
-                count += 1;
-                Ok(())
-            }).unwrap();
+                    count += 1;
+                    Ok(())
+                })
+                .unwrap();
             if processed == 0 {
                 break;
             }
@@ -537,23 +547,25 @@ mod tests {
         let mut prev_timestamp = 0i64;
 
         loop {
-            let processed = reader.process_packets(100, |packet| {
-                // Timestamps should be non-negative
-                assert!(packet.timestamp_us >= 0);
+            let processed = reader
+                .process_packets(100, |packet| {
+                    // Timestamps should be non-negative
+                    assert!(packet.timestamp_us >= 0);
 
-                // Timestamps should generally not go backwards (within reason)
-                // Allow small backward jumps for clock drift
-                if prev_timestamp > 0 {
-                    let diff = packet.timestamp_us - prev_timestamp;
-                    assert!(
-                        diff >= -1_000_000, // Allow up to 1 second backward
-                        "Timestamp went backwards by {} us",
-                        diff.abs()
-                    );
-                }
-                prev_timestamp = packet.timestamp_us;
-                Ok(())
-            }).unwrap();
+                    // Timestamps should generally not go backwards (within reason)
+                    // Allow small backward jumps for clock drift
+                    if prev_timestamp > 0 {
+                        let diff = packet.timestamp_us - prev_timestamp;
+                        assert!(
+                            diff >= -1_000_000, // Allow up to 1 second backward
+                            "Timestamp went backwards by {} us",
+                            diff.abs()
+                        );
+                    }
+                    prev_timestamp = packet.timestamp_us;
+                    Ok(())
+                })
+                .unwrap();
             if processed == 0 {
                 break;
             }
@@ -585,10 +597,12 @@ mod tests {
 
         let mut count = 0;
         loop {
-            let processed = reader.process_packets(100, |_| {
-                count += 1;
-                Ok(())
-            }).unwrap();
+            let processed = reader
+                .process_packets(100, |_| {
+                    count += 1;
+                    Ok(())
+                })
+                .unwrap();
             if processed == 0 || count > 100 {
                 break; // EOF or safety limit
             }
@@ -632,8 +646,20 @@ mod tests {
         let mut frame2 = 0u64;
         let mut len2 = 0usize;
 
-        reader1.process_packets(1, |p| { frame1 = p.frame_number; len1 = p.data.len(); Ok(()) }).unwrap();
-        reader2.process_packets(1, |p| { frame2 = p.frame_number; len2 = p.data.len(); Ok(()) }).unwrap();
+        reader1
+            .process_packets(1, |p| {
+                frame1 = p.frame_number;
+                len1 = p.data.len();
+                Ok(())
+            })
+            .unwrap();
+        reader2
+            .process_packets(1, |p| {
+                frame2 = p.frame_number;
+                len2 = p.data.len();
+                Ok(())
+            })
+            .unwrap();
 
         // Should read identical first packets
         assert_eq!(frame1, frame2);

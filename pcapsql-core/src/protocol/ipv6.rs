@@ -259,7 +259,9 @@ fn parse_generic_ext_header(data: &[u8]) -> Option<(u8, usize)> {
 
 /// Parse Fragment Header.
 /// Returns (next_header, bytes_consumed, fields) or None if parsing fails.
-fn parse_fragment_header(data: &[u8]) -> Option<(u8, usize, SmallVec<[(&'static str, FieldValue); 16]>)> {
+fn parse_fragment_header(
+    data: &[u8],
+) -> Option<(u8, usize, SmallVec<[(&'static str, FieldValue); 16]>)> {
     // Fragment header is exactly 8 bytes
     if data.len() < 8 {
         return None;
@@ -283,7 +285,9 @@ fn parse_fragment_header(data: &[u8]) -> Option<(u8, usize, SmallVec<[(&'static 
 
 /// Parse Routing Header.
 /// Returns (next_header, bytes_consumed, fields) or None if parsing fails.
-fn parse_routing_header(data: &[u8]) -> Option<(u8, usize, SmallVec<[(&'static str, FieldValue); 16]>)> {
+fn parse_routing_header(
+    data: &[u8],
+) -> Option<(u8, usize, SmallVec<[(&'static str, FieldValue); 16]>)> {
     if data.len() < 4 {
         return None;
     }
@@ -520,10 +524,7 @@ mod tests {
         assert_eq!(result.get("ext_fragment"), Some(&FieldValue::Bool(true)));
         assert_eq!(result.get("frag_offset"), Some(&FieldValue::UInt16(1)));
         assert_eq!(result.get("frag_more"), Some(&FieldValue::Bool(true)));
-        assert_eq!(
-            result.get("frag_id"),
-            Some(&FieldValue::UInt32(0x12345678))
-        );
+        assert_eq!(result.get("frag_id"), Some(&FieldValue::UInt32(0x12345678)));
     }
 
     #[test]
@@ -669,7 +670,10 @@ mod tests {
         // Should set ethertype hint for IPv4 so inner IPv4 parser can match
         assert_eq!(result.hint("ethertype"), Some(0x0800u64));
         // Should indicate tunnel type
-        assert_eq!(result.hint("tunnel_type"), Some(TunnelType::Ip4InIp6 as u64));
+        assert_eq!(
+            result.hint("tunnel_type"),
+            Some(TunnelType::Ip4InIp6 as u64)
+        );
     }
 
     #[test]
@@ -706,6 +710,9 @@ mod tests {
         // Should set ethertype hint for IPv6 so inner IPv6 parser can match
         assert_eq!(result.hint("ethertype"), Some(0x86DDu64));
         // Should indicate tunnel type
-        assert_eq!(result.hint("tunnel_type"), Some(TunnelType::Ip6InIp6 as u64));
+        assert_eq!(
+            result.hint("tunnel_type"),
+            Some(TunnelType::Ip6InIp6 as u64)
+        );
     }
 }

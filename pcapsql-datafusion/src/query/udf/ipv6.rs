@@ -86,9 +86,7 @@ impl ScalarUDFImpl for Ip6Udf {
 
         let values: Vec<Option<[u8; 16]>> = ip_strings
             .iter()
-            .map(|opt| {
-                opt.and_then(|s| Ipv6Addr::from_str(s).ok().map(|addr| addr.octets()))
-            })
+            .map(|opt| opt.and_then(|s| Ipv6Addr::from_str(s).ok().map(|addr| addr.octets())))
             .collect();
 
         let result = FixedSizeBinaryArray::try_from_sparse_iter_with_size(

@@ -185,37 +185,34 @@ fn read_legacy_packet<S: Read>(
 
     loop {
         match reader.next() {
-            Ok((offset, block)) => {
-                match block {
-                    PcapBlockOwned::Legacy(packet) => {
-                        *frame_number += 1;
+            Ok((offset, block)) => match block {
+                PcapBlockOwned::Legacy(packet) => {
+                    *frame_number += 1;
 
-                        let timestamp_us =
-                            (packet.ts_sec as i64) * 1_000_000 + (packet.ts_usec as i64);
+                    let timestamp_us = (packet.ts_sec as i64) * 1_000_000 + (packet.ts_usec as i64);
 
-                        let raw = RawPacket {
-                            frame_number: *frame_number,
-                            timestamp_us,
-                            captured_length: packet.caplen,
-                            original_length: packet.origlen,
-                            link_type: *link_type as u16,
-                            data: Bytes::copy_from_slice(packet.data),
-                        };
+                    let raw = RawPacket {
+                        frame_number: *frame_number,
+                        timestamp_us,
+                        captured_length: packet.caplen,
+                        original_length: packet.origlen,
+                        link_type: *link_type as u16,
+                        data: Bytes::copy_from_slice(packet.data),
+                    };
 
-                        reader.consume(offset);
-                        return Ok(Some(raw));
-                    }
-                    PcapBlockOwned::LegacyHeader(header) => {
-                        *link_type = header.network.0 as u32;
-                        reader.consume(offset);
-                        continue;
-                    }
-                    _ => {
-                        reader.consume(offset);
-                        continue;
-                    }
+                    reader.consume(offset);
+                    return Ok(Some(raw));
                 }
-            }
+                PcapBlockOwned::LegacyHeader(header) => {
+                    *link_type = header.network.0 as u32;
+                    reader.consume(offset);
+                    continue;
+                }
+                _ => {
+                    reader.consume(offset);
+                    continue;
+                }
+            },
             Err(PcapParserError::Eof) => return Ok(None),
             Err(PcapParserError::Incomplete(_)) => {
                 reader.refill().map_err(|e| {
@@ -244,62 +241,59 @@ fn read_pcapng_packet<S: Read>(
 
     loop {
         match reader.next() {
-            Ok((offset, block)) => {
-                match block {
-                    PcapBlockOwned::NG(ng_block) => {
-                        use pcap_parser::pcapng::*;
+            Ok((offset, block)) => match block {
+                PcapBlockOwned::NG(ng_block) => {
+                    use pcap_parser::pcapng::*;
 
-                        match ng_block {
-                            Block::InterfaceDescription(idb) => {
-                                *link_type = idb.linktype.0 as u32;
-                                reader.consume(offset);
-                                continue;
-                            }
-                            Block::EnhancedPacket(epb) => {
-                                *frame_number += 1;
+                    match ng_block {
+                        Block::InterfaceDescription(idb) => {
+                            *link_type = idb.linktype.0 as u32;
+                            reader.consume(offset);
+                            continue;
+                        }
+                        Block::EnhancedPacket(epb) => {
+                            *frame_number += 1;
 
-                                let timestamp_us =
-                                    ((epb.ts_high as i64) << 32) | (epb.ts_low as i64);
+                            let timestamp_us = ((epb.ts_high as i64) << 32) | (epb.ts_low as i64);
 
-                                let packet = RawPacket {
-                                    frame_number: *frame_number,
-                                    timestamp_us,
-                                    captured_length: epb.caplen,
-                                    original_length: epb.origlen,
-                                    link_type: *link_type as u16,
-                                    data: Bytes::copy_from_slice(epb.data),
-                                };
+                            let packet = RawPacket {
+                                frame_number: *frame_number,
+                                timestamp_us,
+                                captured_length: epb.caplen,
+                                original_length: epb.origlen,
+                                link_type: *link_type as u16,
+                                data: Bytes::copy_from_slice(epb.data),
+                            };
 
-                                reader.consume(offset);
-                                return Ok(Some(packet));
-                            }
-                            Block::SimplePacket(spb) => {
-                                *frame_number += 1;
+                            reader.consume(offset);
+                            return Ok(Some(packet));
+                        }
+                        Block::SimplePacket(spb) => {
+                            *frame_number += 1;
 
-                                let packet = RawPacket {
-                                    frame_number: *frame_number,
-                                    timestamp_us: 0,
-                                    captured_length: spb.data.len() as u32,
-                                    original_length: spb.origlen,
-                                    link_type: *link_type as u16,
-                                    data: Bytes::copy_from_slice(spb.data),
-                                };
+                            let packet = RawPacket {
+                                frame_number: *frame_number,
+                                timestamp_us: 0,
+                                captured_length: spb.data.len() as u32,
+                                original_length: spb.origlen,
+                                link_type: *link_type as u16,
+                                data: Bytes::copy_from_slice(spb.data),
+                            };
 
-                                reader.consume(offset);
-                                return Ok(Some(packet));
-                            }
-                            _ => {
-                                reader.consume(offset);
-                                continue;
-                            }
+                            reader.consume(offset);
+                            return Ok(Some(packet));
+                        }
+                        _ => {
+                            reader.consume(offset);
+                            continue;
                         }
                     }
-                    _ => {
-                        reader.consume(offset);
-                        continue;
-                    }
                 }
-            }
+                _ => {
+                    reader.consume(offset);
+                    continue;
+                }
+            },
             Err(PcapParserError::Eof) => return Ok(None),
             Err(PcapParserError::Incomplete(_)) => {
                 reader.refill().map_err(|e| {
@@ -515,11 +509,17 @@ mod tests {
 
         // Little-endian microseconds (stored as [0xd4, 0xc3, 0xb2, 0xa1])
         let le_micro = [0xd4, 0xc3, 0xb2, 0xa1];
-        assert_eq!(PcapFormat::detect(&le_micro).unwrap(), PcapFormat::LegacyLeMicro);
+        assert_eq!(
+            PcapFormat::detect(&le_micro).unwrap(),
+            PcapFormat::LegacyLeMicro
+        );
 
         // Big-endian microseconds (stored as [0xa1, 0xb2, 0xc3, 0xd4])
         let be_micro = [0xa1, 0xb2, 0xc3, 0xd4];
-        assert_eq!(PcapFormat::detect(&be_micro).unwrap(), PcapFormat::LegacyBeMicro);
+        assert_eq!(
+            PcapFormat::detect(&be_micro).unwrap(),
+            PcapFormat::LegacyBeMicro
+        );
 
         // PCAPNG
         let pcapng = [0x0a, 0x0d, 0x0d, 0x0a];
@@ -581,7 +581,8 @@ mod tests {
         let format = PcapFormat::detect(&pcap_data).expect("Failed to detect format");
 
         let cursor = Cursor::new(pcap_data);
-        let mut reader = GenericPcapReader::with_format(cursor, format).expect("Failed to create reader");
+        let mut reader =
+            GenericPcapReader::with_format(cursor, format).expect("Failed to create reader");
 
         // Read first packet
         let packet = reader.next_packet().expect("Read error");
@@ -606,7 +607,8 @@ mod tests {
         let format = PcapFormat::detect(&pcap_data).expect("Failed to detect format");
         let cursor = Cursor::new(pcap_data);
 
-        let mut reader = GenericPcapReader::with_format(cursor, format).expect("Failed to create reader");
+        let mut reader =
+            GenericPcapReader::with_format(cursor, format).expect("Failed to create reader");
 
         // Link type is set after reading header block
         reader.next_packet().ok();
@@ -619,7 +621,8 @@ mod tests {
         let format = PcapFormat::detect(&pcap_data).expect("Failed to detect format");
         let cursor = Cursor::new(pcap_data);
 
-        let mut reader = GenericPcapReader::with_format(cursor, format).expect("Failed to create reader");
+        let mut reader =
+            GenericPcapReader::with_format(cursor, format).expect("Failed to create reader");
         assert_eq!(reader.frame_count(), 0);
 
         reader.next_packet().ok();

@@ -35,10 +35,7 @@ impl Protocol for ArpProtocol {
     fn parse<'a>(&self, data: &'a [u8], _context: &ParseContext) -> ParseResult<'a> {
         // ARP for Ethernet/IPv4 is 28 bytes
         if data.len() < 28 {
-            return ParseResult::error(
-                format!("ARP packet too short: {} bytes", data.len()),
-                data,
-            );
+            return ParseResult::error(format!("ARP packet too short: {} bytes", data.len()), data);
         }
 
         let mut fields = SmallVec::new();
@@ -61,10 +58,7 @@ impl Protocol for ArpProtocol {
             operation::REPLY => "Reply",
             _ => "Unknown",
         };
-        fields.push((
-            "operation_name",
-            FieldValue::Str(operation_name),
-        ));
+        fields.push(("operation_name", FieldValue::Str(operation_name)));
 
         // For Ethernet/IPv4 ARP (most common case)
         if hardware_type == 1 && protocol_type == 0x0800 && hardware_size == 6 && protocol_size == 4
@@ -233,7 +227,10 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(result.get("hardware_type"), Some(&FieldValue::UInt16(1)));
-        assert_eq!(result.get("protocol_type"), Some(&FieldValue::UInt16(0x0800)));
+        assert_eq!(
+            result.get("protocol_type"),
+            Some(&FieldValue::UInt16(0x0800))
+        );
         assert_eq!(result.get("hardware_size"), Some(&FieldValue::UInt8(6)));
         assert_eq!(result.get("protocol_size"), Some(&FieldValue::UInt8(4)));
     }

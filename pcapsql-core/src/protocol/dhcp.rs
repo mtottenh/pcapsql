@@ -92,24 +92,39 @@ impl Protocol for DhcpProtocol {
 
         // Client IP address (4 bytes)
         let ciaddr = format_ip(&data[12..16]);
-        fields.push(("ciaddr", FieldValue::OwnedString(CompactString::new(ciaddr))));
+        fields.push((
+            "ciaddr",
+            FieldValue::OwnedString(CompactString::new(ciaddr)),
+        ));
 
         // Your (client) IP address (4 bytes)
         let yiaddr = format_ip(&data[16..20]);
-        fields.push(("yiaddr", FieldValue::OwnedString(CompactString::new(yiaddr))));
+        fields.push((
+            "yiaddr",
+            FieldValue::OwnedString(CompactString::new(yiaddr)),
+        ));
 
         // Server IP address (4 bytes)
         let siaddr = format_ip(&data[20..24]);
-        fields.push(("siaddr", FieldValue::OwnedString(CompactString::new(siaddr))));
+        fields.push((
+            "siaddr",
+            FieldValue::OwnedString(CompactString::new(siaddr)),
+        ));
 
         // Gateway/relay IP address (4 bytes)
         let giaddr = format_ip(&data[24..28]);
-        fields.push(("giaddr", FieldValue::OwnedString(CompactString::new(giaddr))));
+        fields.push((
+            "giaddr",
+            FieldValue::OwnedString(CompactString::new(giaddr)),
+        ));
 
         // Client hardware address (16 bytes, but only first hlen are valid)
         let chaddr_len = (hlen as usize).min(16);
         let chaddr = format_mac(&data[28..28 + chaddr_len]);
-        fields.push(("chaddr", FieldValue::OwnedString(CompactString::new(chaddr))));
+        fields.push((
+            "chaddr",
+            FieldValue::OwnedString(CompactString::new(chaddr)),
+        ));
 
         // Skip server host name (64 bytes) and boot file name (128 bytes)
         // These are at offsets 44 and 108 respectively
@@ -206,12 +221,18 @@ fn parse_dhcp_options(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldVa
         match option_code {
             // Option 1: Subnet Mask
             1 if option_len == 4 => {
-                fields.push(("subnet_mask", FieldValue::OwnedString(CompactString::new(format_ip(option_data)))));
+                fields.push((
+                    "subnet_mask",
+                    FieldValue::OwnedString(CompactString::new(format_ip(option_data))),
+                ));
             }
             // Option 3: Router
             3 if option_len >= 4 => {
                 // Can have multiple routers, just use first one
-                fields.push(("router", FieldValue::OwnedString(CompactString::new(format_ip(&option_data[..4])))));
+                fields.push((
+                    "router",
+                    FieldValue::OwnedString(CompactString::new(format_ip(&option_data[..4]))),
+                ));
             }
             // Option 6: DNS Servers
             6 if option_len >= 4 => {
@@ -220,7 +241,10 @@ fn parse_dhcp_options(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldVa
                     .filter(|chunk| chunk.len() == 4)
                     .map(format_ip)
                     .collect();
-                fields.push(("dns_servers", FieldValue::OwnedString(CompactString::new(dns_servers.join(",")))));
+                fields.push((
+                    "dns_servers",
+                    FieldValue::OwnedString(CompactString::new(dns_servers.join(","))),
+                ));
             }
             // Option 51: IP Address Lease Time
             51 if option_len == 4 => {
@@ -238,7 +262,10 @@ fn parse_dhcp_options(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldVa
             }
             // Option 54: Server Identifier
             54 if option_len == 4 => {
-                fields.push(("server_id", FieldValue::OwnedString(CompactString::new(format_ip(option_data)))));
+                fields.push((
+                    "server_id",
+                    FieldValue::OwnedString(CompactString::new(format_ip(option_data))),
+                ));
             }
             _ => {}
         }
@@ -429,7 +456,9 @@ mod tests {
         assert_eq!(result.get("flags"), Some(&FieldValue::UInt16(0x8000)));
         assert_eq!(
             result.get("chaddr"),
-            Some(&FieldValue::OwnedString(CompactString::new("00:11:22:33:44:55")))
+            Some(&FieldValue::OwnedString(CompactString::new(
+                "00:11:22:33:44:55"
+            )))
         );
         assert_eq!(result.get("message_type"), Some(&FieldValue::UInt8(1)));
     }
@@ -449,7 +478,9 @@ mod tests {
         assert_eq!(result.get("xid"), Some(&FieldValue::UInt32(0xABCDEF01)));
         assert_eq!(
             result.get("yiaddr"),
-            Some(&FieldValue::OwnedString(CompactString::new("192.168.1.100")))
+            Some(&FieldValue::OwnedString(CompactString::new(
+                "192.168.1.100"
+            )))
         );
         assert_eq!(
             result.get("siaddr"),
@@ -490,7 +521,9 @@ mod tests {
         assert_eq!(result.get("lease_time"), Some(&FieldValue::UInt32(86400)));
         assert_eq!(
             result.get("subnet_mask"),
-            Some(&FieldValue::OwnedString(CompactString::new("255.255.255.0")))
+            Some(&FieldValue::OwnedString(CompactString::new(
+                "255.255.255.0"
+            )))
         );
         assert_eq!(
             result.get("router"),
@@ -498,7 +531,9 @@ mod tests {
         );
         assert_eq!(
             result.get("dns_servers"),
-            Some(&FieldValue::OwnedString(CompactString::new("8.8.8.8,8.8.4.4")))
+            Some(&FieldValue::OwnedString(CompactString::new(
+                "8.8.8.8,8.8.4.4"
+            )))
         );
     }
 
