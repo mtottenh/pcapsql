@@ -653,7 +653,8 @@ mod tests {
 
     #[test]
     fn test_histogram_serialization_roundtrip() {
-        let mut acc = HdrHistogramAccumulator::new(2);
+        // Use 3 significant figures for better precision in tests
+        let mut acc = HdrHistogramAccumulator::new(3);
         let batch = Arc::new(Float64Array::from(vec![100.0, 200.0, 300.0])) as ArrayRef;
         acc.update_batch(&[batch]).unwrap();
 
