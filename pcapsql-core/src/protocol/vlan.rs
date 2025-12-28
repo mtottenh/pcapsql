@@ -2,14 +2,9 @@
 
 use smallvec::SmallVec;
 
+use super::ethernet::ethertype;
 use super::{FieldValue, ParseContext, ParseResult, Protocol};
 use crate::schema::{DataKind, FieldDescriptor};
-
-/// EtherType for 802.1Q VLAN tagged frames.
-pub const ETHERTYPE_VLAN: u16 = 0x8100;
-
-/// EtherType for 802.1ad QinQ (double tagging).
-pub const ETHERTYPE_QINQ: u16 = 0x88A8;
 
 /// 802.1Q VLAN tag parser.
 #[derive(Debug, Clone, Copy)]
@@ -27,8 +22,8 @@ impl Protocol for VlanProtocol {
     fn can_parse(&self, context: &ParseContext) -> Option<u32> {
         // Check for VLAN ethertype (0x8100) or QinQ (0x88A8)
         match context.hint("ethertype") {
-            Some(etype) if etype == ETHERTYPE_VLAN as u64 => Some(100),
-            Some(etype) if etype == ETHERTYPE_QINQ as u64 => Some(100),
+            Some(etype) if etype == ethertype::VLAN as u64 => Some(100),
+            Some(etype) if etype == ethertype::QINQ as u64 => Some(100),
             _ => None,
         }
     }
@@ -92,7 +87,6 @@ impl Protocol for VlanProtocol {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::ethernet::ethertype;
 
     /// Create a VLAN tag with the given parameters.
     fn create_vlan_tag(vlan_id: u16, priority: u8, dei: bool, inner_ethertype: u16) -> Vec<u8> {
@@ -114,7 +108,7 @@ mod tests {
 
         let parser = VlanProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", ETHERTYPE_VLAN as u64);
+        context.insert_hint("ethertype", ethertype::VLAN as u64);
         context.parent_protocol = Some("ethernet");
 
         let result = parser.parse(&tag, &context);
@@ -136,7 +130,7 @@ mod tests {
 
         let parser = VlanProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", ETHERTYPE_VLAN as u64);
+        context.insert_hint("ethertype", ethertype::VLAN as u64);
         context.parent_protocol = Some("ethernet");
 
         let result = parser.parse(&tag, &context);
@@ -158,7 +152,7 @@ mod tests {
 
         let parser = VlanProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", ETHERTYPE_VLAN as u64);
+        context.insert_hint("ethertype", ethertype::VLAN as u64);
 
         let result = parser.parse(&tag, &context);
 
@@ -177,12 +171,12 @@ mod tests {
 
         // With VLAN ethertype
         let mut ctx2 = ParseContext::new(1);
-        ctx2.insert_hint("ethertype", ETHERTYPE_VLAN as u64);
+        ctx2.insert_hint("ethertype", ethertype::VLAN as u64);
         assert!(parser.can_parse(&ctx2).is_some());
 
         // With QinQ ethertype
         let mut ctx3 = ParseContext::new(1);
-        ctx3.insert_hint("ethertype", ETHERTYPE_QINQ as u64);
+        ctx3.insert_hint("ethertype", ethertype::QINQ as u64);
         assert!(parser.can_parse(&ctx3).is_some());
 
         // With different ethertype
@@ -197,7 +191,7 @@ mod tests {
 
         let parser = VlanProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", ETHERTYPE_VLAN as u64);
+        context.insert_hint("ethertype", ethertype::VLAN as u64);
 
         let result = parser.parse(&short_tag, &context);
 
@@ -212,7 +206,7 @@ mod tests {
 
         let parser = VlanProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", ETHERTYPE_VLAN as u64);
+        context.insert_hint("ethertype", ethertype::VLAN as u64);
 
         let result = parser.parse(&tag, &context);
 
@@ -229,7 +223,7 @@ mod tests {
 
         let parser = VlanProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", ETHERTYPE_VLAN as u64);
+        context.insert_hint("ethertype", ethertype::VLAN as u64);
 
         let result = parser.parse(&data, &context);
 

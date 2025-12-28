@@ -102,6 +102,11 @@ pub use udp::UdpProtocol;
 pub use vlan::VlanProtocol;
 pub use vxlan::VxlanProtocol;
 
+// Re-export protocol constants for use in UDFs and other crates
+pub use dns::{rcode, record_type};
+pub use ethernet::ethertype;
+pub use ipv6::next_header;
+
 /// Create a registry with all built-in protocol parsers.
 pub fn default_registry() -> ProtocolRegistry {
     let mut registry = ProtocolRegistry::new();

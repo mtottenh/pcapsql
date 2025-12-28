@@ -10,6 +10,7 @@ use datafusion::common::Result as DFResult;
 use datafusion::logical_expr::{
     ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
 };
+use pcapsql_core::protocol::{rcode, record_type};
 
 /// Create the `dns_type_name()` UDF that converts DNS query type number to name.
 ///
@@ -97,25 +98,25 @@ impl ScalarUDFImpl for DnsTypeNameUdf {
 /// Convert DNS type number to name.
 fn dns_type_to_name(qtype: u16) -> String {
     match qtype {
-        1 => "A".to_string(),
-        2 => "NS".to_string(),
-        5 => "CNAME".to_string(),
-        6 => "SOA".to_string(),
-        12 => "PTR".to_string(),
-        15 => "MX".to_string(),
-        16 => "TXT".to_string(),
+        record_type::A => "A".to_string(),
+        record_type::NS => "NS".to_string(),
+        record_type::CNAME => "CNAME".to_string(),
+        record_type::SOA => "SOA".to_string(),
+        record_type::PTR => "PTR".to_string(),
+        record_type::MX => "MX".to_string(),
+        record_type::TXT => "TXT".to_string(),
         17 => "RP".to_string(),
         18 => "AFSDB".to_string(),
         24 => "SIG".to_string(),
         25 => "KEY".to_string(),
-        28 => "AAAA".to_string(),
+        record_type::AAAA => "AAAA".to_string(),
         29 => "LOC".to_string(),
-        33 => "SRV".to_string(),
+        record_type::SRV => "SRV".to_string(),
         35 => "NAPTR".to_string(),
         36 => "KX".to_string(),
         37 => "CERT".to_string(),
         39 => "DNAME".to_string(),
-        41 => "OPT".to_string(),
+        record_type::OPT => "OPT".to_string(),
         42 => "APL".to_string(),
         43 => "DS".to_string(),
         44 => "SSHFP".to_string(),
@@ -143,7 +144,7 @@ fn dns_type_to_name(qtype: u16) -> String {
         250 => "TSIG".to_string(),
         251 => "IXFR".to_string(),
         252 => "AXFR".to_string(),
-        255 => "ANY".to_string(),
+        record_type::ANY => "ANY".to_string(),
         256 => "URI".to_string(),
         257 => "CAA".to_string(),
         32768 => "TA".to_string(),
@@ -203,29 +204,29 @@ impl ScalarUDFImpl for DnsRcodeNameUdf {
 }
 
 /// Convert DNS response code to name.
-fn dns_rcode_to_name(rcode: u8) -> String {
-    match rcode {
-        0 => "NOERROR".to_string(),
-        1 => "FORMERR".to_string(),
-        2 => "SERVFAIL".to_string(),
-        3 => "NXDOMAIN".to_string(),
-        4 => "NOTIMP".to_string(),
-        5 => "REFUSED".to_string(),
-        6 => "YXDOMAIN".to_string(),
-        7 => "YXRRSET".to_string(),
-        8 => "NXRRSET".to_string(),
-        9 => "NOTAUTH".to_string(),
-        10 => "NOTZONE".to_string(),
-        11 => "DSOTYPENI".to_string(),
-        16 => "BADVERS".to_string(),
-        17 => "BADKEY".to_string(),
-        18 => "BADTIME".to_string(),
-        19 => "BADMODE".to_string(),
-        20 => "BADNAME".to_string(),
-        21 => "BADALG".to_string(),
-        22 => "BADTRUNC".to_string(),
-        23 => "BADCOOKIE".to_string(),
-        _ => format!("RCODE{rcode}"),
+fn dns_rcode_to_name(rcode_val: u8) -> String {
+    match rcode_val {
+        rcode::NOERROR => "NOERROR".to_string(),
+        rcode::FORMERR => "FORMERR".to_string(),
+        rcode::SERVFAIL => "SERVFAIL".to_string(),
+        rcode::NXDOMAIN => "NXDOMAIN".to_string(),
+        rcode::NOTIMP => "NOTIMP".to_string(),
+        rcode::REFUSED => "REFUSED".to_string(),
+        rcode::YXDOMAIN => "YXDOMAIN".to_string(),
+        rcode::YXRRSET => "YXRRSET".to_string(),
+        rcode::NXRRSET => "NXRRSET".to_string(),
+        rcode::NOTAUTH => "NOTAUTH".to_string(),
+        rcode::NOTZONE => "NOTZONE".to_string(),
+        rcode::DSOTYPENI => "DSOTYPENI".to_string(),
+        rcode::BADVERS => "BADVERS".to_string(),
+        rcode::BADKEY => "BADKEY".to_string(),
+        rcode::BADTIME => "BADTIME".to_string(),
+        rcode::BADMODE => "BADMODE".to_string(),
+        rcode::BADNAME => "BADNAME".to_string(),
+        rcode::BADALG => "BADALG".to_string(),
+        rcode::BADTRUNC => "BADTRUNC".to_string(),
+        rcode::BADCOOKIE => "BADCOOKIE".to_string(),
+        _ => format!("RCODE{rcode_val}"),
     }
 }
 

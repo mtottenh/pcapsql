@@ -10,13 +10,90 @@ use crate::schema::{DataKind, FieldDescriptor};
 /// Link type constant for Ethernet.
 pub const LINKTYPE_ETHERNET: u16 = 1;
 
-/// Well-known EtherTypes.
+/// Well-known EtherType values (IEEE 802).
+#[allow(dead_code)]
 pub mod ethertype {
+    // Common protocols
     pub const IPV4: u16 = 0x0800;
     pub const ARP: u16 = 0x0806;
-    #[allow(dead_code)] // RFC constant for VLAN tagging
+    pub const WAKE_ON_LAN: u16 = 0x0842;
+    pub const RARP: u16 = 0x8035;
     pub const VLAN: u16 = 0x8100;
     pub const IPV6: u16 = 0x86DD;
+    pub const QINQ: u16 = 0x88A8;
+
+    // Streaming/AV protocols
+    pub const AVTP: u16 = 0x22F0;
+    pub const SRP: u16 = 0x22EA;
+    pub const TRILL: u16 = 0x22F3;
+
+    // Legacy protocols
+    pub const DEC_MOP_RC: u16 = 0x6002;
+    pub const DECNET: u16 = 0x6003;
+    pub const DEC_LAT: u16 = 0x6004;
+    pub const APPLETALK: u16 = 0x809B;
+    pub const AARP: u16 = 0x80F3;
+    pub const IPX: u16 = 0x8137;
+    pub const QNX_QNET: u16 = 0x8204;
+
+    // Link layer protocols
+    pub const SLPP: u16 = 0x8102;
+    pub const VLACP: u16 = 0x8103;
+    pub const FLOW_CONTROL: u16 = 0x8808;
+    pub const LACP: u16 = 0x8809;
+    pub const LLDP: u16 = 0x88CC;
+
+    // MPLS
+    pub const MPLS: u16 = 0x8847;
+    pub const MPLS_MULTICAST: u16 = 0x8848;
+
+    // PPPoE
+    pub const PPPOE_DISCOVERY: u16 = 0x8863;
+    pub const PPPOE_SESSION: u16 = 0x8864;
+
+    // Industrial protocols
+    pub const COBRANET: u16 = 0x8819;
+    pub const PROFINET: u16 = 0x8892;
+    pub const HYPERSCSI: u16 = 0x889A;
+    pub const ATA_OVER_ETHERNET: u16 = 0x88A2;
+    pub const ETHERCAT: u16 = 0x88A4;
+    pub const POWERLINK: u16 = 0x88AB;
+    pub const GOOSE: u16 = 0x88B8;
+    pub const GSE: u16 = 0x88B9;
+    pub const SV: u16 = 0x88BA;
+    pub const SERCOS_III: u16 = 0x88CD;
+    pub const MRP: u16 = 0x88E3;
+    pub const PRP: u16 = 0x88FB;
+    pub const HSR: u16 = 0x892F;
+
+    // Security protocols
+    pub const EAP_OVER_LAN: u16 = 0x888E;
+    pub const MACSEC: u16 = 0x88E5;
+
+    // Provider bridging
+    pub const PBB: u16 = 0x88E7;
+
+    // Time protocols
+    pub const PTP: u16 = 0x88F7;
+
+    // Network management
+    pub const HOMEPLUG_MME: u16 = 0x887B;
+    pub const HOMEPLUG_AV_MME: u16 = 0x88E1;
+    pub const MIKROTIK_ROMON: u16 = 0x88BF;
+    pub const NC_SI: u16 = 0x88F8;
+    pub const CFM_OAM: u16 = 0x8902;
+
+    // Storage protocols
+    pub const FCOE: u16 = 0x8906;
+    pub const FCOE_INIT: u16 = 0x8914;
+    pub const ROCE: u16 = 0x8915;
+
+    // Other
+    pub const WSMP: u16 = 0x88DC;
+    pub const TTE: u16 = 0x891D;
+    pub const ECTP: u16 = 0x9000;
+    pub const QINQ_OLD: u16 = 0x9100;
+    pub const VERITAS_LLT: u16 = 0xCAFE;
 }
 
 /// Ethernet II protocol parser.

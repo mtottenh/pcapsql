@@ -595,15 +595,36 @@ pub mod record_type {
     pub const ANY: u16 = 255;
 }
 
-/// DNS response codes.
+/// DNS response codes (RFC 1035, RFC 2136, RFC 2845, RFC 6895).
 #[allow(dead_code)]
 pub mod rcode {
+    // Standard RCODEs (RFC 1035)
     pub const NOERROR: u8 = 0;
     pub const FORMERR: u8 = 1;
     pub const SERVFAIL: u8 = 2;
     pub const NXDOMAIN: u8 = 3;
     pub const NOTIMP: u8 = 4;
     pub const REFUSED: u8 = 5;
+
+    // Extended RCODEs (RFC 2136)
+    pub const YXDOMAIN: u8 = 6;
+    pub const YXRRSET: u8 = 7;
+    pub const NXRRSET: u8 = 8;
+    pub const NOTAUTH: u8 = 9;
+    pub const NOTZONE: u8 = 10;
+
+    // EDNS extended RCODEs (RFC 6891)
+    pub const DSOTYPENI: u8 = 11;
+
+    // TSIG/TKEY RCODEs (RFC 2845, RFC 2930)
+    pub const BADVERS: u8 = 16;
+    pub const BADKEY: u8 = 17;
+    pub const BADTIME: u8 = 18;
+    pub const BADMODE: u8 = 19;
+    pub const BADNAME: u8 = 20;
+    pub const BADALG: u8 = 21;
+    pub const BADTRUNC: u8 = 22;
+    pub const BADCOOKIE: u8 = 23;
 }
 
 #[cfg(test)]
