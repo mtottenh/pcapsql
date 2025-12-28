@@ -1,0 +1,75 @@
+name: Publish to AUR
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  aur-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Download source tarball and calculate checksum
+        id: checksum
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          curl -sL "https://github.com/${{ github.repository }}/archive/v${VERSION}.tar.gz" -o source.tar.gz
+          SHA256=$(sha256sum source.tar.gz | cut -d' ' -f1)
+          echo "sha256=$SHA256" >> $GITHUB_OUTPUT
+
+      - name: Generate PKGBUILD
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          SHA256="${{ steps.checksum.outputs.sha256 }}"
+          cat > PKGBUILD << EOF
+          # Maintainer: Max Tottenham <mtottenh@gmail.com>
+          pkgname=pcapsql
+          pkgver=$VERSION
+          pkgrel=1
+          pkgdesc="SQL query engine for PCAP network traffic analysis"
+          arch=('x86_64')
+          url="https://github.com/mtottenh/pcapsql"
+          license=('MIT')
+          depends=('gcc-libs')
+          makedepends=('cargo')
+          source=("\$pkgname-\$pkgver.tar.gz::https://github.com/mtottenh/\$pkgname/archive/v\$pkgver.tar.gz")
+          sha256sums=('$SHA256')
+
+          build() {
+              cd "\$pkgname-\$pkgver"
+              export RUSTUP_TOOLCHAIN=stable
+              export CARGO_TARGET_DIR=target
+              cargo build --release -p pcapsql-datafusion
+          }
+
+          package() {
+              cd "\$pkgname-\$pkgver"
+              install -Dm755 target/release/pcapsql "\$pkgdir/usr/bin/pcapsql"
+              install -Dm644 target/assets/pcapsql.1 "\$pkgdir/usr/share/man/man1/pcapsql.1"
+              install -Dm644 target/assets/pcapsql.bash "\$pkgdir/usr/share/bash-completion/completions/pcapsql"
+              install -Dm644 target/assets/pcapsql.zsh "\$pkgdir/usr/share/zsh/site-functions/_pcapsql"
+              install -Dm644 target/assets/pcapsql.fish "\$pkgdir/usr/share/fish/vendor_completions.d/pcapsql.fish"
+              install -Dm644 LICENSE "\$pkgdir/usr/share/licenses/\$pkgname/LICENSE"
+          }
+          EOF
+          # Remove leading spaces from heredoc
+          sed -i 's/^          //' PKGBUILD
+          cat PKGBUILD
+
+      - name: Publish to AUR
+        uses: KSXGitHub/github-actions-deploy-aur@v3.0.1
+        with:
+          pkgname: pcapsql
+          pkgbuild: ./PKGBUILD
+          commit_username: ${{ secrets.AUR_USERNAME }}
+          commit_email: ${{ secrets.AUR_EMAIL }}
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          commit_message: "Update to version ${{ steps.version.outputs.version }}"
+          force_push: true

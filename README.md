@@ -6,13 +6,53 @@
 
 Query PCAP files using SQL. Built on Apache Arrow and DataFusion.
 
+## Installation
+
+### Pre-built Packages
+
+Download the latest release for your distribution from [GitHub Releases](https://github.com/mtottenh/pcapsql/releases).
+
+| Distribution | Version | Package |
+|:-------------|:--------|:--------|
+| ![Ubuntu](https://img.shields.io/badge/Ubuntu-E95420?logo=ubuntu&logoColor=white) | 20.04, 22.04, 24.04 | `.deb` |
+| ![Debian](https://img.shields.io/badge/Debian-A81D33?logo=debian&logoColor=white) | 11, 12 | `.deb` |
+| ![Fedora](https://img.shields.io/badge/Fedora-51A2DA?logo=fedora&logoColor=white) | 39, 40 | `.rpm` |
+| ![Rocky Linux](https://img.shields.io/badge/Rocky_Linux-10B981?logo=rockylinux&logoColor=white) | 9 | `.rpm` |
+| ![Arch Linux](https://img.shields.io/badge/Arch_Linux-1793D1?logo=archlinux&logoColor=white) | Rolling | [AUR](https://aur.archlinux.org/packages/pcapsql) |
+
+```bash
+# Debian/Ubuntu
+sudo dpkg -i pcapsql_*.deb
+
+# Fedora/RHEL/Rocky
+sudo rpm -i pcapsql-*.rpm
+
+# Arch Linux (using yay)
+yay -S pcapsql
+```
+
+### Build from Source
+
+Requires Rust 1.70+:
+
+```bash
+cargo install --git https://github.com/mtottenh/pcapsql pcapsql-datafusion
+```
+
+Or clone and build:
+
+```bash
+git clone https://github.com/mtottenh/pcapsql
+cd pcapsql
+cargo build --release
+./target/release/pcapsql --help
+```
+
 ## Quick Start
 
 ```bash
-cargo build --release
-
 # Interactive mode
-./target/release/pcapsql capture.pcap
+pcapsql capture.pcap
 
 # Single query
 pcapsql capture.pcap -e "SELECT * FROM tcp LIMIT 10"

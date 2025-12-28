@@ -103,30 +103,50 @@ jobs:
         with:
           path: packages
 
-      - name: Organize packages by distro
+      - name: Rename packages with distro info
         run: |
           mkdir -p release-assets
+          # Process deb packages
           for dir in packages/deb-*; do
             if [ -d "$dir" ]; then
               distro=$(basename "$dir" | sed 's/deb-\(.*\)-\([0-9.]*\)/\1/')
               version=$(basename "$dir" | sed 's/deb-\(.*\)-\([0-9.]*\)/\2/')
-              mkdir -p "release-assets/$distro/$version"
-              cp "$dir"/*.deb "release-assets/$distro/$version/"
+              for pkg in "$dir"/*.deb; do
+                if [ -f "$pkg" ]; then
+                  # Rename: pcapsql-datafusion_0.1.0-1_amd64.deb -> pcapsql_0.1.0-1_ubuntu-20.04_amd64.deb
+                  basename=$(basename "$pkg")
+                  # Extract version and arch from original name
+                  pkg_version=$(echo "$basename" | sed 's/pcapsql-datafusion_\([^_]*\)_.*/\1/')
+                  arch=$(echo "$basename" | sed 's/.*_\([^_]*\)\.deb/\1/')
+                  newname="pcapsql_${pkg_version}_${distro}-${version}_${arch}.deb"
+                  cp "$pkg" "release-assets/$newname"
+                fi
+              done
             fi
           done
+          # Process rpm packages
           for dir in packages/rpm-*; do
             if [ -d "$dir" ]; then
               distro=$(basename "$dir" | sed 's/rpm-\(.*\)-\([0-9.]*\)/\1/')
               version=$(basename "$dir" | sed 's/rpm-\(.*\)-\([0-9.]*\)/\2/')
-              mkdir -p "release-assets/$distro/$version"
-              cp "$dir"/*.rpm "release-assets/$distro/$version/"
+              for pkg in "$dir"/*.rpm; do
+                if [ -f "$pkg" ]; then
+                  # Rename: pcapsql-datafusion-0.1.0-1.x86_64.rpm -> pcapsql-0.1.0-1.fedora-40.x86_64.rpm
+                  basename=$(basename "$pkg")
+                  # Extract version and arch from original name
+                  pkg_version=$(echo "$basename" | sed 's/pcapsql-datafusion-\([^.]*-[^.]*\)\..*/\1/')
+                  arch=$(echo "$basename" | sed 's/.*\.\([^.]*\)\.rpm/\1/')
+                  newname="pcapsql-${pkg_version}.${distro}-${version}.${arch}.rpm"
+                  cp "$pkg" "release-assets/$newname"
+                fi
+              done
             fi
           done
-          echo "Package structure:"
-          find release-assets -type f
+          echo "Release assets:"
+          ls -la release-assets/
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          files: release-assets/**/*
+          files: release-assets/*
           generate_release_notes: true
