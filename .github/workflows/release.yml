@@ -28,6 +28,9 @@ jobs:
           - distro: debian
             version: "12"
             container: debian:12
+          - distro: debian
+            version: "13"
+            container: debian:trixie
     runs-on: ubuntu-latest
     container: ${{ matrix.container }}
     steps:
