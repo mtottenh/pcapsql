@@ -125,7 +125,6 @@ impl Protocol for GreProtocol {
         // Optional fields based on flags
 
         // Checksum and Reserved (4 bytes if C bit set)
-        let mut checksum_valid: Option<bool> = None;
         if checksum_present {
             if data.len() < offset + 4 {
                 return ParseResult::error("GRE: missing checksum field".to_string(), data);
@@ -138,8 +137,8 @@ impl Protocol for GreProtocol {
             // To verify: compute checksum over entire packet (with checksum field included)
             // Result should be 0 if valid
             let computed = internet_checksum(data);
-            checksum_valid = Some(computed == 0);
-            fields.push(("checksum_valid", FieldValue::Bool(computed == 0)));
+            let checksum_valid = computed == 0;
+            fields.push(("checksum_valid", FieldValue::Bool(checksum_valid)));
 
             // Reserved field (offset) is at offset+2..offset+4, typically ignored
             offset += 4;

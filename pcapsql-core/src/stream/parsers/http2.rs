@@ -430,7 +430,7 @@ impl Http2StreamParser {
         header: &FrameHeader,
         payload: &[u8],
         direction: Direction,
-        frame_number: u64,
+        _frame_number: u64,
         fields: &mut HashMap<&'static str, OwnedFieldValue>,
     ) {
         let (data, pad_len) = if header.is_padded() && !payload.is_empty() {
