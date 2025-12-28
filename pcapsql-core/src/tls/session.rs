@@ -6,9 +6,7 @@
 use std::sync::Arc;
 
 use super::decrypt::{DecryptionContext, DecryptionError, Direction, TlsVersion};
-use super::kdf::{
-    derive_tls12_keys, derive_tls13_keys, hash_for_cipher_suite, AeadAlgorithm, KeyDerivationError,
-};
+use super::kdf::{derive_tls12_keys, derive_tls13_keys, AeadAlgorithm, KeyDerivationError};
 use super::keylog::{KeyLog, KeyLogEntries};
 use thiserror::Error;
 
