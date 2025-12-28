@@ -93,14 +93,9 @@
 
 use smallvec::SmallVec;
 
+use super::ipv6::next_header;
 use super::{FieldValue, ParseContext, ParseResult, PayloadMode, Protocol};
 use crate::schema::{DataKind, FieldDescriptor};
-
-/// IP protocol number for ESP.
-pub const IP_PROTOCOL_ESP: u8 = 50;
-
-/// IP protocol number for AH.
-pub const IP_PROTOCOL_AH: u8 = 51;
 
 /// IPsec protocol parser (handles both ESP and AH).
 #[derive(Debug, Clone, Copy)]
@@ -118,8 +113,8 @@ impl Protocol for IpsecProtocol {
     fn can_parse(&self, context: &ParseContext) -> Option<u32> {
         // Match when IP protocol hint equals ESP (50) or AH (51)
         match context.hint("ip_protocol") {
-            Some(proto) if proto == IP_PROTOCOL_ESP as u64 => Some(100),
-            Some(proto) if proto == IP_PROTOCOL_AH as u64 => Some(100),
+            Some(proto) if proto == next_header::ESP as u64 => Some(100),
+            Some(proto) if proto == next_header::AH as u64 => Some(100),
             _ => None,
         }
     }
@@ -127,7 +122,7 @@ impl Protocol for IpsecProtocol {
     fn parse<'a>(&self, data: &'a [u8], context: &ParseContext) -> ParseResult<'a> {
         // Determine if this is ESP or AH based on the context hint
         let is_esp = match context.hint("ip_protocol") {
-            Some(proto) => proto == IP_PROTOCOL_ESP as u64,
+            Some(proto) => proto == next_header::ESP as u64,
             None => return ParseResult::error("IPsec: missing ip_protocol hint".to_string(), data),
         };
 

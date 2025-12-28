@@ -16,6 +16,7 @@ use duckdb::vscalar::{ScalarFunctionSignature, VScalar};
 use duckdb::vtab::arrow::WritableVector;
 use duckdb::Connection;
 use libduckdb_sys::duckdb_string_t;
+use pcapsql_core::protocol::{ethertype, rcode, record_type};
 
 // ============================================================================
 // tcp_flags_str(uint16) -> string
@@ -340,24 +341,24 @@ fn check_tcp_flag(flags: u16, name: &str) -> bool {
 /// Convert DNS type to string.
 fn dns_type_to_string(qtype: u16) -> String {
     match qtype {
-        1 => "A".to_string(),
-        2 => "NS".to_string(),
-        5 => "CNAME".to_string(),
-        6 => "SOA".to_string(),
-        12 => "PTR".to_string(),
-        15 => "MX".to_string(),
-        16 => "TXT".to_string(),
-        28 => "AAAA".to_string(),
-        33 => "SRV".to_string(),
+        record_type::A => "A".to_string(),
+        record_type::NS => "NS".to_string(),
+        record_type::CNAME => "CNAME".to_string(),
+        record_type::SOA => "SOA".to_string(),
+        record_type::PTR => "PTR".to_string(),
+        record_type::MX => "MX".to_string(),
+        record_type::TXT => "TXT".to_string(),
+        record_type::AAAA => "AAAA".to_string(),
+        record_type::SRV => "SRV".to_string(),
         35 => "NAPTR".to_string(),
-        41 => "OPT".to_string(),
+        record_type::OPT => "OPT".to_string(),
         43 => "DS".to_string(),
         46 => "RRSIG".to_string(),
         47 => "NSEC".to_string(),
         48 => "DNSKEY".to_string(),
         52 => "TLSA".to_string(),
         65 => "HTTPS".to_string(),
-        255 => "ANY".to_string(),
+        record_type::ANY => "ANY".to_string(),
         256 => "URI".to_string(),
         257 => "CAA".to_string(),
         _ => format!("TYPE{qtype}"),
@@ -365,20 +366,29 @@ fn dns_type_to_string(qtype: u16) -> String {
 }
 
 /// Convert DNS rcode to string.
-fn dns_rcode_to_string(rcode: u16) -> String {
-    match rcode {
-        0 => "NOERROR".to_string(),
-        1 => "FORMERR".to_string(),
-        2 => "SERVFAIL".to_string(),
-        3 => "NXDOMAIN".to_string(),
-        4 => "NOTIMP".to_string(),
-        5 => "REFUSED".to_string(),
-        6 => "YXDOMAIN".to_string(),
-        7 => "YXRRSET".to_string(),
-        8 => "NXRRSET".to_string(),
-        9 => "NOTAUTH".to_string(),
-        10 => "NOTZONE".to_string(),
-        _ => format!("RCODE{rcode}"),
+fn dns_rcode_to_string(rcode_val: u16) -> String {
+    match rcode_val as u8 {
+        rcode::NOERROR => "NOERROR".to_string(),
+        rcode::FORMERR => "FORMERR".to_string(),
+        rcode::SERVFAIL => "SERVFAIL".to_string(),
+        rcode::NXDOMAIN => "NXDOMAIN".to_string(),
+        rcode::NOTIMP => "NOTIMP".to_string(),
+        rcode::REFUSED => "REFUSED".to_string(),
+        rcode::YXDOMAIN => "YXDOMAIN".to_string(),
+        rcode::YXRRSET => "YXRRSET".to_string(),
+        rcode::NXRRSET => "NXRRSET".to_string(),
+        rcode::NOTAUTH => "NOTAUTH".to_string(),
+        rcode::NOTZONE => "NOTZONE".to_string(),
+        rcode::DSOTYPENI => "DSOTYPENI".to_string(),
+        rcode::BADVERS => "BADVERS".to_string(),
+        rcode::BADKEY => "BADKEY".to_string(),
+        rcode::BADTIME => "BADTIME".to_string(),
+        rcode::BADMODE => "BADMODE".to_string(),
+        rcode::BADNAME => "BADNAME".to_string(),
+        rcode::BADALG => "BADALG".to_string(),
+        rcode::BADTRUNC => "BADTRUNC".to_string(),
+        rcode::BADCOOKIE => "BADCOOKIE".to_string(),
+        _ => format!("RCODE{rcode_val}"),
     }
 }
 
@@ -403,15 +413,75 @@ fn ip_proto_to_string(proto: u8) -> String {
 /// Convert EtherType to string.
 fn ethertype_to_string(etype: u16) -> String {
     match etype {
-        0x0800 => "IPv4".to_string(),
-        0x0806 => "ARP".to_string(),
-        0x8100 => "VLAN".to_string(),
-        0x86DD => "IPv6".to_string(),
-        0x8847 => "MPLS".to_string(),
-        0x8848 => "MPLS-MC".to_string(),
-        0x88A8 => "QinQ".to_string(),
-        0x88CC => "LLDP".to_string(),
-        0x88E5 => "MACsec".to_string(),
+        // Common protocols
+        ethertype::IPV4 => "IPv4".to_string(),
+        ethertype::ARP => "ARP".to_string(),
+        ethertype::WAKE_ON_LAN => "Wake-on-LAN".to_string(),
+        ethertype::RARP => "RARP".to_string(),
+        ethertype::VLAN => "VLAN".to_string(),
+        ethertype::IPV6 => "IPv6".to_string(),
+        ethertype::QINQ => "QinQ".to_string(),
+        // Streaming/AV protocols
+        ethertype::AVTP => "AVTP".to_string(),
+        ethertype::SRP => "SRP".to_string(),
+        ethertype::TRILL => "TRILL".to_string(),
+        // Legacy protocols
+        ethertype::DEC_MOP_RC => "DEC-MOP-RC".to_string(),
+        ethertype::DECNET => "DECnet".to_string(),
+        ethertype::DEC_LAT => "DEC-LAT".to_string(),
+        ethertype::APPLETALK => "AppleTalk".to_string(),
+        ethertype::AARP => "AARP".to_string(),
+        ethertype::IPX => "IPX".to_string(),
+        ethertype::QNX_QNET => "QNX-Qnet".to_string(),
+        // Link layer protocols
+        ethertype::SLPP => "SLPP".to_string(),
+        ethertype::VLACP => "VLACP".to_string(),
+        ethertype::FLOW_CONTROL => "Flow-Control".to_string(),
+        ethertype::LACP => "LACP".to_string(),
+        ethertype::LLDP => "LLDP".to_string(),
+        // MPLS
+        ethertype::MPLS => "MPLS".to_string(),
+        ethertype::MPLS_MULTICAST => "MPLS-MC".to_string(),
+        // PPPoE
+        ethertype::PPPOE_DISCOVERY => "PPPoE-Discovery".to_string(),
+        ethertype::PPPOE_SESSION => "PPPoE-Session".to_string(),
+        // Industrial protocols
+        ethertype::COBRANET => "CobraNet".to_string(),
+        ethertype::PROFINET => "PROFINET".to_string(),
+        ethertype::HYPERSCSI => "HyperSCSI".to_string(),
+        ethertype::ATA_OVER_ETHERNET => "AoE".to_string(),
+        ethertype::ETHERCAT => "EtherCAT".to_string(),
+        ethertype::POWERLINK => "POWERLINK".to_string(),
+        ethertype::GOOSE => "GOOSE".to_string(),
+        ethertype::GSE => "GSE".to_string(),
+        ethertype::SV => "SV".to_string(),
+        ethertype::SERCOS_III => "SERCOS-III".to_string(),
+        ethertype::MRP => "MRP".to_string(),
+        ethertype::PRP => "PRP".to_string(),
+        ethertype::HSR => "HSR".to_string(),
+        // Security protocols
+        ethertype::EAP_OVER_LAN => "EAPoL".to_string(),
+        ethertype::MACSEC => "MACsec".to_string(),
+        // Provider bridging
+        ethertype::PBB => "PBB".to_string(),
+        // Time protocols
+        ethertype::PTP => "PTP".to_string(),
+        // Network management
+        ethertype::HOMEPLUG_MME => "HomePlug-MME".to_string(),
+        ethertype::HOMEPLUG_AV_MME => "HomePlug-AV-MME".to_string(),
+        ethertype::MIKROTIK_ROMON => "MikroTik-RoMON".to_string(),
+        ethertype::NC_SI => "NC-SI".to_string(),
+        ethertype::CFM_OAM => "CFM-OAM".to_string(),
+        // Storage protocols
+        ethertype::FCOE => "FCoE".to_string(),
+        ethertype::FCOE_INIT => "FCoE-Init".to_string(),
+        ethertype::ROCE => "RoCE".to_string(),
+        // Other
+        ethertype::WSMP => "WSMP".to_string(),
+        ethertype::TTE => "TTE".to_string(),
+        ethertype::ECTP => "ECTP".to_string(),
+        ethertype::QINQ_OLD => "QinQ-Old".to_string(),
+        ethertype::VERITAS_LLT => "Veritas-LLT".to_string(),
         _ => format!("0x{etype:04X}"),
     }
 }
@@ -470,8 +540,8 @@ mod tests {
 
     #[test]
     fn test_ethertype_name() {
-        assert_eq!(ethertype_to_string(0x0800), "IPv4");
-        assert_eq!(ethertype_to_string(0x86DD), "IPv6");
+        assert_eq!(ethertype_to_string(ethertype::IPV4), "IPv4");
+        assert_eq!(ethertype_to_string(ethertype::IPV6), "IPv6");
         assert_eq!(ethertype_to_string(0x1234), "0x1234");
     }
 }
