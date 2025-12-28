@@ -55,7 +55,8 @@ fn main() {
     let man = Man::new(cmd);
     let man_path = out_dir.join("pcapsql.1");
     let mut man_file = fs::File::create(&man_path).expect("Failed to create man page file");
-    man.render(&mut man_file).expect("Failed to render man page");
+    man.render(&mut man_file)
+        .expect("Failed to render man page");
     println!("cargo:warning=Generated man page: {}", man_path.display());
 
     // Tell cargo to rerun if args.rs changes
