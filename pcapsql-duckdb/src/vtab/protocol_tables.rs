@@ -78,11 +78,14 @@ fn bind_protocol(
 
     let registry = default_registry();
     let proto = registry.get_parser(protocol_name).ok_or_else(|| {
-        DuckDbError::InvalidParameter(format!("Unknown protocol: {}", protocol_name))
+        DuckDbError::InvalidParameter(format!("Unknown protocol: {protocol_name}"))
     })?;
 
     // Add frame_number column first
-    bind.add_result_column("frame_number", LogicalTypeHandle::from(LogicalTypeId::UBigint));
+    bind.add_result_column(
+        "frame_number",
+        LogicalTypeHandle::from(LogicalTypeId::UBigint),
+    );
 
     let mut field_indices = HashMap::new();
     let mut list_columns = HashSet::new();
@@ -114,12 +117,12 @@ fn init_protocol(init: &InitInfo) -> DuckResult<ProtocolInitData, Box<dyn std::e
 
     // Open the PCAP file
     let source = FilePacketSource::open(&bind_data.file_path)
-        .map_err(|e| DuckDbError::Extension(format!("Failed to open PCAP file: {}", e)))?;
+        .map_err(|e| DuckDbError::Extension(format!("Failed to open PCAP file: {e}")))?;
 
     // Create reader
-    let reader = source.reader(None).map_err(|e| {
-        DuckDbError::Extension(format!("Failed to create reader: {}", e))
-    })?;
+    let reader = source
+        .reader(None)
+        .map_err(|e| DuckDbError::Extension(format!("Failed to create reader: {e}")))?;
 
     Ok(ProtocolInitData {
         reader: Mutex::new(Some(reader)),
@@ -204,7 +207,7 @@ fn func_protocol<T: VTab<InitData = ProtocolInitData, BindData = ProtocolBindDat
 
     // Check if we've reached end of file
     match result {
-        Ok(count) if count == 0 => {
+        Ok(0) => {
             init_data.done.store(true, Ordering::Relaxed);
         }
         Err(e) if e.to_string().contains("batch full") => {
@@ -232,6 +235,7 @@ fn func_protocol<T: VTab<InitData = ProtocolInitData, BindData = ProtocolBindDat
 }
 
 /// Output a parsed protocol row.
+#[allow(clippy::too_many_arguments)]
 fn output_parsed_row(
     output: &mut DataChunkHandle,
     row_idx: usize,
@@ -256,7 +260,10 @@ fn output_parsed_row(
 
         // Schema field names may have prefix (e.g., "tcp.src_port")
         // but parsed data uses short names (e.g., "src_port")
-        let lookup_name = field_name.split('.').last().unwrap_or(field_name.as_str());
+        let lookup_name = field_name
+            .split('.')
+            .next_back()
+            .unwrap_or(field_name.as_str());
 
         // Handle list columns specially - accumulate data in builders
         if list_columns.contains(col_idx) {

@@ -105,13 +105,23 @@ impl AggregateUDFImpl for HdrHistogramUdaf {
         Ok(DataType::Binary)
     }
 
-    fn accumulator(&self, _acc_args: datafusion::logical_expr::function::AccumulatorArgs) -> DFResult<Box<dyn Accumulator>> {
+    fn accumulator(
+        &self,
+        _acc_args: datafusion::logical_expr::function::AccumulatorArgs,
+    ) -> DFResult<Box<dyn Accumulator>> {
         Ok(Box::new(HdrHistogramAccumulator::new(DEFAULT_SIGFIGS)))
     }
 
-    fn state_fields(&self, _args: datafusion::logical_expr::function::StateFieldsArgs) -> DFResult<Vec<Arc<Field>>> {
+    fn state_fields(
+        &self,
+        _args: datafusion::logical_expr::function::StateFieldsArgs,
+    ) -> DFResult<Vec<Arc<Field>>> {
         // State is the serialized histogram
-        Ok(vec![Arc::new(Field::new("histogram_state", DataType::Binary, true))])
+        Ok(vec![Arc::new(Field::new(
+            "histogram_state",
+            DataType::Binary,
+            true,
+        ))])
     }
 }
 
@@ -148,7 +158,11 @@ impl HdrHistogramAccumulator {
         let mut deserializer = Deserializer::new();
         deserializer
             .deserialize(&mut std::io::Cursor::new(bytes))
-            .map_err(|e| datafusion::error::DataFusionError::Execution(format!("histogram deserialize error: {}", e)))
+            .map_err(|e| {
+                datafusion::error::DataFusionError::Execution(format!(
+                    "histogram deserialize error: {e}"
+                ))
+            })
     }
 }
 
@@ -215,9 +229,11 @@ impl Accumulator for HdrHistogramAccumulator {
                 let bytes = state_array.value(i);
                 if !bytes.is_empty() {
                     let other = Self::deserialize(bytes)?;
-                    self.histogram
-                        .add(&other)
-                        .map_err(|e| datafusion::error::DataFusionError::Execution(format!("histogram merge error: {}", e)))?;
+                    self.histogram.add(&other).map_err(|e| {
+                        datafusion::error::DataFusionError::Execution(format!(
+                            "histogram merge error: {e}"
+                        ))
+                    })?;
                 }
             }
         }
@@ -637,7 +653,8 @@ mod tests {
 
     #[test]
     fn test_histogram_serialization_roundtrip() {
-        let mut acc = HdrHistogramAccumulator::new(2);
+        // Use 3 significant figures for better precision in tests
+        let mut acc = HdrHistogramAccumulator::new(3);
         let batch = Arc::new(Float64Array::from(vec![100.0, 200.0, 300.0])) as ArrayRef;
         acc.update_batch(&[batch]).unwrap();
 

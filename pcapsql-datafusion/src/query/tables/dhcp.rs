@@ -31,18 +31,18 @@ pub fn dhcp_table_schema() -> Schema {
         Field::new("secs", DataType::UInt16, true),
         Field::new("flags", DataType::UInt16, true),
         // IPv4 addresses stored as UInt32 (network byte order)
-        Field::new("ciaddr", DataType::UInt32, true),  // Client IP address
-        Field::new("yiaddr", DataType::UInt32, true),  // Your (client) IP address
-        Field::new("siaddr", DataType::UInt32, true),  // Server IP address
-        Field::new("giaddr", DataType::UInt32, true),  // Gateway IP address
+        Field::new("ciaddr", DataType::UInt32, true), // Client IP address
+        Field::new("yiaddr", DataType::UInt32, true), // Your (client) IP address
+        Field::new("siaddr", DataType::UInt32, true), // Server IP address
+        Field::new("giaddr", DataType::UInt32, true), // Gateway IP address
         // MAC address stored as FixedSizeBinary(6)
         Field::new("chaddr", DataType::FixedSizeBinary(6), true),
         // Common DHCP options
         Field::new("message_type", DataType::UInt8, true),
-        Field::new("server_id", DataType::UInt32, true),    // Server identifier (IPv4)
+        Field::new("server_id", DataType::UInt32, true), // Server identifier (IPv4)
         Field::new("lease_time", DataType::UInt32, true),
-        Field::new("subnet_mask", DataType::UInt32, true),  // Subnet mask as bitmask
-        Field::new("router", DataType::UInt32, true),       // Default gateway (IPv4)
+        Field::new("subnet_mask", DataType::UInt32, true), // Subnet mask as bitmask
+        Field::new("router", DataType::UInt32, true),      // Default gateway (IPv4)
         // DNS servers as comma-separated string (multiple IPs)
         Field::new("dns_servers", DataType::Utf8, true),
     ])

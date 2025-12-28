@@ -12,15 +12,20 @@ pub mod next_header {
     pub const HOP_BY_HOP: u8 = 0;
     /// IPv4 encapsulated in IPv6 (IP-in-IP)
     pub const IPIP: u8 = 4;
+    #[allow(dead_code)] // RFC constant for protocol identification
     pub const TCP: u8 = 6;
+    #[allow(dead_code)] // RFC constant for protocol identification
     pub const UDP: u8 = 17;
     /// IPv6 encapsulated in IPv6 (IPv6-in-IPv6)
     pub const IPV6_IN_IP: u8 = 41;
     pub const ROUTING: u8 = 43;
     pub const FRAGMENT: u8 = 44;
+    #[allow(dead_code)] // RFC constant for ESP extension header
     pub const ESP: u8 = 50;
     pub const AH: u8 = 51;
+    #[allow(dead_code)] // RFC constant for ICMPv6
     pub const ICMPV6: u8 = 58;
+    #[allow(dead_code)] // RFC constant for no next header
     pub const NO_NEXT_HEADER: u8 = 59;
     pub const DESTINATION: u8 = 60;
     pub const MOBILITY: u8 = 135;
@@ -149,7 +154,7 @@ impl Protocol for Ipv6Protocol {
 fn parse_extension_headers(
     first_nh: u8,
     data: &[u8],
-) -> (u8, usize, SmallVec<[(&'static str, FieldValue); 16]>) {
+) -> (u8, usize, SmallVec<[(&'static str, FieldValue<'_>); 16]>) {
     let mut fields = SmallVec::new();
     let mut offset = 0;
     let mut current_nh = first_nh;
@@ -259,7 +264,10 @@ fn parse_generic_ext_header(data: &[u8]) -> Option<(u8, usize)> {
 
 /// Parse Fragment Header.
 /// Returns (next_header, bytes_consumed, fields) or None if parsing fails.
-fn parse_fragment_header(data: &[u8]) -> Option<(u8, usize, SmallVec<[(&'static str, FieldValue); 16]>)> {
+#[allow(clippy::type_complexity)]
+fn parse_fragment_header(
+    data: &[u8],
+) -> Option<(u8, usize, SmallVec<[(&'static str, FieldValue<'_>); 16]>)> {
     // Fragment header is exactly 8 bytes
     if data.len() < 8 {
         return None;
@@ -283,7 +291,10 @@ fn parse_fragment_header(data: &[u8]) -> Option<(u8, usize, SmallVec<[(&'static 
 
 /// Parse Routing Header.
 /// Returns (next_header, bytes_consumed, fields) or None if parsing fails.
-fn parse_routing_header(data: &[u8]) -> Option<(u8, usize, SmallVec<[(&'static str, FieldValue); 16]>)> {
+#[allow(clippy::type_complexity)]
+fn parse_routing_header(
+    data: &[u8],
+) -> Option<(u8, usize, SmallVec<[(&'static str, FieldValue<'_>); 16]>)> {
     if data.len() < 4 {
         return None;
     }
@@ -333,7 +344,7 @@ mod tests {
 
     fn create_ipv6_context() -> ParseContext {
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", 0x86DD);
+        context.insert_hint("ethertype", ethertype::IPV6 as u64);
         context
     }
 
@@ -375,12 +386,12 @@ mod tests {
 
         // With IPv4 ethertype
         let mut context2 = ParseContext::new(1);
-        context2.insert_hint("ethertype", 0x0800);
+        context2.insert_hint("ethertype", ethertype::IPV4 as u64);
         assert!(parser.can_parse(&context2).is_none());
 
         // With IPv6 ethertype
         let mut context3 = ParseContext::new(1);
-        context3.insert_hint("ethertype", 0x86DD);
+        context3.insert_hint("ethertype", ethertype::IPV6 as u64);
         assert!(parser.can_parse(&context3).is_some());
     }
 
@@ -520,10 +531,7 @@ mod tests {
         assert_eq!(result.get("ext_fragment"), Some(&FieldValue::Bool(true)));
         assert_eq!(result.get("frag_offset"), Some(&FieldValue::UInt16(1)));
         assert_eq!(result.get("frag_more"), Some(&FieldValue::Bool(true)));
-        assert_eq!(
-            result.get("frag_id"),
-            Some(&FieldValue::UInt32(0x12345678))
-        );
+        assert_eq!(result.get("frag_id"), Some(&FieldValue::UInt32(0x12345678)));
     }
 
     #[test]
@@ -667,9 +675,12 @@ mod tests {
         // Should set ip_protocol hint for inner protocol
         assert_eq!(result.hint("ip_protocol"), Some(4u64));
         // Should set ethertype hint for IPv4 so inner IPv4 parser can match
-        assert_eq!(result.hint("ethertype"), Some(0x0800u64));
+        assert_eq!(result.hint("ethertype"), Some(ethertype::IPV4 as u64));
         // Should indicate tunnel type
-        assert_eq!(result.hint("tunnel_type"), Some(TunnelType::Ip4InIp6 as u64));
+        assert_eq!(
+            result.hint("tunnel_type"),
+            Some(TunnelType::Ip4InIp6 as u64)
+        );
     }
 
     #[test]
@@ -704,8 +715,11 @@ mod tests {
         // Should set ip_protocol hint for inner protocol
         assert_eq!(result.hint("ip_protocol"), Some(41u64));
         // Should set ethertype hint for IPv6 so inner IPv6 parser can match
-        assert_eq!(result.hint("ethertype"), Some(0x86DDu64));
+        assert_eq!(result.hint("ethertype"), Some(ethertype::IPV6 as u64));
         // Should indicate tunnel type
-        assert_eq!(result.hint("tunnel_type"), Some(TunnelType::Ip6InIp6 as u64));
+        assert_eq!(
+            result.hint("tunnel_type"),
+            Some(TunnelType::Ip6InIp6 as u64)
+        );
     }
 }

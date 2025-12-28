@@ -1,18 +1,18 @@
 //! pcapsql CLI entry point.
 
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
+use pcapsql_core::{default_registry, KeyLog, Protocol};
 use pcapsql_datafusion::cli::{
     Args, ExportFormat, Exporter, OutputFormatter, Repl, ReplCommand, ReplInput,
 };
 use pcapsql_datafusion::query::{tables, views, QueryEngine};
-use pcapsql_core::{default_registry, KeyLog, Protocol};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -67,36 +67,47 @@ async fn main() -> Result<()> {
             // Try mmap first
             use pcapsql_core::MmapPacketSource;
             match MmapPacketSource::open(&pcap_file) {
-                Ok(source) => {
+                Ok(source) => QueryEngine::with_streaming_source_cached_opts(
+                    Arc::new(source),
+                    args.batch_size,
+                    args.cache_size,
+                    !args.no_reader_eviction,
+                )
+                .await
+                .with_context(|| format!("Failed to open PCAP file: {}", pcap_file.display()))?,
+                Err(e) => {
+                    eprintln!(
+                        "Warning: mmap not supported for this file ({e}), falling back to file source"
+                    );
+                    use pcapsql_core::FilePacketSource;
+                    let source =
+                        Arc::new(FilePacketSource::open(&pcap_file).with_context(|| {
+                            format!("Failed to open PCAP file: {}", pcap_file.display())
+                        })?);
                     QueryEngine::with_streaming_source_cached_opts(
-                        Arc::new(source),
+                        source,
                         args.batch_size,
                         args.cache_size,
                         !args.no_reader_eviction,
                     )
                     .await
-                    .with_context(|| format!("Failed to open PCAP file: {}", pcap_file.display()))?
-                }
-                Err(e) => {
-                    eprintln!(
-                        "Warning: mmap not supported for this file ({}), falling back to file source",
-                        e
-                    );
-                    use pcapsql_core::FilePacketSource;
-                    let source = Arc::new(FilePacketSource::open(&pcap_file)
-                        .with_context(|| format!("Failed to open PCAP file: {}", pcap_file.display()))?);
-                    QueryEngine::with_streaming_source_cached_opts(source, args.batch_size, args.cache_size, !args.no_reader_eviction)
-                        .await
-                        .with_context(|| format!("Failed to create engine"))?
+                    .with_context(|| "Failed to create engine".to_string())?
                 }
             }
         } else {
             use pcapsql_core::FilePacketSource;
-            let source = Arc::new(FilePacketSource::open(&pcap_file)
-                .with_context(|| format!("Failed to open PCAP file: {}", pcap_file.display()))?);
-            QueryEngine::with_streaming_source_cached_opts(source, args.batch_size, args.cache_size, !args.no_reader_eviction)
-                .await
-                .with_context(|| format!("Failed to create engine"))?
+            let source =
+                Arc::new(FilePacketSource::open(&pcap_file).with_context(|| {
+                    format!("Failed to open PCAP file: {}", pcap_file.display())
+                })?);
+            QueryEngine::with_streaming_source_cached_opts(
+                source,
+                args.batch_size,
+                args.cache_size,
+                !args.no_reader_eviction,
+            )
+            .await
+            .with_context(|| "Failed to create engine".to_string())?
         }
     } else {
         // In-memory mode (default for small files)
@@ -113,7 +124,8 @@ async fn main() -> Result<()> {
 
         // Export if output file specified
         if let Some(output_path) = &args.output {
-            let export_format = args.export_format
+            let export_format = args
+                .export_format
                 .or_else(|| ExportFormat::from_extension(output_path))
                 .unwrap_or(ExportFormat::Parquet);
 
@@ -142,7 +154,8 @@ async fn main() -> Result<()> {
 
         // Export if output file specified
         if let Some(output_path) = &args.output {
-            let export_format = args.export_format
+            let export_format = args
+                .export_format
                 .or_else(|| ExportFormat::from_extension(output_path))
                 .unwrap_or(ExportFormat::Parquet);
 
@@ -206,7 +219,7 @@ fn show_schema() {
 
     // Show each protocol table
     for (table_name, schema) in tables::all_table_schemas() {
-        println!("Table: {}", table_name);
+        println!("Table: {table_name}");
         println!("{:-<70}", "");
         println!("{:<30} {:<30} Nullable", "Column", "Type");
         println!("{:-<70}", "");
@@ -236,7 +249,7 @@ fn show_schema() {
 async fn run_repl(
     engine: &QueryEngine,
     formatter: &OutputFormatter,
-    pcap_file: &PathBuf,
+    pcap_file: &Path,
 ) -> Result<()> {
     use arrow::array::RecordBatch;
 
@@ -296,25 +309,23 @@ async fn run_repl(
                         eprintln!("Unknown command: {s}");
                         eprintln!("Type .help for available commands");
                     }
-                    ReplCommand::Sql(query) => {
-                        match engine.query(&query).await {
-                            Ok(batches) => {
-                                let mut stdout = io::stdout();
-                                if let Err(e) = formatter.write_batches(&batches, &mut stdout) {
-                                    eprintln!("Error writing output: {e}");
-                                }
-                                last_result = Some(batches);
+                    ReplCommand::Sql(query) => match engine.query(&query).await {
+                        Ok(batches) => {
+                            let mut stdout = io::stdout();
+                            if let Err(e) = formatter.write_batches(&batches, &mut stdout) {
+                                eprintln!("Error writing output: {e}");
                             }
-                            Err(e) => {
-                                eprintln!("Error: {e}");
-                            }
+                            last_result = Some(batches);
                         }
-                    }
+                        Err(e) => {
+                            eprintln!("Error: {e}");
+                        }
+                    },
                     ReplCommand::Export(filename, query_opt) => {
                         // Determine export format from filename
                         let path = PathBuf::from(&filename);
-                        let format = ExportFormat::from_extension(&path)
-                            .unwrap_or(ExportFormat::Parquet);
+                        let format =
+                            ExportFormat::from_extension(&path).unwrap_or(ExportFormat::Parquet);
 
                         // Get batches to export
                         let batches_result = if let Some(query) = query_opt {
@@ -329,16 +340,14 @@ async fn run_repl(
                         };
 
                         match batches_result {
-                            Ok(batches) => {
-                                match Exporter::export(&path, format, &batches) {
-                                    Ok(rows) => {
-                                        println!("Exported {rows} rows to {filename}");
-                                    }
-                                    Err(e) => {
-                                        eprintln!("Export error: {e}");
-                                    }
+                            Ok(batches) => match Exporter::export(&path, format, &batches) {
+                                Ok(rows) => {
+                                    println!("Exported {rows} rows to {filename}");
                                 }
-                            }
+                                Err(e) => {
+                                    eprintln!("Export error: {e}");
+                                }
+                            },
                             Err(e) => {
                                 eprintln!("Query error: {e}");
                             }
@@ -370,7 +379,7 @@ fn print_help() {
 fn print_tables() {
     println!("Protocol Tables (use frame_number for JOINs):");
     for table_name in tables::all_table_names() {
-        println!("  {}", table_name);
+        println!("  {table_name}");
     }
 
     println!();
@@ -415,7 +424,7 @@ fn load_keylog(args: &Args) -> Option<Arc<KeyLog>> {
             Some(Arc::new(keylog))
         }
         Err(e) => {
-            eprintln!("Warning: Failed to load SSLKEYLOGFILE: {}", e);
+            eprintln!("Warning: Failed to load SSLKEYLOGFILE: {e}");
             eprintln!("         Path: {}", path.display());
             eprintln!("         TLS decryption will be disabled.");
             None

@@ -100,7 +100,8 @@ impl Protocol for GreProtocol {
         fields.push(("version", FieldValue::UInt8(version)));
 
         // Version validation (RFC 2784: Version MUST be 0, RFC 2637: Version 1 for PPTP)
-        let version_valid = version == gre_version::STANDARD || version == gre_version::PPTP_ENHANCED;
+        let version_valid =
+            version == gre_version::STANDARD || version == gre_version::PPTP_ENHANCED;
         fields.push(("version_valid", FieldValue::Bool(version_valid)));
 
         // Add version name for convenience
@@ -124,7 +125,6 @@ impl Protocol for GreProtocol {
         // Optional fields based on flags
 
         // Checksum and Reserved (4 bytes if C bit set)
-        let mut checksum_valid: Option<bool> = None;
         if checksum_present {
             if data.len() < offset + 4 {
                 return ParseResult::error("GRE: missing checksum field".to_string(), data);
@@ -137,8 +137,8 @@ impl Protocol for GreProtocol {
             // To verify: compute checksum over entire packet (with checksum field included)
             // Result should be 0 if valid
             let computed = internet_checksum(data);
-            checksum_valid = Some(computed == 0);
-            fields.push(("checksum_valid", FieldValue::Bool(computed == 0)));
+            let checksum_valid = computed == 0;
+            fields.push(("checksum_valid", FieldValue::Bool(checksum_valid)));
 
             // Reserved field (offset) is at offset+2..offset+4, typically ignored
             offset += 4;
@@ -150,7 +150,12 @@ impl Protocol for GreProtocol {
             if data.len() < offset + 4 {
                 return ParseResult::error("GRE: missing key field".to_string(), data);
             }
-            let key = u32::from_be_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]]);
+            let key = u32::from_be_bytes([
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ]);
             fields.push(("key", FieldValue::UInt32(key)));
             key_value = Some(key);
             offset += 4;
@@ -161,13 +166,21 @@ impl Protocol for GreProtocol {
             if data.len() < offset + 4 {
                 return ParseResult::error("GRE: missing sequence field".to_string(), data);
             }
-            let sequence = u32::from_be_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]]);
+            let sequence = u32::from_be_bytes([
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ]);
             fields.push(("sequence", FieldValue::UInt32(sequence)));
             offset += 4;
         }
 
         // Store header length
-        fields.push(("header_length", FieldValue::UInt8((offset - header_start) as u8)));
+        fields.push((
+            "header_length",
+            FieldValue::UInt8((offset - header_start) as u8),
+        ));
 
         // Set up child hints for the encapsulated protocol
         let mut child_hints = SmallVec::new();
@@ -179,8 +192,8 @@ impl Protocol for GreProtocol {
         }
 
         // Common ethertypes in GRE:
-        // 0x0800 = IPv4
-        // 0x86DD = IPv6
+        // ethertype::IPV4 = IPv4
+        // ethertype::IPV6 = IPv6
         // 0x6558 = Transparent Ethernet Bridging (for NVGRE)
         // 0x880B = PPP
 
@@ -224,6 +237,7 @@ impl Protocol for GreProtocol {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::ethernet::ethertype;
 
     /// Create a minimal GRE header with just flags and protocol type.
     fn create_gre_header(checksum: bool, key: bool, sequence: bool, protocol: u16) -> Vec<u8> {
@@ -272,8 +286,8 @@ mod tests {
     // Test 2: Basic GRE header parsing (no optional fields)
     #[test]
     fn test_basic_gre_header_parsing() {
-        let mut header = create_gre_header(false, false, false, 0x0800); // IPv4
-        // Add some payload
+        let mut header = create_gre_header(false, false, false, ethertype::IPV4); // IPv4
+                                                                                  // Add some payload
         header.extend_from_slice(&[0x45, 0x00, 0x00, 0x28]);
 
         let parser = GreProtocol;
@@ -283,11 +297,20 @@ mod tests {
         let result = parser.parse(&header, &context);
 
         assert!(result.is_ok());
-        assert_eq!(result.get("checksum_present"), Some(&FieldValue::Bool(false)));
+        assert_eq!(
+            result.get("checksum_present"),
+            Some(&FieldValue::Bool(false))
+        );
         assert_eq!(result.get("key_present"), Some(&FieldValue::Bool(false)));
-        assert_eq!(result.get("sequence_present"), Some(&FieldValue::Bool(false)));
+        assert_eq!(
+            result.get("sequence_present"),
+            Some(&FieldValue::Bool(false))
+        );
         assert_eq!(result.get("version"), Some(&FieldValue::UInt8(0)));
-        assert_eq!(result.get("protocol"), Some(&FieldValue::UInt16(0x0800)));
+        assert_eq!(
+            result.get("protocol"),
+            Some(&FieldValue::UInt16(ethertype::IPV4))
+        );
 
         // Should not have optional fields
         assert!(result.get("checksum").is_none());
@@ -301,7 +324,7 @@ mod tests {
     // Test 3: GRE with checksum
     #[test]
     fn test_gre_with_checksum() {
-        let mut header = create_gre_header(true, false, false, 0x0800);
+        let mut header = create_gre_header(true, false, false, ethertype::IPV4);
         // Add checksum (2 bytes) and reserved (2 bytes)
         header.extend_from_slice(&[0xAB, 0xCD, 0x00, 0x00]);
         // Add payload
@@ -314,7 +337,10 @@ mod tests {
         let result = parser.parse(&header, &context);
 
         assert!(result.is_ok());
-        assert_eq!(result.get("checksum_present"), Some(&FieldValue::Bool(true)));
+        assert_eq!(
+            result.get("checksum_present"),
+            Some(&FieldValue::Bool(true))
+        );
         assert_eq!(result.get("checksum"), Some(&FieldValue::UInt16(0xABCD)));
         assert_eq!(result.remaining.len(), 2);
     }
@@ -322,7 +348,7 @@ mod tests {
     // Test 4: GRE with key
     #[test]
     fn test_gre_with_key() {
-        let mut header = create_gre_header(false, true, false, 0x0800);
+        let mut header = create_gre_header(false, true, false, ethertype::IPV4);
         // Add key (4 bytes)
         header.extend_from_slice(&[0x00, 0x01, 0x02, 0x03]);
         // Add payload
@@ -344,7 +370,7 @@ mod tests {
     // Test 5: GRE with sequence number
     #[test]
     fn test_gre_with_sequence() {
-        let mut header = create_gre_header(false, false, true, 0x0800);
+        let mut header = create_gre_header(false, false, true, ethertype::IPV4);
         // Add sequence number (4 bytes)
         header.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
         // Add payload
@@ -357,16 +383,22 @@ mod tests {
         let result = parser.parse(&header, &context);
 
         assert!(result.is_ok());
-        assert_eq!(result.get("sequence_present"), Some(&FieldValue::Bool(true)));
-        assert_eq!(result.get("sequence"), Some(&FieldValue::UInt32(0xDEADBEEF)));
+        assert_eq!(
+            result.get("sequence_present"),
+            Some(&FieldValue::Bool(true))
+        );
+        assert_eq!(
+            result.get("sequence"),
+            Some(&FieldValue::UInt32(0xDEADBEEF))
+        );
         assert_eq!(result.remaining.len(), 2);
     }
 
     // Test 6: GRE with all optional fields
     #[test]
     fn test_gre_with_all_optional_fields() {
-        let mut header = create_gre_header(true, true, true, 0x86DD); // IPv6
-        // Add checksum and reserved
+        let mut header = create_gre_header(true, true, true, ethertype::IPV6); // IPv6
+                                                                               // Add checksum and reserved
         header.extend_from_slice(&[0x12, 0x34, 0x00, 0x00]);
         // Add key
         header.extend_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD]);
@@ -382,13 +414,22 @@ mod tests {
         let result = parser.parse(&header, &context);
 
         assert!(result.is_ok());
-        assert_eq!(result.get("checksum_present"), Some(&FieldValue::Bool(true)));
+        assert_eq!(
+            result.get("checksum_present"),
+            Some(&FieldValue::Bool(true))
+        );
         assert_eq!(result.get("key_present"), Some(&FieldValue::Bool(true)));
-        assert_eq!(result.get("sequence_present"), Some(&FieldValue::Bool(true)));
+        assert_eq!(
+            result.get("sequence_present"),
+            Some(&FieldValue::Bool(true))
+        );
         assert_eq!(result.get("checksum"), Some(&FieldValue::UInt16(0x1234)));
         assert_eq!(result.get("key"), Some(&FieldValue::UInt32(0xAABBCCDD)));
         assert_eq!(result.get("sequence"), Some(&FieldValue::UInt32(1)));
-        assert_eq!(result.get("protocol"), Some(&FieldValue::UInt16(0x86DD)));
+        assert_eq!(
+            result.get("protocol"),
+            Some(&FieldValue::UInt16(ethertype::IPV6))
+        );
         assert_eq!(result.remaining.len(), 2);
     }
 
@@ -396,20 +437,20 @@ mod tests {
     #[test]
     fn test_child_protocol_hint_ethertype() {
         // Test IPv4 ethertype
-        let header_ipv4 = create_gre_header(false, false, false, 0x0800);
+        let header_ipv4 = create_gre_header(false, false, false, ethertype::IPV4);
         let parser = GreProtocol;
         let mut context = ParseContext::new(1);
         context.insert_hint("ip_protocol", 47);
 
         let result = parser.parse(&header_ipv4, &context);
         assert!(result.is_ok());
-        assert_eq!(result.hint("ethertype"), Some(0x0800u64));
+        assert_eq!(result.hint("ethertype"), Some(ethertype::IPV4 as u64));
 
         // Test IPv6 ethertype
-        let header_ipv6 = create_gre_header(false, false, false, 0x86DD);
+        let header_ipv6 = create_gre_header(false, false, false, ethertype::IPV6);
         let result = parser.parse(&header_ipv6, &context);
         assert!(result.is_ok());
-        assert_eq!(result.hint("ethertype"), Some(0x86DDu64));
+        assert_eq!(result.hint("ethertype"), Some(ethertype::IPV6 as u64));
 
         // Test Transparent Ethernet Bridging
         let header_teb = create_gre_header(false, false, false, 0x6558);
@@ -435,7 +476,7 @@ mod tests {
     // Test 9: Missing optional fields when flags are set
     #[test]
     fn test_gre_missing_key_field() {
-        let header = create_gre_header(false, true, false, 0x0800); // Key flag set but no key data
+        let header = create_gre_header(false, true, false, ethertype::IPV4); // Key flag set but no key data
 
         let parser = GreProtocol;
         let mut context = ParseContext::new(1);
@@ -472,13 +513,19 @@ mod tests {
         context.insert_hint("ip_protocol", 47);
 
         // Standard GRE with version 0
-        let header = create_gre_header(false, false, false, 0x0800);
+        let header = create_gre_header(false, false, false, ethertype::IPV4);
         let result = parser.parse(&header, &context);
 
         assert!(result.is_ok());
-        assert_eq!(result.get("version"), Some(&FieldValue::UInt8(gre_version::STANDARD)));
+        assert_eq!(
+            result.get("version"),
+            Some(&FieldValue::UInt8(gre_version::STANDARD))
+        );
         assert_eq!(result.get("version_valid"), Some(&FieldValue::Bool(true)));
-        assert_eq!(result.get("version_name"), Some(&FieldValue::Str("Standard")));
+        assert_eq!(
+            result.get("version_name"),
+            Some(&FieldValue::Str("Standard"))
+        );
     }
 
     // Test 12: Version 1 (PPTP Enhanced GRE) validation
@@ -497,9 +544,15 @@ mod tests {
         let result = parser.parse(&header, &context);
 
         assert!(result.is_ok());
-        assert_eq!(result.get("version"), Some(&FieldValue::UInt8(gre_version::PPTP_ENHANCED)));
+        assert_eq!(
+            result.get("version"),
+            Some(&FieldValue::UInt8(gre_version::PPTP_ENHANCED))
+        );
         assert_eq!(result.get("version_valid"), Some(&FieldValue::Bool(true)));
-        assert_eq!(result.get("version_name"), Some(&FieldValue::Str("PPTP-Enhanced")));
+        assert_eq!(
+            result.get("version_name"),
+            Some(&FieldValue::Str("PPTP-Enhanced"))
+        );
     }
 
     // Test 13: Invalid version (version 2-7)
@@ -514,14 +567,20 @@ mod tests {
             let mut header = Vec::new();
             let flags: u16 = version; // Version in bits 0-2
             header.extend_from_slice(&flags.to_be_bytes());
-            header.extend_from_slice(&0x0800u16.to_be_bytes());
+            header.extend_from_slice(&ethertype::IPV4.to_be_bytes());
 
             let result = parser.parse(&header, &context);
 
             assert!(result.is_ok()); // Still parses (lenient)
-            assert_eq!(result.get("version"), Some(&FieldValue::UInt8(version as u8)));
+            assert_eq!(
+                result.get("version"),
+                Some(&FieldValue::UInt8(version as u8))
+            );
             assert_eq!(result.get("version_valid"), Some(&FieldValue::Bool(false)));
-            assert_eq!(result.get("version_name"), Some(&FieldValue::Str("Unknown")));
+            assert_eq!(
+                result.get("version_name"),
+                Some(&FieldValue::Str("Unknown"))
+            );
         }
     }
 
@@ -536,7 +595,7 @@ mod tests {
         let mut packet = Vec::new();
         let flags: u16 = 0x8000; // Checksum present
         packet.extend_from_slice(&flags.to_be_bytes());
-        packet.extend_from_slice(&0x0800u16.to_be_bytes()); // IPv4
+        packet.extend_from_slice(&ethertype::IPV4.to_be_bytes()); // IPv4
 
         // Placeholder for checksum and reserved (will be filled)
         packet.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // checksum + reserved
@@ -554,7 +613,10 @@ mod tests {
         let result = parser.parse(&packet, &context);
 
         assert!(result.is_ok());
-        assert_eq!(result.get("checksum_present"), Some(&FieldValue::Bool(true)));
+        assert_eq!(
+            result.get("checksum_present"),
+            Some(&FieldValue::Bool(true))
+        );
         assert_eq!(result.get("checksum_valid"), Some(&FieldValue::Bool(true)));
     }
 
@@ -569,7 +631,7 @@ mod tests {
         let mut packet = Vec::new();
         let flags: u16 = 0x8000; // Checksum present
         packet.extend_from_slice(&flags.to_be_bytes());
-        packet.extend_from_slice(&0x0800u16.to_be_bytes());
+        packet.extend_from_slice(&ethertype::IPV4.to_be_bytes());
 
         // Wrong checksum (0xABCD instead of correct value)
         packet.extend_from_slice(&[0xAB, 0xCD, 0x00, 0x00]);
@@ -580,7 +642,10 @@ mod tests {
         let result = parser.parse(&packet, &context);
 
         assert!(result.is_ok()); // Still parses (lenient)
-        assert_eq!(result.get("checksum_present"), Some(&FieldValue::Bool(true)));
+        assert_eq!(
+            result.get("checksum_present"),
+            Some(&FieldValue::Bool(true))
+        );
         assert_eq!(result.get("checksum_valid"), Some(&FieldValue::Bool(false)));
     }
 
@@ -592,34 +657,34 @@ mod tests {
         context.insert_hint("ip_protocol", 47);
 
         // Minimal header (4 bytes)
-        let header_min = create_gre_header(false, false, false, 0x0800);
+        let header_min = create_gre_header(false, false, false, ethertype::IPV4);
         let result = parser.parse(&header_min, &context);
         assert!(result.is_ok());
         assert_eq!(result.get("header_length"), Some(&FieldValue::UInt8(4)));
 
         // With checksum (4 + 4 = 8 bytes)
-        let mut header_chk = create_gre_header(true, false, false, 0x0800);
+        let mut header_chk = create_gre_header(true, false, false, ethertype::IPV4);
         header_chk.extend_from_slice(&[0x00; 4]); // checksum + reserved
         let result = parser.parse(&header_chk, &context);
         assert!(result.is_ok());
         assert_eq!(result.get("header_length"), Some(&FieldValue::UInt8(8)));
 
         // With key (4 + 4 = 8 bytes)
-        let mut header_key = create_gre_header(false, true, false, 0x0800);
+        let mut header_key = create_gre_header(false, true, false, ethertype::IPV4);
         header_key.extend_from_slice(&[0x00; 4]); // key
         let result = parser.parse(&header_key, &context);
         assert!(result.is_ok());
         assert_eq!(result.get("header_length"), Some(&FieldValue::UInt8(8)));
 
         // With sequence (4 + 4 = 8 bytes)
-        let mut header_seq = create_gre_header(false, false, true, 0x0800);
+        let mut header_seq = create_gre_header(false, false, true, ethertype::IPV4);
         header_seq.extend_from_slice(&[0x00; 4]); // sequence
         let result = parser.parse(&header_seq, &context);
         assert!(result.is_ok());
         assert_eq!(result.get("header_length"), Some(&FieldValue::UInt8(8)));
 
         // All optional fields (4 + 4 + 4 + 4 = 16 bytes)
-        let mut header_all = create_gre_header(true, true, true, 0x0800);
+        let mut header_all = create_gre_header(true, true, true, ethertype::IPV4);
         header_all.extend_from_slice(&[0x00; 4]); // checksum + reserved
         header_all.extend_from_slice(&[0x00; 4]); // key
         header_all.extend_from_slice(&[0x00; 4]); // sequence
@@ -684,7 +749,7 @@ mod tests {
         context.insert_hint("ip_protocol", 47);
 
         // Checksum flag set but no checksum data
-        let header = create_gre_header(true, false, false, 0x0800);
+        let header = create_gre_header(true, false, false, ethertype::IPV4);
 
         let result = parser.parse(&header, &context);
         assert!(!result.is_ok());
@@ -699,7 +764,7 @@ mod tests {
         context.insert_hint("ip_protocol", 47);
 
         // Sequence flag set but no sequence data
-        let header = create_gre_header(false, false, true, 0x0800);
+        let header = create_gre_header(false, false, true, ethertype::IPV4);
 
         let result = parser.parse(&header, &context);
         assert!(!result.is_ok());

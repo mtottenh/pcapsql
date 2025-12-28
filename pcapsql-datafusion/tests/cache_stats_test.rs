@@ -560,7 +560,10 @@ async fn test_query_engine_cache_stats_none_for_inmemory() {
 
     // Should return None for in-memory mode
     let stats = engine.cache_stats();
-    assert!(stats.is_none(), "In-memory mode should not have cache stats");
+    assert!(
+        stats.is_none(),
+        "In-memory mode should not have cache stats"
+    );
 }
 
 /// Test cache() method access.

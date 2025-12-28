@@ -9,6 +9,7 @@
 use compact_str::CompactString;
 use smallvec::SmallVec;
 
+use super::ethernet::ethertype;
 use super::{FieldValue, ParseContext, ParseResult, Protocol, TunnelType};
 use crate::schema::{DataKind, FieldDescriptor};
 
@@ -108,7 +109,7 @@ impl Protocol for MplsProtocol {
             // Check stack depth limit for safety
             if stack_depth >= MAX_LABEL_STACK_DEPTH {
                 return ParseResult::error(
-                    format!("MPLS: label stack too deep (max {})", MAX_LABEL_STACK_DEPTH),
+                    format!("MPLS: label stack too deep (max {MAX_LABEL_STACK_DEPTH})"),
                     data,
                 );
             }
@@ -157,7 +158,10 @@ impl Protocol for MplsProtocol {
         fields.push(("bottom", FieldValue::Bool(bottom_of_stack)));
         fields.push(("ttl", FieldValue::UInt8(top_ttl)));
         fields.push(("stack_depth", FieldValue::UInt8(stack_depth)));
-        fields.push(("labels", FieldValue::OwnedString(CompactString::new(labels.join(",")))));
+        fields.push((
+            "labels",
+            FieldValue::OwnedString(CompactString::new(labels.join(","))),
+        ));
 
         // Add special label fields
         fields.push(("is_reserved_label", FieldValue::Bool(has_special_label)));
@@ -176,11 +180,11 @@ impl Protocol for MplsProtocol {
 
             match version {
                 4 => {
-                    child_hints.push(("ethertype", 0x0800u64)); // IPv4
+                    child_hints.push(("ethertype", ethertype::IPV4 as u64));
                     child_hints.push(("ip_version", 4u64));
                 }
                 6 => {
-                    child_hints.push(("ethertype", 0x86DDu64)); // IPv6
+                    child_hints.push(("ethertype", ethertype::IPV6 as u64));
                     child_hints.push(("ip_version", 6u64));
                 }
                 _ => {
@@ -243,7 +247,7 @@ mod tests {
 
         // With IPv4 ethertype
         let mut ctx2 = ParseContext::new(1);
-        ctx2.insert_hint("ethertype", 0x0800);
+        ctx2.insert_hint("ethertype", ethertype::IPV4 as u64);
         assert!(parser.can_parse(&ctx2).is_none());
 
         // With MPLS unicast ethertype
@@ -278,7 +282,10 @@ mod tests {
         assert_eq!(result.get("bottom"), Some(&FieldValue::Bool(true)));
         assert_eq!(result.get("ttl"), Some(&FieldValue::UInt8(64)));
         assert_eq!(result.get("stack_depth"), Some(&FieldValue::UInt8(1)));
-        assert_eq!(result.get("labels"), Some(&FieldValue::OwnedString(CompactString::new("1000"))));
+        assert_eq!(
+            result.get("labels"),
+            Some(&FieldValue::OwnedString(CompactString::new("1000")))
+        );
         assert_eq!(result.remaining.len(), 4);
     }
 
@@ -311,7 +318,10 @@ mod tests {
         // Stack depth should be 3
         assert_eq!(result.get("stack_depth"), Some(&FieldValue::UInt8(3)));
         // Labels string
-        assert_eq!(result.get("labels"), Some(&FieldValue::OwnedString(CompactString::new("100,200,300"))));
+        assert_eq!(
+            result.get("labels"),
+            Some(&FieldValue::OwnedString(CompactString::new("100,200,300")))
+        );
         // Bottom flag reflects the last label
         assert_eq!(result.get("bottom"), Some(&FieldValue::Bool(true)));
     }
@@ -390,7 +400,7 @@ mod tests {
 
         let result_ipv4 = parser.parse(&data_ipv4, &context);
         assert!(result_ipv4.is_ok());
-        assert_eq!(result_ipv4.hint("ethertype"), Some(0x0800u64));
+        assert_eq!(result_ipv4.hint("ethertype"), Some(ethertype::IPV4 as u64));
         assert_eq!(result_ipv4.hint("ip_version"), Some(4u64));
 
         // IPv6 inner (version nibble = 6)
@@ -400,7 +410,7 @@ mod tests {
 
         let result_ipv6 = parser.parse(&data_ipv6, &context);
         assert!(result_ipv6.is_ok());
-        assert_eq!(result_ipv6.hint("ethertype"), Some(0x86DDu64));
+        assert_eq!(result_ipv6.hint("ethertype"), Some(ethertype::IPV6 as u64));
         assert_eq!(result_ipv6.hint("ip_version"), Some(6u64));
     }
 
@@ -460,15 +470,26 @@ mod tests {
 
         // Label 0 = IPv4 Explicit NULL
         let mut data = Vec::new();
-        data.extend_from_slice(&create_mpls_label(special_label::IPV4_EXPLICIT_NULL, 0, true, 64));
+        data.extend_from_slice(&create_mpls_label(
+            special_label::IPV4_EXPLICIT_NULL,
+            0,
+            true,
+            64,
+        ));
         data.extend_from_slice(&[0x45, 0x00]); // IPv4 payload
 
         let result = parser.parse(&data, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("label"), Some(&FieldValue::UInt32(0)));
-        assert_eq!(result.get("is_reserved_label"), Some(&FieldValue::Bool(true)));
-        assert_eq!(result.get("special_label_name"), Some(&FieldValue::Str("IPv4-Explicit-NULL")));
+        assert_eq!(
+            result.get("is_reserved_label"),
+            Some(&FieldValue::Bool(true))
+        );
+        assert_eq!(
+            result.get("special_label_name"),
+            Some(&FieldValue::Str("IPv4-Explicit-NULL"))
+        );
     }
 
     // Test 12: Special label recognition - Router Alert
@@ -485,8 +506,14 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(result.get("label"), Some(&FieldValue::UInt32(1)));
-        assert_eq!(result.get("is_reserved_label"), Some(&FieldValue::Bool(true)));
-        assert_eq!(result.get("special_label_name"), Some(&FieldValue::Str("Router-Alert")));
+        assert_eq!(
+            result.get("is_reserved_label"),
+            Some(&FieldValue::Bool(true))
+        );
+        assert_eq!(
+            result.get("special_label_name"),
+            Some(&FieldValue::Str("Router-Alert"))
+        );
     }
 
     // Test 13: Special label recognition - IPv6 Explicit NULL
@@ -498,15 +525,26 @@ mod tests {
 
         // Label 2 = IPv6 Explicit NULL
         let mut data = Vec::new();
-        data.extend_from_slice(&create_mpls_label(special_label::IPV6_EXPLICIT_NULL, 0, true, 64));
+        data.extend_from_slice(&create_mpls_label(
+            special_label::IPV6_EXPLICIT_NULL,
+            0,
+            true,
+            64,
+        ));
         data.extend_from_slice(&[0x60, 0x00]); // IPv6 payload
 
         let result = parser.parse(&data, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("label"), Some(&FieldValue::UInt32(2)));
-        assert_eq!(result.get("is_reserved_label"), Some(&FieldValue::Bool(true)));
-        assert_eq!(result.get("special_label_name"), Some(&FieldValue::Str("IPv6-Explicit-NULL")));
+        assert_eq!(
+            result.get("is_reserved_label"),
+            Some(&FieldValue::Bool(true))
+        );
+        assert_eq!(
+            result.get("special_label_name"),
+            Some(&FieldValue::Str("IPv6-Explicit-NULL"))
+        );
     }
 
     // Test 14: All special/reserved labels
@@ -532,8 +570,14 @@ mod tests {
             let result = parser.parse(&data, &context);
 
             assert!(result.is_ok());
-            assert_eq!(result.get("is_reserved_label"), Some(&FieldValue::Bool(true)));
-            assert_eq!(result.get("special_label_name"), Some(&FieldValue::Str(expected_name)));
+            assert_eq!(
+                result.get("is_reserved_label"),
+                Some(&FieldValue::Bool(true))
+            );
+            assert_eq!(
+                result.get("special_label_name"),
+                Some(&FieldValue::Str(expected_name))
+            );
         }
     }
 
@@ -550,8 +594,14 @@ mod tests {
             let result = parser.parse(&data, &context);
 
             assert!(result.is_ok());
-            assert_eq!(result.get("is_reserved_label"), Some(&FieldValue::Bool(true)));
-            assert_eq!(result.get("special_label_name"), Some(&FieldValue::Str("Reserved")));
+            assert_eq!(
+                result.get("is_reserved_label"),
+                Some(&FieldValue::Bool(true))
+            );
+            assert_eq!(
+                result.get("special_label_name"),
+                Some(&FieldValue::Str("Reserved"))
+            );
         }
     }
 
@@ -567,7 +617,10 @@ mod tests {
         let result = parser.parse(&data, &context);
 
         assert!(result.is_ok());
-        assert_eq!(result.get("is_reserved_label"), Some(&FieldValue::Bool(false)));
+        assert_eq!(
+            result.get("is_reserved_label"),
+            Some(&FieldValue::Bool(false))
+        );
         assert!(result.get("special_label_name").is_none());
 
         // Test a more typical label value
@@ -575,7 +628,10 @@ mod tests {
         let result2 = parser.parse(&data2, &context);
 
         assert!(result2.is_ok());
-        assert_eq!(result2.get("is_reserved_label"), Some(&FieldValue::Bool(false)));
+        assert_eq!(
+            result2.get("is_reserved_label"),
+            Some(&FieldValue::Bool(false))
+        );
         assert!(result2.get("special_label_name").is_none());
     }
 
@@ -619,7 +675,12 @@ mod tests {
         // Stack: [1000, Router Alert (1), 2000]
         let mut data = Vec::new();
         data.extend_from_slice(&create_mpls_label(1000, 0, false, 64));
-        data.extend_from_slice(&create_mpls_label(special_label::ROUTER_ALERT, 0, false, 63));
+        data.extend_from_slice(&create_mpls_label(
+            special_label::ROUTER_ALERT,
+            0,
+            false,
+            63,
+        ));
         data.extend_from_slice(&create_mpls_label(2000, 0, true, 62));
 
         let result = parser.parse(&data, &context);
@@ -628,7 +689,10 @@ mod tests {
         // Top label is not special
         assert_eq!(result.get("label"), Some(&FieldValue::UInt32(1000)));
         // But stack contains a reserved label
-        assert_eq!(result.get("is_reserved_label"), Some(&FieldValue::Bool(true)));
+        assert_eq!(
+            result.get("is_reserved_label"),
+            Some(&FieldValue::Bool(true))
+        );
         // special_label_name is None because top label isn't special
         assert!(result.get("special_label_name").is_none());
     }

@@ -35,10 +35,7 @@ impl Protocol for ArpProtocol {
     fn parse<'a>(&self, data: &'a [u8], _context: &ParseContext) -> ParseResult<'a> {
         // ARP for Ethernet/IPv4 is 28 bytes
         if data.len() < 28 {
-            return ParseResult::error(
-                format!("ARP packet too short: {} bytes", data.len()),
-                data,
-            );
+            return ParseResult::error(format!("ARP packet too short: {} bytes", data.len()), data);
         }
 
         let mut fields = SmallVec::new();
@@ -61,13 +58,13 @@ impl Protocol for ArpProtocol {
             operation::REPLY => "Reply",
             _ => "Unknown",
         };
-        fields.push((
-            "operation_name",
-            FieldValue::Str(operation_name),
-        ));
+        fields.push(("operation_name", FieldValue::Str(operation_name)));
 
         // For Ethernet/IPv4 ARP (most common case)
-        if hardware_type == 1 && protocol_type == 0x0800 && hardware_size == 6 && protocol_size == 4
+        if hardware_type == 1
+            && protocol_type == ethertype::IPV4
+            && hardware_size == 6
+            && protocol_size == 4
         {
             fields.push(("sender_mac", FieldValue::mac(&data[8..14])));
             fields.push(("sender_ip", FieldValue::ipv4(&data[14..18])));
@@ -121,7 +118,7 @@ mod tests {
 
         let parser = ArpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", 0x0806);
+        context.insert_hint("ethertype", ethertype::ARP as u64);
 
         let result = parser.parse(&packet, &context);
 
@@ -155,7 +152,7 @@ mod tests {
 
         let parser = ArpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", 0x0806);
+        context.insert_hint("ethertype", ethertype::ARP as u64);
 
         let result = parser.parse(&packet, &context);
 
@@ -188,12 +185,12 @@ mod tests {
 
         // With IPv4 ethertype
         let mut ctx2 = ParseContext::new(1);
-        ctx2.insert_hint("ethertype", 0x0800);
+        ctx2.insert_hint("ethertype", ethertype::IPV4 as u64);
         assert!(parser.can_parse(&ctx2).is_none());
 
         // With ARP ethertype
         let mut ctx3 = ParseContext::new(1);
-        ctx3.insert_hint("ethertype", 0x0806);
+        ctx3.insert_hint("ethertype", ethertype::ARP as u64);
         assert!(parser.can_parse(&ctx3).is_some());
     }
 
@@ -203,7 +200,7 @@ mod tests {
 
         let parser = ArpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", 0x0806);
+        context.insert_hint("ethertype", ethertype::ARP as u64);
 
         let result = parser.parse(&short_packet, &context);
 
@@ -227,13 +224,16 @@ mod tests {
 
         let parser = ArpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", 0x0806);
+        context.insert_hint("ethertype", ethertype::ARP as u64);
 
         let result = parser.parse(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("hardware_type"), Some(&FieldValue::UInt16(1)));
-        assert_eq!(result.get("protocol_type"), Some(&FieldValue::UInt16(0x0800)));
+        assert_eq!(
+            result.get("protocol_type"),
+            Some(&FieldValue::UInt16(ethertype::IPV4))
+        );
         assert_eq!(result.get("hardware_size"), Some(&FieldValue::UInt8(6)));
         assert_eq!(result.get("protocol_size"), Some(&FieldValue::UInt8(4)));
     }
@@ -254,7 +254,7 @@ mod tests {
 
         let parser = ArpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", 0x0806);
+        context.insert_hint("ethertype", ethertype::ARP as u64);
 
         let result = parser.parse(&packet, &context);
 

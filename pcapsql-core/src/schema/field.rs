@@ -59,8 +59,7 @@ impl FieldDescriptor {
 impl FieldDescriptor {
     /// Frame number field (present in all protocol tables).
     pub const fn frame_number() -> Self {
-        Self::new("frame_number", DataKind::UInt64)
-            .with_description("Unique packet identifier")
+        Self::new("frame_number", DataKind::UInt64).with_description("Unique packet identifier")
     }
 
     /// Timestamp field.
@@ -71,14 +70,12 @@ impl FieldDescriptor {
 
     /// Source port field.
     pub const fn src_port() -> Self {
-        Self::new("src_port", DataKind::UInt16)
-            .with_description("Source port number")
+        Self::new("src_port", DataKind::UInt16).with_description("Source port number")
     }
 
     /// Destination port field.
     pub const fn dst_port() -> Self {
-        Self::new("dst_port", DataKind::UInt16)
-            .with_description("Destination port number")
+        Self::new("dst_port", DataKind::UInt16).with_description("Destination port number")
     }
 
     /// IPv4 address field (stored as UInt32).

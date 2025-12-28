@@ -81,10 +81,7 @@ impl StreamBuffer {
     ) -> bool {
         // Fast path: segment is in-order and no pending segments exist
         // This avoids allocating an intermediate Vec for the Segment struct
-        if self.initial_seq.is_some()
-            && seq == self.expected_seq
-            && self.pending.is_empty()
-        {
+        if self.initial_seq.is_some() && seq == self.expected_seq && self.pending.is_empty() {
             self.segment_count += 1;
             self.reassembled.extend_from_slice(data);
             self.expected_seq = seq_add(seq, data.len());
@@ -268,11 +265,7 @@ impl TcpReassembler {
     }
 
     /// Get or create a stream buffer.
-    pub fn get_or_create(
-        &mut self,
-        connection_id: u64,
-        direction: Direction,
-    ) -> &mut StreamBuffer {
+    pub fn get_or_create(&mut self, connection_id: u64, direction: Direction) -> &mut StreamBuffer {
         let key = StreamKey {
             connection_id,
             direction,
@@ -356,8 +349,7 @@ impl TcpReassembler {
 
     /// Remove a stream (connection closed).
     pub fn remove(&mut self, connection_id: u64) {
-        self.streams
-            .retain(|k, _| k.connection_id != connection_id);
+        self.streams.retain(|k, _| k.connection_id != connection_id);
     }
 
     /// Get stream statistics.

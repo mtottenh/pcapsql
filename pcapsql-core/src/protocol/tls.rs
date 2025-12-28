@@ -20,14 +20,15 @@
 use compact_str::CompactString;
 use smallvec::SmallVec;
 use tls_parser::{
-    parse_tls_extensions, parse_tls_plaintext, TlsCipherSuite, TlsExtension,
-    TlsMessage, TlsMessageHandshake, TlsVersion,
+    parse_tls_extensions, parse_tls_plaintext, TlsCipherSuite, TlsExtension, TlsMessage,
+    TlsMessageHandshake, TlsVersion,
 };
 
 use super::{FieldValue, ParseContext, ParseResult, Protocol};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// TLS/HTTPS port.
+#[allow(dead_code)]
 pub const TLS_PORT: u16 = 443;
 
 /// Common TLS ports for priority matching.
@@ -82,14 +83,8 @@ impl Protocol for TlsProtocol {
         match parse_tls_plaintext(data) {
             Ok((remaining, record)) => {
                 // Record header fields
-                fields.push((
-                    "record_type",
-                    FieldValue::UInt8(record.hdr.record_type.0),
-                ));
-                fields.push((
-                    "record_version",
-                    FieldValue::UInt16(record.hdr.version.0),
-                ));
+                fields.push(("record_type", FieldValue::UInt8(record.hdr.record_type.0)));
+                fields.push(("record_version", FieldValue::UInt16(record.hdr.version.0)));
                 fields.push((
                     "version",
                     FieldValue::OwnedString(CompactString::new(format_tls_version(
@@ -147,7 +142,7 @@ impl Protocol for TlsProtocol {
 
                 ParseResult::partial(fields, &data[5..], "TLS record incomplete".to_string())
             }
-            Err(e) => ParseResult::error(format!("TLS parse error: {:?}", e), data),
+            Err(e) => ParseResult::error(format!("TLS parse error: {e:?}"), data),
         }
     }
 
@@ -214,17 +209,17 @@ impl Protocol for TlsProtocol {
 }
 
 /// Parse a TLS handshake message.
-fn parse_handshake(handshake: &TlsMessageHandshake, fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) {
+fn parse_handshake(
+    handshake: &TlsMessageHandshake,
+    fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
+) {
     match handshake {
         TlsMessageHandshake::ClientHello(ch) => {
             fields.push(("handshake_type", FieldValue::UInt8(1)));
             fields.push(("handshake_version", FieldValue::UInt16(ch.version.0)));
 
             // Decryption foundation: client_random (32 bytes)
-            fields.push((
-                "client_random",
-                FieldValue::OwnedBytes(ch.random.to_vec()),
-            ));
+            fields.push(("client_random", FieldValue::OwnedBytes(ch.random.to_vec())));
 
             // Session ID (for session resumption tracking)
             if let Some(session_id) = ch.session_id {
@@ -233,10 +228,7 @@ fn parse_handshake(handshake: &TlsMessageHandshake, fields: &mut SmallVec<[(&'st
                     FieldValue::UInt8(session_id.len() as u8),
                 ));
                 if !session_id.is_empty() {
-                    fields.push((
-                        "session_id",
-                        FieldValue::OwnedBytes(session_id.to_vec()),
-                    ));
+                    fields.push(("session_id", FieldValue::OwnedBytes(session_id.to_vec())));
                 }
             } else {
                 fields.push(("session_id_length", FieldValue::UInt8(0)));
@@ -302,10 +294,7 @@ fn parse_handshake(handshake: &TlsMessageHandshake, fields: &mut SmallVec<[(&'st
             fields.push(("handshake_version", FieldValue::UInt16(sh.version.0)));
 
             // Decryption foundation: server_random (32 bytes)
-            fields.push((
-                "server_random",
-                FieldValue::OwnedBytes(sh.random.to_vec()),
-            ));
+            fields.push(("server_random", FieldValue::OwnedBytes(sh.random.to_vec())));
 
             // Session ID
             if let Some(session_id) = sh.session_id {
@@ -314,10 +303,7 @@ fn parse_handshake(handshake: &TlsMessageHandshake, fields: &mut SmallVec<[(&'st
                     FieldValue::UInt8(session_id.len() as u8),
                 ));
                 if !session_id.is_empty() {
-                    fields.push((
-                        "session_id",
-                        FieldValue::OwnedBytes(session_id.to_vec()),
-                    ));
+                    fields.push(("session_id", FieldValue::OwnedBytes(session_id.to_vec())));
                 }
             } else {
                 fields.push(("session_id_length", FieldValue::UInt8(0)));
@@ -451,10 +437,8 @@ fn parse_extensions(
                     }
                 }
                 TlsExtension::SupportedVersions(versions) => {
-                    let vers: Vec<String> = versions
-                        .iter()
-                        .map(|v| format_tls_version(*v))
-                        .collect();
+                    let vers: Vec<String> =
+                        versions.iter().map(|v| format_tls_version(*v)).collect();
                     if !vers.is_empty() {
                         fields.push((
                             "supported_versions",
@@ -475,10 +459,8 @@ fn parse_extensions(
                     }
                 }
                 TlsExtension::EllipticCurves(curves) => {
-                    let curve_names: Vec<String> = curves
-                        .iter()
-                        .map(|c| format_named_group(c.0))
-                        .collect();
+                    let curve_names: Vec<String> =
+                        curves.iter().map(|c| format_named_group(c.0)).collect();
                     if !curve_names.is_empty() {
                         fields.push((
                             "supported_groups",
@@ -487,10 +469,8 @@ fn parse_extensions(
                     }
                 }
                 TlsExtension::EcPointFormats(formats) => {
-                    let format_names: Vec<String> = formats
-                        .iter()
-                        .map(|f| format_ec_point_format(*f))
-                        .collect();
+                    let format_names: Vec<String> =
+                        formats.iter().map(|f| format_ec_point_format(*f)).collect();
                     if !format_names.is_empty() {
                         fields.push((
                             "ec_point_formats",
@@ -590,9 +570,21 @@ fn compute_ja3(ch: &tls_parser::TlsClientHelloContents) -> String {
         "{},{},{},{},{}",
         version,
         ciphers.join("-"),
-        ext_types.iter().map(|t| t.to_string()).collect::<Vec<_>>().join("-"),
-        curves.iter().map(|c| c.to_string()).collect::<Vec<_>>().join("-"),
-        point_formats.iter().map(|p| p.to_string()).collect::<Vec<_>>().join("-"),
+        ext_types
+            .iter()
+            .map(|t| t.to_string())
+            .collect::<Vec<_>>()
+            .join("-"),
+        curves
+            .iter()
+            .map(|c| c.to_string())
+            .collect::<Vec<_>>()
+            .join("-"),
+        point_formats
+            .iter()
+            .map(|p| p.to_string())
+            .collect::<Vec<_>>()
+            .join("-"),
     )
 }
 
@@ -624,7 +616,11 @@ fn compute_ja3s(sh: &tls_parser::TlsServerHelloContents) -> String {
         "{},{},{}",
         version,
         cipher,
-        ext_types.iter().map(|t| t.to_string()).collect::<Vec<_>>().join("-"),
+        ext_types
+            .iter()
+            .map(|t| t.to_string())
+            .collect::<Vec<_>>()
+            .join("-"),
     )
 }
 
@@ -643,19 +639,19 @@ fn format_tls_version(version: TlsVersion) -> String {
         0x0303 => "TLS 1.2".to_string(),
         0x0304 => "TLS 1.3".to_string(),
         v if is_grease_value(v) => "GREASE".to_string(),
-        v => format!("Unknown (0x{:04x})", v),
+        v => format!("Unknown (0x{v:04x})"),
     }
 }
 
 /// Get cipher suite name from ID using tls-parser's IANA database.
 fn cipher_suite_name(id: u16) -> String {
     if is_grease_value(id) {
-        return format!("GREASE (0x{:04x})", id);
+        return format!("GREASE (0x{id:04x})");
     }
 
     TlsCipherSuite::from_id(id)
         .map(|cs| cs.name.to_string())
-        .unwrap_or_else(|| format!("0x{:04X}", id))
+        .unwrap_or_else(|| format!("0x{id:04X}"))
 }
 
 /// Format compression method.
@@ -664,7 +660,7 @@ fn format_compression_method(method: u8) -> String {
         0 => "null".to_string(),
         1 => "DEFLATE".to_string(),
         64 => "LZS".to_string(),
-        _ => format!("0x{:02x}", method),
+        _ => format!("0x{method:02x}"),
     }
 }
 
@@ -688,7 +684,7 @@ fn format_signature_algorithm(alg: u16) -> String {
         0x080a => "rsa_pss_pss_sha384".to_string(),
         0x080b => "rsa_pss_pss_sha512".to_string(),
         v if is_grease_value(v) => "GREASE".to_string(),
-        _ => format!("0x{:04x}", alg),
+        _ => format!("0x{alg:04x}"),
     }
 }
 
@@ -731,17 +727,17 @@ fn format_named_group(group: u16) -> String {
         259 => "ffdhe6144".to_string(),
         260 => "ffdhe8192".to_string(),
         v if is_grease_value(v) => "GREASE".to_string(),
-        _ => format!("0x{:04x}", group),
+        _ => format!("0x{group:04x}"),
     }
 }
 
 /// Format EC point format.
-fn format_ec_point_format(format: u8) -> String {
-    match format {
+fn format_ec_point_format(fmt: u8) -> String {
+    match fmt {
         0 => "uncompressed".to_string(),
         1 => "ansiX962_compressed_prime".to_string(),
         2 => "ansiX962_compressed_char2".to_string(),
-        _ => format!("0x{:02x}", format),
+        _ => format!("0x{fmt:02x}"),
     }
 }
 
@@ -928,7 +924,7 @@ mod tests {
     /// Create a TLS Alert record.
     fn create_tls_alert() -> Vec<u8> {
         vec![
-            21,   // Record type: Alert
+            21, // Record type: Alert
             0x03, 0x03, // Version: TLS 1.2
             0x00, 0x02, // Length: 2
             0x02, // Level: Fatal
@@ -1050,7 +1046,10 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.get("record_type"), Some(&FieldValue::UInt8(21)));
         assert_eq!(result.get("alert_level"), Some(&FieldValue::UInt8(2)));
-        assert_eq!(result.get("alert_description"), Some(&FieldValue::UInt8(40)));
+        assert_eq!(
+            result.get("alert_description"),
+            Some(&FieldValue::UInt8(40))
+        );
         assert_eq!(
             result.get("alert_description_str"),
             Some(&FieldValue::OwnedString(CompactString::new(
@@ -1071,14 +1070,8 @@ mod tests {
     #[test]
     fn test_cipher_suite_names() {
         // Test that common cipher suites are properly named via tls-parser
-        assert_eq!(
-            cipher_suite_name(0x1301),
-            "TLS_AES_128_GCM_SHA256"
-        );
-        assert_eq!(
-            cipher_suite_name(0x1302),
-            "TLS_AES_256_GCM_SHA384"
-        );
+        assert_eq!(cipher_suite_name(0x1301), "TLS_AES_128_GCM_SHA256");
+        assert_eq!(cipher_suite_name(0x1302), "TLS_AES_256_GCM_SHA384");
         assert_eq!(
             cipher_suite_name(0xC02F),
             "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"

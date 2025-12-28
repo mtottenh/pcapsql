@@ -3,6 +3,7 @@
 //! Provides builders for constructing test packets and helper functions
 //! for validating parse results.
 
+use super::ethernet::ethertype;
 use super::{FieldValue, ParseContext, ParseResult};
 
 /// Builder for constructing Ethernet frames.
@@ -19,7 +20,7 @@ impl Default for EthernetBuilder {
         Self {
             src_mac: [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
             dst_mac: [0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
-            ethertype: 0x0800, // IPv4
+            ethertype: ethertype::IPV4,
             payload: Vec::new(),
         }
     }
@@ -46,15 +47,15 @@ impl EthernetBuilder {
     }
 
     pub fn ipv4(self) -> Self {
-        self.ethertype(0x0800)
+        self.ethertype(ethertype::IPV4)
     }
 
     pub fn ipv6(self) -> Self {
-        self.ethertype(0x86DD)
+        self.ethertype(ethertype::IPV6)
     }
 
     pub fn arp(self) -> Self {
-        self.ethertype(0x0806)
+        self.ethertype(ethertype::ARP)
     }
 
     pub fn payload(mut self, payload: Vec<u8>) -> Self {
@@ -511,7 +512,7 @@ pub fn ethernet_context() -> ParseContext {
 /// Create a parse context with IPv4 hint.
 pub fn ipv4_context() -> ParseContext {
     let mut ctx = ParseContext::new(1);
-    ctx.insert_hint("ethertype", 0x0800);
+    ctx.insert_hint("ethertype", ethertype::IPV4 as u64);
     ctx.parent_protocol = Some("ethernet");
     ctx
 }
@@ -549,7 +550,7 @@ mod tests {
         let frame = EthernetBuilder::new()
             .src_mac([0x11, 0x22, 0x33, 0x44, 0x55, 0x66])
             .dst_mac([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff])
-            .ethertype(0x0800)
+            .ethertype(ethertype::IPV4)
             .payload(vec![0x45, 0x00])
             .build();
 

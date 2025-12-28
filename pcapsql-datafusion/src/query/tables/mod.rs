@@ -101,9 +101,9 @@ fn with_encap_fields(schema: Schema) -> Schema {
 /// Get all protocol table names.
 pub fn all_table_names() -> Vec<&'static str> {
     vec![
-        "frames", "ethernet", "arp", "vlan", "mpls", "ipv4", "ipv6", "tcp", "udp", "icmp", "icmpv6",
-        "gre", "vxlan", "gtp", "ipsec", "bgp", "ospf",
-        "dns", "dhcp", "ntp", "http", "http2", "tls", "ssh", "quic",
+        "frames", "ethernet", "arp", "vlan", "mpls", "ipv4", "ipv6", "tcp", "udp", "icmp",
+        "icmpv6", "gre", "vxlan", "gtp", "ipsec", "bgp", "ospf", "dns", "dhcp", "ntp", "http",
+        "http2", "tls", "ssh", "quic",
     ]
 }
 

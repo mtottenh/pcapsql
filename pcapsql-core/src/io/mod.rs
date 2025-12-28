@@ -31,9 +31,9 @@ mod mmap;
 mod pcap_stream;
 mod source;
 
-pub use decompress::{Compression, DecompressReader, FileDecoder};
 #[cfg(feature = "mmap")]
 pub use decompress::{AnyDecoder, MmapSlice};
+pub use decompress::{Compression, DecompressReader, FileDecoder};
 #[cfg(feature = "mmap")]
 pub use mmap::{MmapPacketReader, MmapPacketSource};
 pub use pcap_stream::{GenericPcapReader, PcapFormat};

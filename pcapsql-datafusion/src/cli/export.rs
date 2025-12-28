@@ -170,11 +170,7 @@ mod tests {
         let id_array = Int32Array::from(vec![1, 2, 3]);
         let name_array = StringArray::from(vec![Some("Alice"), Some("Bob"), None]);
 
-        RecordBatch::try_new(
-            schema,
-            vec![Arc::new(id_array), Arc::new(name_array)],
-        )
-        .unwrap()
+        RecordBatch::try_new(schema, vec![Arc::new(id_array), Arc::new(name_array)]).unwrap()
     }
 
     #[test]
@@ -270,9 +266,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.csv");
 
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("text", DataType::Utf8, true),
-        ]));
+        let schema = Arc::new(Schema::new(vec![Field::new("text", DataType::Utf8, true)]));
 
         let text_array = StringArray::from(vec![
             Some("hello, world"),

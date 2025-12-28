@@ -29,12 +29,12 @@ impl Protocol for NtpProtocol {
     }
 
     fn can_parse(&self, context: &ParseContext) -> Option<u32> {
-        // Check for NTP port 123
+        // Check for NTP port
         let src_port = context.hint("src_port");
         let dst_port = context.hint("dst_port");
 
         match (src_port, dst_port) {
-            (Some(123), _) | (_, Some(123)) => Some(100),
+            (Some(p), _) | (_, Some(p)) if p == NTP_PORT as u64 => Some(100),
             _ => None,
         }
     }
@@ -81,10 +81,7 @@ impl Protocol for NtpProtocol {
         let ref_id_bytes = &data[12..16];
         let reference_id = if stratum == 0 || stratum == 1 {
             // For stratum 0-1, it's ASCII (e.g., "GPS", "PPS")
-            CompactString::new(
-                String::from_utf8_lossy(ref_id_bytes)
-                    .trim_end_matches('\0')
-            )
+            CompactString::new(String::from_utf8_lossy(ref_id_bytes).trim_end_matches('\0'))
         } else {
             // For stratum 2+, it's an IP address
             CompactString::new(format!(

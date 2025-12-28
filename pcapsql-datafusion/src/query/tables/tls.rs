@@ -80,32 +80,26 @@ pub fn tls_table_schema() -> Schema {
     Schema::new(vec![
         // Core identification
         Field::new("frame_number", DataType::UInt64, false),
-
         // Record layer
         Field::new("record_type", DataType::UInt8, true),
         Field::new("record_version", DataType::UInt16, true),
         Field::new("version", DataType::Utf8, true),
-
         // Handshake
         Field::new("handshake_type", DataType::UInt8, true),
         Field::new("handshake_version", DataType::UInt16, true),
-
         // Decryption foundation fields
         Field::new("client_random", DataType::FixedSizeBinary(32), true),
         Field::new("server_random", DataType::FixedSizeBinary(32), true),
         Field::new("session_id", DataType::Binary, true),
         Field::new("session_id_length", DataType::UInt8, true),
-
         // Cipher suites
         Field::new("cipher_suites", DataType::Utf8, true),
         Field::new("cipher_suite_count", DataType::UInt16, true),
         Field::new("selected_cipher", DataType::Utf8, true),
         Field::new("selected_cipher_id", DataType::UInt16, true),
-
         // Compression
         Field::new("compression_methods", DataType::Utf8, true),
         Field::new("selected_compression", DataType::UInt8, true),
-
         // Extensions
         Field::new("sni", DataType::Utf8, true),
         Field::new("alpn", DataType::Utf8, true),
@@ -115,27 +109,22 @@ pub fn tls_table_schema() -> Schema {
         Field::new("ec_point_formats", DataType::Utf8, true),
         Field::new("extensions_length", DataType::UInt16, true),
         Field::new("extension_types", DataType::Utf8, true),
-
         // Alerts
         Field::new("alert_level", DataType::UInt8, true),
         Field::new("alert_description", DataType::UInt8, true),
         Field::new("alert_description_str", DataType::Utf8, true),
-
         // Heartbeat
         Field::new("is_heartbeat", DataType::Boolean, true),
         Field::new("heartbeat_type", DataType::UInt8, true),
-
         // Other record types
         Field::new("is_change_cipher_spec", DataType::Boolean, true),
         Field::new("has_app_data", DataType::Boolean, true),
         Field::new("app_data_length", DataType::UInt32, true),
-
         // JA3 fingerprinting
         Field::new("ja3", DataType::Utf8, true),
         Field::new("ja3_hash", DataType::Utf8, true),
         Field::new("ja3s", DataType::Utf8, true),
         Field::new("ja3s_hash", DataType::Utf8, true),
-
         // Certificate info
         Field::new("certificate_count", DataType::UInt16, true),
     ])

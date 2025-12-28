@@ -116,6 +116,7 @@ fn error_code_name(code: u8) -> &'static str {
 }
 
 /// Get the name of a path attribute type.
+#[allow(dead_code)]
 fn path_attr_type_name(type_code: u8) -> &'static str {
     match type_code {
         path_attr_type::ORIGIN => "ORIGIN",
@@ -177,8 +178,8 @@ impl Protocol for BgpProtocol {
         let length = u16::from_be_bytes([data[16], data[17]]);
         fields.push(("length", FieldValue::UInt16(length)));
 
-        if length < 19 || length > 4096 {
-            return ParseResult::error(format!("BGP: invalid length {}", length), data);
+        if !(19..=4096).contains(&length) {
+            return ParseResult::error(format!("BGP: invalid length {length}"), data);
         }
 
         // Byte 18: Type
@@ -292,7 +293,11 @@ impl BgpProtocol {
     /// |             Optional Parameters (variable)                    |
     /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
     /// ```
-    fn parse_open_message(&self, data: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) {
+    fn parse_open_message(
+        &self,
+        data: &[u8],
+        fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
+    ) {
         if data.len() < 10 {
             return;
         }
@@ -311,7 +316,10 @@ impl BgpProtocol {
 
         // Bytes 5-8: BGP Identifier (IPv4 address)
         let bgp_id = format!("{}.{}.{}.{}", data[5], data[6], data[7], data[8]);
-        fields.push(("bgp_id", FieldValue::OwnedString(CompactString::new(bgp_id))));
+        fields.push((
+            "bgp_id",
+            FieldValue::OwnedString(CompactString::new(bgp_id)),
+        ));
 
         // Byte 9: Optional Parameters Length
         let opt_params_len = data[9] as usize;
@@ -390,7 +398,10 @@ impl BgpProtocol {
         }
 
         if !capabilities.is_empty() {
-            fields.push(("capabilities", FieldValue::OwnedString(CompactString::new(capabilities.join(",")))));
+            fields.push((
+                "capabilities",
+                FieldValue::OwnedString(CompactString::new(capabilities.join(","))),
+            ));
         }
 
         // If 4-byte ASN capability was found, store it
@@ -421,7 +432,11 @@ impl BgpProtocol {
     /// |       Network Layer Reachability Information (variable)      |
     /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
     /// ```
-    fn parse_update_message(&self, data: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) {
+    fn parse_update_message(
+        &self,
+        data: &[u8],
+        fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
+    ) {
         if data.len() < 4 {
             return;
         }
@@ -430,7 +445,10 @@ impl BgpProtocol {
 
         // Bytes 0-1: Withdrawn Routes Length
         let withdrawn_routes_len = u16::from_be_bytes([data[0], data[1]]) as usize;
-        fields.push(("withdrawn_routes_len", FieldValue::UInt16(withdrawn_routes_len as u16)));
+        fields.push((
+            "withdrawn_routes_len",
+            FieldValue::UInt16(withdrawn_routes_len as u16),
+        ));
         offset += 2;
 
         // Parse withdrawn routes (NLRI prefixes)
@@ -440,8 +458,14 @@ impl BgpProtocol {
         let withdrawn_data = &data[offset..offset + withdrawn_routes_len];
         let withdrawn_prefixes = self.parse_nlri_prefixes(withdrawn_data);
         if !withdrawn_prefixes.is_empty() {
-            fields.push(("withdrawn_routes", FieldValue::OwnedString(CompactString::new(withdrawn_prefixes.join(",")))));
-            fields.push(("withdrawn_count", FieldValue::UInt16(withdrawn_prefixes.len() as u16)));
+            fields.push((
+                "withdrawn_routes",
+                FieldValue::OwnedString(CompactString::new(withdrawn_prefixes.join(","))),
+            ));
+            fields.push((
+                "withdrawn_count",
+                FieldValue::UInt16(withdrawn_prefixes.len() as u16),
+            ));
         }
         offset += withdrawn_routes_len;
 
@@ -468,7 +492,10 @@ impl BgpProtocol {
             let nlri_data = &data[offset..];
             let nlri_prefixes = self.parse_nlri_prefixes(nlri_data);
             if !nlri_prefixes.is_empty() {
-                fields.push(("nlri", FieldValue::OwnedString(CompactString::new(nlri_prefixes.join(",")))));
+                fields.push((
+                    "nlri",
+                    FieldValue::OwnedString(CompactString::new(nlri_prefixes.join(","))),
+                ));
                 fields.push(("nlri_count", FieldValue::UInt16(nlri_prefixes.len() as u16)));
             }
         }
@@ -486,21 +513,19 @@ impl BgpProtocol {
             offset += 1;
 
             // Calculate how many bytes the prefix occupies
-            let prefix_bytes = (prefix_len_bits + 7) / 8;
+            let prefix_bytes = prefix_len_bits.div_ceil(8);
             if offset + prefix_bytes > data.len() {
                 break;
             }
 
             // Build the prefix (pad with zeros to make 4 bytes for IPv4)
             let mut prefix = [0u8; 4];
-            for i in 0..prefix_bytes.min(4) {
-                prefix[i] = data[offset + i];
-            }
+            let copy_len = prefix_bytes.min(4);
+            prefix[..copy_len].copy_from_slice(&data[offset..offset + copy_len]);
 
             let prefix_str = format!(
                 "{}.{}.{}.{}/{}",
-                prefix[0], prefix[1], prefix[2], prefix[3],
-                prefix_len_bits
+                prefix[0], prefix[1], prefix[2], prefix[3], prefix_len_bits
             );
             prefixes.push(prefix_str);
 
@@ -511,7 +536,11 @@ impl BgpProtocol {
     }
 
     /// Parse path attributes from UPDATE message.
-    fn parse_path_attributes(&self, data: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) {
+    fn parse_path_attributes(
+        &self,
+        data: &[u8],
+        fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
+    ) {
         let mut offset = 0;
 
         while offset + 3 <= data.len() {
@@ -561,7 +590,10 @@ impl BgpProtocol {
                 }
                 path_attr_type::AS_PATH => {
                     let (as_path_str, path_length) = self.parse_as_path(attr_data);
-                    fields.push(("as_path", FieldValue::OwnedString(CompactString::new(as_path_str))));
+                    fields.push((
+                        "as_path",
+                        FieldValue::OwnedString(CompactString::new(as_path_str)),
+                    ));
                     fields.push(("as_path_length", FieldValue::UInt16(path_length)));
                 }
                 path_attr_type::NEXT_HOP => {
@@ -570,13 +602,19 @@ impl BgpProtocol {
                             "{}.{}.{}.{}",
                             attr_data[0], attr_data[1], attr_data[2], attr_data[3]
                         );
-                        fields.push(("next_hop", FieldValue::OwnedString(CompactString::new(next_hop))));
+                        fields.push((
+                            "next_hop",
+                            FieldValue::OwnedString(CompactString::new(next_hop)),
+                        ));
                     }
                 }
                 path_attr_type::MULTI_EXIT_DISC => {
                     if attr_data.len() >= 4 {
                         let med = u32::from_be_bytes([
-                            attr_data[0], attr_data[1], attr_data[2], attr_data[3]
+                            attr_data[0],
+                            attr_data[1],
+                            attr_data[2],
+                            attr_data[3],
                         ]);
                         fields.push(("med", FieldValue::UInt32(med)));
                     }
@@ -584,7 +622,10 @@ impl BgpProtocol {
                 path_attr_type::LOCAL_PREF => {
                     if attr_data.len() >= 4 {
                         let local_pref = u32::from_be_bytes([
-                            attr_data[0], attr_data[1], attr_data[2], attr_data[3]
+                            attr_data[0],
+                            attr_data[1],
+                            attr_data[2],
+                            attr_data[3],
                         ]);
                         fields.push(("local_pref", FieldValue::UInt32(local_pref)));
                     }
@@ -598,9 +639,15 @@ impl BgpProtocol {
                     if attr_data.len() >= 6 {
                         let (asn, ip_offset) = if attr_data.len() >= 8 {
                             // 4-byte AS
-                            (u32::from_be_bytes([
-                                attr_data[0], attr_data[1], attr_data[2], attr_data[3]
-                            ]), 4)
+                            (
+                                u32::from_be_bytes([
+                                    attr_data[0],
+                                    attr_data[1],
+                                    attr_data[2],
+                                    attr_data[3],
+                                ]),
+                                4,
+                            )
                         } else {
                             // 2-byte AS
                             (u16::from_be_bytes([attr_data[0], attr_data[1]]) as u32, 2)
@@ -610,10 +657,15 @@ impl BgpProtocol {
                         if attr_data.len() >= ip_offset + 4 {
                             let ip = format!(
                                 "{}.{}.{}.{}",
-                                attr_data[ip_offset], attr_data[ip_offset + 1],
-                                attr_data[ip_offset + 2], attr_data[ip_offset + 3]
+                                attr_data[ip_offset],
+                                attr_data[ip_offset + 1],
+                                attr_data[ip_offset + 2],
+                                attr_data[ip_offset + 3]
                             );
-                            fields.push(("aggregator_ip", FieldValue::OwnedString(CompactString::new(ip))));
+                            fields.push((
+                                "aggregator_ip",
+                                FieldValue::OwnedString(CompactString::new(ip)),
+                            ));
                         }
                     }
                 }
@@ -664,10 +716,7 @@ impl BgpProtocol {
                         data[offset + i * 4 + 3],
                     ])
                 } else {
-                    u16::from_be_bytes([
-                        data[offset + i * 2],
-                        data[offset + i * 2 + 1],
-                    ]) as u32
+                    u16::from_be_bytes([data[offset + i * 2], data[offset + i * 2 + 1]]) as u32
                 };
                 asns.push(asn.to_string());
             }
@@ -693,7 +742,11 @@ impl BgpProtocol {
     }
 
     /// Parse NOTIFICATION message.
-    fn parse_notification_message(&self, data: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) {
+    fn parse_notification_message(
+        &self,
+        data: &[u8],
+        fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
+    ) {
         if data.len() < 2 {
             return;
         }
@@ -701,7 +754,10 @@ impl BgpProtocol {
         // Byte 0: Error Code
         let error_code = data[0];
         fields.push(("error_code", FieldValue::UInt8(error_code)));
-        fields.push(("error_code_name", FieldValue::Str(error_code_name(error_code))));
+        fields.push((
+            "error_code_name",
+            FieldValue::Str(error_code_name(error_code)),
+        ));
 
         // Byte 1: Error Subcode
         let error_subcode = data[1];
@@ -711,7 +767,11 @@ impl BgpProtocol {
     }
 
     /// Parse ROUTE-REFRESH message (RFC 2918).
-    fn parse_route_refresh_message(&self, data: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) {
+    fn parse_route_refresh_message(
+        &self,
+        data: &[u8],
+        fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
+    ) {
         if data.len() < 4 {
             return;
         }
@@ -851,7 +911,11 @@ mod tests {
 
         for (msg_type, name) in test_types {
             // Use appropriate length for message type
-            let length = if msg_type == message_type::OPEN { 29 } else { 19 };
+            let length = if msg_type == message_type::OPEN {
+                29
+            } else {
+                19
+            };
             let mut msg = create_bgp_header(msg_type, length);
             // Add padding for OPEN message
             if msg_type == message_type::OPEN {
@@ -860,8 +924,14 @@ mod tests {
 
             let result = parser.parse(&msg, &context);
             assert!(result.is_ok());
-            assert_eq!(result.get("message_type"), Some(&FieldValue::UInt8(msg_type)));
-            assert_eq!(result.get("message_type_name"), Some(&FieldValue::Str(name)));
+            assert_eq!(
+                result.get("message_type"),
+                Some(&FieldValue::UInt8(msg_type))
+            );
+            assert_eq!(
+                result.get("message_type_name"),
+                Some(&FieldValue::Str(name))
+            );
         }
     }
 
@@ -879,7 +949,10 @@ mod tests {
         assert_eq!(result.get("version"), Some(&FieldValue::UInt8(4)));
         assert_eq!(result.get("my_as"), Some(&FieldValue::UInt16(65001)));
         assert_eq!(result.get("hold_time"), Some(&FieldValue::UInt16(180)));
-        assert_eq!(result.get("bgp_id"), Some(&FieldValue::OwnedString(CompactString::new("192.168.1.1"))));
+        assert_eq!(
+            result.get("bgp_id"),
+            Some(&FieldValue::OwnedString(CompactString::new("192.168.1.1")))
+        );
     }
 
     // Test 5: KEEPALIVE message (no payload)
@@ -893,7 +966,10 @@ mod tests {
         let result = parser.parse(&msg, &context);
 
         assert!(result.is_ok());
-        assert_eq!(result.get("message_type"), Some(&FieldValue::UInt8(message_type::KEEPALIVE)));
+        assert_eq!(
+            result.get("message_type"),
+            Some(&FieldValue::UInt8(message_type::KEEPALIVE))
+        );
         assert_eq!(result.get("length"), Some(&FieldValue::UInt16(19)));
     }
 
@@ -908,8 +984,14 @@ mod tests {
         let result = parser.parse(&msg, &context);
 
         assert!(result.is_ok());
-        assert_eq!(result.get("message_type"), Some(&FieldValue::UInt8(message_type::UPDATE)));
-        assert_eq!(result.get("withdrawn_routes_len"), Some(&FieldValue::UInt16(5)));
+        assert_eq!(
+            result.get("message_type"),
+            Some(&FieldValue::UInt8(message_type::UPDATE))
+        );
+        assert_eq!(
+            result.get("withdrawn_routes_len"),
+            Some(&FieldValue::UInt16(5))
+        );
         assert_eq!(result.get("path_attr_len"), Some(&FieldValue::UInt16(10)));
     }
 
@@ -927,8 +1009,14 @@ mod tests {
         let result = parser.parse(&msg, &context);
 
         assert!(result.is_ok());
-        assert_eq!(result.get("message_type"), Some(&FieldValue::UInt8(message_type::NOTIFICATION)));
-        assert_eq!(result.get("message_type_name"), Some(&FieldValue::Str("NOTIFICATION")));
+        assert_eq!(
+            result.get("message_type"),
+            Some(&FieldValue::UInt8(message_type::NOTIFICATION))
+        );
+        assert_eq!(
+            result.get("message_type_name"),
+            Some(&FieldValue::Str("NOTIFICATION"))
+        );
     }
 
     // Test 8: Invalid marker rejection
@@ -1012,8 +1100,10 @@ mod tests {
         // Build optional parameters: capability 65 (4-byte AS) with value 4200000001
         let four_byte_asn: u32 = 4200000001;
         let cap_data = [
-            2, 6,  // Parameter type 2 (Capabilities), length 6
-            capability_code::FOUR_OCTET_AS, 4,  // Capability 65, length 4
+            2,
+            6, // Parameter type 2 (Capabilities), length 6
+            capability_code::FOUR_OCTET_AS,
+            4, // Capability 65, length 4
             ((four_byte_asn >> 24) & 0xFF) as u8,
             ((four_byte_asn >> 16) & 0xFF) as u8,
             ((four_byte_asn >> 8) & 0xFF) as u8,
@@ -1036,7 +1126,10 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(result.get("my_as"), Some(&FieldValue::UInt16(AS_TRANS)));
-        assert_eq!(result.get("my_as_4byte"), Some(&FieldValue::UInt32(four_byte_asn)));
+        assert_eq!(
+            result.get("my_as_4byte"),
+            Some(&FieldValue::UInt32(four_byte_asn))
+        );
 
         // Check capabilities string contains 4-BYTE-AS
         if let Some(FieldValue::OwnedString(caps)) = result.get("capabilities") {
@@ -1060,8 +1153,8 @@ mod tests {
         // Withdrawn routes: 10.0.0.0/8 (2 bytes: len=8, prefix=10)
         //                   192.168.0.0/16 (3 bytes: len=16, prefix=192,168)
         let withdrawn = [
-            8, 10,           // 10.0.0.0/8
-            16, 192, 168,    // 192.168.0.0/16
+            8, 10, // 10.0.0.0/8
+            16, 192, 168, // 192.168.0.0/16
         ];
 
         let total_len = 19 + 2 + withdrawn.len() + 2; // header + withdrawn_len + withdrawn + path_attr_len
@@ -1078,7 +1171,10 @@ mod tests {
         let result = parser.parse(&msg, &context);
 
         assert!(result.is_ok());
-        assert_eq!(result.get("withdrawn_routes_len"), Some(&FieldValue::UInt16(5)));
+        assert_eq!(
+            result.get("withdrawn_routes_len"),
+            Some(&FieldValue::UInt16(5))
+        );
         assert_eq!(result.get("withdrawn_count"), Some(&FieldValue::UInt16(2)));
 
         if let Some(FieldValue::OwnedString(routes)) = result.get("withdrawn_routes") {
@@ -1104,29 +1200,25 @@ mod tests {
 
         // AS_PATH (type 2): AS_SEQUENCE with 2-byte ASNs [65001, 65002]
         path_attrs.extend_from_slice(&[
-            0x40, path_attr_type::AS_PATH, 6,
-            as_path_segment_type::AS_SEQUENCE, 2,  // AS_SEQUENCE with 2 ASNs
-            0xFD, 0xE9,  // 65001
-            0xFD, 0xEA,  // 65002
+            0x40,
+            path_attr_type::AS_PATH,
+            6,
+            as_path_segment_type::AS_SEQUENCE,
+            2, // AS_SEQUENCE with 2 ASNs
+            0xFD,
+            0xE9, // 65001
+            0xFD,
+            0xEA, // 65002
         ]);
 
         // NEXT_HOP (type 3): 192.168.1.1
-        path_attrs.extend_from_slice(&[
-            0x40, path_attr_type::NEXT_HOP, 4,
-            192, 168, 1, 1
-        ]);
+        path_attrs.extend_from_slice(&[0x40, path_attr_type::NEXT_HOP, 4, 192, 168, 1, 1]);
 
         // MED (type 4): 100
-        path_attrs.extend_from_slice(&[
-            0x80, path_attr_type::MULTI_EXIT_DISC, 4,
-            0, 0, 0, 100
-        ]);
+        path_attrs.extend_from_slice(&[0x80, path_attr_type::MULTI_EXIT_DISC, 4, 0, 0, 0, 100]);
 
         // LOCAL_PREF (type 5): 200
-        path_attrs.extend_from_slice(&[
-            0x40, path_attr_type::LOCAL_PREF, 4,
-            0, 0, 0, 200
-        ]);
+        path_attrs.extend_from_slice(&[0x40, path_attr_type::LOCAL_PREF, 4, 0, 0, 0, 200]);
 
         // Build message
         let mut msg = Vec::new();
@@ -1146,9 +1238,15 @@ mod tests {
         let result = parser.parse(&msg, &context);
 
         assert!(result.is_ok());
-        assert_eq!(result.get("origin"), Some(&FieldValue::UInt8(origin_type::IGP)));
+        assert_eq!(
+            result.get("origin"),
+            Some(&FieldValue::UInt8(origin_type::IGP))
+        );
         assert_eq!(result.get("origin_name"), Some(&FieldValue::Str("IGP")));
-        assert_eq!(result.get("next_hop"), Some(&FieldValue::OwnedString(CompactString::new("192.168.1.1"))));
+        assert_eq!(
+            result.get("next_hop"),
+            Some(&FieldValue::OwnedString(CompactString::new("192.168.1.1")))
+        );
         assert_eq!(result.get("med"), Some(&FieldValue::UInt32(100)));
         assert_eq!(result.get("local_pref"), Some(&FieldValue::UInt32(200)));
         assert_eq!(result.get("as_path_length"), Some(&FieldValue::UInt16(2)));
@@ -1170,9 +1268,20 @@ mod tests {
 
         // Minimal path attributes (ORIGIN + AS_PATH + NEXT_HOP required)
         let path_attrs = [
-            0x40, path_attr_type::ORIGIN, 1, origin_type::IGP,
-            0x40, path_attr_type::AS_PATH, 0,  // Empty AS_PATH
-            0x40, path_attr_type::NEXT_HOP, 4, 10, 0, 0, 1,
+            0x40,
+            path_attr_type::ORIGIN,
+            1,
+            origin_type::IGP,
+            0x40,
+            path_attr_type::AS_PATH,
+            0, // Empty AS_PATH
+            0x40,
+            path_attr_type::NEXT_HOP,
+            4,
+            10,
+            0,
+            0,
+            1,
         ];
 
         // NLRI: 172.16.0.0/12
@@ -1219,8 +1328,14 @@ mod tests {
         let result = parser.parse(&msg, &context);
 
         assert!(result.is_ok());
-        assert_eq!(result.get("message_type"), Some(&FieldValue::UInt8(message_type::ROUTE_REFRESH)));
-        assert_eq!(result.get("message_type_name"), Some(&FieldValue::Str("ROUTE-REFRESH")));
+        assert_eq!(
+            result.get("message_type"),
+            Some(&FieldValue::UInt8(message_type::ROUTE_REFRESH))
+        );
+        assert_eq!(
+            result.get("message_type_name"),
+            Some(&FieldValue::Str("ROUTE-REFRESH"))
+        );
         assert_eq!(result.get("afi"), Some(&FieldValue::UInt16(1)));
         assert_eq!(result.get("safi"), Some(&FieldValue::UInt8(1)));
     }
@@ -1255,13 +1370,28 @@ mod tests {
 
         // AS_PATH with AS_SET {65001, 65002, 65003}
         let path_attrs = [
-            0x40, path_attr_type::ORIGIN, 1, origin_type::IGP,
-            0x40, path_attr_type::AS_PATH, 8,
-            as_path_segment_type::AS_SET, 3,  // AS_SET with 3 ASNs
-            0xFD, 0xE9,  // 65001
-            0xFD, 0xEA,  // 65002
-            0xFD, 0xEB,  // 65003
-            0x40, path_attr_type::NEXT_HOP, 4, 10, 0, 0, 1,
+            0x40,
+            path_attr_type::ORIGIN,
+            1,
+            origin_type::IGP,
+            0x40,
+            path_attr_type::AS_PATH,
+            8,
+            as_path_segment_type::AS_SET,
+            3, // AS_SET with 3 ASNs
+            0xFD,
+            0xE9, // 65001
+            0xFD,
+            0xEA, // 65002
+            0xFD,
+            0xEB, // 65003
+            0x40,
+            path_attr_type::NEXT_HOP,
+            4,
+            10,
+            0,
+            0,
+            1,
         ];
 
         let mut msg = Vec::new();
@@ -1315,8 +1445,14 @@ mod tests {
 
             assert!(result.is_ok());
             assert_eq!(result.get("error_code"), Some(&FieldValue::UInt8(err_code)));
-            assert_eq!(result.get("error_subcode"), Some(&FieldValue::UInt8(err_subcode)));
-            assert_eq!(result.get("error_code_name"), Some(&FieldValue::Str(expected_name)));
+            assert_eq!(
+                result.get("error_subcode"),
+                Some(&FieldValue::UInt8(err_subcode))
+            );
+            assert_eq!(
+                result.get("error_code_name"),
+                Some(&FieldValue::Str(expected_name))
+            );
         }
     }
 
@@ -1328,10 +1464,23 @@ mod tests {
         context.insert_hint("dst_port", 179);
 
         let path_attrs = [
-            0x40, path_attr_type::ORIGIN, 1, origin_type::IGP,
-            0x40, path_attr_type::AS_PATH, 0,
-            0x40, path_attr_type::NEXT_HOP, 4, 10, 0, 0, 1,
-            0x40, path_attr_type::ATOMIC_AGGREGATE, 0, // Zero length
+            0x40,
+            path_attr_type::ORIGIN,
+            1,
+            origin_type::IGP,
+            0x40,
+            path_attr_type::AS_PATH,
+            0,
+            0x40,
+            path_attr_type::NEXT_HOP,
+            4,
+            10,
+            0,
+            0,
+            1,
+            0x40,
+            path_attr_type::ATOMIC_AGGREGATE,
+            0, // Zero length
         ];
 
         let mut msg = Vec::new();
@@ -1348,7 +1497,10 @@ mod tests {
         let result = parser.parse(&msg, &context);
 
         assert!(result.is_ok());
-        assert_eq!(result.get("atomic_aggregate"), Some(&FieldValue::Bool(true)));
+        assert_eq!(
+            result.get("atomic_aggregate"),
+            Some(&FieldValue::Bool(true))
+        );
     }
 
     // Test 21: AGGREGATOR attribute
@@ -1360,12 +1512,29 @@ mod tests {
 
         // AGGREGATOR with 2-byte AS
         let path_attrs = [
-            0x40, path_attr_type::ORIGIN, 1, origin_type::IGP,
-            0x40, path_attr_type::AS_PATH, 0,
-            0x40, path_attr_type::NEXT_HOP, 4, 10, 0, 0, 1,
-            0xC0, path_attr_type::AGGREGATOR, 6,  // Optional, Transitive
-            0xFD, 0xE9,  // AS 65001
-            192, 168, 1, 1, // Aggregator IP
+            0x40,
+            path_attr_type::ORIGIN,
+            1,
+            origin_type::IGP,
+            0x40,
+            path_attr_type::AS_PATH,
+            0,
+            0x40,
+            path_attr_type::NEXT_HOP,
+            4,
+            10,
+            0,
+            0,
+            1,
+            0xC0,
+            path_attr_type::AGGREGATOR,
+            6, // Optional, Transitive
+            0xFD,
+            0xE9, // AS 65001
+            192,
+            168,
+            1,
+            1, // Aggregator IP
         ];
 
         let mut msg = Vec::new();
@@ -1382,8 +1551,14 @@ mod tests {
         let result = parser.parse(&msg, &context);
 
         assert!(result.is_ok());
-        assert_eq!(result.get("aggregator_as"), Some(&FieldValue::UInt32(65001)));
-        assert_eq!(result.get("aggregator_ip"), Some(&FieldValue::OwnedString(CompactString::new("192.168.1.1"))));
+        assert_eq!(
+            result.get("aggregator_as"),
+            Some(&FieldValue::UInt32(65001))
+        );
+        assert_eq!(
+            result.get("aggregator_ip"),
+            Some(&FieldValue::OwnedString(CompactString::new("192.168.1.1")))
+        );
     }
 
     // Test 22: Extended length path attribute
@@ -1427,7 +1602,10 @@ mod tests {
         let result = parser.parse(&msg, &context);
 
         assert!(result.is_ok());
-        assert_eq!(result.get("origin"), Some(&FieldValue::UInt8(origin_type::EGP)));
+        assert_eq!(
+            result.get("origin"),
+            Some(&FieldValue::UInt8(origin_type::EGP))
+        );
         assert_eq!(result.get("origin_name"), Some(&FieldValue::Str("EGP")));
         assert_eq!(result.get("as_path_length"), Some(&FieldValue::UInt16(6)));
     }
@@ -1440,16 +1618,27 @@ mod tests {
         context.insert_hint("dst_port", 179);
 
         let path_attrs = [
-            0x40, path_attr_type::ORIGIN, 1, origin_type::IGP,
-            0x40, path_attr_type::AS_PATH, 0,
-            0x40, path_attr_type::NEXT_HOP, 4, 10, 0, 0, 1,
+            0x40,
+            path_attr_type::ORIGIN,
+            1,
+            origin_type::IGP,
+            0x40,
+            path_attr_type::AS_PATH,
+            0,
+            0x40,
+            path_attr_type::NEXT_HOP,
+            4,
+            10,
+            0,
+            0,
+            1,
         ];
 
         // Multiple NLRI: 10.0.0.0/8, 172.16.0.0/16, 192.168.1.0/24
         let nlri = [
-            8, 10,                    // 10.0.0.0/8
-            16, 172, 16,              // 172.16.0.0/16
-            24, 192, 168, 1,          // 192.168.1.0/24
+            8, 10, // 10.0.0.0/8
+            16, 172, 16, // 172.16.0.0/16
+            24, 192, 168, 1, // 192.168.1.0/24
         ];
 
         let mut msg = Vec::new();

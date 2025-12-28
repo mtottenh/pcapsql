@@ -55,9 +55,9 @@ mod protocol_tables;
 mod read_pcap;
 mod registry;
 
+pub use protocol_tables::register as register_protocol_tables;
 pub use read_pcap::{register as register_read_pcap, ReadPcapVTab};
 pub use registry::{register as register_registry, PcapProtocolsVTab, PcapSchemaVTab};
-pub use protocol_tables::register as register_protocol_tables;
 
 /// Register all VTab functions.
 pub fn register_all(con: &duckdb::Connection) -> duckdb::Result<(), Box<dyn std::error::Error>> {

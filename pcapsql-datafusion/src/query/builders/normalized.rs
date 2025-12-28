@@ -43,8 +43,8 @@ pub struct NormalizedBatchSet {
 impl NormalizedBatchSet {
     /// Create a new normalized batch set with the given batch size.
     pub fn new(batch_size: usize) -> Self {
-        let frames_builder = ProtocolBatchBuilder::new("frames", batch_size)
-            .expect("frames schema should exist");
+        let frames_builder =
+            ProtocolBatchBuilder::new("frames", batch_size).expect("frames schema should exist");
 
         let mut protocol_builders = HashMap::new();
 
@@ -391,7 +391,12 @@ mod tests {
         assert!(batches.get("udp").unwrap().is_empty());
 
         // Check row counts
-        let frames_rows: usize = batches.get("frames").unwrap().iter().map(|b| b.num_rows()).sum();
+        let frames_rows: usize = batches
+            .get("frames")
+            .unwrap()
+            .iter()
+            .map(|b| b.num_rows())
+            .sum();
         assert_eq!(frames_rows, 10);
     }
 
@@ -456,7 +461,10 @@ mod tests {
         };
 
         let mut dns_fields = SmallVec::new();
-        dns_fields.push(("query_name", FieldValue::OwnedString(CompactString::new("example.com"))));
+        dns_fields.push((
+            "query_name",
+            FieldValue::OwnedString(CompactString::new("example.com")),
+        ));
         dns_fields.push(("query_type", FieldValue::UInt16(1)));
         dns_fields.push(("is_query", FieldValue::Bool(true)));
         let dns = ParseResult {
@@ -469,26 +477,50 @@ mod tests {
             tunnel_id: None,
         };
 
-        let parsed2: Vec<(&'static str, ParseResult)> =
-            vec![("ethernet", eth2), ("ipv4", ipv4_2), ("udp", udp), ("dns", dns)];
+        let parsed2: Vec<(&'static str, ParseResult)> = vec![
+            ("ethernet", eth2),
+            ("ipv4", ipv4_2),
+            ("udp", udp),
+            ("dns", dns),
+        ];
         batch_set.add_packet(&raw2, &parsed2).unwrap();
 
         let batches = batch_set.finish().unwrap();
 
         // TCP table should have 1 row
-        let tcp_rows: usize = batches.get("tcp").unwrap().iter().map(|b| b.num_rows()).sum();
+        let tcp_rows: usize = batches
+            .get("tcp")
+            .unwrap()
+            .iter()
+            .map(|b| b.num_rows())
+            .sum();
         assert_eq!(tcp_rows, 1);
 
         // UDP table should have 1 row
-        let udp_rows: usize = batches.get("udp").unwrap().iter().map(|b| b.num_rows()).sum();
+        let udp_rows: usize = batches
+            .get("udp")
+            .unwrap()
+            .iter()
+            .map(|b| b.num_rows())
+            .sum();
         assert_eq!(udp_rows, 1);
 
         // DNS table should have 1 row
-        let dns_rows: usize = batches.get("dns").unwrap().iter().map(|b| b.num_rows()).sum();
+        let dns_rows: usize = batches
+            .get("dns")
+            .unwrap()
+            .iter()
+            .map(|b| b.num_rows())
+            .sum();
         assert_eq!(dns_rows, 1);
 
         // Frames should have 2 rows
-        let frames_rows: usize = batches.get("frames").unwrap().iter().map(|b| b.num_rows()).sum();
+        let frames_rows: usize = batches
+            .get("frames")
+            .unwrap()
+            .iter()
+            .map(|b| b.num_rows())
+            .sum();
         assert_eq!(frames_rows, 2);
     }
 

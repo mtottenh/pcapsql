@@ -43,10 +43,7 @@ impl OwnedParseResult {
         error: Option<&String>,
     ) -> Self {
         Self {
-            fields: fields
-                .iter()
-                .map(|(k, v)| (*k, v.to_owned()))
-                .collect(),
+            fields: fields.iter().map(|(k, v)| (*k, v.to_owned())).collect(),
             error: error.cloned(),
             encap_depth: 0,
             tunnel_type: TunnelType::None,
@@ -96,12 +93,7 @@ impl CachedParse {
     ) -> Self {
         let protocols = results
             .iter()
-            .map(|(name, result)| {
-                (
-                    *name,
-                    OwnedParseResult::from_parse_result(result),
-                )
-            })
+            .map(|(name, result)| (*name, OwnedParseResult::from_parse_result(result)))
             .collect();
 
         Self {
@@ -126,7 +118,10 @@ impl CachedParse {
     ///
     /// For tunneled packets, the same protocol (e.g., IPv4) may appear at
     /// multiple encapsulation depths. This method returns all occurrences.
-    pub fn get_all_protocols<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a OwnedParseResult> + 'a {
+    pub fn get_all_protocols<'a>(
+        &'a self,
+        name: &'a str,
+    ) -> impl Iterator<Item = &'a OwnedParseResult> + 'a {
         self.protocols
             .iter()
             .filter(move |(n, _)| *n == name)
@@ -291,11 +286,17 @@ impl CacheStats {
              \x20 Evictions:   {:>10} (LRU: {}, Reader: {})\n\
              \x20 Readers:     {:>10}\n\
              \x20 Memory:      {:>10}",
-            self.hits, hit_pct,
-            self.misses, miss_pct,
-            self.entries, self.max_entries, util_pct,
+            self.hits,
+            hit_pct,
+            self.misses,
+            miss_pct,
+            self.entries,
+            self.max_entries,
+            util_pct,
             self.peak_entries,
-            self.total_evictions(), self.evictions_lru, self.evictions_reader,
+            self.total_evictions(),
+            self.evictions_lru,
+            self.evictions_reader,
             self.active_readers,
             format_bytes(self.memory_bytes_estimate),
         )
@@ -315,7 +316,7 @@ fn format_bytes(bytes: usize) -> String {
     } else if bytes >= KB {
         format!("{:.2} KB", bytes as f64 / KB as f64)
     } else {
-        format!("{} B", bytes)
+        format!("{bytes} B")
     }
 }
 
@@ -393,7 +394,12 @@ mod tests {
                     OwnedParseResult {
                         fields: {
                             let mut f = HashMap::new();
-                            f.insert("src_ip", OwnedFieldValue::OwnedString(compact_str::CompactString::new("10.0.0.1")));
+                            f.insert(
+                                "src_ip",
+                                OwnedFieldValue::OwnedString(compact_str::CompactString::new(
+                                    "10.0.0.1",
+                                )),
+                            );
                             f
                         },
                         error: None,
@@ -431,7 +437,12 @@ mod tests {
                     OwnedParseResult {
                         fields: {
                             let mut f = HashMap::new();
-                            f.insert("src_ip", OwnedFieldValue::OwnedString(compact_str::CompactString::new("192.168.1.1")));
+                            f.insert(
+                                "src_ip",
+                                OwnedFieldValue::OwnedString(compact_str::CompactString::new(
+                                    "192.168.1.1",
+                                )),
+                            );
                             f
                         },
                         error: None,
@@ -486,9 +497,15 @@ mod tests {
         use std::net::{IpAddr, Ipv4Addr};
 
         let mut fields = HashMap::new();
-        fields.insert("src_ip", OwnedFieldValue::IpAddr(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
+        fields.insert(
+            "src_ip",
+            OwnedFieldValue::IpAddr(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))),
+        );
         fields.insert("dst_port", OwnedFieldValue::UInt16(443));
-        fields.insert("payload", OwnedFieldValue::OwnedBytes(vec![0x48, 0x65, 0x6c, 0x6c, 0x6f]));
+        fields.insert(
+            "payload",
+            OwnedFieldValue::OwnedBytes(vec![0x48, 0x65, 0x6c, 0x6c, 0x6f]),
+        );
         fields.insert("flags", OwnedFieldValue::UInt8(0x18));
         fields.insert("is_syn", OwnedFieldValue::Bool(false));
 
@@ -537,7 +554,10 @@ mod tests {
         use smallvec::SmallVec;
 
         let mut borrowed_fields: SmallVec<[(&'static str, FieldValue); 16]> = SmallVec::new();
-        borrowed_fields.push(("src_mac", FieldValue::MacAddr([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff])));
+        borrowed_fields.push((
+            "src_mac",
+            FieldValue::MacAddr([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
+        ));
         borrowed_fields.push(("ethertype", FieldValue::UInt16(0x0800)));
 
         let error_msg = "Some error".to_string();
@@ -606,9 +626,36 @@ mod tests {
         let cached = CachedParse {
             frame_number: 1,
             protocols: vec![
-                ("ethernet", OwnedParseResult { fields: HashMap::new(), error: None, encap_depth: 0, tunnel_type: TunnelType::None, tunnel_id: None }),
-                ("ipv4", OwnedParseResult { fields: HashMap::new(), error: None, encap_depth: 0, tunnel_type: TunnelType::None, tunnel_id: None }),
-                ("tcp", OwnedParseResult { fields: HashMap::new(), error: None, encap_depth: 0, tunnel_type: TunnelType::None, tunnel_id: None }),
+                (
+                    "ethernet",
+                    OwnedParseResult {
+                        fields: HashMap::new(),
+                        error: None,
+                        encap_depth: 0,
+                        tunnel_type: TunnelType::None,
+                        tunnel_id: None,
+                    },
+                ),
+                (
+                    "ipv4",
+                    OwnedParseResult {
+                        fields: HashMap::new(),
+                        error: None,
+                        encap_depth: 0,
+                        tunnel_type: TunnelType::None,
+                        tunnel_id: None,
+                    },
+                ),
+                (
+                    "tcp",
+                    OwnedParseResult {
+                        fields: HashMap::new(),
+                        error: None,
+                        encap_depth: 0,
+                        tunnel_type: TunnelType::None,
+                        tunnel_id: None,
+                    },
+                ),
             ],
         };
 
@@ -649,34 +696,68 @@ mod tests {
     #[test]
     fn test_cache_stats_various_ratios() {
         // 50% hit ratio
-        let stats_50 = CacheStats { hits: 50, misses: 50, entries: 100, max_entries: 1000, ..Default::default() };
+        let stats_50 = CacheStats {
+            hits: 50,
+            misses: 50,
+            entries: 100,
+            max_entries: 1000,
+            ..Default::default()
+        };
         assert!((stats_50.hit_ratio() - 0.5).abs() < 0.001);
 
         // 100% hit ratio
-        let stats_100 = CacheStats { hits: 100, misses: 0, entries: 100, max_entries: 1000, ..Default::default() };
+        let stats_100 = CacheStats {
+            hits: 100,
+            misses: 0,
+            entries: 100,
+            max_entries: 1000,
+            ..Default::default()
+        };
         assert!((stats_100.hit_ratio() - 1.0).abs() < 0.001);
 
         // 0% hit ratio (all misses)
-        let stats_0 = CacheStats { hits: 0, misses: 100, entries: 0, max_entries: 1000, ..Default::default() };
+        let stats_0 = CacheStats {
+            hits: 0,
+            misses: 100,
+            entries: 0,
+            max_entries: 1000,
+            ..Default::default()
+        };
         assert!((stats_0.hit_ratio() - 0.0).abs() < 0.001);
     }
 
     #[test]
     fn test_cache_stats_utilization() {
         // 0% utilization
-        let stats_0 = CacheStats { entries: 0, max_entries: 100, ..Default::default() };
+        let stats_0 = CacheStats {
+            entries: 0,
+            max_entries: 100,
+            ..Default::default()
+        };
         assert!((stats_0.utilization() - 0.0).abs() < 0.001);
 
         // 50% utilization
-        let stats_50 = CacheStats { entries: 50, max_entries: 100, ..Default::default() };
+        let stats_50 = CacheStats {
+            entries: 50,
+            max_entries: 100,
+            ..Default::default()
+        };
         assert!((stats_50.utilization() - 0.5).abs() < 0.001);
 
         // 100% utilization
-        let stats_100 = CacheStats { entries: 100, max_entries: 100, ..Default::default() };
+        let stats_100 = CacheStats {
+            entries: 100,
+            max_entries: 100,
+            ..Default::default()
+        };
         assert!((stats_100.utilization() - 1.0).abs() < 0.001);
 
         // Edge case: max_entries = 0
-        let stats_zero_max = CacheStats { entries: 0, max_entries: 0, ..Default::default() };
+        let stats_zero_max = CacheStats {
+            entries: 0,
+            max_entries: 0,
+            ..Default::default()
+        };
         assert!((stats_zero_max.utilization() - 0.0).abs() < 0.001);
     }
 

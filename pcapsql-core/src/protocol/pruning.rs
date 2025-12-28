@@ -62,7 +62,11 @@ pub fn compute_required_protocols(
 }
 
 /// Recursively add a protocol and all its dependencies to the required set.
-fn add_with_dependencies(protocol: &str, registry: &ProtocolRegistry, required: &mut HashSet<String>) {
+fn add_with_dependencies(
+    protocol: &str,
+    registry: &ProtocolRegistry,
+    required: &mut HashSet<String>,
+) {
     // Get parser from registry
     if let Some(parser) = registry.get_parser(protocol) {
         let name = parser.name().to_string();
@@ -231,7 +235,10 @@ mod tests {
         assert!(should_continue_parsing(&["ethernet", "ipv4"], &required));
 
         // All required parsed - should stop
-        assert!(!should_continue_parsing(&["ethernet", "ipv4", "tcp"], &required));
+        assert!(!should_continue_parsing(
+            &["ethernet", "ipv4", "tcp"],
+            &required
+        ));
     }
 
     #[test]

@@ -84,7 +84,10 @@ impl PacketRange {
     /// Check if a frame number is within this range
     pub fn contains(&self, frame_number: u64) -> bool {
         frame_number >= self.start.frame_number
-            && self.end.as_ref().map_or(true, |e| frame_number < e.frame_number)
+            && self
+                .end
+                .as_ref()
+                .is_none_or(|e| frame_number < e.frame_number)
     }
 }
 

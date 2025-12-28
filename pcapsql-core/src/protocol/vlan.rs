@@ -92,15 +92,14 @@ impl Protocol for VlanProtocol {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::ethernet::ethertype;
 
     /// Create a VLAN tag with the given parameters.
     fn create_vlan_tag(vlan_id: u16, priority: u8, dei: bool, inner_ethertype: u16) -> Vec<u8> {
         let mut tag = Vec::with_capacity(4);
 
         // Build TCI
-        let tci = ((priority as u16 & 0x07) << 13)
-            | ((dei as u16) << 12)
-            | (vlan_id & 0x0FFF);
+        let tci = ((priority as u16 & 0x07) << 13) | ((dei as u16) << 12) | (vlan_id & 0x0FFF);
 
         tag.extend_from_slice(&tci.to_be_bytes());
         tag.extend_from_slice(&inner_ethertype.to_be_bytes());
@@ -111,7 +110,7 @@ mod tests {
     #[test]
     fn test_parse_vlan_basic() {
         // VLAN ID 100, Priority 0, DEI false, inner ethertype IPv4
-        let tag = create_vlan_tag(100, 0, false, 0x0800);
+        let tag = create_vlan_tag(100, 0, false, ethertype::IPV4);
 
         let parser = VlanProtocol;
         let mut context = ParseContext::new(1);
@@ -124,13 +123,16 @@ mod tests {
         assert_eq!(result.get("vlan_id"), Some(&FieldValue::UInt16(100)));
         assert_eq!(result.get("priority"), Some(&FieldValue::UInt8(0)));
         assert_eq!(result.get("dei"), Some(&FieldValue::Bool(false)));
-        assert_eq!(result.get("inner_ethertype"), Some(&FieldValue::UInt16(0x0800)));
+        assert_eq!(
+            result.get("inner_ethertype"),
+            Some(&FieldValue::UInt16(ethertype::IPV4))
+        );
     }
 
     #[test]
     fn test_parse_vlan_with_priority() {
         // VLAN ID 200, Priority 5, DEI true, inner ethertype IPv6
-        let tag = create_vlan_tag(200, 5, true, 0x86DD);
+        let tag = create_vlan_tag(200, 5, true, ethertype::IPV6);
 
         let parser = VlanProtocol;
         let mut context = ParseContext::new(1);
@@ -143,13 +145,16 @@ mod tests {
         assert_eq!(result.get("vlan_id"), Some(&FieldValue::UInt16(200)));
         assert_eq!(result.get("priority"), Some(&FieldValue::UInt8(5)));
         assert_eq!(result.get("dei"), Some(&FieldValue::Bool(true)));
-        assert_eq!(result.get("inner_ethertype"), Some(&FieldValue::UInt16(0x86DD)));
+        assert_eq!(
+            result.get("inner_ethertype"),
+            Some(&FieldValue::UInt16(ethertype::IPV6))
+        );
     }
 
     #[test]
     fn test_parse_vlan_max_id() {
         // Max VLAN ID (4095), max priority (7)
-        let tag = create_vlan_tag(4095, 7, true, 0x0800);
+        let tag = create_vlan_tag(4095, 7, true, ethertype::IPV4);
 
         let parser = VlanProtocol;
         let mut context = ParseContext::new(1);
@@ -182,7 +187,7 @@ mod tests {
 
         // With different ethertype
         let mut ctx4 = ParseContext::new(1);
-        ctx4.insert_hint("ethertype", 0x0800u64); // IPv4
+        ctx4.insert_hint("ethertype", ethertype::IPV4 as u64);
         assert!(parser.can_parse(&ctx4).is_none());
     }
 
@@ -203,7 +208,7 @@ mod tests {
     #[test]
     fn test_vlan_child_hints() {
         // VLAN ID 42, inner ethertype IPv4
-        let tag = create_vlan_tag(42, 3, false, 0x0800);
+        let tag = create_vlan_tag(42, 3, false, ethertype::IPV4);
 
         let parser = VlanProtocol;
         let mut context = ParseContext::new(1);
@@ -212,13 +217,13 @@ mod tests {
         let result = parser.parse(&tag, &context);
 
         assert!(result.is_ok());
-        assert_eq!(result.hint("ethertype"), Some(0x0800u64));
+        assert_eq!(result.hint("ethertype"), Some(ethertype::IPV4 as u64));
         assert_eq!(result.hint("vlan_id"), Some(42u64));
     }
 
     #[test]
     fn test_vlan_with_payload() {
-        let mut data = create_vlan_tag(100, 0, false, 0x0800);
+        let mut data = create_vlan_tag(100, 0, false, ethertype::IPV4);
         // Add some payload (IPv4 header start)
         data.extend_from_slice(&[0x45, 0x00, 0x00, 0x28]);
 

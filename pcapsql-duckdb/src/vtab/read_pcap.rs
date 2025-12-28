@@ -114,13 +114,15 @@ impl VTab for ReadPcapVTab {
             let protocol = registry.get_parser(&protocol_name).ok_or_else(|| {
                 let available: Vec<_> = registry.all_parsers().map(|p| p.name()).collect();
                 DuckDbError::InvalidParameter(format!(
-                    "Unknown protocol: '{}'. Available: {:?}",
-                    protocol_name, available
+                    "Unknown protocol: '{protocol_name}'. Available: {available:?}"
                 ))
             })?;
 
             // Add frame_number column first
-            bind.add_result_column("frame_number", LogicalTypeHandle::from(LogicalTypeId::UBigint));
+            bind.add_result_column(
+                "frame_number",
+                LogicalTypeHandle::from(LogicalTypeId::UBigint),
+            );
             column_names.push("frame_number".to_string());
             field_indices.insert("frame_number".to_string(), 0);
 
@@ -152,12 +154,12 @@ impl VTab for ReadPcapVTab {
 
         // Open the PCAP file
         let source = FilePacketSource::open(&bind_data.file_path)
-            .map_err(|e| DuckDbError::Extension(format!("Failed to open PCAP file: {}", e)))?;
+            .map_err(|e| DuckDbError::Extension(format!("Failed to open PCAP file: {e}")))?;
 
         // Create reader
-        let reader = source.reader(None).map_err(|e| {
-            DuckDbError::Extension(format!("Failed to create reader: {}", e))
-        })?;
+        let reader = source
+            .reader(None)
+            .map_err(|e| DuckDbError::Extension(format!("Failed to create reader: {e}")))?;
 
         Ok(ReadPcapInitData {
             reader: Mutex::new(Some(reader)),
@@ -223,11 +225,7 @@ impl VTab for ReadPcapVTab {
                 row_count += 1;
             } else {
                 // Parse and check if this packet contains our protocol
-                let results = parse_packet(
-                    &init_data.registry,
-                    packet.link_type,
-                    packet.data,
-                );
+                let results = parse_packet(&init_data.registry, packet.link_type, packet.data);
 
                 // Add ALL occurrences of the protocol (supports tunneled traffic)
                 for (proto_name, parsed) in &results {
@@ -261,7 +259,7 @@ impl VTab for ReadPcapVTab {
 
         // Check if we've reached end of file
         match result {
-            Ok(count) if count == 0 => {
+            Ok(0) => {
                 init_data.done.store(true, Ordering::Relaxed);
             }
             Err(e) if e.to_string().contains("batch full") => {
@@ -277,7 +275,10 @@ impl VTab for ReadPcapVTab {
         // Write list columns to output
         for (&col_idx, builder) in &list_builders {
             let mut list_vector = output.list_vector(col_idx);
-            let null_rows = null_list_rows.get(&col_idx).map(|v| v.as_slice()).unwrap_or(&[]);
+            let null_rows = null_list_rows
+                .get(&col_idx)
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
             builder.write_to_list_vector(&mut list_vector, null_rows);
         }
 
@@ -331,6 +332,7 @@ fn output_frame_row(
 }
 
 /// Output a parsed protocol row.
+#[allow(clippy::too_many_arguments)]
 fn output_parsed_row(
     output: &mut DataChunkHandle,
     row_idx: usize,
@@ -359,7 +361,7 @@ fn output_parsed_row(
         // Strip the protocol prefix to get the actual field name used in ParseResult
         let lookup_name = field_name
             .split('.')
-            .last()
+            .next_back()
             .unwrap_or(field_name.as_str());
 
         // Handle list columns specially - accumulate data in builders

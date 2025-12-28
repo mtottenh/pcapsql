@@ -89,8 +89,14 @@ impl VTab for PcapProtocolsVTab {
     fn bind(bind: &BindInfo) -> DuckResult<Self::BindData, Box<dyn std::error::Error>> {
         // Define output columns
         bind.add_result_column("name", LogicalTypeHandle::from(LogicalTypeId::Varchar));
-        bind.add_result_column("description", LogicalTypeHandle::from(LogicalTypeId::Varchar));
-        bind.add_result_column("field_count", LogicalTypeHandle::from(LogicalTypeId::UInteger));
+        bind.add_result_column(
+            "description",
+            LogicalTypeHandle::from(LogicalTypeId::Varchar),
+        );
+        bind.add_result_column(
+            "field_count",
+            LogicalTypeHandle::from(LogicalTypeId::UInteger),
+        );
 
         // Collect protocol information
         let registry = default_registry();
@@ -218,8 +224,14 @@ impl VTab for PcapSchemaVTab {
         let protocol_name = bind.get_parameter(0).to_string().to_lowercase();
 
         // Define output columns
-        bind.add_result_column("column_name", LogicalTypeHandle::from(LogicalTypeId::Varchar));
-        bind.add_result_column("column_type", LogicalTypeHandle::from(LogicalTypeId::Varchar));
+        bind.add_result_column(
+            "column_name",
+            LogicalTypeHandle::from(LogicalTypeId::Varchar),
+        );
+        bind.add_result_column(
+            "column_type",
+            LogicalTypeHandle::from(LogicalTypeId::Varchar),
+        );
         bind.add_result_column("nullable", LogicalTypeHandle::from(LogicalTypeId::Boolean));
 
         let registry = default_registry();
@@ -265,8 +277,7 @@ impl VTab for PcapSchemaVTab {
             }
         } else {
             return Err(Box::new(DuckDbError::InvalidParameter(format!(
-                "Unknown protocol: '{}'. Use pcap_protocols() to list available protocols.",
-                protocol_name
+                "Unknown protocol: '{protocol_name}'. Use pcap_protocols() to list available protocols."
             ))));
         }
 
@@ -348,7 +359,7 @@ fn duckdb_type_name(kind: &DataKind) -> String {
         DataKind::Float64 => "DOUBLE".to_string(),
         DataKind::String => "VARCHAR".to_string(),
         DataKind::Binary => "BLOB".to_string(),
-        DataKind::FixedBinary(n) => format!("BLOB[{}]", n),
+        DataKind::FixedBinary(n) => format!("BLOB[{n}]"),
         DataKind::TimestampMicros => "BIGINT".to_string(), // Stored as microseconds
         DataKind::List(inner) => format!("{}[]", duckdb_type_name(inner)),
     }

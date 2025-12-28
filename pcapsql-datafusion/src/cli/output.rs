@@ -353,9 +353,18 @@ mod tests {
         let output_str = String::from_utf8(output).unwrap();
 
         // IPs should be formatted
-        assert!(output_str.contains("192.168.1.1"), "Should contain formatted IP");
-        assert!(output_str.contains("10.0.0.1"), "Should contain formatted IP");
-        assert!(output_str.contains("8.8.8.8"), "Should contain formatted IP");
+        assert!(
+            output_str.contains("192.168.1.1"),
+            "Should contain formatted IP"
+        );
+        assert!(
+            output_str.contains("10.0.0.1"),
+            "Should contain formatted IP"
+        );
+        assert!(
+            output_str.contains("8.8.8.8"),
+            "Should contain formatted IP"
+        );
 
         // Count should still be a number (not formatted as IP)
         assert!(output_str.contains("42"), "Count should be preserved");

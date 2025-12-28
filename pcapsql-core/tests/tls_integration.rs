@@ -66,12 +66,14 @@ fn test_keylog_parsing_tls12() {
         hex::encode(TEST_MASTER_SECRET)
     );
 
-    let keylog = KeyLog::from_str(&keylog_content).expect("Failed to parse keylog");
+    let keylog = KeyLog::parse(&keylog_content).expect("Failed to parse keylog");
 
     assert_eq!(keylog.session_count(), 1);
     assert_eq!(keylog.entry_count(), 1);
 
-    let entries = keylog.lookup(&TEST_CLIENT_RANDOM).expect("Should find entry");
+    let entries = keylog
+        .lookup(&TEST_CLIENT_RANDOM)
+        .expect("Should find entry");
     assert!(entries.master_secret.is_some());
 }
 
@@ -86,12 +88,14 @@ fn test_keylog_parsing_tls13() {
         hex::encode(TEST_TRAFFIC_SECRET_32),
     );
 
-    let keylog = KeyLog::from_str(&keylog_content).expect("Failed to parse keylog");
+    let keylog = KeyLog::parse(&keylog_content).expect("Failed to parse keylog");
 
     assert_eq!(keylog.session_count(), 1);
     assert_eq!(keylog.entry_count(), 2);
 
-    let entries = keylog.lookup(&TEST_CLIENT_RANDOM).expect("Should find entry");
+    let entries = keylog
+        .lookup(&TEST_CLIENT_RANDOM)
+        .expect("Should find entry");
     assert!(entries.client_traffic_secret_0.is_some());
     assert!(entries.server_traffic_secret_0.is_some());
 }
@@ -116,18 +120,22 @@ fn test_keylog_parsing_mixed() {
         hex::encode(TEST_TRAFFIC_SECRET_32),
     );
 
-    let keylog = KeyLog::from_str(&keylog_content).expect("Failed to parse keylog");
+    let keylog = KeyLog::parse(&keylog_content).expect("Failed to parse keylog");
 
     assert_eq!(keylog.session_count(), 2);
     assert_eq!(keylog.entry_count(), 3);
 
     // TLS 1.2 session
-    let entries_12 = keylog.lookup(&client_random_1).expect("Should find TLS 1.2 entry");
+    let entries_12 = keylog
+        .lookup(&client_random_1)
+        .expect("Should find TLS 1.2 entry");
     assert!(entries_12.master_secret.is_some());
     assert!(!entries_12.has_tls13_app_keys());
 
     // TLS 1.3 session
-    let entries_13 = keylog.lookup(&client_random_2).expect("Should find TLS 1.3 entry");
+    let entries_13 = keylog
+        .lookup(&client_random_2)
+        .expect("Should find TLS 1.3 entry");
     assert!(entries_13.has_tls13_app_keys());
 }
 
@@ -259,7 +267,10 @@ fn test_decryption_context_tls13_aes128gcm() {
     let keys = derive_tls13_keys(&TEST_TRAFFIC_SECRET_32, TLS_AES_128_GCM_SHA256).unwrap();
 
     let ctx = DecryptionContext::new_tls13(&keys, AeadAlgorithm::Aes128Gcm);
-    assert!(ctx.is_ok(), "TLS 1.3 AES-128-GCM context creation should succeed");
+    assert!(
+        ctx.is_ok(),
+        "TLS 1.3 AES-128-GCM context creation should succeed"
+    );
 }
 
 #[test]
@@ -267,7 +278,10 @@ fn test_decryption_context_tls13_aes256gcm() {
     let keys = derive_tls13_keys(&TEST_TRAFFIC_SECRET_48, TLS_AES_256_GCM_SHA384).unwrap();
 
     let ctx = DecryptionContext::new_tls13(&keys, AeadAlgorithm::Aes256Gcm);
-    assert!(ctx.is_ok(), "TLS 1.3 AES-256-GCM context creation should succeed");
+    assert!(
+        ctx.is_ok(),
+        "TLS 1.3 AES-256-GCM context creation should succeed"
+    );
 }
 
 // ============================================================================
@@ -282,7 +296,7 @@ fn test_session_tls12_full_handshake() {
         hex::encode(TEST_CLIENT_RANDOM),
         hex::encode(TEST_MASTER_SECRET)
     );
-    let keylog = Arc::new(KeyLog::from_str(&keylog_content).unwrap());
+    let keylog = Arc::new(KeyLog::parse(&keylog_content).unwrap());
 
     let mut session = TlsSession::new(keylog);
 
@@ -290,11 +304,17 @@ fn test_session_tls12_full_handshake() {
     session.process_client_hello(TEST_CLIENT_RANDOM);
 
     // Process ServerHello with AES-128-GCM cipher suite
-    let result =
-        session.process_server_hello(TEST_SERVER_RANDOM, TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, TlsVersion::Tls12);
+    let result = session.process_server_hello(
+        TEST_SERVER_RANDOM,
+        TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+        TlsVersion::Tls12,
+    );
 
     assert!(result.is_ok(), "ServerHello processing should succeed");
-    assert!(session.can_decrypt(), "Should be able to decrypt after handshake");
+    assert!(
+        session.can_decrypt(),
+        "Should be able to decrypt after handshake"
+    );
 }
 
 #[test]
@@ -314,7 +334,7 @@ fn test_session_tls13_full_handshake() {
         hex::encode(TEST_CLIENT_RANDOM),
         hex::encode(TEST_TRAFFIC_SECRET_32),
     );
-    let keylog = Arc::new(KeyLog::from_str(&keylog_content).unwrap());
+    let keylog = Arc::new(KeyLog::parse(&keylog_content).unwrap());
 
     let mut session = TlsSession::new(keylog);
 
@@ -322,7 +342,11 @@ fn test_session_tls13_full_handshake() {
     session.process_client_hello(TEST_CLIENT_RANDOM);
 
     // Process ServerHello with TLS 1.3 AES-128-GCM
-    let result = session.process_server_hello(TEST_SERVER_RANDOM, TLS_AES_128_GCM_SHA256, TlsVersion::Tls13);
+    let result = session.process_server_hello(
+        TEST_SERVER_RANDOM,
+        TLS_AES_128_GCM_SHA256,
+        TlsVersion::Tls13,
+    );
 
     assert!(result.is_ok(), "TLS 1.3 ServerHello should succeed");
     assert!(session.can_decrypt(), "Should be able to decrypt TLS 1.3");
@@ -336,14 +360,20 @@ fn test_session_missing_keys() {
     let mut session = TlsSession::new(keylog);
     session.process_client_hello(TEST_CLIENT_RANDOM);
 
-    let result =
-        session.process_server_hello(TEST_SERVER_RANDOM, TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, TlsVersion::Tls12);
+    let result = session.process_server_hello(
+        TEST_SERVER_RANDOM,
+        TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+        TlsVersion::Tls12,
+    );
 
     assert!(
         matches!(result, Err(SessionError::MissingKeys)),
         "Should fail with MissingKeys error"
     );
-    assert!(!session.can_decrypt(), "Should not be able to decrypt without keys");
+    assert!(
+        !session.can_decrypt(),
+        "Should not be able to decrypt without keys"
+    );
 }
 
 #[test]
@@ -353,7 +383,7 @@ fn test_session_unsupported_cipher_suite() {
         hex::encode(TEST_CLIENT_RANDOM),
         hex::encode(TEST_MASTER_SECRET)
     );
-    let keylog = Arc::new(KeyLog::from_str(&keylog_content).unwrap());
+    let keylog = Arc::new(KeyLog::parse(&keylog_content).unwrap());
 
     let mut session = TlsSession::new(keylog);
     session.process_client_hello(TEST_CLIENT_RANDOM);
@@ -459,9 +489,24 @@ fn test_tls12_key_derivation_all_suites() {
 #[test]
 fn test_tls13_key_derivation_all_suites() {
     let tls13_suites = [
-        (0x1301, "TLS_AES_128_GCM_SHA256", &TEST_TRAFFIC_SECRET_32[..], 16),
-        (0x1302, "TLS_AES_256_GCM_SHA384", &TEST_TRAFFIC_SECRET_48[..], 32),
-        (0x1303, "TLS_CHACHA20_POLY1305_SHA256", &TEST_TRAFFIC_SECRET_32[..], 32),
+        (
+            0x1301,
+            "TLS_AES_128_GCM_SHA256",
+            &TEST_TRAFFIC_SECRET_32[..],
+            16,
+        ),
+        (
+            0x1302,
+            "TLS_AES_256_GCM_SHA384",
+            &TEST_TRAFFIC_SECRET_48[..],
+            32,
+        ),
+        (
+            0x1303,
+            "TLS_CHACHA20_POLY1305_SHA256",
+            &TEST_TRAFFIC_SECRET_32[..],
+            32,
+        ),
     ];
 
     for (suite_id, name, traffic_secret, expected_key_len) in tls13_suites {
@@ -497,15 +542,18 @@ fn test_full_pipeline_with_synthetic_data() {
         hex::encode(TEST_CLIENT_RANDOM),
         hex::encode(TEST_MASTER_SECRET)
     );
-    let keylog = Arc::new(KeyLog::from_str(&keylog_content).unwrap());
+    let keylog = Arc::new(KeyLog::parse(&keylog_content).unwrap());
 
     // Create session
     let mut session = TlsSession::new(keylog.clone());
 
     // Simulate handshake
     session.process_client_hello(TEST_CLIENT_RANDOM);
-    let result =
-        session.process_server_hello(TEST_SERVER_RANDOM, TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, TlsVersion::Tls12);
+    let result = session.process_server_hello(
+        TEST_SERVER_RANDOM,
+        TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+        TlsVersion::Tls12,
+    );
     assert!(result.is_ok());
 
     // Verify we can decrypt
@@ -525,7 +573,10 @@ fn test_precaptured_tls12() {
     let keylog_path = "testdata/tls/tls12_aes128gcm.keys";
 
     if !std::path::Path::new(pcap_path).exists() {
-        eprintln!("Skipping test_precaptured_tls12: test data not found at {}", pcap_path);
+        eprintln!(
+            "Skipping test_precaptured_tls12: test data not found at {}",
+            pcap_path
+        );
         eprintln!("See testdata/tls/README.md for instructions on generating test data");
         return;
     }
@@ -541,7 +592,10 @@ fn test_precaptured_tls13() {
     let keylog_path = "testdata/tls/tls13_aes256gcm.keys";
 
     if !std::path::Path::new(pcap_path).exists() {
-        eprintln!("Skipping test_precaptured_tls13: test data not found at {}", pcap_path);
+        eprintln!(
+            "Skipping test_precaptured_tls13: test data not found at {}",
+            pcap_path
+        );
         return;
     }
 
@@ -556,7 +610,10 @@ fn test_precaptured_http2() {
     let keylog_path = "testdata/tls/http2_multiplex.keys";
 
     if !std::path::Path::new(pcap_path).exists() {
-        eprintln!("Skipping test_precaptured_http2: test data not found at {}", pcap_path);
+        eprintln!(
+            "Skipping test_precaptured_http2: test data not found at {}",
+            pcap_path
+        );
         return;
     }
 
@@ -576,28 +633,28 @@ fn test_keylog_file_not_found() {
 
 #[test]
 fn test_keylog_empty_file() {
-    let keylog = KeyLog::from_str("").unwrap();
+    let keylog = KeyLog::parse("").unwrap();
     assert!(keylog.is_empty());
     assert_eq!(keylog.session_count(), 0);
 }
 
 #[test]
 fn test_keylog_comments_only() {
-    let keylog = KeyLog::from_str("# This is a comment\n# Another comment\n").unwrap();
+    let keylog = KeyLog::parse("# This is a comment\n# Another comment\n").unwrap();
     assert!(keylog.is_empty());
 }
 
 #[test]
 fn test_keylog_invalid_hex() {
     // Invalid hex in client_random
-    let result = KeyLog::from_str("CLIENT_RANDOM ZZZZ 0000");
+    let result = KeyLog::parse("CLIENT_RANDOM ZZZZ 0000");
     assert!(result.is_err(), "Should fail with invalid hex");
 }
 
 #[test]
 fn test_keylog_wrong_length() {
     // Client random too short (should be 32 bytes = 64 hex chars)
-    let result = KeyLog::from_str("CLIENT_RANDOM 0102030405 0102030405");
+    let result = KeyLog::parse("CLIENT_RANDOM 0102030405 0102030405");
     assert!(result.is_err(), "Should fail with wrong length");
 }
 
@@ -607,8 +664,11 @@ fn test_session_no_client_hello() {
     let mut session = TlsSession::new(keylog);
 
     // Try to process ServerHello without ClientHello
-    let _result =
-        session.process_server_hello(TEST_SERVER_RANDOM, TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, TlsVersion::Tls12);
+    let _result = session.process_server_hello(
+        TEST_SERVER_RANDOM,
+        TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+        TlsVersion::Tls12,
+    );
 
     // This should handle gracefully - either error or just not decrypt
     // The exact behavior depends on implementation

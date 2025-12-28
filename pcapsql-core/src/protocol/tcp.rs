@@ -26,6 +26,7 @@ pub mod flags {
 }
 
 /// TCP option kinds.
+#[allow(dead_code)]
 pub mod options {
     pub const END_OF_LIST: u8 = 0;
     pub const NOP: u8 = 1;
@@ -344,12 +345,18 @@ impl Protocol for TcpProtocol {
             FieldDescriptor::new("tcp.sack_permitted", DataKind::Bool)
                 .set_nullable(true)
                 .with_description("Selective ACK permitted (option 4)"),
-            FieldDescriptor::new("tcp.sack_left_edges", DataKind::List(Box::new(DataKind::UInt32)))
-                .set_nullable(true)
-                .with_description("SACK block left edges (option 5)"),
-            FieldDescriptor::new("tcp.sack_right_edges", DataKind::List(Box::new(DataKind::UInt32)))
-                .set_nullable(true)
-                .with_description("SACK block right edges (option 5)"),
+            FieldDescriptor::new(
+                "tcp.sack_left_edges",
+                DataKind::List(Box::new(DataKind::UInt32)),
+            )
+            .set_nullable(true)
+            .with_description("SACK block left edges (option 5)"),
+            FieldDescriptor::new(
+                "tcp.sack_right_edges",
+                DataKind::List(Box::new(DataKind::UInt32)),
+            )
+            .set_nullable(true)
+            .with_description("SACK block right edges (option 5)"),
             FieldDescriptor::new("tcp.ts_val", DataKind::UInt32)
                 .set_nullable(true)
                 .with_description("TCP timestamp value (TSval) - sender's timestamp (option 8)"),
@@ -503,11 +510,12 @@ impl Protocol for TcpProtocol {
 
                         if fields.contains("options") {
                             if !opts.option_names.is_empty() {
-                                let options_str = if let Some(static_str) = get_options_static(&opts) {
-                                    FieldValue::Str(static_str)
-                                } else {
-                                    FieldValue::OwnedString(opts.option_names.join(",").into())
-                                };
+                                let options_str =
+                                    if let Some(static_str) = get_options_static(&opts) {
+                                        FieldValue::Str(static_str)
+                                    } else {
+                                        FieldValue::OwnedString(opts.option_names.join(",").into())
+                                    };
                                 result_fields.push(("options", options_str));
                             } else {
                                 result_fields.push(("options", FieldValue::Null));
@@ -1236,10 +1244,26 @@ mod tests {
             Some(FieldValue::OwnedString(s)) => s.as_str(),
             _ => panic!("Expected string for options"),
         };
-        assert!(opts_str.contains("MSS"), "options should contain MSS: {}", opts_str);
-        assert!(opts_str.contains("SACK_PERM"), "options should contain SACK_PERM: {}", opts_str);
-        assert!(opts_str.contains("TS"), "options should contain TS: {}", opts_str);
-        assert!(opts_str.contains("WS"), "options should contain WS: {}", opts_str);
+        assert!(
+            opts_str.contains("MSS"),
+            "options should contain MSS: {}",
+            opts_str
+        );
+        assert!(
+            opts_str.contains("SACK_PERM"),
+            "options should contain SACK_PERM: {}",
+            opts_str
+        );
+        assert!(
+            opts_str.contains("TS"),
+            "options should contain TS: {}",
+            opts_str
+        );
+        assert!(
+            opts_str.contains("WS"),
+            "options should contain WS: {}",
+            opts_str
+        );
     }
 
     #[test]
@@ -1269,10 +1293,7 @@ mod tests {
         context.insert_hint("ip_protocol", 6);
 
         // Project to only timestamp fields
-        let fields: HashSet<String> = ["ts_val", "ts_ecr"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let fields: HashSet<String> = ["ts_val", "ts_ecr"].iter().map(|s| s.to_string()).collect();
         let result = parser.parse_projected(&header, &context, Some(&fields));
 
         assert!(result.is_ok());

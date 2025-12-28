@@ -443,7 +443,11 @@ mod tests {
         // Ensure the enum is reasonably sized (no large variants bloating it)
         let size = std::mem::size_of::<BuiltinProtocol>();
         // All our protocols are zero-sized unit structs, so enum is just the discriminant
-        assert!(size <= 8, "BuiltinProtocol is {} bytes, expected <= 8", size);
+        assert!(
+            size <= 8,
+            "BuiltinProtocol is {} bytes, expected <= 8",
+            size
+        );
     }
 
     #[test]

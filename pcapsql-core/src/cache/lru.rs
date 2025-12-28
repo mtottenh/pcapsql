@@ -104,7 +104,8 @@ impl LruParseCache {
 
         let evicted = before_count - entries.len();
         if evicted > 0 {
-            self.evictions_reader.fetch_add(evicted as u64, Ordering::Relaxed);
+            self.evictions_reader
+                .fetch_add(evicted as u64, Ordering::Relaxed);
         }
     }
 
@@ -128,7 +129,8 @@ impl LruParseCache {
             entries.remove(&frame);
         }
 
-        self.evictions_lru.fetch_add(to_remove as u64, Ordering::Relaxed);
+        self.evictions_lru
+            .fetch_add(to_remove as u64, Ordering::Relaxed);
     }
 
     /// Update peak entries if current is higher.
@@ -402,13 +404,16 @@ mod tests {
         });
         let parsed2 = Arc::new(CachedParse {
             frame_number: 1,
-            protocols: vec![("test", super::super::OwnedParseResult {
-                fields: std::collections::HashMap::new(),
-                error: None,
-                encap_depth: 0,
-                tunnel_type: crate::protocol::TunnelType::None,
-                tunnel_id: None,
-            })],
+            protocols: vec![(
+                "test",
+                super::super::OwnedParseResult {
+                    fields: std::collections::HashMap::new(),
+                    error: None,
+                    encap_depth: 0,
+                    tunnel_type: crate::protocol::TunnelType::None,
+                    tunnel_id: None,
+                },
+            )],
         });
 
         cache.put(1, parsed1);
@@ -574,8 +579,20 @@ mod tests {
         cache.get(3);
 
         // Add 2 entries
-        cache.put(1, Arc::new(CachedParse { frame_number: 1, protocols: vec![] }));
-        cache.put(2, Arc::new(CachedParse { frame_number: 2, protocols: vec![] }));
+        cache.put(
+            1,
+            Arc::new(CachedParse {
+                frame_number: 1,
+                protocols: vec![],
+            }),
+        );
+        cache.put(
+            2,
+            Arc::new(CachedParse {
+                frame_number: 2,
+                protocols: vec![],
+            }),
+        );
 
         // 2 hits
         cache.get(1);
@@ -598,7 +615,13 @@ mod tests {
 
         // Add 15 entries
         for i in 1..=15 {
-            cache.put(i, Arc::new(CachedParse { frame_number: i, protocols: vec![] }));
+            cache.put(
+                i,
+                Arc::new(CachedParse {
+                    frame_number: i,
+                    protocols: vec![],
+                }),
+            );
         }
 
         // Reader 1 is at frame 5, reader 2 at frame 10
@@ -610,7 +633,13 @@ mod tests {
 
         // Add more entries to trigger eviction
         for i in 16..=25 {
-            cache.put(i, Arc::new(CachedParse { frame_number: i, protocols: vec![] }));
+            cache.put(
+                i,
+                Arc::new(CachedParse {
+                    frame_number: i,
+                    protocols: vec![],
+                }),
+            );
         }
 
         // Now move reader 1 past
@@ -632,8 +661,20 @@ mod tests {
         // with pathological input.
         let cache = LruParseCache::new(0);
 
-        cache.put(1, Arc::new(CachedParse { frame_number: 1, protocols: vec![] }));
-        cache.put(2, Arc::new(CachedParse { frame_number: 2, protocols: vec![] }));
+        cache.put(
+            1,
+            Arc::new(CachedParse {
+                frame_number: 1,
+                protocols: vec![],
+            }),
+        );
+        cache.put(
+            2,
+            Arc::new(CachedParse {
+                frame_number: 2,
+                protocols: vec![],
+            }),
+        );
 
         // Implementation allows entries due to eviction logic triggering after insert check
         // For production use, NoCache is recommended when caching is not desired
@@ -648,7 +689,13 @@ mod tests {
 
         // Add 5 entries (fill the cache)
         for i in 1..=5 {
-            cache.put(i, Arc::new(CachedParse { frame_number: i, protocols: vec![] }));
+            cache.put(
+                i,
+                Arc::new(CachedParse {
+                    frame_number: i,
+                    protocols: vec![],
+                }),
+            );
         }
 
         let stats = cache.get_stats();
@@ -657,13 +704,22 @@ mod tests {
 
         // Add more entries to trigger LRU eviction
         for i in 6..=10 {
-            cache.put(i, Arc::new(CachedParse { frame_number: i, protocols: vec![] }));
+            cache.put(
+                i,
+                Arc::new(CachedParse {
+                    frame_number: i,
+                    protocols: vec![],
+                }),
+            );
         }
 
         let stats = cache.get_stats();
         // LRU evictions should have occurred
         assert!(stats.evictions_lru > 0);
-        assert_eq!(stats.total_evictions(), stats.evictions_lru + stats.evictions_reader);
+        assert_eq!(
+            stats.total_evictions(),
+            stats.evictions_lru + stats.evictions_reader
+        );
     }
 
     #[test]
@@ -675,7 +731,13 @@ mod tests {
 
         // Add 10 entries
         for i in 1..=10 {
-            cache.put(i, Arc::new(CachedParse { frame_number: i, protocols: vec![] }));
+            cache.put(
+                i,
+                Arc::new(CachedParse {
+                    frame_number: i,
+                    protocols: vec![],
+                }),
+            );
         }
 
         // Reader passes frame 5
@@ -686,7 +748,13 @@ mod tests {
 
         // Add more entries to trigger eviction of passed entries
         for i in 11..=25 {
-            cache.put(i, Arc::new(CachedParse { frame_number: i, protocols: vec![] }));
+            cache.put(
+                i,
+                Arc::new(CachedParse {
+                    frame_number: i,
+                    protocols: vec![],
+                }),
+            );
         }
 
         let stats = cache.get_stats();
@@ -702,7 +770,13 @@ mod tests {
 
         // Add 10 entries (fill the cache)
         for i in 1..=10 {
-            cache.put(i, Arc::new(CachedParse { frame_number: i, protocols: vec![] }));
+            cache.put(
+                i,
+                Arc::new(CachedParse {
+                    frame_number: i,
+                    protocols: vec![],
+                }),
+            );
         }
 
         let stats = cache.get_stats();
@@ -751,7 +825,13 @@ mod tests {
 
         // Add 5 entries
         for i in 1..=5 {
-            cache.put(i, Arc::new(CachedParse { frame_number: i, protocols: vec![] }));
+            cache.put(
+                i,
+                Arc::new(CachedParse {
+                    frame_number: i,
+                    protocols: vec![],
+                }),
+            );
         }
 
         let stats = cache.get_stats();
@@ -765,12 +845,24 @@ mod tests {
 
         // Generate some stats
         cache.get(1); // miss
-        cache.put(1, Arc::new(CachedParse { frame_number: 1, protocols: vec![] }));
+        cache.put(
+            1,
+            Arc::new(CachedParse {
+                frame_number: 1,
+                protocols: vec![],
+            }),
+        );
         cache.get(1); // hit
 
         // Trigger some evictions
         for i in 2..=10 {
-            cache.put(i, Arc::new(CachedParse { frame_number: i, protocols: vec![] }));
+            cache.put(
+                i,
+                Arc::new(CachedParse {
+                    frame_number: i,
+                    protocols: vec![],
+                }),
+            );
         }
 
         let stats = cache.get_stats();
@@ -802,7 +894,13 @@ mod tests {
 
         // Add 50 entries (50% utilization)
         for i in 1..=50 {
-            cache.put(i, Arc::new(CachedParse { frame_number: i, protocols: vec![] }));
+            cache.put(
+                i,
+                Arc::new(CachedParse {
+                    frame_number: i,
+                    protocols: vec![],
+                }),
+            );
         }
 
         let stats = cache.get_stats();

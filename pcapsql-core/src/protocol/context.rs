@@ -140,7 +140,10 @@ impl ParseContext {
 
     /// Get the innermost tunnel type, if inside a tunnel.
     pub fn current_tunnel_type(&self) -> TunnelType {
-        self.tunnel_stack.last().map(|t| t.tunnel_type).unwrap_or(TunnelType::None)
+        self.tunnel_stack
+            .last()
+            .map(|t| t.tunnel_type)
+            .unwrap_or(TunnelType::None)
     }
 
     /// Get the innermost tunnel ID, if inside a tunnel with an ID.
@@ -295,6 +298,7 @@ impl<'data> ParseResult<'data> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::ethernet::ethertype;
 
     #[test]
     fn test_tunnel_type_conversions() {
@@ -403,7 +407,7 @@ mod tests {
     #[test]
     fn test_hint_count_stays_inline() {
         let mut ctx = ParseContext::new(1);
-        ctx.insert_hint("ethertype", 0x0800);
+        ctx.insert_hint("ethertype", ethertype::IPV4 as u64);
         ctx.insert_hint("ip_protocol", 6);
         ctx.insert_hint("src_port", 12345);
         ctx.insert_hint("dst_port", 80);

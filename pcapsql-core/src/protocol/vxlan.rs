@@ -56,7 +56,10 @@ impl Protocol for VxlanProtocol {
 
         // Check if reserved bits are zero (for strict validation)
         let reserved_flags_zero = (flags & 0xF7) == 0;
-        fields.push(("flags_valid", FieldValue::Bool(reserved_flags_zero && i_flag)));
+        fields.push((
+            "flags_valid",
+            FieldValue::Bool(reserved_flags_zero && i_flag),
+        ));
 
         // Bytes 1-3: Reserved (should be 0)
         // We skip validation as some implementations may use these
@@ -70,7 +73,10 @@ impl Protocol for VxlanProtocol {
         // Calculate inner frame length
         let inner_frame_len = data.len() - 8;
         if inner_frame_len > 0 {
-            fields.push(("inner_frame_length", FieldValue::UInt32(inner_frame_len as u32)));
+            fields.push((
+                "inner_frame_length",
+                FieldValue::UInt32(inner_frame_len as u32),
+            ));
         }
 
         // Set up child hints for the inner Ethernet frame
@@ -390,7 +396,10 @@ mod tests {
         with_frame.extend_from_slice(&[0u8; 14]); // Minimum Ethernet header
         let result = parser.parse(&with_frame, &context);
         assert!(result.is_ok());
-        assert_eq!(result.get("inner_frame_length"), Some(&FieldValue::UInt32(14)));
+        assert_eq!(
+            result.get("inner_frame_length"),
+            Some(&FieldValue::UInt32(14))
+        );
 
         // With larger inner frame
         let mut with_payload = Vec::new();
@@ -398,7 +407,10 @@ mod tests {
         with_payload.extend_from_slice(&[0u8; 1500]); // Full MTU
         let result = parser.parse(&with_payload, &context);
         assert!(result.is_ok());
-        assert_eq!(result.get("inner_frame_length"), Some(&FieldValue::UInt32(1500)));
+        assert_eq!(
+            result.get("inner_frame_length"),
+            Some(&FieldValue::UInt32(1500))
+        );
     }
 
     // Test 15: Various VNI values with validation

@@ -143,7 +143,10 @@ fn hex_to_bytes(hex: &str) -> Option<Vec<u8>> {
     let hex = hex.trim();
 
     // Handle optional "0x" prefix
-    let hex = hex.strip_prefix("0x").or_else(|| hex.strip_prefix("0X")).unwrap_or(hex);
+    let hex = hex
+        .strip_prefix("0x")
+        .or_else(|| hex.strip_prefix("0X"))
+        .unwrap_or(hex);
 
     // Must have even number of characters
     if !hex.len().is_multiple_of(2) {
@@ -169,8 +172,14 @@ mod tests {
 
     #[test]
     fn test_bytes_to_hex() {
-        assert_eq!(bytes_to_hex(&[0xff, 0xff, 0xff, 0xff, 0xff, 0xff]), "ffffffffffff");
-        assert_eq!(bytes_to_hex(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]), "001122334455");
+        assert_eq!(
+            bytes_to_hex(&[0xff, 0xff, 0xff, 0xff, 0xff, 0xff]),
+            "ffffffffffff"
+        );
+        assert_eq!(
+            bytes_to_hex(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
+            "001122334455"
+        );
         assert_eq!(bytes_to_hex(&[0xde, 0xad, 0xbe, 0xef]), "deadbeef");
         assert_eq!(bytes_to_hex(&[]), "");
     }
@@ -193,8 +202,14 @@ mod tests {
 
     #[test]
     fn test_hex_to_bytes_with_prefix() {
-        assert_eq!(hex_to_bytes("0xdeadbeef"), Some(vec![0xde, 0xad, 0xbe, 0xef]));
-        assert_eq!(hex_to_bytes("0XDEADBEEF"), Some(vec![0xde, 0xad, 0xbe, 0xef]));
+        assert_eq!(
+            hex_to_bytes("0xdeadbeef"),
+            Some(vec![0xde, 0xad, 0xbe, 0xef])
+        );
+        assert_eq!(
+            hex_to_bytes("0XDEADBEEF"),
+            Some(vec![0xde, 0xad, 0xbe, 0xef])
+        );
     }
 
     #[test]
@@ -208,12 +223,18 @@ mod tests {
 
     #[test]
     fn test_hex_to_bytes_whitespace() {
-        assert_eq!(hex_to_bytes("  deadbeef  "), Some(vec![0xde, 0xad, 0xbe, 0xef]));
+        assert_eq!(
+            hex_to_bytes("  deadbeef  "),
+            Some(vec![0xde, 0xad, 0xbe, 0xef])
+        );
     }
 
     #[test]
     fn test_roundtrip() {
-        let original = vec![0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
+        let original = vec![
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+            0xee, 0xff,
+        ];
         let hex = bytes_to_hex(&original);
         let result = hex_to_bytes(&hex).unwrap();
         assert_eq!(original, result);

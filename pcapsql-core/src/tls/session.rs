@@ -6,9 +6,7 @@
 use std::sync::Arc;
 
 use super::decrypt::{DecryptionContext, DecryptionError, Direction, TlsVersion};
-use super::kdf::{
-    derive_tls12_keys, derive_tls13_keys, hash_for_cipher_suite, AeadAlgorithm, KeyDerivationError,
-};
+use super::kdf::{derive_tls12_keys, derive_tls13_keys, AeadAlgorithm, KeyDerivationError};
 use super::keylog::{KeyLog, KeyLogEntries};
 use thiserror::Error;
 
@@ -192,7 +190,8 @@ impl TlsSession {
     /// - Key material from SSLKEYLOGFILE
     pub fn try_establish_keys(&mut self) -> Result<(), SessionError> {
         if self.state == SessionState::KeysEstablished
-            || self.state == SessionState::Tls13HandshakeEncrypted {
+            || self.state == SessionState::Tls13HandshakeEncrypted
+        {
             return Ok(()); // Already done
         }
 
@@ -211,10 +210,7 @@ impl TlsSession {
             .cipher_suite
             .ok_or(SessionError::MissingCipherSuite)?;
 
-        let version = self
-            .handshake
-            .version
-            .unwrap_or(TlsVersion::Tls12);
+        let version = self.handshake.version.unwrap_or(TlsVersion::Tls12);
 
         // Look up keys from SSLKEYLOGFILE and clone to avoid borrow conflict
         let key_entries = self
@@ -258,16 +254,20 @@ impl TlsSession {
         cipher_suite: u16,
         aead: AeadAlgorithm,
     ) -> Result<(), SessionError> {
-        let master_secret = key_entries
-            .master_secret
-            .ok_or(SessionError::MissingKeys)?;
+        let master_secret = key_entries.master_secret.ok_or(SessionError::MissingKeys)?;
 
         let keys = derive_tls12_keys(&master_secret, client_random, server_random, cipher_suite)?;
 
-        self.client_decrypt =
-            Some(DecryptionContext::new_tls12(&keys, aead, Direction::ClientToServer)?);
-        self.server_decrypt =
-            Some(DecryptionContext::new_tls12(&keys, aead, Direction::ServerToClient)?);
+        self.client_decrypt = Some(DecryptionContext::new_tls12(
+            &keys,
+            aead,
+            Direction::ClientToServer,
+        )?);
+        self.server_decrypt = Some(DecryptionContext::new_tls12(
+            &keys,
+            aead,
+            Direction::ServerToClient,
+        )?);
 
         Ok(())
     }
@@ -502,7 +502,7 @@ mod tests {
     fn create_test_keylog() -> Arc<KeyLog> {
         // Create a keylog with test data
         let content = "CLIENT_RANDOM 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f";
-        Arc::new(KeyLog::from_str(content).unwrap())
+        Arc::new(KeyLog::parse(content).unwrap())
     }
 
     fn create_test_keylog_tls13() -> Arc<KeyLog> {
@@ -512,7 +512,7 @@ SERVER_HANDSHAKE_TRAFFIC_SECRET 0123456789abcdef0123456789abcdef0123456789abcdef
 CLIENT_TRAFFIC_SECRET_0 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef aabbccdd00112233445566778899aabbccddeeff00112233445566778899aabb
 SERVER_TRAFFIC_SECRET_0 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef 11223344556677889900aabbccddeeff00112233445566778899aabbccddeeff
 "#;
-        Arc::new(KeyLog::from_str(content).unwrap())
+        Arc::new(KeyLog::parse(content).unwrap())
     }
 
     #[test]
@@ -559,10 +559,9 @@ SERVER_TRAFFIC_SECRET_0 0123456789abcdef0123456789abcdef0123456789abcdef01234567
 
         // Use the client_random that's in the keylog
         let client_random: [u8; 32] = [
-            0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
-            0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
-            0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
-            0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
+            0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab,
+            0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67,
+            0x89, 0xab, 0xcd, 0xef,
         ];
         session.process_client_hello(client_random);
 
@@ -585,10 +584,9 @@ SERVER_TRAFFIC_SECRET_0 0123456789abcdef0123456789abcdef0123456789abcdef01234567
 
         // Use the client_random that's in the keylog
         let client_random: [u8; 32] = [
-            0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
-            0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
-            0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
-            0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
+            0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab,
+            0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67,
+            0x89, 0xab, 0xcd, 0xef,
         ];
         session.process_client_hello(client_random);
 
@@ -604,7 +602,10 @@ SERVER_TRAFFIC_SECRET_0 0123456789abcdef0123456789abcdef0123456789abcdef01234567
         // Test transition to application data mode after handshake completes
         assert!(session.is_tls13_handshake_phase());
         session.mark_server_finished();
-        assert_eq!(session.tls13_handshake_phase(), Tls13HandshakePhase::ServerFinished);
+        assert_eq!(
+            session.tls13_handshake_phase(),
+            Tls13HandshakePhase::ServerFinished
+        );
         session.mark_client_finished();
         assert_eq!(session.state(), SessionState::KeysEstablished);
         assert!(!session.is_tls13_handshake_phase());
@@ -616,10 +617,9 @@ SERVER_TRAFFIC_SECRET_0 0123456789abcdef0123456789abcdef0123456789abcdef01234567
         let mut session = TlsSession::new(keylog);
 
         let client_random: [u8; 32] = [
-            0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
-            0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
-            0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
-            0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
+            0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab,
+            0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67,
+            0x89, 0xab, 0xcd, 0xef,
         ];
         session.process_client_hello(client_random);
 
@@ -627,7 +627,10 @@ SERVER_TRAFFIC_SECRET_0 0123456789abcdef0123456789abcdef0123456789abcdef01234567
         // Use an unsupported cipher suite
         let result = session.process_server_hello(server_random, 0x0000, TlsVersion::Tls12);
 
-        assert!(matches!(result, Err(SessionError::UnsupportedCipherSuite(0x0000))));
+        assert!(matches!(
+            result,
+            Err(SessionError::UnsupportedCipherSuite(0x0000))
+        ));
     }
 
     #[test]
@@ -667,7 +670,10 @@ SERVER_TRAFFIC_SECRET_0 0123456789abcdef0123456789abcdef0123456789abcdef01234567
     fn test_cipher_suite_name() {
         assert_eq!(cipher_suite_name(0x1301), Some("TLS_AES_128_GCM_SHA256"));
         assert_eq!(cipher_suite_name(0x1302), Some("TLS_AES_256_GCM_SHA384"));
-        assert_eq!(cipher_suite_name(0xC02F), Some("TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"));
+        assert_eq!(
+            cipher_suite_name(0xC02F),
+            Some("TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256")
+        );
         assert_eq!(cipher_suite_name(0x0000), None);
     }
 }

@@ -156,8 +156,7 @@ impl FrameHeader {
             return None;
         }
 
-        let length =
-            ((data[0] as u32) << 16) | ((data[1] as u32) << 8) | (data[2] as u32);
+        let length = ((data[0] as u32) << 16) | ((data[1] as u32) << 8) | (data[2] as u32);
         let frame_type = FrameType::from(data[3]);
         let flags = data[4];
         let stream_id = ((data[5] as u32 & 0x7F) << 24)
@@ -201,6 +200,7 @@ impl FrameHeader {
 
 /// Priority data for HEADERS and PRIORITY frames
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct PriorityData {
     pub exclusive: bool,
     pub stream_dependency: u32,
@@ -212,6 +212,7 @@ pub struct PriorityData {
 pub enum StreamState {
     Idle,
     Open,
+    #[allow(dead_code)] // RFC 7540 state - not yet implemented
     HalfClosedLocal,
     HalfClosedRemote,
     Closed,
@@ -232,6 +233,7 @@ impl StreamState {
 /// HTTP/2 stream tracking
 #[derive(Debug, Clone)]
 pub struct Http2Stream {
+    #[allow(dead_code)] // Used in Debug output and future features
     pub stream_id: u32,
     pub state: StreamState,
 
@@ -273,6 +275,7 @@ impl Http2Stream {
     }
 
     /// Extract common header value
+    #[allow(dead_code)]
     pub fn get_header(&self, name: &str) -> Option<&str> {
         // Check request headers first, then response
         for (n, v) in &self.request_headers {
@@ -361,26 +364,31 @@ impl Http2StreamParser {
     ) -> HashMap<&'static str, OwnedFieldValue> {
         let mut fields = HashMap::new();
 
-        fields.insert(
-            "frame_type",
-            FieldValue::Str(header.frame_type.as_str()),
-        );
-        fields.insert(
-            "stream_id",
-            FieldValue::UInt32(header.stream_id),
-        );
+        fields.insert("frame_type", FieldValue::Str(header.frame_type.as_str()));
+        fields.insert("stream_id", FieldValue::UInt32(header.stream_id));
         fields.insert("flags", FieldValue::UInt8(header.flags));
-        fields.insert(
-            "length",
-            FieldValue::UInt32(header.length),
-        );
+        fields.insert("length", FieldValue::UInt32(header.length));
 
         match header.frame_type {
             FrameType::Data => {
-                Self::parse_data_frame(state, header, payload, direction, frame_number, &mut fields);
+                Self::parse_data_frame(
+                    state,
+                    header,
+                    payload,
+                    direction,
+                    frame_number,
+                    &mut fields,
+                );
             }
             FrameType::Headers => {
-                Self::parse_headers_frame(state, header, payload, direction, frame_number, &mut fields);
+                Self::parse_headers_frame(
+                    state,
+                    header,
+                    payload,
+                    direction,
+                    frame_number,
+                    &mut fields,
+                );
             }
             FrameType::Priority => {
                 Self::parse_priority_frame(payload, &mut fields);
@@ -407,20 +415,14 @@ impl Http2StreamParser {
                 Self::parse_continuation_frame(state, header, payload, direction, &mut fields);
             }
             FrameType::Unknown(t) => {
-                fields.insert(
-                    "unknown_type",
-                    FieldValue::UInt8(t),
-                );
+                fields.insert("unknown_type", FieldValue::UInt8(t));
             }
         }
 
         // Add stream state if available
         if header.stream_id != 0 {
             if let Some(stream) = state.streams.get(&header.stream_id) {
-                fields.insert(
-                    "stream_state",
-                    FieldValue::Str(stream.state.as_str()),
-                );
+                fields.insert("stream_state", FieldValue::Str(stream.state.as_str()));
             }
         }
 
@@ -432,7 +434,7 @@ impl Http2StreamParser {
         header: &FrameHeader,
         payload: &[u8],
         direction: Direction,
-        frame_number: u64,
+        _frame_number: u64,
         fields: &mut HashMap<&'static str, OwnedFieldValue>,
     ) {
         let (data, pad_len) = if header.is_padded() && !payload.is_empty() {
@@ -446,20 +448,11 @@ impl Http2StreamParser {
             (payload, 0)
         };
 
-        fields.insert(
-            "data_length",
-            FieldValue::UInt64(data.len() as u64),
-        );
+        fields.insert("data_length", FieldValue::UInt64(data.len() as u64));
         if pad_len > 0 {
-            fields.insert(
-                "padding_length",
-                FieldValue::UInt8(pad_len as u8),
-            );
+            fields.insert("padding_length", FieldValue::UInt8(pad_len as u8));
         }
-        fields.insert(
-            "end_stream",
-            FieldValue::Bool(header.is_end_stream()),
-        );
+        fields.insert("end_stream", FieldValue::Bool(header.is_end_stream()));
 
         // Update stream state
         let stream = state
@@ -514,31 +507,16 @@ impl Http2StreamParser {
             let weight = payload[offset + 4];
             offset += 5;
 
-            fields.insert(
-                "priority_exclusive",
-                FieldValue::Bool(exclusive),
-            );
-            fields.insert(
-                "priority_dependency",
-                FieldValue::UInt32(dep),
-            );
-            fields.insert(
-                "priority_weight",
-                FieldValue::UInt8(weight),
-            );
+            fields.insert("priority_exclusive", FieldValue::Bool(exclusive));
+            fields.insert("priority_dependency", FieldValue::UInt32(dep));
+            fields.insert("priority_weight", FieldValue::UInt8(weight));
         }
 
         let header_block_end = payload.len().saturating_sub(pad_len);
         let header_block = &payload[offset.min(header_block_end)..header_block_end];
 
-        fields.insert(
-            "end_stream",
-            FieldValue::Bool(header.is_end_stream()),
-        );
-        fields.insert(
-            "end_headers",
-            FieldValue::Bool(header.is_end_headers()),
-        );
+        fields.insert("end_stream", FieldValue::Bool(header.is_end_stream()));
+        fields.insert("end_headers", FieldValue::Bool(header.is_end_headers()));
 
         // Decode headers first if complete
         let decoded_headers = if header.is_end_headers() {
@@ -647,12 +625,16 @@ impl Http2StreamParser {
 
             // Store in appropriate list
             if direction == Direction::ToServer || stream.status.is_none() {
-                stream.request_headers.push((name_str.clone(), value_str.clone()));
+                stream
+                    .request_headers
+                    .push((name_str.clone(), value_str.clone()));
             } else {
-                stream.response_headers.push((name_str.clone(), value_str.clone()));
+                stream
+                    .response_headers
+                    .push((name_str.clone(), value_str.clone()));
             }
 
-            header_strs.push(format!("{}: {}", name_str, value_str));
+            header_strs.push(format!("{name_str}: {value_str}"));
         }
 
         // Store all headers as a semicolon-separated string
@@ -674,27 +656,13 @@ impl Http2StreamParser {
 
     fn parse_priority_frame(payload: &[u8], fields: &mut HashMap<&'static str, OwnedFieldValue>) {
         if payload.len() >= 5 {
-            let dep = u32::from_be_bytes([
-                payload[0] & 0x7F,
-                payload[1],
-                payload[2],
-                payload[3],
-            ]);
+            let dep = u32::from_be_bytes([payload[0] & 0x7F, payload[1], payload[2], payload[3]]);
             let exclusive = payload[0] & 0x80 != 0;
             let weight = payload[4];
 
-            fields.insert(
-                "priority_exclusive",
-                FieldValue::Bool(exclusive),
-            );
-            fields.insert(
-                "priority_dependency",
-                FieldValue::UInt32(dep),
-            );
-            fields.insert(
-                "priority_weight",
-                FieldValue::UInt8(weight),
-            );
+            fields.insert("priority_exclusive", FieldValue::Bool(exclusive));
+            fields.insert("priority_dependency", FieldValue::UInt32(dep));
+            fields.insert("priority_weight", FieldValue::UInt8(weight));
         }
     }
 
@@ -707,10 +675,7 @@ impl Http2StreamParser {
         if payload.len() >= 4 {
             let error_code = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
             fields.insert("error_code", FieldValue::UInt32(error_code));
-            fields.insert(
-                "error_name",
-                FieldValue::Str(error_codes::name(error_code)),
-            );
+            fields.insert("error_name", FieldValue::Str(error_codes::name(error_code)));
         }
 
         // Update stream state
@@ -744,22 +709,13 @@ impl Http2StreamParser {
                 // Store specific settings as individual fields
                 match id {
                     settings::HEADER_TABLE_SIZE => {
-                        fields.insert(
-                            "header_table_size",
-                            FieldValue::UInt32(value),
-                        );
+                        fields.insert("header_table_size", FieldValue::UInt32(value));
                     }
                     settings::MAX_CONCURRENT_STREAMS => {
-                        fields.insert(
-                            "max_concurrent_streams",
-                            FieldValue::UInt32(value),
-                        );
+                        fields.insert("max_concurrent_streams", FieldValue::UInt32(value));
                     }
                     settings::INITIAL_WINDOW_SIZE => {
-                        fields.insert(
-                            "initial_window_size",
-                            FieldValue::UInt32(value),
-                        );
+                        fields.insert("initial_window_size", FieldValue::UInt32(value));
                     }
                     settings::MAX_FRAME_SIZE => {
                         fields.insert("max_frame_size", FieldValue::UInt32(value));
@@ -771,7 +727,7 @@ impl Http2StreamParser {
             if !settings_strs.is_empty() {
                 fields.insert(
                     "settings",
-                    FieldValue::OwnedString(CompactString::new(&settings_strs.join(", "))),
+                    FieldValue::OwnedString(CompactString::new(settings_strs.join(", "))),
                 );
             }
         }
@@ -801,10 +757,7 @@ impl Http2StreamParser {
             ]);
             offset += 4;
 
-            fields.insert(
-                "promised_stream_id",
-                FieldValue::UInt32(promised_stream_id),
-            );
+            fields.insert("promised_stream_id", FieldValue::UInt32(promised_stream_id));
 
             let header_block_end = payload.len().saturating_sub(pad_len);
             let header_block = &payload[offset.min(header_block_end)..header_block_end];
@@ -838,24 +791,13 @@ impl Http2StreamParser {
 
     fn parse_goaway_frame(payload: &[u8], fields: &mut HashMap<&'static str, OwnedFieldValue>) {
         if payload.len() >= 8 {
-            let last_stream_id = u32::from_be_bytes([
-                payload[0] & 0x7F,
-                payload[1],
-                payload[2],
-                payload[3],
-            ]);
-            let error_code =
-                u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]);
+            let last_stream_id =
+                u32::from_be_bytes([payload[0] & 0x7F, payload[1], payload[2], payload[3]]);
+            let error_code = u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]);
 
-            fields.insert(
-                "last_stream_id",
-                FieldValue::UInt32(last_stream_id),
-            );
+            fields.insert("last_stream_id", FieldValue::UInt32(last_stream_id));
             fields.insert("error_code", FieldValue::UInt32(error_code));
-            fields.insert(
-                "error_name",
-                FieldValue::Str(error_codes::name(error_code)),
-            );
+            fields.insert("error_name", FieldValue::Str(error_codes::name(error_code)));
 
             if payload.len() > 8 {
                 let debug_data = String::from_utf8_lossy(&payload[8..]).to_string();
@@ -867,14 +809,14 @@ impl Http2StreamParser {
         }
     }
 
-    fn parse_window_update_frame(payload: &[u8], fields: &mut HashMap<&'static str, OwnedFieldValue>) {
+    fn parse_window_update_frame(
+        payload: &[u8],
+        fields: &mut HashMap<&'static str, OwnedFieldValue>,
+    ) {
         if payload.len() >= 4 {
             let increment =
                 u32::from_be_bytes([payload[0] & 0x7F, payload[1], payload[2], payload[3]]);
-            fields.insert(
-                "window_increment",
-                FieldValue::UInt32(increment),
-            );
+            fields.insert("window_increment", FieldValue::UInt32(increment));
         }
     }
 
@@ -885,10 +827,7 @@ impl Http2StreamParser {
         direction: Direction,
         fields: &mut HashMap<&'static str, OwnedFieldValue>,
     ) {
-        fields.insert(
-            "end_headers",
-            FieldValue::Bool(header.is_end_headers()),
-        );
+        fields.insert("end_headers", FieldValue::Bool(header.is_end_headers()));
 
         // Accumulate header block
         if let Some((stream_id, ref mut block, saved_dir)) = state.continuation.take() {
@@ -1167,14 +1106,20 @@ mod tests {
     #[test]
     fn test_error_code_names() {
         assert_eq!(error_codes::name(error_codes::NO_ERROR), "NO_ERROR");
-        assert_eq!(error_codes::name(error_codes::PROTOCOL_ERROR), "PROTOCOL_ERROR");
+        assert_eq!(
+            error_codes::name(error_codes::PROTOCOL_ERROR),
+            "PROTOCOL_ERROR"
+        );
         assert_eq!(error_codes::name(error_codes::CANCEL), "CANCEL");
         assert_eq!(error_codes::name(0xFFFF), "UNKNOWN");
     }
 
     #[test]
     fn test_settings_names() {
-        assert_eq!(settings::name(settings::HEADER_TABLE_SIZE), "HEADER_TABLE_SIZE");
+        assert_eq!(
+            settings::name(settings::HEADER_TABLE_SIZE),
+            "HEADER_TABLE_SIZE"
+        );
         assert_eq!(settings::name(settings::MAX_FRAME_SIZE), "MAX_FRAME_SIZE");
         assert_eq!(settings::name(0xFFFF), "UNKNOWN");
     }
@@ -1255,8 +1200,7 @@ mod tests {
             0x00, // flags = 0
             0x00, 0x00, 0x00, 0x00, // stream_id = 0
             // HEADER_TABLE_SIZE = 4096
-            0x00, 0x01, 0x00, 0x00, 0x10, 0x00,
-            // MAX_CONCURRENT_STREAMS = 100
+            0x00, 0x01, 0x00, 0x00, 0x10, 0x00, // MAX_CONCURRENT_STREAMS = 100
             0x00, 0x03, 0x00, 0x00, 0x00, 0x64,
         ];
 
@@ -1300,7 +1244,10 @@ mod tests {
                     messages[0].fields.get("frame_type"),
                     Some(&FieldValue::Str("PING"))
                 );
-                assert_eq!(messages[0].fields.get("ack"), Some(&FieldValue::Bool(false)));
+                assert_eq!(
+                    messages[0].fields.get("ack"),
+                    Some(&FieldValue::Bool(false))
+                );
             }
             _ => panic!("Expected Complete"),
         }

@@ -412,10 +412,7 @@ mod tests {
 
     #[test]
     fn test_list_display() {
-        let list = FieldValue::List(vec![
-            FieldValue::UInt32(10),
-            FieldValue::UInt32(20),
-        ]);
+        let list = FieldValue::List(vec![FieldValue::UInt32(10), FieldValue::UInt32(20)]);
         assert_eq!(format!("{}", list), "[10, 20]");
 
         let empty: FieldValue = FieldValue::List(vec![]);
@@ -430,18 +427,9 @@ mod tests {
 
     #[test]
     fn test_list_equality() {
-        let list1 = FieldValue::List(vec![
-            FieldValue::UInt32(1),
-            FieldValue::UInt32(2),
-        ]);
-        let list2 = FieldValue::List(vec![
-            FieldValue::UInt32(1),
-            FieldValue::UInt32(2),
-        ]);
-        let list3 = FieldValue::List(vec![
-            FieldValue::UInt32(1),
-            FieldValue::UInt32(3),
-        ]);
+        let list1 = FieldValue::List(vec![FieldValue::UInt32(1), FieldValue::UInt32(2)]);
+        let list2 = FieldValue::List(vec![FieldValue::UInt32(1), FieldValue::UInt32(2)]);
+        let list3 = FieldValue::List(vec![FieldValue::UInt32(1), FieldValue::UInt32(3)]);
 
         assert_eq!(list1, list2);
         assert_ne!(list1, list3);

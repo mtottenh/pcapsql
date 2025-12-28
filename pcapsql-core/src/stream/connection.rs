@@ -199,6 +199,7 @@ impl ConnectionTracker {
 
     /// Get or create a connection for the given packet.
     /// Returns (connection, direction).
+    #[allow(clippy::too_many_arguments)]
     pub fn get_or_create(
         &mut self,
         src_ip: IpAddr,

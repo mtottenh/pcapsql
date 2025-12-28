@@ -268,7 +268,10 @@ mod tests {
     #[test]
     fn test_format_mac_broadcast() {
         let broadcast = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff];
-        assert_eq!(format_mac(&broadcast), Some("ff:ff:ff:ff:ff:ff".to_string()));
+        assert_eq!(
+            format_mac(&broadcast),
+            Some("ff:ff:ff:ff:ff:ff".to_string())
+        );
     }
 
     #[test]

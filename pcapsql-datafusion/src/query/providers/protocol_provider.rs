@@ -11,8 +11,8 @@ use datafusion::catalog::Session;
 use datafusion::datasource::{TableProvider, TableType};
 use datafusion::error::Result as DFResult;
 use datafusion::logical_expr::Expr;
-use datafusion_datasource::memory::MemorySourceConfig;
 use datafusion::physical_plan::ExecutionPlan;
+use datafusion_datasource::memory::MemorySourceConfig;
 
 use pcapsql_core::{compute_required_protocols, PacketSource, ParseCache, ProtocolRegistry};
 
@@ -116,7 +116,7 @@ impl<S: PacketSource + 'static> TableProvider for ProtocolTableProvider<S> {
     ) -> DFResult<Arc<dyn ExecutionPlan>> {
         match &self.mode {
             TableMode::InMemory { batches } => Ok(MemorySourceConfig::try_new_exec(
-                &[batches.clone()],
+                std::slice::from_ref(batches),
                 self.schema.clone(),
                 projection.cloned(),
             )? as Arc<dyn ExecutionPlan>),

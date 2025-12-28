@@ -10,6 +10,7 @@
 use compact_str::CompactString;
 use smallvec::SmallVec;
 
+use super::ethernet::ethertype;
 use super::{FieldValue, ParseContext, ParseResult, Protocol, TunnelType};
 use crate::schema::{DataKind, FieldDescriptor};
 
@@ -23,6 +24,7 @@ pub const GTP_C_PORT: u16 = 2123;
 const MAX_EXTENSION_HEADERS: usize = 16;
 
 /// GTP message types.
+#[allow(dead_code)]
 pub mod message_type {
     pub const ECHO_REQUEST: u8 = 1;
     pub const ECHO_RESPONSE: u8 = 2;
@@ -210,11 +212,11 @@ impl Protocol for GtpProtocol {
 
             match ip_version {
                 4 => {
-                    child_hints.push(("ethertype", 0x0800u64)); // IPv4
+                    child_hints.push(("ethertype", ethertype::IPV4 as u64));
                     child_hints.push(("ip_version", 4u64));
                 }
                 6 => {
-                    child_hints.push(("ethertype", 0x86DDu64)); // IPv6
+                    child_hints.push(("ethertype", ethertype::IPV6 as u64));
                     child_hints.push(("ip_version", 6u64));
                 }
                 _ => {}
@@ -314,7 +316,12 @@ impl GtpProtocol {
             if data.len() < offset + 4 {
                 return ParseResult::error("GTPv2: missing TEID field".to_string(), data);
             }
-            let teid = u32::from_be_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]]);
+            let teid = u32::from_be_bytes([
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ]);
             fields.push(("teid", FieldValue::UInt32(teid)));
             offset += 4;
         }
@@ -473,7 +480,10 @@ mod tests {
             let result = parser.parse(&header, &context);
 
             assert!(result.is_ok());
-            assert_eq!(result.get("message_type"), Some(&FieldValue::UInt8(msg_type)));
+            assert_eq!(
+                result.get("message_type"),
+                Some(&FieldValue::UInt8(msg_type))
+            );
         }
     }
 
@@ -598,21 +608,30 @@ mod tests {
         let header = vec![
             0x34, // Version 1, PT=1, E=1
             message_type::G_PDU,
-            0x00, 0x0C, // Length (includes optional fields + ext header)
-            0x00, 0x00, 0x00, 0x01, // TEID
-            0x00, 0x00, // Sequence (not present but field exists)
-            0x00, // N-PDU
+            0x00,
+            0x0C, // Length (includes optional fields + ext header)
+            0x00,
+            0x00,
+            0x00,
+            0x01, // TEID
+            0x00,
+            0x00,                                   // Sequence (not present but field exists)
+            0x00,                                   // N-PDU
             extension_header_type::PDCP_PDU_NUMBER, // Next ext header type
             // Extension header: PDCP PDU Number
             0x01, // Length = 1 * 4 = 4 bytes
-            0x12, 0x34, // PDCP PDU Number data
+            0x12,
+            0x34,                           // PDCP PDU Number data
             extension_header_type::NO_MORE, // No more extensions
         ];
 
         let result = parser.parse(&header, &context);
 
         assert!(result.is_ok());
-        assert_eq!(result.get("extension_header_count"), Some(&FieldValue::UInt8(1)));
+        assert_eq!(
+            result.get("extension_header_count"),
+            Some(&FieldValue::UInt8(1))
+        );
 
         if let Some(FieldValue::OwnedString(ext)) = result.get("extension_headers") {
             assert!(ext.contains("PDCP PDU Number"));
@@ -633,25 +652,35 @@ mod tests {
         let header = vec![
             0x34, // Version 1, PT=1, E=1
             message_type::G_PDU,
-            0x00, 0x14, // Length
-            0x00, 0x00, 0x00, 0x01, // TEID
-            0x00, 0x00, // Sequence
-            0x00, // N-PDU
+            0x00,
+            0x14, // Length
+            0x00,
+            0x00,
+            0x00,
+            0x01, // TEID
+            0x00,
+            0x00,                            // Sequence
+            0x00,                            // N-PDU
             extension_header_type::UDP_PORT, // First ext header type
             // Extension header 1: UDP Port (type 0x40)
             0x01, // Length = 4 bytes
-            0x08, 0x68, // UDP port 2152
+            0x08,
+            0x68,                                         // UDP port 2152
             extension_header_type::PDU_SESSION_CONTAINER, // Next ext
             // Extension header 2: PDU Session Container (type 0x85)
             0x01, // Length = 4 bytes
-            0x01, 0x00, // PDU session data
+            0x01,
+            0x00,                           // PDU session data
             extension_header_type::NO_MORE, // End of chain
         ];
 
         let result = parser.parse(&header, &context);
 
         assert!(result.is_ok());
-        assert_eq!(result.get("extension_header_count"), Some(&FieldValue::UInt8(2)));
+        assert_eq!(
+            result.get("extension_header_count"),
+            Some(&FieldValue::UInt8(2))
+        );
 
         if let Some(FieldValue::OwnedString(ext)) = result.get("extension_headers") {
             assert!(ext.contains("UDP Port"));
@@ -672,10 +701,15 @@ mod tests {
         let mut header = vec![
             0x34, // Version 1, PT=1, E=1
             message_type::G_PDU,
-            0x00, 0x60, // Length (large)
-            0x00, 0x00, 0x00, 0x01, // TEID
-            0x00, 0x00, // Sequence
-            0x00, // N-PDU
+            0x00,
+            0x60, // Length (large)
+            0x00,
+            0x00,
+            0x00,
+            0x01, // TEID
+            0x00,
+            0x00,                            // Sequence
+            0x00,                            // N-PDU
             extension_header_type::UDP_PORT, // First ext header type
         ];
 
@@ -696,7 +730,10 @@ mod tests {
         assert!(result.is_ok());
         // Should be capped at MAX_EXTENSION_HEADERS (16)
         if let Some(FieldValue::UInt8(count)) = result.get("extension_header_count") {
-            assert!(*count <= 16, "Extension header count should be capped at 16");
+            assert!(
+                *count <= 16,
+                "Extension header count should be capped at 16"
+            );
         }
     }
 
@@ -808,9 +845,14 @@ mod tests {
         let header = vec![
             0x31, // Version 1, PT=1, PN=1
             message_type::G_PDU,
-            0x00, 0x08, // Length
-            0x00, 0x00, 0x00, 0x01, // TEID
-            0x00, 0x00, // Sequence
+            0x00,
+            0x08, // Length
+            0x00,
+            0x00,
+            0x00,
+            0x01, // TEID
+            0x00,
+            0x00, // Sequence
             0x42, // N-PDU Number = 66
             0x00, // Next extension header type
         ];
@@ -832,20 +874,29 @@ mod tests {
         let test_cases = [
             (extension_header_type::RAN_CONTAINER, "RAN Container"),
             (extension_header_type::NR_RAN_CONTAINER, "NR RAN Container"),
-            (extension_header_type::LONG_PDCP_PDU_NUMBER, "Long PDCP PDU Number"),
+            (
+                extension_header_type::LONG_PDCP_PDU_NUMBER,
+                "Long PDCP PDU Number",
+            ),
         ];
 
         for (ext_type, expected_name) in test_cases {
             let header = vec![
                 0x34, // Version 1, PT=1, E=1
                 message_type::G_PDU,
-                0x00, 0x0C, // Length
-                0x00, 0x00, 0x00, 0x01, // TEID
-                0x00, 0x00, // Sequence
-                0x00, // N-PDU
+                0x00,
+                0x0C, // Length
+                0x00,
+                0x00,
+                0x00,
+                0x01, // TEID
+                0x00,
+                0x00,     // Sequence
+                0x00,     // N-PDU
                 ext_type, // Extension header type
-                0x01, // Length = 4 bytes
-                0x00, 0x00, // Data
+                0x01,     // Length = 4 bytes
+                0x00,
+                0x00,                           // Data
                 extension_header_type::NO_MORE, // End
             ];
 
@@ -853,7 +904,12 @@ mod tests {
             assert!(result.is_ok());
 
             if let Some(FieldValue::OwnedString(ext)) = result.get("extension_headers") {
-                assert!(ext.contains(expected_name), "Expected '{}' in '{}'", expected_name, ext);
+                assert!(
+                    ext.contains(expected_name),
+                    "Expected '{}' in '{}'",
+                    expected_name,
+                    ext
+                );
             } else {
                 panic!("Expected extension_headers field");
             }
@@ -880,8 +936,7 @@ mod tests {
         for (msg_type, _name) in test_types {
             let header = vec![
                 0x48, // Version 2, P=0, T=1
-                msg_type,
-                0x00, 0x0C, // Length
+                msg_type, 0x00, 0x0C, // Length
                 0x00, 0x00, 0x00, 0x01, // TEID
                 0x00, 0x00, 0x01, // Sequence
                 0x00, // Spare
@@ -889,7 +944,10 @@ mod tests {
 
             let result = parser.parse(&header, &context);
             assert!(result.is_ok());
-            assert_eq!(result.get("message_type"), Some(&FieldValue::UInt8(msg_type)));
+            assert_eq!(
+                result.get("message_type"),
+                Some(&FieldValue::UInt8(msg_type))
+            );
         }
     }
 
@@ -904,13 +962,19 @@ mod tests {
         let header = vec![
             0x37, // Version 1, PT=1, E=1, S=1, PN=1
             message_type::G_PDU,
-            0x00, 0x10, // Length
-            0x12, 0x34, 0x56, 0x78, // TEID
-            0xAB, 0xCD, // Sequence Number
-            0x42, // N-PDU Number
+            0x00,
+            0x10, // Length
+            0x12,
+            0x34,
+            0x56,
+            0x78, // TEID
+            0xAB,
+            0xCD,                            // Sequence Number
+            0x42,                            // N-PDU Number
             extension_header_type::UDP_PORT, // Next extension header
-            0x01, // Ext length = 4 bytes
-            0x08, 0x68, // UDP port data
+            0x01,                            // Ext length = 4 bytes
+            0x08,
+            0x68, // UDP port data
             extension_header_type::NO_MORE,
         ];
 
@@ -920,6 +984,9 @@ mod tests {
         assert_eq!(result.get("teid"), Some(&FieldValue::UInt32(0x12345678)));
         assert_eq!(result.get("sequence"), Some(&FieldValue::UInt16(0xABCD)));
         assert_eq!(result.get("npdu"), Some(&FieldValue::UInt8(0x42)));
-        assert_eq!(result.get("extension_header_count"), Some(&FieldValue::UInt8(1)));
+        assert_eq!(
+            result.get("extension_header_count"),
+            Some(&FieldValue::UInt8(1))
+        );
     }
 }

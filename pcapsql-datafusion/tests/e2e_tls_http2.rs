@@ -32,10 +32,7 @@ const TLS_TEST_DIR: &str = "testdata/tls";
 macro_rules! skip_if_missing {
     ($path:expr) => {
         if !Path::new($path).exists() {
-            eprintln!(
-                "SKIPPED: Test data not found at {}",
-                $path
-            );
+            eprintln!("SKIPPED: Test data not found at {}", $path);
             eprintln!("         Run: cd testdata/tls && sudo ./generate_test_data.sh");
             return;
         }
@@ -131,10 +128,17 @@ async fn test_tls12_handshake_metadata() {
     .await;
 
     assert!(!results.is_empty(), "Should have ClientHello");
-    assert!(results[0].num_rows() >= 1, "Should have at least one ClientHello");
+    assert!(
+        results[0].num_rows() >= 1,
+        "Should have at least one ClientHello"
+    );
 
     let sni = get_string(&results, 0, 1);
-    assert_eq!(sni, Some("localhost".to_string()), "SNI should be 'localhost'");
+    assert_eq!(
+        sni,
+        Some("localhost".to_string()),
+        "SNI should be 'localhost'"
+    );
 }
 
 /// Test TLS 1.2 JA3 fingerprint extraction
@@ -154,7 +158,11 @@ async fn test_tls12_ja3_fingerprint() {
     assert!(!results.is_empty(), "Should have JA3 hash");
     let ja3 = get_string(&results, 0, 0);
     assert!(ja3.is_some(), "JA3 hash should not be null");
-    assert_eq!(ja3.as_ref().unwrap().len(), 32, "JA3 hash should be 32 hex chars (MD5)");
+    assert_eq!(
+        ja3.as_ref().unwrap().len(),
+        32,
+        "JA3 hash should be 32 hex chars (MD5)"
+    );
 }
 
 /// Test TLS 1.2 JA3S fingerprint extraction
@@ -174,7 +182,11 @@ async fn test_tls12_ja3s_fingerprint() {
     assert!(!results.is_empty(), "Should have JA3S hash");
     let ja3s = get_string(&results, 0, 0);
     assert!(ja3s.is_some(), "JA3S hash should not be null");
-    assert_eq!(ja3s.as_ref().unwrap().len(), 32, "JA3S hash should be 32 hex chars");
+    assert_eq!(
+        ja3s.as_ref().unwrap().len(),
+        32,
+        "JA3S hash should be 32 hex chars"
+    );
 }
 
 /// Test TLS 1.3 handshake metadata
@@ -190,13 +202,12 @@ async fn test_tls13_handshake_metadata() {
     assert!(count > 0, "Should have TLS records");
 
     // Check ClientHello has SNI
-    let results = query(
-        &engine,
-        "SELECT sni FROM tls WHERE handshake_type = 1",
-    )
-    .await;
+    let results = query(&engine, "SELECT sni FROM tls WHERE handshake_type = 1").await;
 
-    assert!(!results.is_empty() && results[0].num_rows() > 0, "Should have ClientHello");
+    assert!(
+        !results.is_empty() && results[0].num_rows() > 0,
+        "Should have ClientHello"
+    );
 }
 
 /// Test TLS version field
@@ -229,7 +240,10 @@ async fn test_tls_cipher_suites() {
     )
     .await;
 
-    assert!(!results.is_empty() && results[0].num_rows() > 0, "Should have cipher suites");
+    assert!(
+        !results.is_empty() && results[0].num_rows() > 0,
+        "Should have cipher suites"
+    );
     let cipher_suites = get_string(&results, 0, 0);
     assert!(cipher_suites.is_some(), "Cipher suites should not be null");
 }
@@ -250,13 +264,20 @@ async fn test_tls_join_tcp() {
     )
     .await;
 
-    assert!(!results.is_empty() && results[0].num_rows() > 0, "JOIN should return results");
+    assert!(
+        !results.is_empty() && results[0].num_rows() > 0,
+        "JOIN should return results"
+    );
 
     // Verify dst_port is our test port (14433)
     let batch = &results[0];
     let dst_port_col = batch.column_by_name("dst_port").unwrap();
     let dst_port_array = dst_port_col.as_any().downcast_ref::<UInt16Array>().unwrap();
-    assert_eq!(dst_port_array.value(0), 14433, "Should be on test port 14433");
+    assert_eq!(
+        dst_port_array.value(0),
+        14433,
+        "Should be on test port 14433"
+    );
 }
 
 /// Test TLS table JOIN with frames table
@@ -275,7 +296,10 @@ async fn test_tls_join_frames() {
     )
     .await;
 
-    assert!(!results.is_empty() && results[0].num_rows() > 0, "JOIN with frames should work");
+    assert!(
+        !results.is_empty() && results[0].num_rows() > 0,
+        "JOIN with frames should work"
+    );
 }
 
 // ============================================================================
@@ -287,8 +311,8 @@ async fn test_tls_join_frames() {
 async fn test_keylog_loading_tls12() {
     skip_if_missing!("testdata/tls/tls12_aes128gcm.keys");
 
-    let keylog = KeyLog::from_file("testdata/tls/tls12_aes128gcm.keys")
-        .expect("Should load keylog");
+    let keylog =
+        KeyLog::from_file("testdata/tls/tls12_aes128gcm.keys").expect("Should load keylog");
 
     assert_eq!(keylog.session_count(), 1, "Should have 1 session");
     assert!(keylog.entry_count() >= 1, "Should have at least 1 entry");
@@ -299,11 +323,14 @@ async fn test_keylog_loading_tls12() {
 async fn test_keylog_loading_tls13() {
     skip_if_missing!("testdata/tls/tls13_aes256gcm.keys");
 
-    let keylog = KeyLog::from_file("testdata/tls/tls13_aes256gcm.keys")
-        .expect("Should load keylog");
+    let keylog =
+        KeyLog::from_file("testdata/tls/tls13_aes256gcm.keys").expect("Should load keylog");
 
     assert_eq!(keylog.session_count(), 1, "Should have 1 session");
-    assert!(keylog.entry_count() >= 4, "TLS 1.3 should have traffic secrets");
+    assert!(
+        keylog.entry_count() >= 4,
+        "TLS 1.3 should have traffic secrets"
+    );
 }
 
 // ============================================================================
@@ -384,7 +411,10 @@ async fn test_frame_number_consistency() {
     .await;
 
     let orphan_count = get_i64(&results, 0);
-    assert_eq!(orphan_count, 0, "All TLS records should have matching frames");
+    assert_eq!(
+        orphan_count, 0,
+        "All TLS records should have matching frames"
+    );
 }
 
 /// Test that TLS records link to TCP segments
@@ -446,11 +476,17 @@ async fn test_tls_handshake_type_distribution() {
     )
     .await;
 
-    assert!(!results.is_empty(), "Should have handshake type distribution");
+    assert!(
+        !results.is_empty(),
+        "Should have handshake type distribution"
+    );
 
     // Should have at least ClientHello (1) and ServerHello (2)
     let batch = &results[0];
-    assert!(batch.num_rows() >= 2, "Should have multiple handshake types");
+    assert!(
+        batch.num_rows() >= 2,
+        "Should have multiple handshake types"
+    );
 }
 
 // ============================================================================

@@ -4,8 +4,8 @@
 //! - TLS 1.2 PRF (Pseudo-Random Function) based on HMAC-SHA256/SHA384
 //! - TLS 1.3 HKDF-based key derivation
 
-use ring::hmac::{self, Algorithm as HmacAlgorithm, Key as HmacKey};
 use ring::hkdf::{self, KeyType, Prk, HKDF_SHA256, HKDF_SHA384};
+use ring::hmac::{self, Algorithm as HmacAlgorithm, Key as HmacKey};
 use thiserror::Error;
 
 /// Errors during key derivation.
@@ -90,8 +90,8 @@ impl AeadAlgorithm {
     pub fn from_cipher_suite(suite_id: u16) -> Option<Self> {
         match suite_id {
             // TLS 1.3 cipher suites
-            0x1301 => Some(AeadAlgorithm::Aes128Gcm),       // TLS_AES_128_GCM_SHA256
-            0x1302 => Some(AeadAlgorithm::Aes256Gcm),       // TLS_AES_256_GCM_SHA384
+            0x1301 => Some(AeadAlgorithm::Aes128Gcm), // TLS_AES_128_GCM_SHA256
+            0x1302 => Some(AeadAlgorithm::Aes256Gcm), // TLS_AES_256_GCM_SHA384
             0x1303 => Some(AeadAlgorithm::Chacha20Poly1305), // TLS_CHACHA20_POLY1305_SHA256
 
             // TLS 1.2 ECDHE-RSA cipher suites
@@ -443,24 +443,12 @@ mod tests {
     #[test]
     fn test_hash_for_cipher_suite() {
         // SHA-256 suites
-        assert_eq!(
-            hash_for_cipher_suite(0x1301),
-            Some(HashAlgorithm::Sha256)
-        );
-        assert_eq!(
-            hash_for_cipher_suite(0xC02F),
-            Some(HashAlgorithm::Sha256)
-        );
+        assert_eq!(hash_for_cipher_suite(0x1301), Some(HashAlgorithm::Sha256));
+        assert_eq!(hash_for_cipher_suite(0xC02F), Some(HashAlgorithm::Sha256));
 
         // SHA-384 suites
-        assert_eq!(
-            hash_for_cipher_suite(0x1302),
-            Some(HashAlgorithm::Sha384)
-        );
-        assert_eq!(
-            hash_for_cipher_suite(0xC030),
-            Some(HashAlgorithm::Sha384)
-        );
+        assert_eq!(hash_for_cipher_suite(0x1302), Some(HashAlgorithm::Sha384));
+        assert_eq!(hash_for_cipher_suite(0xC030), Some(HashAlgorithm::Sha384));
 
         // Unknown
         assert_eq!(hash_for_cipher_suite(0x0000), None);
@@ -555,8 +543,8 @@ mod tests {
         let traffic_secret = [0x42u8; 32];
 
         // TLS_AES_128_GCM_SHA256
-        let keys = derive_tls13_keys(&traffic_secret, 0x1301)
-            .expect("key derivation should succeed");
+        let keys =
+            derive_tls13_keys(&traffic_secret, 0x1301).expect("key derivation should succeed");
 
         // AES-128-GCM: 16-byte key, 12-byte IV
         assert_eq!(keys.key.len(), 16);
@@ -569,8 +557,8 @@ mod tests {
         let traffic_secret = [0x42u8; 48];
 
         // TLS_AES_256_GCM_SHA384
-        let keys = derive_tls13_keys(&traffic_secret, 0x1302)
-            .expect("key derivation should succeed");
+        let keys =
+            derive_tls13_keys(&traffic_secret, 0x1302).expect("key derivation should succeed");
 
         // AES-256-GCM: 32-byte key, 12-byte IV
         assert_eq!(keys.key.len(), 32);
@@ -582,8 +570,8 @@ mod tests {
         let traffic_secret = [0x42u8; 32];
 
         // TLS_CHACHA20_POLY1305_SHA256
-        let keys = derive_tls13_keys(&traffic_secret, 0x1303)
-            .expect("key derivation should succeed");
+        let keys =
+            derive_tls13_keys(&traffic_secret, 0x1303).expect("key derivation should succeed");
 
         // ChaCha20-Poly1305: 32-byte key, 12-byte IV
         assert_eq!(keys.key.len(), 32);

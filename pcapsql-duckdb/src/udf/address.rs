@@ -7,6 +7,9 @@
 //! - `mac(string)` -> Blob(6)
 //! - `mac_to_string(blob)` -> String
 
+// Loop indices needed for both null checks and slice access
+#![allow(clippy::needless_range_loop)]
+
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
 

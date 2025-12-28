@@ -60,6 +60,7 @@ pub struct ProtocolStreamExec<S: PacketSource> {
 }
 
 impl<S: PacketSource + 'static> ProtocolStreamExec<S> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         table_name: String,
         schema: SchemaRef,
@@ -72,15 +73,7 @@ impl<S: PacketSource + 'static> ProtocolStreamExec<S> {
         limit: Option<usize>,
     ) -> Self {
         Self::new_with_pruning(
-            table_name,
-            schema,
-            source,
-            registry,
-            partitions,
-            batch_size,
-            projection,
-            cache,
-            limit,
+            table_name, schema, source, registry, partitions, batch_size, projection, cache, limit,
             None,
         )
     }
@@ -90,6 +83,7 @@ impl<S: PacketSource + 'static> ProtocolStreamExec<S> {
     /// When `required_protocols` is provided, only protocols in that set
     /// (and their dependencies) will be parsed, reducing CPU usage for
     /// selective queries.
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_pruning(
         table_name: String,
         schema: SchemaRef,
@@ -122,6 +116,7 @@ impl<S: PacketSource + 'static> ProtocolStreamExec<S> {
     /// This constructor supports both protocol pruning and field projection:
     /// - Protocol pruning: Only parse protocols in the required set
     /// - Field projection: Only extract needed fields within each protocol
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_optimizations(
         table_name: String,
         schema: SchemaRef,
@@ -273,7 +268,9 @@ impl<S: PacketSource> ProtocolStreamExec<S> {
 impl<S: PacketSource> DisplayAs for ProtocolStreamExec<S> {
     fn fmt_as(&self, t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
         match t {
-            DisplayFormatType::Default | DisplayFormatType::Verbose | DisplayFormatType::TreeRender => {
+            DisplayFormatType::Default
+            | DisplayFormatType::Verbose
+            | DisplayFormatType::TreeRender => {
                 write!(
                     f,
                     "ProtocolStreamExec: table={}, partitions={}, batch_size={}",
@@ -282,7 +279,7 @@ impl<S: PacketSource> DisplayAs for ProtocolStreamExec<S> {
                     self.batch_size
                 )?;
                 if let Some(limit) = self.limit {
-                    write!(f, ", limit={}", limit)?;
+                    write!(f, ", limit={limit}")?;
                 }
                 if self.field_projections.is_some() {
                     write!(f, ", field_projection=true")?;

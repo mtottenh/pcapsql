@@ -2,8 +2,8 @@
 //!
 //! The `dns` table contains DNS (Domain Name System) query and response fields.
 
-use std::sync::Arc;
 use arrow::datatypes::{DataType, Field, Schema};
+use std::sync::Arc;
 
 /// Build the schema for the `dns` table.
 ///
@@ -57,7 +57,11 @@ pub fn dns_table_schema() -> Schema {
         ),
         Field::new(
             "answer_ip6s",
-            DataType::List(Arc::new(Field::new("item", DataType::FixedSizeBinary(16), true))),
+            DataType::List(Arc::new(Field::new(
+                "item",
+                DataType::FixedSizeBinary(16),
+                true,
+            ))),
             true,
         ),
         Field::new(
