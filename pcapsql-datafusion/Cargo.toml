@@ -82,6 +82,15 @@ assets = [
     ["../target/assets/pcapsql.fish", "usr/share/fish/vendor_completions.d/pcapsql.fish", "644"],
 ]
 
+[package.metadata.generate-rpm]
+assets = [
+    { source = "../target/release/pcapsql", dest = "/usr/bin/pcapsql", mode = "755" },
+    { source = "../target/assets/pcapsql.1", dest = "/usr/share/man/man1/pcapsql.1", mode = "644", doc = true },
+    { source = "../target/assets/pcapsql.bash", dest = "/usr/share/bash-completion/completions/pcapsql", mode = "644" },
+    { source = "../target/assets/pcapsql.zsh", dest = "/usr/share/zsh/site-functions/_pcapsql", mode = "644" },
+    { source = "../target/assets/pcapsql.fish", dest = "/usr/share/fish/vendor_completions.d/pcapsql.fish", mode = "644" },
+]
+
 [[bench]]
 name = "parsing"
 harness = false
