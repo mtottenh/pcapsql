@@ -10,6 +10,7 @@ use super::{FieldValue, ParseContext, ParseResult, Protocol};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// SSH default port.
+#[allow(dead_code)]
 pub const SSH_PORT: u16 = 22;
 
 /// SSH message types.

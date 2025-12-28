@@ -10,9 +10,11 @@ use super::{FieldValue, ParseContext, ParseResult, Protocol};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// DHCP server port.
+#[allow(dead_code)]
 pub const DHCP_SERVER_PORT: u16 = 67;
 
 /// DHCP client port.
+#[allow(dead_code)]
 pub const DHCP_CLIENT_PORT: u16 = 68;
 
 /// DHCP magic cookie (0x63825363).

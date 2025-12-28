@@ -10,6 +10,7 @@ use super::{FieldValue, ParseContext, ParseResult, Protocol};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// NTP port.
+#[allow(dead_code)]
 pub const NTP_PORT: u16 = 123;
 
 /// NTP header size.

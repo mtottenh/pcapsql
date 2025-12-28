@@ -23,6 +23,7 @@ pub const GTP_C_PORT: u16 = 2123;
 const MAX_EXTENSION_HEADERS: usize = 16;
 
 /// GTP message types.
+#[allow(dead_code)]
 pub mod message_type {
     pub const ECHO_REQUEST: u8 = 1;
     pub const ECHO_RESPONSE: u8 = 2;

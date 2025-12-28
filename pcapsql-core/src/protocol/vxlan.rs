@@ -11,6 +11,7 @@ use super::{FieldValue, ParseContext, ParseResult, Protocol, TunnelType};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// Standard VXLAN UDP destination port.
+#[allow(dead_code)]
 pub const VXLAN_PORT: u16 = 4789;
 
 /// VXLAN protocol parser.

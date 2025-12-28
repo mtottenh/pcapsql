@@ -27,6 +27,7 @@ pub mod message_type {
 }
 
 /// BGP path attribute type codes.
+#[allow(dead_code)]
 pub mod path_attr_type {
     pub const ORIGIN: u8 = 1;
     pub const AS_PATH: u8 = 2;
@@ -116,6 +117,7 @@ fn error_code_name(code: u8) -> &'static str {
 }
 
 /// Get the name of a path attribute type.
+#[allow(dead_code)]
 fn path_attr_type_name(type_code: u8) -> &'static str {
     match type_code {
         path_attr_type::ORIGIN => "ORIGIN",

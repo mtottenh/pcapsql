@@ -10,6 +10,7 @@ use super::{FieldValue, ParseContext, ParseResult, Protocol};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// DNS well-known port.
+#[allow(dead_code)]
 pub const DNS_PORT: u16 = 53;
 
 /// DNS protocol parser.

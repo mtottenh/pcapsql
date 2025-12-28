@@ -8,6 +8,7 @@ use super::{FieldValue, ParseContext, ParseResult, Protocol, TunnelType};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// IPv6 Next Header values for extension headers and encapsulation.
+#[allow(dead_code)]
 pub mod next_header {
     pub const HOP_BY_HOP: u8 = 0;
     /// IPv4 encapsulated in IPv6 (IP-in-IP)

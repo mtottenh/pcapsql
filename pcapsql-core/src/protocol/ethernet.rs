@@ -11,6 +11,7 @@ use crate::schema::{DataKind, FieldDescriptor};
 pub const LINKTYPE_ETHERNET: u16 = 1;
 
 /// Well-known EtherTypes.
+#[allow(dead_code)]
 pub mod ethertype {
     pub const IPV4: u16 = 0x0800;
     pub const ARP: u16 = 0x0806;
