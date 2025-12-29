@@ -616,14 +616,14 @@ fn format_hexdump(frame_number: u64, data: &[u8]) -> String {
         let offset = chunk_idx * 16;
 
         // Offset
-        output.push_str(&format!("{:08x}  ", offset));
+        output.push_str(&format!("{offset:08x}  "));
 
         // Hex bytes (space after 8 bytes)
         for (i, byte) in chunk.iter().enumerate() {
             if i == 8 {
                 output.push(' ');
             }
-            output.push_str(&format!("{:02x} ", byte));
+            output.push_str(&format!("{byte:02x} "));
         }
 
         // Padding for incomplete last line
