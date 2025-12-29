@@ -448,9 +448,27 @@ mod tests {
         if !path.exists() {
             return;
         }
+        let source = MmapPacketSource::open(&path).unwrap();
+        // dns.cap should have Ethernet link type (1)
+        assert_eq!(source.metadata().link_type, 1);
+    }
+
+    #[test]
+    fn test_mmap_netlink_link_type() {
+        let path = test_pcap_path("nlmon-big.pcap");
+        if !path.exists() {
+            eprintln!("Skipping test - nlmon-big.pcap not found");
+            return;
+        }
 
         let source = MmapPacketSource::open(&path).unwrap();
-        assert_eq!(source.link_type(), 1); // Ethernet
+        // nlmon-big.pcap should have NETLINK link type (253)
+        assert_eq!(
+            source.link_type(),
+            253,
+            "Expected LINKTYPE_NETLINK (253), got {}",
+            source.link_type()
+        );
     }
 
     #[test]

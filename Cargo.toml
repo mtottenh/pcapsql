@@ -83,6 +83,11 @@ ring = "0.17"
 # HTTP/2 HPACK header compression (RFC 7541)
 hpack = "0.3"
 
+# Netlink protocol parsing
+netlink-packet-core = "0.7"
+netlink-packet-route = "0.21"
+netlink-packet-utils = "0.5"
+
 [profile.release]
 lto = true
 codegen-units = 1

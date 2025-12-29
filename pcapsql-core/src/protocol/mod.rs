@@ -57,10 +57,13 @@ mod icmpv6;
 mod ipsec;
 mod ipv4;
 mod ipv6;
+mod linux_sll;
 mod mpls;
+mod netlink;
 mod ntp;
 mod ospf;
 mod quic;
+mod rtnetlink;
 mod ssh;
 mod tcp;
 mod tls;
@@ -91,10 +94,13 @@ pub use icmpv6::Icmpv6Protocol;
 pub use ipsec::IpsecProtocol;
 pub use ipv4::Ipv4Protocol;
 pub use ipv6::Ipv6Protocol;
+pub use linux_sll::LinuxSllProtocol;
 pub use mpls::MplsProtocol;
+pub use netlink::NetlinkProtocol;
 pub use ntp::NtpProtocol;
 pub use ospf::OspfProtocol;
 pub use quic::QuicProtocol;
+pub use rtnetlink::RtnetlinkProtocol;
 pub use ssh::SshProtocol;
 pub use tcp::TcpProtocol;
 pub use tls::TlsProtocol;
@@ -106,6 +112,7 @@ pub use vxlan::VxlanProtocol;
 pub use dns::{rcode, record_type};
 pub use ethernet::ethertype;
 pub use ipv6::next_header;
+pub use netlink::family as netlink_family;
 
 /// Create a registry with all built-in protocol parsers.
 pub fn default_registry() -> ProtocolRegistry {
@@ -113,6 +120,7 @@ pub fn default_registry() -> ProtocolRegistry {
 
     // Layer 2
     registry.register(EthernetProtocol);
+    registry.register(LinuxSllProtocol);
     registry.register(ArpProtocol);
     registry.register(VlanProtocol);
     registry.register(MplsProtocol);
@@ -145,6 +153,10 @@ pub fn default_registry() -> ProtocolRegistry {
     registry.register(TlsProtocol);
     registry.register(SshProtocol);
     registry.register(QuicProtocol);
+
+    // Netlink protocols (Linux kernel-userspace)
+    registry.register(NetlinkProtocol);
+    registry.register(RtnetlinkProtocol);
 
     registry
 }

@@ -102,30 +102,84 @@ impl<R: Read> GenericPcapReader<R> {
     ///
     /// This is the primary constructor. Use `PcapFormat::detect()` to determine
     /// the format from magic bytes before calling this.
+    ///
+    /// Note: For legacy PCAP, the header is read during construction to extract
+    /// the link_type. For PCAPNG, link_type is initially 1 and gets updated when
+    /// the Interface Description Block is read during packet processing.
     pub fn with_format(source: R, format: PcapFormat) -> Result<Self, Error> {
         let buf_reader = BufReader::with_capacity(BUFFER_SIZE, source);
 
-        let inner = if format.is_pcapng() {
+        let (inner, link_type) = if format.is_pcapng() {
             let reader = PcapNGReader::new(BUFFER_SIZE, buf_reader).map_err(|e| {
                 Error::Pcap(PcapError::InvalidFormat {
                     reason: format!("Failed to parse PCAPNG: {e}"),
                 })
             })?;
-            ReaderInner::Ng(reader)
+            // PCAPNG link_type comes from IDB block, read during packet processing
+            (ReaderInner::Ng(reader), 1u32)
         } else {
-            let reader = LegacyPcapReader::new(BUFFER_SIZE, buf_reader).map_err(|e| {
+            let mut reader = LegacyPcapReader::new(BUFFER_SIZE, buf_reader).map_err(|e| {
                 Error::Pcap(PcapError::InvalidFormat {
                     reason: format!("Failed to parse legacy PCAP: {e}"),
                 })
             })?;
-            ReaderInner::Legacy(reader)
+            // Read ahead to get link_type from the legacy PCAP header
+            let link_type = Self::read_legacy_header_link_type(&mut reader)?;
+            (ReaderInner::Legacy(reader), link_type)
         };
 
         Ok(GenericPcapReader {
             inner,
             frame_number: 0,
-            link_type: 1, // Default to Ethernet, will be updated from headers
+            link_type,
         })
+    }
+
+    /// Read the legacy PCAP header to extract link_type.
+    ///
+    /// This consumes the header block but leaves the reader positioned
+    /// at the first packet.
+    fn read_legacy_header_link_type<S: Read>(
+        reader: &mut LegacyPcapReader<S>,
+    ) -> Result<u32, Error> {
+        use pcap_parser::PcapError as PcapParserError;
+
+        loop {
+            match reader.next() {
+                Ok((offset, block)) => match block {
+                    PcapBlockOwned::LegacyHeader(header) => {
+                        let link_type = header.network.0 as u32;
+                        reader.consume(offset);
+                        return Ok(link_type);
+                    }
+                    PcapBlockOwned::Legacy(_) => {
+                        // Shouldn't happen - header should come first
+                        // Don't consume, let normal reading handle it
+                        return Ok(1); // Default to Ethernet
+                    }
+                    _ => {
+                        reader.consume(offset);
+                        continue;
+                    }
+                },
+                Err(PcapParserError::Eof) => {
+                    return Ok(1); // Empty file, default to Ethernet
+                }
+                Err(PcapParserError::Incomplete(_)) => {
+                    reader.refill().map_err(|e| {
+                        Error::Pcap(PcapError::InvalidFormat {
+                            reason: format!("Failed to read PCAP header: {e}"),
+                        })
+                    })?;
+                    continue;
+                }
+                Err(e) => {
+                    return Err(Error::Pcap(PcapError::InvalidFormat {
+                        reason: format!("Failed to parse PCAP header: {e}"),
+                    }));
+                }
+            }
+        }
     }
 
     /// Read the next packet.

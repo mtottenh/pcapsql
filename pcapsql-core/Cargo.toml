@@ -66,6 +66,11 @@ ring.workspace = true
 # HTTP/2 HPACK header compression (RFC 7541)
 hpack.workspace = true
 
+# Netlink protocol parsing
+netlink-packet-core.workspace = true
+netlink-packet-route.workspace = true
+netlink-packet-utils.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
 hex.workspace = true
