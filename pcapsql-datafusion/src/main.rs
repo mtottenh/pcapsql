@@ -514,9 +514,7 @@ fn format_timestamp_us(us: i64) -> String {
     // Calculate year, month, day from days since epoch (1970-01-01)
     let (year, month, day) = days_to_ymd(days_since_epoch);
 
-    format!(
-        "{year:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}.{subsec_us:06}Z"
-    )
+    format!("{year:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}.{subsec_us:06}Z")
 }
 
 /// Convert days since Unix epoch to (year, month, day).
