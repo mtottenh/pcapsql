@@ -24,10 +24,13 @@ mod icmpv6;
 mod ipsec;
 mod ipv4;
 mod ipv6;
+mod linux_sll;
 mod mpls;
+mod netlink;
 mod ntp;
 mod ospf;
 mod quic;
+mod rtnetlink;
 mod ssh;
 mod tcp;
 mod tcp_connections;
@@ -54,10 +57,13 @@ pub use icmpv6::icmpv6_table_schema;
 pub use ipsec::ipsec_table_schema;
 pub use ipv4::ipv4_table_schema;
 pub use ipv6::ipv6_table_schema;
+pub use linux_sll::linux_sll_table_schema;
 pub use mpls::mpls_table_schema;
+pub use netlink::netlink_table_schema;
 pub use ntp::ntp_table_schema;
 pub use ospf::ospf_table_schema;
 pub use quic::quic_table_schema;
+pub use rtnetlink::rtnetlink_table_schema;
 pub use ssh::ssh_table_schema;
 pub use tcp::tcp_table_schema;
 pub use tcp_connections::{build_tcp_connections_batch, tcp_connections_schema};
@@ -101,9 +107,34 @@ fn with_encap_fields(schema: Schema) -> Schema {
 /// Get all protocol table names.
 pub fn all_table_names() -> Vec<&'static str> {
     vec![
-        "frames", "ethernet", "arp", "vlan", "mpls", "ipv4", "ipv6", "tcp", "udp", "icmp",
-        "icmpv6", "gre", "vxlan", "gtp", "ipsec", "bgp", "ospf", "dns", "dhcp", "ntp", "http",
-        "http2", "tls", "ssh", "quic",
+        "frames",
+        "ethernet",
+        "linux_sll",
+        "arp",
+        "vlan",
+        "mpls",
+        "ipv4",
+        "ipv6",
+        "tcp",
+        "udp",
+        "icmp",
+        "icmpv6",
+        "gre",
+        "vxlan",
+        "gtp",
+        "ipsec",
+        "bgp",
+        "ospf",
+        "dns",
+        "dhcp",
+        "ntp",
+        "http",
+        "http2",
+        "tls",
+        "ssh",
+        "quic",
+        "netlink",
+        "rtnetlink",
     ]
 }
 
@@ -117,6 +148,7 @@ pub fn get_table_schema(name: &str) -> Option<Schema> {
         "frames" => Some(frames_table_schema()),
         // All protocol tables include encap fields for tunnel support
         "ethernet" => Some(with_encap_fields(ethernet_table_schema())),
+        "linux_sll" => Some(with_encap_fields(linux_sll_table_schema())),
         "arp" => Some(with_encap_fields(arp_table_schema())),
         "vlan" => Some(with_encap_fields(vlan_table_schema())),
         "mpls" => Some(with_encap_fields(mpls_table_schema())),
@@ -140,6 +172,8 @@ pub fn get_table_schema(name: &str) -> Option<Schema> {
         "tls" => Some(with_encap_fields(tls_table_schema())),
         "ssh" => Some(with_encap_fields(ssh_table_schema())),
         "quic" => Some(with_encap_fields(quic_table_schema())),
+        "netlink" => Some(with_encap_fields(netlink_table_schema())),
+        "rtnetlink" => Some(with_encap_fields(rtnetlink_table_schema())),
         _ => None,
     }
 }

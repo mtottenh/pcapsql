@@ -7,8 +7,9 @@ use crate::schema::FieldDescriptor;
 use super::{
     ArpProtocol, BgpProtocol, DhcpProtocol, DnsProtocol, EthernetProtocol, GreProtocol,
     GtpProtocol, IcmpProtocol, Icmpv6Protocol, IpsecProtocol, Ipv4Protocol, Ipv6Protocol,
-    MplsProtocol, NtpProtocol, OspfProtocol, ParseContext, ParseResult, QuicProtocol, SshProtocol,
-    TcpProtocol, TlsProtocol, UdpProtocol, VlanProtocol, VxlanProtocol,
+    LinuxSllProtocol, MplsProtocol, NetlinkProtocol, NtpProtocol, OspfProtocol, ParseContext,
+    ParseResult, QuicProtocol, RtnetlinkProtocol, SshProtocol, TcpProtocol, TlsProtocol,
+    UdpProtocol, VlanProtocol, VxlanProtocol,
 };
 
 /// How a protocol's remaining bytes should be handled.
@@ -118,6 +119,7 @@ pub trait Protocol: Send + Sync {
 #[derive(Debug, Clone, Copy)]
 pub enum BuiltinProtocol {
     Ethernet(EthernetProtocol),
+    LinuxSll(LinuxSllProtocol),
     Arp(ArpProtocol),
     Vlan(VlanProtocol),
     Mpls(MplsProtocol),
@@ -139,6 +141,8 @@ pub enum BuiltinProtocol {
     Tls(TlsProtocol),
     Ssh(SshProtocol),
     Quic(QuicProtocol),
+    Netlink(NetlinkProtocol),
+    Rtnetlink(RtnetlinkProtocol),
 }
 
 /// Macro to delegate Protocol trait methods to inner types.
@@ -146,6 +150,7 @@ macro_rules! delegate_protocol {
     ($self:expr, $method:ident $(, $arg:expr)*) => {
         match $self {
             BuiltinProtocol::Ethernet(p) => p.$method($($arg),*),
+            BuiltinProtocol::LinuxSll(p) => p.$method($($arg),*),
             BuiltinProtocol::Arp(p) => p.$method($($arg),*),
             BuiltinProtocol::Vlan(p) => p.$method($($arg),*),
             BuiltinProtocol::Mpls(p) => p.$method($($arg),*),
@@ -167,6 +172,8 @@ macro_rules! delegate_protocol {
             BuiltinProtocol::Tls(p) => p.$method($($arg),*),
             BuiltinProtocol::Ssh(p) => p.$method($($arg),*),
             BuiltinProtocol::Quic(p) => p.$method($($arg),*),
+            BuiltinProtocol::Netlink(p) => p.$method($($arg),*),
+            BuiltinProtocol::Rtnetlink(p) => p.$method($($arg),*),
         }
     };
 }
@@ -237,6 +244,12 @@ impl Protocol for BuiltinProtocol {
 impl From<EthernetProtocol> for BuiltinProtocol {
     fn from(p: EthernetProtocol) -> Self {
         BuiltinProtocol::Ethernet(p)
+    }
+}
+
+impl From<LinuxSllProtocol> for BuiltinProtocol {
+    fn from(p: LinuxSllProtocol) -> Self {
+        BuiltinProtocol::LinuxSll(p)
     }
 }
 
@@ -363,6 +376,18 @@ impl From<SshProtocol> for BuiltinProtocol {
 impl From<QuicProtocol> for BuiltinProtocol {
     fn from(p: QuicProtocol) -> Self {
         BuiltinProtocol::Quic(p)
+    }
+}
+
+impl From<NetlinkProtocol> for BuiltinProtocol {
+    fn from(p: NetlinkProtocol) -> Self {
+        BuiltinProtocol::Netlink(p)
+    }
+}
+
+impl From<RtnetlinkProtocol> for BuiltinProtocol {
+    fn from(p: RtnetlinkProtocol) -> Self {
+        BuiltinProtocol::Rtnetlink(p)
     }
 }
 
