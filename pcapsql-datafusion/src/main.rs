@@ -305,6 +305,70 @@ async fn run_repl(
                             println!("No cache to reset.");
                         }
                     }
+                    ReplCommand::TimeInfo => {
+                        use arrow::array::{Array, Int64Array, TimestampMicrosecondArray};
+
+                        let query = "SELECT MIN(timestamp) as start_ts, MAX(timestamp) as end_ts, COUNT(*) as packet_count FROM frames";
+                        match engine.query(query).await {
+                            Ok(batches) => {
+                                if let Some(batch) = batches.first() {
+                                    // Extract start timestamp
+                                    let start_ts = batch
+                                        .column(0)
+                                        .as_any()
+                                        .downcast_ref::<TimestampMicrosecondArray>()
+                                        .and_then(|a| {
+                                            if a.is_null(0) {
+                                                None
+                                            } else {
+                                                Some(a.value(0))
+                                            }
+                                        });
+
+                                    // Extract end timestamp
+                                    let end_ts = batch
+                                        .column(1)
+                                        .as_any()
+                                        .downcast_ref::<TimestampMicrosecondArray>()
+                                        .and_then(|a| {
+                                            if a.is_null(0) {
+                                                None
+                                            } else {
+                                                Some(a.value(0))
+                                            }
+                                        });
+
+                                    // Extract packet count
+                                    let packet_count = batch
+                                        .column(2)
+                                        .as_any()
+                                        .downcast_ref::<Int64Array>()
+                                        .map(|a| a.value(0))
+                                        .unwrap_or(0);
+
+                                    match (start_ts, end_ts) {
+                                        (Some(start), Some(end)) => {
+                                            let duration = end - start;
+                                            println!("Capture Time Information:");
+                                            println!("  Start:     {}", format_timestamp_us(start));
+                                            println!("  End:       {}", format_timestamp_us(end));
+                                            println!(
+                                                "  Duration:  {}",
+                                                format_duration_us(duration)
+                                            );
+                                            println!("  Packets:   {packet_count}");
+                                        }
+                                        _ => {
+                                            println!("No packets in capture.");
+                                        }
+                                    }
+                                } else {
+                                    println!("No data available.");
+                                }
+                            }
+                            Err(e) => eprintln!("Error: {e}"),
+                        }
+                    }
                     ReplCommand::Unknown(s) => {
                         eprintln!("Unknown command: {s}");
                         eprintln!("Type .help for available commands");
@@ -368,6 +432,7 @@ fn print_help() {
     println!("  .schema          Show table schemas");
     println!("  .protocols       List registered protocols");
     println!("  .export <file> [query]  Export to file (format inferred from extension)");
+    println!("  .timeinfo        Show capture time information");
     println!("  .stats           Show cache statistics");
     println!("  .stats reset     Reset cache statistics counters");
     println!("  .quit            Exit");
@@ -429,6 +494,60 @@ fn load_keylog(args: &Args) -> Option<Arc<KeyLog>> {
             eprintln!("         TLS decryption will be disabled.");
             None
         }
+    }
+}
+
+/// Format a microsecond Unix timestamp as ISO 8601 UTC.
+fn format_timestamp_us(us: i64) -> String {
+    // Convert to broken-down time components
+    let secs_since_epoch = us / 1_000_000;
+    let subsec_us = us % 1_000_000;
+
+    // Calculate date/time components (simplified UTC calculation)
+    let days_since_epoch = secs_since_epoch / 86400;
+    let time_of_day = secs_since_epoch % 86400;
+
+    let hours = time_of_day / 3600;
+    let minutes = (time_of_day % 3600) / 60;
+    let seconds = time_of_day % 60;
+
+    // Calculate year, month, day from days since epoch (1970-01-01)
+    let (year, month, day) = days_to_ymd(days_since_epoch);
+
+    format!("{year:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}.{subsec_us:06}Z")
+}
+
+/// Convert days since Unix epoch to (year, month, day).
+fn days_to_ymd(days: i64) -> (i64, u32, u32) {
+    // Algorithm from Howard Hinnant's date algorithms
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
+}
+
+/// Format a duration in microseconds as human-readable string.
+fn format_duration_us(us: i64) -> String {
+    let total_secs = us / 1_000_000;
+    let subsec_ms = (us % 1_000_000) / 1000;
+
+    let hours = total_secs / 3600;
+    let mins = (total_secs % 3600) / 60;
+    let secs = total_secs % 60;
+
+    if hours > 0 {
+        format!("{hours}h {mins}m {secs}.{subsec_ms:03}s")
+    } else if mins > 0 {
+        format!("{mins}m {secs}.{subsec_ms:03}s")
+    } else {
+        format!("{secs}.{subsec_ms:03}s")
     }
 }
 

@@ -25,6 +25,8 @@ pub enum ReplCommand {
     Stats,
     /// Reset cache statistics counters
     StatsReset,
+    /// Show capture time information
+    TimeInfo,
     /// Unknown command
     Unknown(String),
     /// Empty input
@@ -60,6 +62,7 @@ impl ReplCommand {
                 ".schema" | ".s" => ReplCommand::Schema,
                 ".protocols" | ".p" => ReplCommand::Protocols,
                 ".quit" | ".exit" | ".q" => ReplCommand::Quit,
+                ".timeinfo" | ".ti" => ReplCommand::TimeInfo,
                 _ => ReplCommand::Unknown(trimmed.to_string()),
             }
         } else if trimmed.eq_ignore_ascii_case("quit") || trimmed.eq_ignore_ascii_case("exit") {
@@ -323,5 +326,13 @@ mod tests {
             ReplCommand::parse(".stats clear"),
             ReplCommand::Unknown(_)
         ));
+    }
+
+    #[test]
+    fn test_parse_timeinfo() {
+        assert_eq!(ReplCommand::parse(".timeinfo"), ReplCommand::TimeInfo);
+        assert_eq!(ReplCommand::parse(".ti"), ReplCommand::TimeInfo);
+        assert_eq!(ReplCommand::parse(".TIMEINFO"), ReplCommand::TimeInfo);
+        assert_eq!(ReplCommand::parse(".TI"), ReplCommand::TimeInfo);
     }
 }
