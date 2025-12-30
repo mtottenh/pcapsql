@@ -83,6 +83,7 @@ mod ipv6;
 mod mac;
 mod protocol;
 mod tcp;
+mod time;
 
 // Re-export address UDFs
 pub use ipv4::{create_ip4_to_string_udf, create_ip4_udf, create_ip_in_cidr_udf};
@@ -97,6 +98,12 @@ pub use tcp::{create_has_tcp_flag_udf, create_tcp_flags_str_udf};
 
 // Re-export utility UDFs
 pub use hex::{create_hex_udf, create_unhex_udf};
+
+// Re-export time UDFs
+pub use time::{
+    create_end_time_udf_eager, create_end_time_udf_lazy, create_relative_time_udf,
+    create_start_time_udf,
+};
 
 // Re-export histogram UDAFs and UDFs
 pub use histogram::{
@@ -180,11 +187,60 @@ pub fn register_histogram_udfs(ctx: &SessionContext) -> Result<(), Error> {
 ///
 /// This is a convenience function that registers all network, protocol, utility,
 /// and histogram UDFs.
+///
+/// Note: Time UDFs are NOT included here because they require capture metadata.
+/// Use `register_time_udfs_eager()` or `register_time_udfs_lazy()` separately.
 pub fn register_all_udfs(ctx: &SessionContext) -> Result<(), Error> {
     register_network_udfs(ctx)?;
     register_protocol_udfs(ctx)?;
     register_utility_udfs(ctx)?;
     register_histogram_udfs(ctx)?;
+    Ok(())
+}
+
+/// Register time UDFs with known timestamps (eager mode).
+///
+/// Used in in-memory mode where all packets have been loaded and
+/// timestamps are already extracted from the frames table.
+///
+/// # Arguments
+///
+/// * `ctx` - DataFusion session context
+/// * `start_us` - Capture start timestamp (microseconds since epoch)
+/// * `end_us` - Capture end timestamp (microseconds since epoch)
+pub fn register_time_udfs_eager(
+    ctx: &SessionContext,
+    start_us: i64,
+    end_us: i64,
+) -> Result<(), Error> {
+    ctx.register_udf(create_start_time_udf(start_us));
+    ctx.register_udf(create_end_time_udf_eager(end_us));
+    ctx.register_udf(create_relative_time_udf(start_us));
+    Ok(())
+}
+
+/// Register time UDFs with lazy end_time evaluation (streaming mode).
+///
+/// Used in streaming mode where we don't want to scan the entire file
+/// upfront. The `end_time()` function will scan the file on first call
+/// and cache the result.
+///
+/// # Arguments
+///
+/// * `ctx` - DataFusion session context
+/// * `start_us` - Capture start timestamp (microseconds since epoch)
+/// * `end_scan_fn` - Closure that scans for the last packet timestamp
+pub fn register_time_udfs_lazy<F>(
+    ctx: &SessionContext,
+    start_us: i64,
+    end_scan_fn: F,
+) -> Result<(), Error>
+where
+    F: Fn() -> i64 + Send + Sync + 'static,
+{
+    ctx.register_udf(create_start_time_udf(start_us));
+    ctx.register_udf(create_end_time_udf_lazy(end_scan_fn));
+    ctx.register_udf(create_relative_time_udf(start_us));
     Ok(())
 }
 
@@ -214,5 +270,21 @@ mod tests {
     fn test_register_all_udfs() {
         let ctx = SessionContext::new();
         register_all_udfs(&ctx).unwrap();
+    }
+
+    #[test]
+    fn test_register_time_udfs_eager() {
+        let ctx = SessionContext::new();
+        let start_us: i64 = 1704067200_000_000;
+        let end_us: i64 = 1704153600_000_000;
+        register_time_udfs_eager(&ctx, start_us, end_us).unwrap();
+    }
+
+    #[test]
+    fn test_register_time_udfs_lazy() {
+        let ctx = SessionContext::new();
+        let start_us: i64 = 1704067200_000_000;
+        let end_us: i64 = 1704153600_000_000;
+        register_time_udfs_lazy(&ctx, start_us, move || end_us).unwrap();
     }
 }

@@ -39,10 +39,11 @@ pub use frames::{frames_schema, FramesBatchBuilder};
 pub use provider::PcapTableProvider;
 pub use providers::{ProtocolBatchStream, ProtocolStreamExec, ProtocolTableProvider};
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::RecordBatch;
+use arrow::array::{Array, RecordBatch, TimestampMicrosecondArray};
 use datafusion::config::ConfigOptions;
 use datafusion::prelude::*;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -50,7 +51,8 @@ use indicatif::{ProgressBar, ProgressStyle};
 use crate::error::{Error, QueryError};
 use pcapsql_core::{
     default_registry, parse_packet, CacheStats, FilePacketSource, KeyLog, LruParseCache,
-    MmapPacketSource, NoCache, PacketSource, ParseCache, PcapReader, ProtocolRegistry,
+    MmapPacketSource, NoCache, PacketReader, PacketSource, ParseCache, PcapReader,
+    ProtocolRegistry,
 };
 
 /// File size threshold for automatic streaming mode selection.
@@ -118,6 +120,10 @@ impl QueryEngine {
             )));
         }
 
+        // Extract timestamp range and register time UDFs
+        let (start_us, end_us) = Self::extract_timestamp_range(&protocol_batches)?;
+        udf::register_time_udfs_eager(&ctx, start_us, end_us)?;
+
         // Register all protocol tables
         for (table_name, batches) in &protocol_batches {
             if batches.is_empty() {
@@ -183,6 +189,10 @@ impl QueryEngine {
                 "No packets found in PCAP file".to_string(),
             )));
         }
+
+        // Extract timestamp range and register time UDFs
+        let (start_us, end_us) = Self::extract_timestamp_range(&protocol_batches)?;
+        udf::register_time_udfs_eager(&ctx, start_us, end_us)?;
 
         // Register all protocol tables
         for (table_name, batches) in &protocol_batches {
@@ -308,6 +318,42 @@ impl QueryEngine {
 
         // Register all UDFs (network addresses, protocol names, utilities)
         udf::register_all_udfs(&ctx)?;
+
+        // Get first packet timestamp for start_time() and relative_time()
+        let start_us = {
+            let mut reader = source.reader(None)?;
+            let mut first_ts = 0i64;
+            reader.process_packets(1, |packet| {
+                first_ts = packet.timestamp_us;
+                Ok(())
+            })?;
+            first_ts
+        };
+
+        // Create lazy closure for end_time() that scans on demand
+        let source_for_end_scan = source.clone();
+        let end_scan_fn = move || {
+            let mut reader = match source_for_end_scan.reader(None) {
+                Ok(r) => r,
+                Err(_) => return 0i64,
+            };
+            let mut last_ts = 0i64;
+            loop {
+                let count = reader
+                    .process_packets(1000, |packet| {
+                        last_ts = packet.timestamp_us;
+                        Ok(())
+                    })
+                    .unwrap_or(0);
+                if count == 0 {
+                    break;
+                }
+            }
+            last_ts
+        };
+
+        // Register time UDFs with lazy end_time evaluation
+        udf::register_time_udfs_lazy(&ctx, start_us, end_scan_fn)?;
 
         // Convert cache to trait object if present
         let cache_dyn: Option<Arc<dyn ParseCache>> = cache.map(|c| c as Arc<dyn ParseCache>);
@@ -474,6 +520,46 @@ impl QueryEngine {
 
         // Finish and return all batches
         batch_set.finish()
+    }
+
+    /// Extract the timestamp range (min, max) from loaded frame batches.
+    ///
+    /// Returns (start_timestamp_us, end_timestamp_us) for the capture.
+    fn extract_timestamp_range(
+        batches: &HashMap<String, Vec<RecordBatch>>,
+    ) -> Result<(i64, i64), Error> {
+        let frames = batches.get("frames").ok_or_else(|| {
+            Error::Query(QueryError::Execution(
+                "No frames table for timestamp extraction".to_string(),
+            ))
+        })?;
+
+        let mut min_ts = i64::MAX;
+        let mut max_ts = i64::MIN;
+
+        for batch in frames {
+            if let Some(ts_col) = batch.column_by_name("timestamp") {
+                let ts_array = ts_col
+                    .as_any()
+                    .downcast_ref::<TimestampMicrosecondArray>()
+                    .expect("timestamp column should be TimestampMicrosecondArray");
+
+                for i in 0..ts_array.len() {
+                    if !ts_array.is_null(i) {
+                        let ts = ts_array.value(i);
+                        min_ts = min_ts.min(ts);
+                        max_ts = max_ts.max(ts);
+                    }
+                }
+            }
+        }
+
+        // Handle empty capture
+        if min_ts == i64::MAX {
+            Ok((0, 0))
+        } else {
+            Ok((min_ts, max_ts))
+        }
     }
 
     /// Execute a SQL query and return results.
