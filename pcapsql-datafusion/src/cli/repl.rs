@@ -27,6 +27,8 @@ pub enum ReplCommand {
     StatsReset,
     /// Show capture time information
     TimeInfo,
+    /// Hex dump of a packet frame
+    Hexdump(u64),
     /// Unknown command
     Unknown(String),
     /// Empty input
@@ -54,6 +56,11 @@ impl ReplCommand {
             // Handle .stats specially since it has an optional "reset" argument
             if lower.starts_with(".stats") {
                 return Self::parse_stats(trimmed);
+            }
+
+            // Handle .hexdump specially since it requires a frame number argument
+            if lower.starts_with(".hexdump") {
+                return Self::parse_hexdump(trimmed);
             }
 
             match lower.as_str() {
@@ -118,6 +125,25 @@ impl ReplCommand {
             ReplCommand::Unknown(format!(
                 "Unknown stats subcommand: '{rest}'. Use '.stats' or '.stats reset'"
             ))
+        }
+    }
+
+    /// Parse .hexdump command with required frame number argument.
+    fn parse_hexdump(input: &str) -> Self {
+        // Format: .hexdump <frame_number>
+        let rest = input
+            .strip_prefix(".hexdump")
+            .or_else(|| input.strip_prefix(".HEXDUMP"))
+            .unwrap_or(input)
+            .trim();
+
+        if rest.is_empty() {
+            ReplCommand::Unknown(".hexdump requires a frame number".to_string())
+        } else {
+            match rest.parse::<u64>() {
+                Ok(frame_num) => ReplCommand::Hexdump(frame_num),
+                Err(_) => ReplCommand::Unknown(format!("Invalid frame number: {rest}")),
+            }
         }
     }
 
@@ -334,5 +360,31 @@ mod tests {
         assert_eq!(ReplCommand::parse(".ti"), ReplCommand::TimeInfo);
         assert_eq!(ReplCommand::parse(".TIMEINFO"), ReplCommand::TimeInfo);
         assert_eq!(ReplCommand::parse(".TI"), ReplCommand::TimeInfo);
+    }
+
+    #[test]
+    fn test_parse_hexdump() {
+        assert_eq!(ReplCommand::parse(".hexdump 42"), ReplCommand::Hexdump(42));
+        assert_eq!(ReplCommand::parse(".hexdump 1"), ReplCommand::Hexdump(1));
+        assert_eq!(
+            ReplCommand::parse(".HEXDUMP 100"),
+            ReplCommand::Hexdump(100)
+        );
+    }
+
+    #[test]
+    fn test_parse_hexdump_invalid() {
+        assert!(matches!(
+            ReplCommand::parse(".hexdump"),
+            ReplCommand::Unknown(_)
+        ));
+        assert!(matches!(
+            ReplCommand::parse(".hexdump abc"),
+            ReplCommand::Unknown(_)
+        ));
+        assert!(matches!(
+            ReplCommand::parse(".hexdump -1"),
+            ReplCommand::Unknown(_)
+        ));
     }
 }

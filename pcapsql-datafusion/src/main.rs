@@ -369,6 +369,41 @@ async fn run_repl(
                             Err(e) => eprintln!("Error: {e}"),
                         }
                     }
+                    ReplCommand::Hexdump(frame_num) => {
+                        use arrow::array::{Array, BinaryArray};
+
+                        let query =
+                            format!("SELECT raw_data FROM frames WHERE frame_number = {frame_num}");
+                        match engine.query(&query).await {
+                            Ok(batches) => {
+                                let has_data =
+                                    batches.first().map(|b| b.num_rows() > 0).unwrap_or(false);
+
+                                if !has_data {
+                                    println!("Frame {frame_num} not found.");
+                                } else if let Some(batch) = batches.first() {
+                                    let raw_data = batch
+                                        .column(0)
+                                        .as_any()
+                                        .downcast_ref::<BinaryArray>()
+                                        .and_then(|a| {
+                                            if a.is_null(0) {
+                                                None
+                                            } else {
+                                                Some(a.value(0))
+                                            }
+                                        });
+
+                                    if let Some(data) = raw_data {
+                                        print!("{}", format_hexdump(frame_num, data));
+                                    } else {
+                                        println!("Frame {frame_num} has no data.");
+                                    }
+                                }
+                            }
+                            Err(e) => eprintln!("Error: {e}"),
+                        }
+                    }
                     ReplCommand::Unknown(s) => {
                         eprintln!("Unknown command: {s}");
                         eprintln!("Type .help for available commands");
@@ -433,6 +468,7 @@ fn print_help() {
     println!("  .protocols       List registered protocols");
     println!("  .export <file> [query]  Export to file (format inferred from extension)");
     println!("  .timeinfo        Show capture time information");
+    println!("  .hexdump <frame> Hex dump of packet data");
     println!("  .stats           Show cache statistics");
     println!("  .stats reset     Reset cache statistics counters");
     println!("  .quit            Exit");
@@ -569,4 +605,52 @@ fn print_tls_status(keylog: &Option<Arc<KeyLog>>) {
         }
     }
     eprintln!();
+}
+
+/// Format bytes as a standard hexdump (16 bytes per line, hex + ASCII).
+fn format_hexdump(frame_number: u64, data: &[u8]) -> String {
+    let mut output = String::new();
+    output.push_str(&format!("Frame {} ({} bytes):\n", frame_number, data.len()));
+
+    for (chunk_idx, chunk) in data.chunks(16).enumerate() {
+        let offset = chunk_idx * 16;
+
+        // Offset
+        output.push_str(&format!("{offset:08x}  "));
+
+        // Hex bytes (space after 8 bytes)
+        for (i, byte) in chunk.iter().enumerate() {
+            if i == 8 {
+                output.push(' ');
+            }
+            output.push_str(&format!("{byte:02x} "));
+        }
+
+        // Padding for incomplete last line
+        if chunk.len() < 16 {
+            for _ in 0..(16 - chunk.len()) {
+                output.push_str("   ");
+            }
+            if chunk.len() <= 8 {
+                output.push(' ');
+            }
+        }
+
+        // ASCII representation
+        output.push_str(" |");
+        for byte in chunk {
+            if *byte >= 32 && *byte < 127 {
+                output.push(*byte as char);
+            } else {
+                output.push('.');
+            }
+        }
+        // Pad ASCII if incomplete
+        for _ in chunk.len()..16 {
+            output.push(' ');
+        }
+        output.push_str("|\n");
+    }
+
+    output
 }
