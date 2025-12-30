@@ -1,0 +1,59 @@
+name: Publish to crates.io
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (verify without publishing)'
+        required: true
+        default: true
+        type: boolean
+
+jobs:
+  publish:
+    name: Publish crates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-action@stable
+
+      - name: Verify workspace builds
+        run: cargo build --workspace
+
+      - name: Run tests
+        run: cargo test --workspace
+
+      - name: Dry run - pcapsql-core
+        if: ${{ inputs.dry_run }}
+        run: cargo publish --dry-run -p pcapsql-core
+
+      - name: Dry run - pcapsql-datafusion
+        if: ${{ inputs.dry_run }}
+        run: cargo publish --dry-run -p pcapsql-datafusion
+
+      - name: Publish pcapsql-core
+        if: ${{ !inputs.dry_run }}
+        run: cargo publish -p pcapsql-core --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Wait for crates.io indexing
+        if: ${{ !inputs.dry_run }}
+        run: |
+          echo "Waiting 90 seconds for crates.io to index pcapsql-core..."
+          sleep 90
+
+      - name: Publish pcapsql-datafusion
+        if: ${{ !inputs.dry_run }}
+        run: cargo publish -p pcapsql-datafusion --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Summary
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "## Dry Run Complete" >> $GITHUB_STEP_SUMMARY
+            echo "Both crates passed validation. Ready to publish!" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "## Published to crates.io" >> $GITHUB_STEP_SUMMARY
+            echo "- [pcapsql-core](https://crates.io/crates/pcapsql-core)" >> $GITHUB_STEP_SUMMARY
+            echo "- [pcapsql-datafusion](https://crates.io/crates/pcapsql-datafusion)" >> $GITHUB_STEP_SUMMARY
+          fi

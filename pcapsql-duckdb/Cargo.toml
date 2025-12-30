@@ -5,6 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 description = "DuckDB extension for PCAP analysis using pcapsql"
+publish = false
 
 [lib]
 crate-type = ["cdylib"]

@@ -4,7 +4,10 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 description = "Engine-agnostic PCAP protocol parsing library"
+readme = "README.md"
 keywords = ["pcap", "network", "protocol", "parser"]
 categories = ["network-programming", "parsing"]
 
