@@ -289,7 +289,7 @@ async fn run_repl(
                     ReplCommand::Tables => print_tables(),
                     ReplCommand::Schema => show_schema(),
                     ReplCommand::Protocols => list_protocols(),
-                    ReplCommand::Stats => {
+                    ReplCommand::CacheStats => {
                         if let Some(stats) = engine.cache_stats() {
                             println!("{}", stats.format_summary());
                         } else {
@@ -297,7 +297,7 @@ async fn run_repl(
                             println!("Cache is only used in streaming mode with --cache-size > 0");
                         }
                     }
-                    ReplCommand::StatsReset => {
+                    ReplCommand::CacheStatsReset => {
                         if let Some(cache) = engine.cache() {
                             cache.reset_stats();
                             println!("Cache statistics reset.");
@@ -469,8 +469,8 @@ fn print_help() {
     println!("  .export <file> [query]  Export to file (format inferred from extension)");
     println!("  .timeinfo        Show capture time information");
     println!("  .hexdump <frame> Hex dump of packet data");
-    println!("  .stats           Show cache statistics");
-    println!("  .stats reset     Reset cache statistics counters");
+    println!("  .cachestats      Show cache statistics (alias: .cs)");
+    println!("  .cachestats reset Reset cache statistics counters");
     println!("  .quit            Exit");
     println!();
     println!("Export formats: .parquet, .json/.jsonl, .csv");

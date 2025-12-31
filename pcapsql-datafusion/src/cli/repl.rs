@@ -22,9 +22,9 @@ pub enum ReplCommand {
     /// First String is filename, second is optional SQL query
     Export(String, Option<String>),
     /// Show cache statistics
-    Stats,
+    CacheStats,
     /// Reset cache statistics counters
-    StatsReset,
+    CacheStatsReset,
     /// Show capture time information
     TimeInfo,
     /// Hex dump of a packet frame
@@ -53,9 +53,9 @@ impl ReplCommand {
                 return Self::parse_export(trimmed);
             }
 
-            // Handle .stats specially since it has an optional "reset" argument
-            if lower.starts_with(".stats") {
-                return Self::parse_stats(trimmed);
+            // Handle .cachestats specially since it has an optional "reset" argument
+            if lower.starts_with(".cachestats") || lower.starts_with(".cs") {
+                return Self::parse_cachestats(trimmed);
             }
 
             // Handle .hexdump specially since it requires a frame number argument
@@ -106,24 +106,26 @@ impl ReplCommand {
         }
     }
 
-    /// Parse .stats command with optional "reset" argument.
-    fn parse_stats(input: &str) -> Self {
-        // Format: .stats [reset]
+    /// Parse .cachestats command with optional "reset" argument.
+    fn parse_cachestats(input: &str) -> Self {
+        // Format: .cachestats [reset] or .cs [reset]
         // Strip prefix case-insensitively
         let lower = input.to_lowercase();
-        let rest = if lower.starts_with(".stats") {
-            input[".stats".len()..].trim()
+        let rest = if lower.starts_with(".cachestats") {
+            input[".cachestats".len()..].trim()
+        } else if lower.starts_with(".cs") {
+            input[".cs".len()..].trim()
         } else {
             ""
         };
 
         if rest.is_empty() {
-            ReplCommand::Stats
+            ReplCommand::CacheStats
         } else if rest.eq_ignore_ascii_case("reset") {
-            ReplCommand::StatsReset
+            ReplCommand::CacheStatsReset
         } else {
             ReplCommand::Unknown(format!(
-                "Unknown stats subcommand: '{rest}'. Use '.stats' or '.stats reset'"
+                "Unknown cachestats subcommand: '{rest}'. Use '.cachestats' or '.cachestats reset'"
             ))
         }
     }
@@ -329,27 +331,42 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_stats() {
-        assert_eq!(ReplCommand::parse(".stats"), ReplCommand::Stats);
-        assert_eq!(ReplCommand::parse(".Stats"), ReplCommand::Stats);
-        assert_eq!(ReplCommand::parse(".STATS"), ReplCommand::Stats);
+    fn test_parse_cachestats() {
+        assert_eq!(ReplCommand::parse(".cachestats"), ReplCommand::CacheStats);
+        assert_eq!(ReplCommand::parse(".Cachestats"), ReplCommand::CacheStats);
+        assert_eq!(ReplCommand::parse(".CACHESTATS"), ReplCommand::CacheStats);
+        assert_eq!(ReplCommand::parse(".cs"), ReplCommand::CacheStats);
+        assert_eq!(ReplCommand::parse(".CS"), ReplCommand::CacheStats);
     }
 
     #[test]
-    fn test_parse_stats_reset() {
-        assert_eq!(ReplCommand::parse(".stats reset"), ReplCommand::StatsReset);
-        assert_eq!(ReplCommand::parse(".stats RESET"), ReplCommand::StatsReset);
-        assert_eq!(ReplCommand::parse(".Stats Reset"), ReplCommand::StatsReset);
+    fn test_parse_cachestats_reset() {
+        assert_eq!(
+            ReplCommand::parse(".cachestats reset"),
+            ReplCommand::CacheStatsReset
+        );
+        assert_eq!(
+            ReplCommand::parse(".cachestats RESET"),
+            ReplCommand::CacheStatsReset
+        );
+        assert_eq!(
+            ReplCommand::parse(".cs reset"),
+            ReplCommand::CacheStatsReset
+        );
+        assert_eq!(
+            ReplCommand::parse(".CS Reset"),
+            ReplCommand::CacheStatsReset
+        );
     }
 
     #[test]
-    fn test_parse_stats_unknown_subcommand() {
+    fn test_parse_cachestats_unknown_subcommand() {
         assert!(matches!(
-            ReplCommand::parse(".stats foo"),
+            ReplCommand::parse(".cachestats foo"),
             ReplCommand::Unknown(_)
         ));
         assert!(matches!(
-            ReplCommand::parse(".stats clear"),
+            ReplCommand::parse(".cs clear"),
             ReplCommand::Unknown(_)
         ));
     }
