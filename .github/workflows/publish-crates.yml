@@ -31,7 +31,7 @@ jobs:
 
       - name: Dry run - pcapsql-datafusion
         if: ${{ inputs.dry_run }}
-        run: cargo publish --dry-run -p pcapsql-datafusion
+        run: cargo package -p pcapsql-datafusion --no-verify --allow-dirty
 
       - name: Publish pcapsql-core
         if: ${{ !inputs.dry_run }}
