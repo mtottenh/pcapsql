@@ -14,10 +14,10 @@ Download the latest release for your distribution from [GitHub Releases](https:/
 
 | Distribution | Version | Package |
 |:-------------|:--------|:--------|
-| ![Ubuntu](https://img.shields.io/badge/Ubuntu-E95420?logo=ubuntu&logoColor=white) | 20.04, 22.04, 24.04 | `.deb` |
+| ![Ubuntu](https://img.shields.io/badge/Ubuntu-E95420?logo=ubuntu&logoColor=white) | 20.04, 22.04, 24.04, 24.10, 25.04, 25.10 | `.deb` |
 | ![Debian](https://img.shields.io/badge/Debian-A81D33?logo=debian&logoColor=white) | 11, 12, 13 | `.deb` |
-| ![Fedora](https://img.shields.io/badge/Fedora-51A2DA?logo=fedora&logoColor=white) | 39, 40 | `.rpm` |
-| ![Rocky Linux](https://img.shields.io/badge/Rocky_Linux-10B981?logo=rockylinux&logoColor=white) | 9 | `.rpm` |
+| ![Fedora](https://img.shields.io/badge/Fedora-51A2DA?logo=fedora&logoColor=white) | 39, 40, 41, 42, 43 | `.rpm` |
+| ![Rocky Linux](https://img.shields.io/badge/Rocky_Linux-10B981?logo=rockylinux&logoColor=white) | 9, 10 | `.rpm` |
 | ![Arch Linux](https://img.shields.io/badge/Arch_Linux-1793D1?logo=archlinux&logoColor=white) | Rolling | [AUR](https://aur.archlinux.org/packages/pcapsql) |
 
 ```bash

@@ -22,6 +22,15 @@ jobs:
           - distro: ubuntu
             version: "24.04"
             container: ubuntu:24.04
+          - distro: ubuntu
+            version: "24.10"
+            container: ubuntu:24.10
+          - distro: ubuntu
+            version: "25.04"
+            container: ubuntu:25.04
+          - distro: ubuntu
+            version: "25.10"
+            container: ubuntu:25.10
           - distro: debian
             version: "11"
             container: debian:11
@@ -68,9 +77,21 @@ jobs:
           - distro: fedora
             version: "40"
             container: fedora:40
+          - distro: fedora
+            version: "41"
+            container: fedora:41
+          - distro: fedora
+            version: "42"
+            container: fedora:42
+          - distro: fedora
+            version: "43"
+            container: fedora:43
           - distro: el
             version: "9"
             container: rockylinux:9
+          - distro: el
+            version: "10"
+            container: rockylinux:10
     runs-on: ubuntu-latest
     container: ${{ matrix.container }}
     steps:
