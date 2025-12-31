@@ -87,6 +87,18 @@ pub struct Args {
     #[arg(short = 'f', long = "file", value_name = "QUERY_FILE")]
     pub query_file: Option<PathBuf>,
 
+    /// BPF filter expression (tcpdump-style syntax).
+    ///
+    /// The filter is translated to SQL and added to the query's WHERE clause.
+    /// Supports: tcp, udp, icmp, host, port, net, and boolean operators.
+    ///
+    /// Examples:
+    ///   --filter "tcp port 80"
+    ///   --filter "host 192.168.1.1 and not port 22"
+    ///   --filter "net 10.0.0.0/8 or net 172.16.0.0/12"
+    #[arg(long = "filter", value_name = "FILTER")]
+    pub filter: Option<String>,
+
     /// Output format for stdout
     #[arg(long = "format", value_enum, default_value = "table")]
     pub format: OutputFormat,
@@ -279,5 +291,40 @@ mod tests {
 
         assert_eq!(args.keylog, Some(PathBuf::from("/path/to/keys.log")));
         assert_eq!(args.verbose, 1);
+    }
+
+    // Test 7: BPF filter argument
+    #[test]
+    fn test_bpf_filter_argument() {
+        let args = Args::try_parse_from([
+            "pcapsql",
+            "test.pcap",
+            "--filter",
+            "tcp port 80",
+            "-e",
+            "SELECT * FROM tcp",
+        ])
+        .unwrap();
+
+        assert_eq!(args.filter, Some("tcp port 80".to_string()));
+    }
+
+    // Test 8: BPF filter with complex expression
+    #[test]
+    fn test_bpf_filter_complex() {
+        let args = Args::try_parse_from([
+            "pcapsql",
+            "test.pcap",
+            "--filter",
+            "host 192.168.1.1 and not port 22",
+            "-e",
+            "SELECT * FROM packets",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            args.filter,
+            Some("host 192.168.1.1 and not port 22".to_string())
+        );
     }
 }

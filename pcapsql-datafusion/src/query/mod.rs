@@ -21,6 +21,7 @@
 //! See the `tables`, `views`, and `providers` submodules for details.
 
 pub mod arrow_schema;
+pub mod bpf;
 pub mod builders;
 mod filter;
 mod frames;

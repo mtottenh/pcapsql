@@ -63,6 +63,9 @@ hdrhistogram.workspace = true
 # SQLite database support
 rusqlite.workspace = true
 
+# BPF filter parsing
+nom.workspace = true
+
 [dev-dependencies]
 criterion.workspace = true
 tempfile.workspace = true
