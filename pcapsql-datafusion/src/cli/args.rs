@@ -47,6 +47,8 @@ pub enum ExportFormat {
     Json,
     /// Comma-separated values
     Csv,
+    /// SQLite database
+    Sqlite,
 }
 
 impl ExportFormat {
@@ -62,6 +64,7 @@ impl ExportFormat {
                 "parquet" | "pq" => Some(ExportFormat::Parquet),
                 "json" | "jsonl" | "ndjson" => Some(ExportFormat::Json),
                 "csv" => Some(ExportFormat::Csv),
+                "sqlite" | "db" | "sqlite3" => Some(ExportFormat::Sqlite),
                 _ => None,
             })
     }

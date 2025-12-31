@@ -784,7 +784,7 @@ fn print_help() {
     println!("  .cachestats reset Reset cache statistics counters");
     println!("  .quit            Exit");
     println!();
-    println!("Export formats: .parquet, .json/.jsonl, .csv");
+    println!("Export formats: .parquet, .json/.jsonl, .csv, .sqlite/.db");
     println!("SQL queries end with a semicolon (;)");
 }
 
