@@ -1,0 +1,40 @@
+[package]
+name = "pcapsql-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.pcapsql-core]
+path = "../pcapsql-core"
+
+# Uncomment when adding BPF parser fuzz target
+# [dependencies.pcapsql-datafusion]
+# path = "../pcapsql-datafusion"
+
+# P0: Core Infrastructure Fuzz Targets
+[[bin]]
+name = "fuzz_pcap_reader"
+path = "fuzz_targets/fuzz_pcap_reader.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_protocol_chain"
+path = "fuzz_targets/fuzz_protocol_chain.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_compression"
+path = "fuzz_targets/fuzz_compression.rs"
+test = false
+doc = false
+bench = false

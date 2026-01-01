@@ -1,0 +1,15 @@
+# Build artifacts
+target/
+
+# Crash artifacts
+artifacts/
+
+# Coverage data
+coverage/
+
+# Cargo lock (we use workspace lock)
+Cargo.lock
+
+# Note: corpus/ is NOT ignored - we want to keep seed corpus in git
+# The fuzzer will add more files during runs, which can be periodically
+# merged and committed to improve the seed corpus.
