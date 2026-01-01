@@ -17,6 +17,7 @@ fn test_pcap_path(name: &str) -> PathBuf {
 }
 
 /// Helper to count result rows
+#[allow(dead_code)]
 async fn count_query_results(engine: &QueryEngine, query: &str) -> Option<i64> {
     let batches = engine.query(query).await.ok()?;
     let mut total = 0i64;
@@ -480,8 +481,7 @@ fn test_stats_cli_output() {
     // Should contain cache stats header
     assert!(
         stderr.contains("Cache Statistics") || stderr.contains("not available"),
-        "Expected cache stats in stderr: {}",
-        stderr
+        "Expected cache stats in stderr: {stderr}"
     );
 }
 
@@ -513,8 +513,7 @@ fn test_stats_flag_shows_summary() {
     // Should contain cache stats components
     assert!(
         stderr.contains("Hits:") || stderr.contains("Cache Statistics"),
-        "Expected cache stats in stderr: {}",
-        stderr
+        "Expected cache stats in stderr: {stderr}"
     );
 }
 
@@ -752,11 +751,7 @@ async fn test_cache_stats_schema_complete() {
     ];
 
     for col in &expected_columns {
-        assert!(
-            schema.field_with_name(col).is_ok(),
-            "Missing column: {}",
-            col
-        );
+        assert!(schema.field_with_name(col).is_ok(), "Missing column: {col}");
     }
 
     assert_eq!(schema.fields().len(), 12);

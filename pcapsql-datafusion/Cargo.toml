@@ -60,6 +60,9 @@ bytes.workspace = true
 # HdrHistogram for latency analysis
 hdrhistogram.workspace = true
 
+# SQLite database support
+rusqlite.workspace = true
+
 [dev-dependencies]
 criterion.workspace = true
 tempfile.workspace = true

@@ -11,6 +11,7 @@ use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 
+use super::sqlite::SqliteExporter;
 use super::ExportFormat;
 
 /// Exports query results to various file formats.
@@ -34,6 +35,9 @@ impl Exporter {
             ExportFormat::Parquet => Self::export_parquet(path.as_ref(), schema, batches)?,
             ExportFormat::Json => Self::export_json(path.as_ref(), batches)?,
             ExportFormat::Csv => Self::export_csv(path.as_ref(), batches)?,
+            ExportFormat::Sqlite => {
+                return SqliteExporter::export(path.as_ref(), batches, "data");
+            }
         }
 
         Ok(total_rows)
@@ -234,6 +238,25 @@ mod tests {
     }
 
     #[test]
+    fn test_export_sqlite() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.sqlite");
+
+        let batch = create_test_batch();
+        let result = Exporter::export(&path, ExportFormat::Sqlite, &[batch]);
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 3);
+
+        // Verify database was created and contains data
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM data", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 3);
+    }
+
+    #[test]
     fn test_export_format_from_extension() {
         assert_eq!(
             ExportFormat::from_extension(&std::path::PathBuf::from("test.parquet")),
@@ -254,6 +277,18 @@ mod tests {
         assert_eq!(
             ExportFormat::from_extension(&std::path::PathBuf::from("test.csv")),
             Some(ExportFormat::Csv)
+        );
+        assert_eq!(
+            ExportFormat::from_extension(&std::path::PathBuf::from("test.sqlite")),
+            Some(ExportFormat::Sqlite)
+        );
+        assert_eq!(
+            ExportFormat::from_extension(&std::path::PathBuf::from("test.db")),
+            Some(ExportFormat::Sqlite)
+        );
+        assert_eq!(
+            ExportFormat::from_extension(&std::path::PathBuf::from("test.sqlite3")),
+            Some(ExportFormat::Sqlite)
         );
         assert_eq!(
             ExportFormat::from_extension(&std::path::PathBuf::from("test.txt")),

@@ -41,7 +41,7 @@ macro_rules! skip_if_missing {
 
 /// Create QueryEngine for test PCAP
 async fn create_engine(pcap_name: &str) -> Option<QueryEngine> {
-    let pcap_path = format!("{}/{}", TLS_TEST_DIR, pcap_name);
+    let pcap_path = format!("{TLS_TEST_DIR}/{pcap_name}");
     if !Path::new(&pcap_path).exists() {
         return None;
     }

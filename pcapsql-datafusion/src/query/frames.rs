@@ -226,14 +226,14 @@ mod tests {
     fn test_frames_multiple_packets() {
         let mut builder = FramesBatchBuilder::new(100);
 
-        let packets = vec![
-            vec![0x01, 0x02, 0x03],
-            vec![0x04, 0x05, 0x06, 0x07],
-            vec![0x08, 0x09],
+        let packets: [&[u8]; 3] = [
+            &[0x01, 0x02, 0x03],
+            &[0x04, 0x05, 0x06, 0x07],
+            &[0x08, 0x09],
         ];
 
         for (i, data) in packets.iter().enumerate() {
-            let raw = create_test_raw_packet((i + 1) as u64, data.clone());
+            let raw = create_test_raw_packet((i + 1) as u64, data.to_vec());
             builder.add_packet(&raw);
         }
 

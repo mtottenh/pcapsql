@@ -275,16 +275,16 @@ mod tests {
     #[test]
     fn test_register_time_udfs_eager() {
         let ctx = SessionContext::new();
-        let start_us: i64 = 1704067200_000_000;
-        let end_us: i64 = 1704153600_000_000;
+        let start_us: i64 = 1_704_067_200_000_000;
+        let end_us: i64 = 1_704_153_600_000_000;
         register_time_udfs_eager(&ctx, start_us, end_us).unwrap();
     }
 
     #[test]
     fn test_register_time_udfs_lazy() {
         let ctx = SessionContext::new();
-        let start_us: i64 = 1704067200_000_000;
-        let end_us: i64 = 1704153600_000_000;
+        let start_us: i64 = 1_704_067_200_000_000;
+        let end_us: i64 = 1_704_153_600_000_000;
         register_time_udfs_lazy(&ctx, start_us, move || end_us).unwrap();
     }
 }
