@@ -25,6 +25,13 @@ compress-bzip2 = ["dep:bzip2"]
 compress-xz = ["dep:xz2"]
 compress-all = ["compress-gzip", "compress-zstd", "compress-lz4", "compress-bzip2", "compress-xz"]
 
+# Cloud storage support
+cloud = ["dep:object_store", "dep:url", "dep:tokio"]
+s3 = ["cloud", "object_store/aws"]
+gcs = ["cloud", "object_store/gcp"]
+azure = ["cloud", "object_store/azure"]
+cloud-all = ["s3", "gcs", "azure"]
+
 [dependencies]
 # Parsing
 etherparse.workspace = true
@@ -42,6 +49,11 @@ xz2 = { workspace = true, optional = true }
 
 # Memory-mapped I/O (optional)
 memmap2 = { workspace = true, optional = true }
+
+# Cloud storage (optional)
+object_store = { workspace = true, optional = true }
+url = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
 
 # Error handling
 thiserror.workspace = true

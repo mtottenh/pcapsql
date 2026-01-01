@@ -1,0 +1,114 @@
+name: Cloud Integration Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      debug:
+        description: 'Enable debug logging'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+
+    services:
+      localstack:
+        image: localstack/localstack:latest
+        ports:
+          - 4566:4566
+        env:
+          SERVICES: s3
+          DEFAULT_REGION: us-east-1
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-cloud-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install AWS CLI
+        run: |
+          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+          unzip -q awscliv2.zip
+          sudo ./aws/install --update
+          aws --version
+
+      - name: Install compression tools
+        run: sudo apt-get update && sudo apt-get install -y zstd lz4
+
+      - name: Wait for LocalStack
+        run: |
+          echo "Waiting for LocalStack to be ready..."
+          for i in {1..30}; do
+            if curl -s http://localhost:4566/_localstack/health | grep -q '"s3": *"available"'; then
+              echo "LocalStack is ready!"
+              break
+            fi
+            echo "Waiting... ($i/30)"
+            sleep 2
+          done
+
+      - name: Generate and upload test data
+        env:
+          AWS_ACCESS_KEY_ID: test
+          AWS_SECRET_ACCESS_KEY: test
+          AWS_DEFAULT_REGION: us-east-1
+        run: |
+          # Generate all test PCAP files using uvx
+          echo "Generating test PCAP files..."
+          uvx --with scapy python testdata/scripts/gen_format_tests.py --output-dir /tmp/generated
+
+          # Create test bucket
+          aws --endpoint-url=http://localhost:4566 s3 mb s3://test-pcaps
+
+          # Upload all generated PCAP files
+          echo "Uploading generated files..."
+          for f in /tmp/generated/*.pcap /tmp/generated/*.pcapng; do
+            if [ -f "$f" ]; then
+              aws --endpoint-url=http://localhost:4566 s3 cp "$f" "s3://test-pcaps/$(basename $f)"
+            fi
+          done
+
+          # Create compressed versions
+          echo "Creating compressed versions..."
+          gzip -c /tmp/generated/small_dns.pcap > /tmp/generated/small_dns.pcap.gz
+          zstd -q -c /tmp/generated/small_dns.pcap > /tmp/generated/small_dns.pcap.zst
+          lz4 -q -c /tmp/generated/small_dns.pcap > /tmp/generated/small_dns.pcap.lz4
+
+          # Upload compressed versions
+          aws --endpoint-url=http://localhost:4566 s3 cp /tmp/generated/small_dns.pcap.gz s3://test-pcaps/
+          aws --endpoint-url=http://localhost:4566 s3 cp /tmp/generated/small_dns.pcap.zst s3://test-pcaps/
+          aws --endpoint-url=http://localhost:4566 s3 cp /tmp/generated/small_dns.pcap.lz4 s3://test-pcaps/
+
+          # List uploaded files
+          echo "Uploaded files:"
+          aws --endpoint-url=http://localhost:4566 s3 ls s3://test-pcaps/
+
+      - name: Build with S3 and compression features
+        run: cargo build --features s3,compress-zstd,compress-lz4
+
+      - name: Run cloud integration tests
+        env:
+          RUST_BACKTRACE: ${{ inputs.debug && '1' || '0' }}
+        run: |
+          cargo test -p pcapsql-datafusion --features s3,compress-zstd,compress-lz4 \
+            --test cloud_integration -- --ignored --nocapture

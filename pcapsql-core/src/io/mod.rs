@@ -14,6 +14,7 @@
 //!
 //! - [`FilePacketSource`] - Standard buffered file I/O (works with all file types)
 //! - [`MmapPacketSource`] - Memory-mapped I/O for PCAP/PCAPNG files (requires `mmap` feature)
+//! - [`CloudPacketSource`] - Cloud storage I/O for S3, GCS, Azure (requires `cloud` feature)
 //!
 //! ## Compression Support
 //!
@@ -25,19 +26,26 @@
 //! - Bzip2 (.bz2) - `compress-bzip2` feature
 //! - XZ (.xz) - `compress-xz` feature
 
+#[cfg(feature = "cloud")]
+mod cloud;
 mod decompress;
 #[cfg(feature = "mmap")]
 mod mmap;
 mod pcap_stream;
 mod source;
 
+pub use decompress::{decompress_header, Compression, DecompressReader, FileDecoder};
 #[cfg(feature = "mmap")]
 pub use decompress::{AnyDecoder, MmapSlice};
-pub use decompress::{Compression, DecompressReader, FileDecoder};
 #[cfg(feature = "mmap")]
 pub use mmap::{MmapPacketReader, MmapPacketSource};
 pub use pcap_stream::{GenericPcapReader, PcapFormat};
 pub use source::{
     FilePacketReader, FilePacketSource, PacketPosition, PacketRange, PacketReader, PacketRef,
     PacketSource, PacketSourceMetadata, RawPacket,
+};
+
+#[cfg(feature = "cloud")]
+pub use cloud::{
+    is_cloud_url, CloudLocation, CloudPacketReader, CloudPacketSource, ObjectStoreReader,
 };

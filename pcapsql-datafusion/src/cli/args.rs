@@ -201,6 +201,34 @@ pub struct Args {
     /// Use LRU-only cache eviction (disable reader-position-based eviction).
     #[arg(long = "no-reader-eviction")]
     pub no_reader_eviction: bool,
+
+    // --- Cloud Storage Options ---
+    /// Custom cloud storage endpoint (for S3-compatible services like MinIO, R2).
+    ///
+    /// Used when reading from cloud URLs (s3://, gs://, az://).
+    /// For AWS S3, this is usually not needed (auto-detected from region).
+    ///
+    /// Examples:
+    ///   --cloud-endpoint http://localhost:9000  (MinIO)
+    ///   --cloud-endpoint https://s3.us-west-2.amazonaws.com
+    #[cfg_attr(feature = "cloud", arg(long = "cloud-endpoint", value_name = "URL"))]
+    #[cfg(feature = "cloud")]
+    pub cloud_endpoint: Option<String>,
+
+    /// Use anonymous (unsigned) requests for public cloud buckets.
+    ///
+    /// Skips credential lookup for read-only access to public data.
+    #[cfg_attr(feature = "cloud", arg(long = "cloud-anonymous"))]
+    #[cfg(feature = "cloud")]
+    pub cloud_anonymous: bool,
+
+    /// Buffer size for cloud storage reads (default 8MB).
+    ///
+    /// Larger values reduce the number of HTTP requests but increase memory usage.
+    /// Accepts suffixes: K, M, G (e.g., "16M", "32M").
+    #[cfg_attr(feature = "cloud", arg(long = "cloud-chunk-size", default_value = "8M", value_name = "SIZE", value_parser = parse_size_arg))]
+    #[cfg(feature = "cloud")]
+    pub cloud_chunk_size: usize,
 }
 
 /// Value parser for size arguments (e.g., "512M", "1G").
@@ -326,5 +354,41 @@ mod tests {
             args.filter,
             Some("host 192.168.1.1 and not port 22".to_string())
         );
+    }
+
+    // Test 9: Cloud storage arguments (only when cloud feature enabled)
+    #[cfg(feature = "cloud")]
+    #[test]
+    fn test_cloud_arguments() {
+        let args = Args::try_parse_from([
+            "pcapsql",
+            "s3://bucket/capture.pcap",
+            "--cloud-endpoint",
+            "http://localhost:9000",
+            "--cloud-anonymous",
+            "--cloud-chunk-size",
+            "16M",
+            "-e",
+            "SELECT COUNT(*) FROM frames",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            args.cloud_endpoint,
+            Some("http://localhost:9000".to_string())
+        );
+        assert!(args.cloud_anonymous);
+        assert_eq!(args.cloud_chunk_size, 16 * 1024 * 1024);
+    }
+
+    // Test 10: Cloud storage default values
+    #[cfg(feature = "cloud")]
+    #[test]
+    fn test_cloud_defaults() {
+        let args = Args::try_parse_from(["pcapsql", "s3://bucket/test.pcap"]).unwrap();
+
+        assert!(args.cloud_endpoint.is_none());
+        assert!(!args.cloud_anonymous);
+        assert_eq!(args.cloud_chunk_size, 8 * 1024 * 1024); // 8MB default
     }
 }
