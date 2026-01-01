@@ -224,8 +224,7 @@ mod tests {
         for (name, schema) in all_table_schemas() {
             assert!(
                 schema.field_with_name("frame_number").is_ok(),
-                "Table '{}' should have frame_number field",
-                name
+                "Table '{name}' should have frame_number field"
             );
         }
     }

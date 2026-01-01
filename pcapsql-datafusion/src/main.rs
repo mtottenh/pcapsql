@@ -533,11 +533,11 @@ async fn run_repl(
 
                         // Build query - try to detect if column contains IPs
                         let display_col = if column.contains("ip") && !column.contains("ip6") {
-                            format!("ip4_to_string({}) as {}", column, column)
+                            format!("ip4_to_string({column}) as {column}")
                         } else if column.contains("ip6") {
-                            format!("ip6_to_string({}) as {}", column, column)
+                            format!("ip6_to_string({column}) as {column}")
                         } else if column.contains("mac") {
-                            format!("mac_to_string({}) as {}", column, column)
+                            format!("mac_to_string({column}) as {column}")
                         } else {
                             column.clone()
                         };
@@ -548,18 +548,14 @@ async fn run_repl(
 
                         for table in tables {
                             let query = format!(
-                                "SELECT {}, COUNT(*) as count FROM {} WHERE {} IS NOT NULL GROUP BY {} ORDER BY count DESC LIMIT {}",
-                                display_col, table, column, column, limit
+                                "SELECT {display_col}, COUNT(*) as count FROM {table} WHERE {column} IS NOT NULL GROUP BY {column} ORDER BY count DESC LIMIT {limit}"
                             );
 
                             match engine.query(&query).await {
                                 Ok(batches) => {
                                     if batches.first().map(|b| b.num_rows() > 0).unwrap_or(false) {
                                         found = true;
-                                        println!(
-                                            "Top {} {} values (from {}):",
-                                            limit, column, table
-                                        );
+                                        println!("Top {limit} {column} values (from {table}):");
 
                                         for batch in &batches {
                                             let val_col = batch.column(0);
@@ -592,7 +588,7 @@ async fn run_repl(
                         }
 
                         if !found {
-                            eprintln!("Column '{}' not found in any table", column);
+                            eprintln!("Column '{column}' not found in any table");
                         }
                     }
                     ReplCommand::Histogram(column) => {
@@ -604,8 +600,7 @@ async fn run_repl(
 
                         for table in tables {
                             let range_query = format!(
-                                "SELECT MIN(CAST({} AS DOUBLE)) as min_val, MAX(CAST({} AS DOUBLE)) as max_val FROM {} WHERE {} IS NOT NULL",
-                                column, column, table, column
+                                "SELECT MIN(CAST({column} AS DOUBLE)) as min_val, MAX(CAST({column} AS DOUBLE)) as max_val FROM {table} WHERE {column} IS NOT NULL"
                             );
 
                             if let Ok(batches) = engine.query(&range_query).await {
@@ -647,10 +642,9 @@ async fn run_repl(
                                         let bucket_size = (range / 10.0).max(1.0);
 
                                         let hist_query = format!(
-                                            "SELECT FLOOR(CAST({} AS DOUBLE) / {}) * {} as bucket, COUNT(*) as count \
-                                             FROM {} WHERE {} IS NOT NULL \
-                                             GROUP BY bucket ORDER BY bucket",
-                                            column, bucket_size, bucket_size, table, column
+                                            "SELECT FLOOR(CAST({column} AS DOUBLE) / {bucket_size}) * {bucket_size} as bucket, COUNT(*) as count \
+                                             FROM {table} WHERE {column} IS NOT NULL \
+                                             GROUP BY bucket ORDER BY bucket"
                                         );
 
                                         if let Ok(hist_batches) = engine.query(&hist_query).await {
@@ -685,10 +679,7 @@ async fn run_repl(
                                             }
 
                                             if !buckets.is_empty() {
-                                                println!(
-                                                    "{} distribution (from {}):",
-                                                    column, table
-                                                );
+                                                println!("{column} distribution (from {table}):");
                                                 for (bucket, count) in &buckets {
                                                     let end = bucket + bucket_size;
                                                     let bar = render_bar(*count, max_count, 30);
@@ -709,7 +700,7 @@ async fn run_repl(
                         }
 
                         if !found {
-                            eprintln!("Column '{}' not found or not numeric", column);
+                            eprintln!("Column '{column}' not found or not numeric");
                         }
                     }
                     ReplCommand::Unknown(s) => {
@@ -907,7 +898,7 @@ fn format_bytes(bytes: u64) -> String {
     } else if bytes >= 1_000 {
         format!("{:.1} KB", bytes as f64 / 1_000.0)
     } else {
-        format!("{} B", bytes)
+        format!("{bytes} B")
     }
 }
 
@@ -916,7 +907,7 @@ fn format_count(n: u64) -> String {
     let s = n.to_string();
     let mut result = String::new();
     for (i, c) in s.chars().rev().enumerate() {
-        if i > 0 && i % 3 == 0 {
+        if i > 0 && i.is_multiple_of(3) {
             result.push(',');
         }
         result.push(c);
@@ -981,19 +972,15 @@ fn format_arrow_value(array: &dyn arrow::array::Array, index: usize) -> String {
     if let Some(a) = array.as_any().downcast_ref::<BinaryArray>() {
         let bytes = a.value(index);
         if bytes.len() <= 8 {
-            return bytes.iter().map(|b| format!("{:02x}", b)).collect();
+            return bytes.iter().map(|b| format!("{b:02x}")).collect();
         } else {
-            return format!(
-                "{}...",
-                bytes[..8]
-                    .iter()
-                    .map(|b| format!("{:02x}", b))
-                    .collect::<String>()
-            );
+            let prefix: String = bytes[..8].iter().map(|b| format!("{b:02x}")).collect();
+            return format!("{prefix}...");
         }
     }
 
-    format!("{:?}", array.data_type())
+    let dt = array.data_type();
+    format!("{dt:?}")
 }
 
 /// Print TLS decryption status.

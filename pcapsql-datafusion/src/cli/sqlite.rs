@@ -96,8 +96,7 @@ fn format_timestamp_iso8601(timestamp_us: i64) -> String {
 
     // Convert to datetime components
     // Using a simple approach: seconds since Unix epoch
-    let datetime = chrono_like_format(secs, micros);
-    datetime
+    chrono_like_format(secs, micros)
 }
 
 /// Simple timestamp formatting without chrono dependency.
@@ -126,15 +125,9 @@ fn chrono_like_format(secs: i64, micros: u32) -> String {
     let seconds = time_of_day % SECS_PER_MIN;
 
     if micros > 0 {
-        format!(
-            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:06}Z",
-            year, month, day, hours, minutes, seconds, micros
-        )
+        format!("{year:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}.{micros:06}Z")
     } else {
-        format!(
-            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-            year, month, day, hours, minutes, seconds
-        )
+        format!("{year:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}Z")
     }
 }
 
@@ -538,7 +531,7 @@ mod tests {
     fn test_format_timestamp_iso8601() {
         // 2024-01-15 12:40:45.123456 UTC
         // = 1705322445.123456 seconds since epoch
-        let ts = 1705322445_123456i64;
+        let ts = 1_705_322_445_123_456_i64;
         let formatted = format_timestamp_iso8601(ts);
         assert!(formatted.starts_with("2024-01-15T12:40:45"));
         assert!(formatted.contains("123456"));
@@ -547,7 +540,7 @@ mod tests {
     #[test]
     fn test_format_timestamp_no_micros() {
         // Exact second: 2024-01-15 12:40:45 UTC
-        let ts = 1705322445_000000i64;
+        let ts = 1_705_322_445_000_000_i64;
         let formatted = format_timestamp_iso8601(ts);
         assert_eq!(formatted, "2024-01-15T12:40:45Z");
     }

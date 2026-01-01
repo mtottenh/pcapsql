@@ -305,7 +305,7 @@ mod tests {
     #[tokio::test]
     async fn test_start_time_udf() {
         let ctx = SessionContext::new();
-        let start_us: i64 = 1704067200_000_000; // 2024-01-01 00:00:00 UTC
+        let start_us: i64 = 1_704_067_200_000_000; // 2024-01-01 00:00:00 UTC
         ctx.register_udf(create_start_time_udf(start_us));
 
         let result = ctx
@@ -331,7 +331,7 @@ mod tests {
     #[tokio::test]
     async fn test_end_time_udf_eager() {
         let ctx = SessionContext::new();
-        let end_us: i64 = 1704153600_000_000; // 2024-01-02 00:00:00 UTC
+        let end_us: i64 = 1_704_153_600_000_000; // 2024-01-02 00:00:00 UTC
         ctx.register_udf(create_end_time_udf_eager(end_us));
 
         let result = ctx
@@ -355,7 +355,7 @@ mod tests {
     #[tokio::test]
     async fn test_end_time_udf_lazy() {
         let ctx = SessionContext::new();
-        let end_us: i64 = 1704153600_000_000;
+        let end_us: i64 = 1_704_153_600_000_000;
 
         // Lazy version with closure
         let scan_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -391,7 +391,7 @@ mod tests {
     #[tokio::test]
     async fn test_relative_time_udf() {
         let ctx = SessionContext::new();
-        let start_us: i64 = 1704067200_000_000; // 2024-01-01 00:00:00 UTC
+        let start_us: i64 = 1_704_067_200_000_000; // 2024-01-01 00:00:00 UTC
         ctx.register_udf(create_relative_time_udf(start_us));
 
         // Create a test table with timestamps
@@ -440,7 +440,7 @@ mod tests {
     #[tokio::test]
     async fn test_relative_time_filter() {
         let ctx = SessionContext::new();
-        let start_us: i64 = 1704067200_000_000;
+        let start_us: i64 = 1_704_067_200_000_000;
         ctx.register_udf(create_relative_time_udf(start_us));
 
         let timestamps = TimestampMicrosecondArray::from(vec![
