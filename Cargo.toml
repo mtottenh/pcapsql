@@ -5,6 +5,7 @@ members = [
     "pcapsql-datafusion",
     "pcapsql-duckdb",
 ]
+exclude = ["fuzz"]
 
 # Default to building the CLI
 default-members = ["pcapsql-datafusion"]

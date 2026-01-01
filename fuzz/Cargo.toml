@@ -1,0 +1,76 @@
+[package]
+name = "pcapsql-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.pcapsql-core]
+path = "../pcapsql-core"
+
+# Uncomment when adding BPF parser fuzz target
+# [dependencies.pcapsql-datafusion]
+# path = "../pcapsql-datafusion"
+
+# P0: Core Infrastructure Fuzz Targets
+[[bin]]
+name = "fuzz_pcap_reader"
+path = "fuzz_targets/fuzz_pcap_reader.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_protocol_chain"
+path = "fuzz_targets/fuzz_protocol_chain.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_compression"
+path = "fuzz_targets/fuzz_compression.rs"
+test = false
+doc = false
+bench = false
+
+# P1: Complex Routing/Tunneling Protocol Fuzz Targets
+[[bin]]
+name = "fuzz_bgp"
+path = "fuzz_targets/fuzz_bgp.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_gtp"
+path = "fuzz_targets/fuzz_gtp.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_ospf"
+path = "fuzz_targets/fuzz_ospf.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_gre"
+path = "fuzz_targets/fuzz_gre.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_vxlan"
+path = "fuzz_targets/fuzz_vxlan.rs"
+test = false
+doc = false
+bench = false
