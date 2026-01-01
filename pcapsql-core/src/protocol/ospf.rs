@@ -133,10 +133,14 @@ impl Protocol for OspfProtocol {
         // We skip detailed authentication parsing
 
         // Parse packet-specific fields
-        let packet_data = if data.len() >= length as usize {
+        // Note: length field comes from the packet and may be malicious/invalid
+        // We must ensure length >= 24 (header size) to avoid slice panic
+        let packet_data = if length as usize > 24 && data.len() >= length as usize {
             &data[24..length as usize]
-        } else {
+        } else if data.len() > 24 {
             &data[24..]
+        } else {
+            &[]
         };
 
         match (msg_type, version) {
@@ -988,7 +992,30 @@ mod tests {
         assert_eq!(result.get("neighbor_count"), Some(&FieldValue::UInt16(3)));
     }
 
-    // Test 18: LS Age field in LSA
+    // Test 18: Malformed packet with length < 24 (regression test for fuzz crash)
+    #[test]
+    fn test_malformed_length_less_than_header() {
+        let parser = OspfProtocol;
+        let mut context = ParseContext::new(1);
+        context.insert_hint("ip_protocol", 89);
+
+        // Crash input from fuzzer: length field is 0 which is less than header size (24)
+        // This should not panic - it should handle gracefully
+        let crash_input: [u8; 32] = [
+            2, 2, 0, 0, // version=2, type=2, length=0 (invalid!)
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 105, 112, 95, 112, 114, 111, 116, 111, 99, 111, 108,
+            2, 7, 0, 0, 0, 1,
+        ];
+
+        // Should not panic, should parse header fields
+        let result = parser.parse(&crash_input, &context);
+        assert!(result.is_ok());
+        assert_eq!(result.get("version"), Some(&FieldValue::UInt8(2)));
+        assert_eq!(result.get("message_type"), Some(&FieldValue::UInt8(2)));
+        assert_eq!(result.get("length"), Some(&FieldValue::UInt16(0)));
+    }
+
+    // Test 19: LS Age field in LSA
     #[test]
     fn test_lsa_age_field() {
         let parser = OspfProtocol;
