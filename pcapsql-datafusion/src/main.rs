@@ -289,7 +289,7 @@ async fn run_repl(
                     ReplCommand::Tables => print_tables(),
                     ReplCommand::Schema => show_schema(),
                     ReplCommand::Protocols => list_protocols(),
-                    ReplCommand::Stats => {
+                    ReplCommand::CacheStats => {
                         if let Some(stats) = engine.cache_stats() {
                             println!("{}", stats.format_summary());
                         } else {
@@ -297,7 +297,7 @@ async fn run_repl(
                             println!("Cache is only used in streaming mode with --cache-size > 0");
                         }
                     }
-                    ReplCommand::StatsReset => {
+                    ReplCommand::CacheStatsReset => {
                         if let Some(cache) = engine.cache() {
                             cache.reset_stats();
                             println!("Cache statistics reset.");
@@ -404,6 +404,314 @@ async fn run_repl(
                             Err(e) => eprintln!("Error: {e}"),
                         }
                     }
+                    ReplCommand::Stats => {
+                        use arrow::array::{Array, Int64Array, StringArray};
+
+                        // Query basic stats from frames
+                        let stats_query = "SELECT COUNT(*) as packets, SUM(CAST(length AS BIGINT)) as bytes FROM frames";
+                        match engine.query(stats_query).await {
+                            Ok(batches) => {
+                                if let Some(batch) = batches.first() {
+                                    let packets = batch
+                                        .column(0)
+                                        .as_any()
+                                        .downcast_ref::<Int64Array>()
+                                        .and_then(|a| {
+                                            if a.is_null(0) {
+                                                None
+                                            } else {
+                                                Some(a.value(0) as u64)
+                                            }
+                                        })
+                                        .unwrap_or(0);
+                                    let bytes = batch
+                                        .column(1)
+                                        .as_any()
+                                        .downcast_ref::<Int64Array>()
+                                        .and_then(|a| {
+                                            if a.is_null(0) {
+                                                None
+                                            } else {
+                                                Some(a.value(0) as u64)
+                                            }
+                                        })
+                                        .unwrap_or(0);
+
+                                    println!("Capture Statistics:");
+                                    println!("  Packets:    {}", format_count(packets));
+                                    println!("  Bytes:      {}", format_bytes(bytes));
+                                }
+                            }
+                            Err(e) => eprintln!("Error querying stats: {e}"),
+                        }
+
+                        // Query time range
+                        let time_query = "SELECT MIN(timestamp) as start_ts, MAX(timestamp) as end_ts FROM frames";
+                        if let Ok(batches) = engine.query(time_query).await {
+                            if let Some(batch) = batches.first() {
+                                use arrow::array::TimestampMicrosecondArray;
+                                let start_ts = batch
+                                    .column(0)
+                                    .as_any()
+                                    .downcast_ref::<TimestampMicrosecondArray>()
+                                    .and_then(
+                                        |a| if a.is_null(0) { None } else { Some(a.value(0)) },
+                                    );
+                                let end_ts = batch
+                                    .column(1)
+                                    .as_any()
+                                    .downcast_ref::<TimestampMicrosecondArray>()
+                                    .and_then(
+                                        |a| if a.is_null(0) { None } else { Some(a.value(0)) },
+                                    );
+
+                                if let (Some(start), Some(end)) = (start_ts, end_ts) {
+                                    let duration_us = end - start;
+                                    println!("  Duration:   {}", format_duration_us(duration_us));
+                                    println!("  Start:      {}", format_timestamp_us(start));
+                                    println!("  End:        {}", format_timestamp_us(end));
+                                }
+                            }
+                        }
+
+                        // Query protocol distribution
+                        let proto_query = r#"
+                            SELECT 'TCP' as proto, COUNT(*) as cnt FROM tcp
+                            UNION ALL SELECT 'UDP', COUNT(*) FROM udp
+                            UNION ALL SELECT 'ICMP', COUNT(*) FROM icmp
+                            UNION ALL SELECT 'DNS', COUNT(*) FROM dns
+                            UNION ALL SELECT 'HTTP', COUNT(*) FROM http
+                            UNION ALL SELECT 'TLS', COUNT(*) FROM tls
+                            ORDER BY cnt DESC
+                        "#;
+                        if let Ok(batches) = engine.query(proto_query).await {
+                            let mut total: u64 = 0;
+                            let mut protos: Vec<(String, u64)> = Vec::new();
+
+                            for batch in &batches {
+                                let proto_col =
+                                    batch.column(0).as_any().downcast_ref::<StringArray>();
+                                let count_col =
+                                    batch.column(1).as_any().downcast_ref::<Int64Array>();
+
+                                if let (Some(protos_arr), Some(counts_arr)) = (proto_col, count_col)
+                                {
+                                    for i in 0..batch.num_rows() {
+                                        if !protos_arr.is_null(i) && !counts_arr.is_null(i) {
+                                            let proto = protos_arr.value(i).to_string();
+                                            let count = counts_arr.value(i) as u64;
+                                            if count > 0 {
+                                                total += count;
+                                                protos.push((proto, count));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            if !protos.is_empty() {
+                                println!();
+                                println!("Protocol Distribution:");
+                                for (proto, count) in protos {
+                                    let pct = if total > 0 {
+                                        count as f64 / total as f64 * 100.0
+                                    } else {
+                                        0.0
+                                    };
+                                    println!(
+                                        "  {:<10} {:>10}  ({:.1}%)",
+                                        proto,
+                                        format_count(count),
+                                        pct
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    ReplCommand::Top(column, limit) => {
+                        use arrow::array::{Array, Int64Array};
+
+                        // Build query - try to detect if column contains IPs
+                        let display_col = if column.contains("ip") && !column.contains("ip6") {
+                            format!("ip4_to_string({}) as {}", column, column)
+                        } else if column.contains("ip6") {
+                            format!("ip6_to_string({}) as {}", column, column)
+                        } else if column.contains("mac") {
+                            format!("mac_to_string({}) as {}", column, column)
+                        } else {
+                            column.clone()
+                        };
+
+                        // Try frames table first, then specific protocol tables
+                        let tables = ["frames", "ipv4", "tcp", "udp", "dns"];
+                        let mut found = false;
+
+                        for table in tables {
+                            let query = format!(
+                                "SELECT {}, COUNT(*) as count FROM {} WHERE {} IS NOT NULL GROUP BY {} ORDER BY count DESC LIMIT {}",
+                                display_col, table, column, column, limit
+                            );
+
+                            match engine.query(&query).await {
+                                Ok(batches) => {
+                                    if batches.first().map(|b| b.num_rows() > 0).unwrap_or(false) {
+                                        found = true;
+                                        println!(
+                                            "Top {} {} values (from {}):",
+                                            limit, column, table
+                                        );
+
+                                        for batch in &batches {
+                                            let val_col = batch.column(0);
+                                            let count_col = batch
+                                                .column(1)
+                                                .as_any()
+                                                .downcast_ref::<Int64Array>();
+
+                                            if let Some(counts) = count_col {
+                                                for i in 0..batch.num_rows() {
+                                                    let value = format_arrow_value(val_col, i);
+                                                    let count = if counts.is_null(i) {
+                                                        0
+                                                    } else {
+                                                        counts.value(i) as u64
+                                                    };
+                                                    println!(
+                                                        "  {:<20} {:>10}",
+                                                        value,
+                                                        format_count(count)
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        break;
+                                    }
+                                }
+                                Err(_) => continue,
+                            }
+                        }
+
+                        if !found {
+                            eprintln!("Column '{}' not found in any table", column);
+                        }
+                    }
+                    ReplCommand::Histogram(column) => {
+                        use arrow::array::{Array, Float64Array, Int64Array};
+
+                        // First get min/max to determine bucket size
+                        let tables = ["frames", "ipv4", "tcp", "udp"];
+                        let mut found = false;
+
+                        for table in tables {
+                            let range_query = format!(
+                                "SELECT MIN(CAST({} AS DOUBLE)) as min_val, MAX(CAST({} AS DOUBLE)) as max_val FROM {} WHERE {} IS NOT NULL",
+                                column, column, table, column
+                            );
+
+                            if let Ok(batches) = engine.query(&range_query).await {
+                                if let Some(batch) = batches.first() {
+                                    if batch.num_rows() == 0 {
+                                        continue;
+                                    }
+
+                                    let min_val = batch
+                                        .column(0)
+                                        .as_any()
+                                        .downcast_ref::<Float64Array>()
+                                        .and_then(|a| {
+                                            if a.is_null(0) {
+                                                None
+                                            } else {
+                                                Some(a.value(0))
+                                            }
+                                        });
+                                    let max_val = batch
+                                        .column(1)
+                                        .as_any()
+                                        .downcast_ref::<Float64Array>()
+                                        .and_then(|a| {
+                                            if a.is_null(0) {
+                                                None
+                                            } else {
+                                                Some(a.value(0))
+                                            }
+                                        });
+
+                                    if let (Some(min_v), Some(max_v)) = (min_val, max_val) {
+                                        if min_v == max_v {
+                                            continue;
+                                        }
+
+                                        found = true;
+                                        let range = max_v - min_v;
+                                        let bucket_size = (range / 10.0).max(1.0);
+
+                                        let hist_query = format!(
+                                            "SELECT FLOOR(CAST({} AS DOUBLE) / {}) * {} as bucket, COUNT(*) as count \
+                                             FROM {} WHERE {} IS NOT NULL \
+                                             GROUP BY bucket ORDER BY bucket",
+                                            column, bucket_size, bucket_size, table, column
+                                        );
+
+                                        if let Ok(hist_batches) = engine.query(&hist_query).await {
+                                            // Collect all buckets and find max count
+                                            let mut buckets: Vec<(f64, u64)> = Vec::new();
+                                            let mut max_count: u64 = 0;
+
+                                            for hb in &hist_batches {
+                                                let bucket_col = hb
+                                                    .column(0)
+                                                    .as_any()
+                                                    .downcast_ref::<Float64Array>();
+                                                let count_col = hb
+                                                    .column(1)
+                                                    .as_any()
+                                                    .downcast_ref::<Int64Array>();
+
+                                                if let (Some(buckets_arr), Some(counts_arr)) =
+                                                    (bucket_col, count_col)
+                                                {
+                                                    for i in 0..hb.num_rows() {
+                                                        if !buckets_arr.is_null(i)
+                                                            && !counts_arr.is_null(i)
+                                                        {
+                                                            let bucket = buckets_arr.value(i);
+                                                            let count = counts_arr.value(i) as u64;
+                                                            max_count = max_count.max(count);
+                                                            buckets.push((bucket, count));
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            if !buckets.is_empty() {
+                                                println!(
+                                                    "{} distribution (from {}):",
+                                                    column, table
+                                                );
+                                                for (bucket, count) in &buckets {
+                                                    let end = bucket + bucket_size;
+                                                    let bar = render_bar(*count, max_count, 30);
+                                                    println!(
+                                                        "  {:>8.0}-{:<8.0} {} {:>10}",
+                                                        bucket,
+                                                        end,
+                                                        bar,
+                                                        format_count(*count)
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+
+                        if !found {
+                            eprintln!("Column '{}' not found or not numeric", column);
+                        }
+                    }
                     ReplCommand::Unknown(s) => {
                         eprintln!("Unknown command: {s}");
                         eprintln!("Type .help for available commands");
@@ -469,8 +777,11 @@ fn print_help() {
     println!("  .export <file> [query]  Export to file (format inferred from extension)");
     println!("  .timeinfo        Show capture time information");
     println!("  .hexdump <frame> Hex dump of packet data");
-    println!("  .stats           Show cache statistics");
-    println!("  .stats reset     Reset cache statistics counters");
+    println!("  .stats           Show capture statistics");
+    println!("  .top <col> [N]   Show top N values for column (default: 10)");
+    println!("  .histogram <col> Show value distribution (alias: .hist)");
+    println!("  .cachestats      Show cache statistics (alias: .cs)");
+    println!("  .cachestats reset Reset cache statistics counters");
     println!("  .quit            Exit");
     println!();
     println!("Export formats: .parquet, .json/.jsonl, .csv");
@@ -585,6 +896,104 @@ fn format_duration_us(us: i64) -> String {
     } else {
         format!("{secs}.{subsec_ms:03}s")
     }
+}
+
+/// Format bytes with human-readable units.
+fn format_bytes(bytes: u64) -> String {
+    if bytes >= 1_000_000_000 {
+        format!("{:.1} GB", bytes as f64 / 1_000_000_000.0)
+    } else if bytes >= 1_000_000 {
+        format!("{:.1} MB", bytes as f64 / 1_000_000.0)
+    } else if bytes >= 1_000 {
+        format!("{:.1} KB", bytes as f64 / 1_000.0)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
+/// Format a count with thousands separators.
+fn format_count(n: u64) -> String {
+    let s = n.to_string();
+    let mut result = String::new();
+    for (i, c) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            result.push(',');
+        }
+        result.push(c);
+    }
+    result.chars().rev().collect()
+}
+
+/// Render an ASCII bar for histogram display.
+fn render_bar(value: u64, max_value: u64, max_width: usize) -> String {
+    if max_value == 0 {
+        return String::new();
+    }
+    let width = ((value as f64 / max_value as f64) * max_width as f64) as usize;
+    "█".repeat(width.max(1))
+}
+
+/// Format an Arrow array value at a given index as a string.
+fn format_arrow_value(array: &dyn arrow::array::Array, index: usize) -> String {
+    use arrow::array::{
+        BinaryArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array, Int8Array,
+        StringArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
+    };
+
+    if array.is_null(index) {
+        return "NULL".to_string();
+    }
+
+    // Try various types
+    if let Some(a) = array.as_any().downcast_ref::<StringArray>() {
+        return a.value(index).to_string();
+    }
+    if let Some(a) = array.as_any().downcast_ref::<Int64Array>() {
+        return a.value(index).to_string();
+    }
+    if let Some(a) = array.as_any().downcast_ref::<UInt64Array>() {
+        return a.value(index).to_string();
+    }
+    if let Some(a) = array.as_any().downcast_ref::<Int32Array>() {
+        return a.value(index).to_string();
+    }
+    if let Some(a) = array.as_any().downcast_ref::<UInt32Array>() {
+        return a.value(index).to_string();
+    }
+    if let Some(a) = array.as_any().downcast_ref::<Int16Array>() {
+        return a.value(index).to_string();
+    }
+    if let Some(a) = array.as_any().downcast_ref::<UInt16Array>() {
+        return a.value(index).to_string();
+    }
+    if let Some(a) = array.as_any().downcast_ref::<Int8Array>() {
+        return a.value(index).to_string();
+    }
+    if let Some(a) = array.as_any().downcast_ref::<UInt8Array>() {
+        return a.value(index).to_string();
+    }
+    if let Some(a) = array.as_any().downcast_ref::<Float64Array>() {
+        return format!("{:.2}", a.value(index));
+    }
+    if let Some(a) = array.as_any().downcast_ref::<Float32Array>() {
+        return format!("{:.2}", a.value(index));
+    }
+    if let Some(a) = array.as_any().downcast_ref::<BinaryArray>() {
+        let bytes = a.value(index);
+        if bytes.len() <= 8 {
+            return bytes.iter().map(|b| format!("{:02x}", b)).collect();
+        } else {
+            return format!(
+                "{}...",
+                bytes[..8]
+                    .iter()
+                    .map(|b| format!("{:02x}", b))
+                    .collect::<String>()
+            );
+        }
+    }
+
+    format!("{:?}", array.data_type())
 }
 
 /// Print TLS decryption status.

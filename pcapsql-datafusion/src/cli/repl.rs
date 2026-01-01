@@ -22,13 +22,19 @@ pub enum ReplCommand {
     /// First String is filename, second is optional SQL query
     Export(String, Option<String>),
     /// Show cache statistics
-    Stats,
+    CacheStats,
     /// Reset cache statistics counters
-    StatsReset,
+    CacheStatsReset,
     /// Show capture time information
     TimeInfo,
     /// Hex dump of a packet frame
     Hexdump(u64),
+    /// Show capture statistics (packets, bytes, duration, protocols)
+    Stats,
+    /// Show top N values for a column
+    Top(String, usize),
+    /// Show histogram distribution for a column
+    Histogram(String),
     /// Unknown command
     Unknown(String),
     /// Empty input
@@ -53,9 +59,9 @@ impl ReplCommand {
                 return Self::parse_export(trimmed);
             }
 
-            // Handle .stats specially since it has an optional "reset" argument
-            if lower.starts_with(".stats") {
-                return Self::parse_stats(trimmed);
+            // Handle .cachestats specially since it has an optional "reset" argument
+            if lower.starts_with(".cachestats") || lower.starts_with(".cs") {
+                return Self::parse_cachestats(trimmed);
             }
 
             // Handle .hexdump specially since it requires a frame number argument
@@ -63,7 +69,18 @@ impl ReplCommand {
                 return Self::parse_hexdump(trimmed);
             }
 
+            // Handle .top specially since it has column and optional count arguments
+            if lower.starts_with(".top") {
+                return Self::parse_top(trimmed);
+            }
+
+            // Handle .histogram specially since it has a column argument
+            if lower.starts_with(".histogram") || lower.starts_with(".hist") {
+                return Self::parse_histogram(trimmed);
+            }
+
             match lower.as_str() {
+                ".stats" => ReplCommand::Stats,
                 ".help" | ".h" | ".?" => ReplCommand::Help,
                 ".tables" | ".t" => ReplCommand::Tables,
                 ".schema" | ".s" => ReplCommand::Schema,
@@ -106,24 +123,26 @@ impl ReplCommand {
         }
     }
 
-    /// Parse .stats command with optional "reset" argument.
-    fn parse_stats(input: &str) -> Self {
-        // Format: .stats [reset]
+    /// Parse .cachestats command with optional "reset" argument.
+    fn parse_cachestats(input: &str) -> Self {
+        // Format: .cachestats [reset] or .cs [reset]
         // Strip prefix case-insensitively
         let lower = input.to_lowercase();
-        let rest = if lower.starts_with(".stats") {
-            input[".stats".len()..].trim()
+        let rest = if lower.starts_with(".cachestats") {
+            input[".cachestats".len()..].trim()
+        } else if lower.starts_with(".cs") {
+            input[".cs".len()..].trim()
         } else {
             ""
         };
 
         if rest.is_empty() {
-            ReplCommand::Stats
+            ReplCommand::CacheStats
         } else if rest.eq_ignore_ascii_case("reset") {
-            ReplCommand::StatsReset
+            ReplCommand::CacheStatsReset
         } else {
             ReplCommand::Unknown(format!(
-                "Unknown stats subcommand: '{rest}'. Use '.stats' or '.stats reset'"
+                "Unknown cachestats subcommand: '{rest}'. Use '.cachestats' or '.cachestats reset'"
             ))
         }
     }
@@ -144,6 +163,53 @@ impl ReplCommand {
                 Ok(frame_num) => ReplCommand::Hexdump(frame_num),
                 Err(_) => ReplCommand::Unknown(format!("Invalid frame number: {rest}")),
             }
+        }
+    }
+
+    /// Parse .top command with column name and optional count.
+    fn parse_top(input: &str) -> Self {
+        // Format: .top <column> [N]
+        let lower = input.to_lowercase();
+        let rest = if lower.starts_with(".top") {
+            input[".top".len()..].trim()
+        } else {
+            ""
+        };
+
+        if rest.is_empty() {
+            return ReplCommand::Unknown(".top requires a column name".to_string());
+        }
+
+        let parts: Vec<&str> = rest.split_whitespace().collect();
+        match parts.as_slice() {
+            [column] => ReplCommand::Top(column.to_string(), 10), // Default to 10
+            [column, count] => match count.parse::<usize>() {
+                Ok(n) if n > 0 => ReplCommand::Top(column.to_string(), n),
+                Ok(_) => ReplCommand::Unknown("Count must be greater than 0".to_string()),
+                Err(_) => ReplCommand::Unknown(format!("Invalid count: {count}")),
+            },
+            _ => ReplCommand::Unknown("Usage: .top <column> [count]".to_string()),
+        }
+    }
+
+    /// Parse .histogram command with column name.
+    fn parse_histogram(input: &str) -> Self {
+        // Format: .histogram <column> or .hist <column>
+        let lower = input.to_lowercase();
+        let rest = if lower.starts_with(".histogram") {
+            input[".histogram".len()..].trim()
+        } else if lower.starts_with(".hist") {
+            input[".hist".len()..].trim()
+        } else {
+            ""
+        };
+
+        if rest.is_empty() {
+            ReplCommand::Unknown(".histogram requires a column name".to_string())
+        } else {
+            // Just take the first word as the column name
+            let column = rest.split_whitespace().next().unwrap_or(rest);
+            ReplCommand::Histogram(column.to_string())
         }
     }
 
@@ -329,27 +395,42 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_stats() {
-        assert_eq!(ReplCommand::parse(".stats"), ReplCommand::Stats);
-        assert_eq!(ReplCommand::parse(".Stats"), ReplCommand::Stats);
-        assert_eq!(ReplCommand::parse(".STATS"), ReplCommand::Stats);
+    fn test_parse_cachestats() {
+        assert_eq!(ReplCommand::parse(".cachestats"), ReplCommand::CacheStats);
+        assert_eq!(ReplCommand::parse(".Cachestats"), ReplCommand::CacheStats);
+        assert_eq!(ReplCommand::parse(".CACHESTATS"), ReplCommand::CacheStats);
+        assert_eq!(ReplCommand::parse(".cs"), ReplCommand::CacheStats);
+        assert_eq!(ReplCommand::parse(".CS"), ReplCommand::CacheStats);
     }
 
     #[test]
-    fn test_parse_stats_reset() {
-        assert_eq!(ReplCommand::parse(".stats reset"), ReplCommand::StatsReset);
-        assert_eq!(ReplCommand::parse(".stats RESET"), ReplCommand::StatsReset);
-        assert_eq!(ReplCommand::parse(".Stats Reset"), ReplCommand::StatsReset);
+    fn test_parse_cachestats_reset() {
+        assert_eq!(
+            ReplCommand::parse(".cachestats reset"),
+            ReplCommand::CacheStatsReset
+        );
+        assert_eq!(
+            ReplCommand::parse(".cachestats RESET"),
+            ReplCommand::CacheStatsReset
+        );
+        assert_eq!(
+            ReplCommand::parse(".cs reset"),
+            ReplCommand::CacheStatsReset
+        );
+        assert_eq!(
+            ReplCommand::parse(".CS Reset"),
+            ReplCommand::CacheStatsReset
+        );
     }
 
     #[test]
-    fn test_parse_stats_unknown_subcommand() {
+    fn test_parse_cachestats_unknown_subcommand() {
         assert!(matches!(
-            ReplCommand::parse(".stats foo"),
+            ReplCommand::parse(".cachestats foo"),
             ReplCommand::Unknown(_)
         ));
         assert!(matches!(
-            ReplCommand::parse(".stats clear"),
+            ReplCommand::parse(".cs clear"),
             ReplCommand::Unknown(_)
         ));
     }
@@ -384,6 +465,73 @@ mod tests {
         ));
         assert!(matches!(
             ReplCommand::parse(".hexdump -1"),
+            ReplCommand::Unknown(_)
+        ));
+    }
+
+    #[test]
+    fn test_parse_stats() {
+        assert_eq!(ReplCommand::parse(".stats"), ReplCommand::Stats);
+        assert_eq!(ReplCommand::parse(".STATS"), ReplCommand::Stats);
+        assert_eq!(ReplCommand::parse(".Stats"), ReplCommand::Stats);
+    }
+
+    #[test]
+    fn test_parse_top() {
+        assert_eq!(
+            ReplCommand::parse(".top dst_port"),
+            ReplCommand::Top("dst_port".to_string(), 10)
+        );
+        assert_eq!(
+            ReplCommand::parse(".top src_ip 5"),
+            ReplCommand::Top("src_ip".to_string(), 5)
+        );
+        assert_eq!(
+            ReplCommand::parse(".TOP length 20"),
+            ReplCommand::Top("length".to_string(), 20)
+        );
+    }
+
+    #[test]
+    fn test_parse_top_invalid() {
+        assert!(matches!(
+            ReplCommand::parse(".top"),
+            ReplCommand::Unknown(_)
+        ));
+        assert!(matches!(
+            ReplCommand::parse(".top dst_port abc"),
+            ReplCommand::Unknown(_)
+        ));
+        assert!(matches!(
+            ReplCommand::parse(".top dst_port 0"),
+            ReplCommand::Unknown(_)
+        ));
+    }
+
+    #[test]
+    fn test_parse_histogram() {
+        assert_eq!(
+            ReplCommand::parse(".histogram length"),
+            ReplCommand::Histogram("length".to_string())
+        );
+        assert_eq!(
+            ReplCommand::parse(".hist dst_port"),
+            ReplCommand::Histogram("dst_port".to_string())
+        );
+        assert_eq!(
+            ReplCommand::parse(".HISTOGRAM frame_number"),
+            ReplCommand::Histogram("frame_number".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_histogram_invalid() {
+        assert!(matches!(
+            ReplCommand::parse(".histogram"),
+            ReplCommand::Unknown(_)
+        ));
+        assert!(matches!(
+            ReplCommand::parse(".hist"),
             ReplCommand::Unknown(_)
         ));
     }
