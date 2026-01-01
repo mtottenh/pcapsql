@@ -79,6 +79,19 @@ impl PcapFormat {
     pub fn is_legacy(&self) -> bool {
         !self.is_pcapng()
     }
+
+    /// Whether this format uses little-endian byte order.
+    ///
+    /// This is relevant for parsing header fields like link_type.
+    /// For PCAPNG, the section header defines endianness, but we assume
+    /// little-endian as it's the most common case.
+    pub fn is_little_endian(&self) -> bool {
+        match self {
+            PcapFormat::LegacyLeMicro | PcapFormat::LegacyLeNano => true,
+            PcapFormat::LegacyBeMicro | PcapFormat::LegacyBeNano => false,
+            PcapFormat::PcapNg => true, // Most PCAPNG files are little-endian
+        }
+    }
 }
 
 /// Generic PCAP/PCAPNG reader over any Read source.
@@ -591,6 +604,18 @@ mod tests {
 
         assert!(PcapFormat::PcapNg.is_pcapng());
         assert!(!PcapFormat::PcapNg.is_legacy());
+    }
+
+    #[test]
+    fn test_pcap_format_endianness() {
+        // Little-endian formats
+        assert!(PcapFormat::LegacyLeMicro.is_little_endian());
+        assert!(PcapFormat::LegacyLeNano.is_little_endian());
+        assert!(PcapFormat::PcapNg.is_little_endian()); // Most PCAPNG files are LE
+
+        // Big-endian formats
+        assert!(!PcapFormat::LegacyBeMicro.is_little_endian());
+        assert!(!PcapFormat::LegacyBeNano.is_little_endian());
     }
 
     /// Create a minimal valid PCAP file for testing.

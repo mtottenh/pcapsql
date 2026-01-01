@@ -1,7 +1,7 @@
 //! pcapsql CLI entry point.
 
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -10,7 +10,7 @@ use tracing_subscriber::EnvFilter;
 
 use pcapsql_core::{default_registry, KeyLog, Protocol};
 use pcapsql_datafusion::cli::{
-    Args, ExportFormat, Exporter, OutputFormatter, Repl, ReplCommand, ReplInput,
+    Args, ExportFormat, Exporter, InputSource, OutputFormatter, Repl, ReplCommand, ReplInput,
 };
 use pcapsql_datafusion::query::{bpf, tables, views, QueryEngine};
 
@@ -48,40 +48,84 @@ async fn main() -> Result<()> {
     }
 
     // Require a PCAP file for query operations
-    let pcap_file = args
+    let pcap_file_arg = args
         .file
+        .as_ref()
         .context("PCAP file required. Use --help for usage.")?;
 
-    // Create query engine - choose mode based on flags and keylog
-    let engine = if let Some(kl) = keylog {
-        // TLS decryption enabled - use with_keylog for stream processing
-        if args.verbose > 0 {
-            eprintln!("Processing TCP streams for TLS decryption...");
-        }
-        QueryEngine::with_keylog(&pcap_file, kl, args.batch_size)
+    // Parse input source (local file or cloud URL)
+    let input_source = InputSource::parse(&pcap_file_arg.to_string_lossy());
+    let source_name = input_source.display_name();
+
+    // Create query engine - choose mode based on source type and flags
+    let engine = match input_source {
+        #[cfg(feature = "cloud")]
+        InputSource::CloudUrl(url) => {
+            // Cloud URLs always use streaming mode
+            if args.verbose > 0 {
+                eprintln!("Opening cloud source: {url}");
+            }
+
+            QueryEngine::with_cloud_source(
+                &url,
+                args.batch_size,
+                args.cache_size,
+                args.cloud_endpoint.as_deref(),
+                args.cloud_anonymous,
+                args.cloud_chunk_size,
+            )
             .await
-            .with_context(|| format!("Failed to open PCAP file: {}", pcap_file.display()))?
-    } else if args.streaming {
-        // Explicit streaming mode with cache
-        if args.mmap {
-            // Try mmap first
-            use pcapsql_core::MmapPacketSource;
-            match MmapPacketSource::open(&pcap_file) {
-                Ok(source) => QueryEngine::with_streaming_source_cached_opts(
-                    Arc::new(source),
-                    args.batch_size,
-                    args.cache_size,
-                    !args.no_reader_eviction,
-                )
-                .await
-                .with_context(|| format!("Failed to open PCAP file: {}", pcap_file.display()))?,
-                Err(e) => {
-                    eprintln!(
-                        "Warning: mmap not supported for this file ({e}), falling back to file source"
-                    );
+            .with_context(|| format!("Failed to open cloud source: {url}"))?
+        }
+
+        InputSource::LocalFile(ref pcap_file) => {
+            if let Some(kl) = keylog {
+                // TLS decryption enabled - use with_keylog for stream processing
+                if args.verbose > 0 {
+                    eprintln!("Processing TCP streams for TLS decryption...");
+                }
+                QueryEngine::with_keylog(pcap_file, kl, args.batch_size)
+                    .await
+                    .with_context(|| format!("Failed to open PCAP file: {}", pcap_file.display()))?
+            } else if args.streaming {
+                // Explicit streaming mode with cache
+                if args.mmap {
+                    // Try mmap first
+                    use pcapsql_core::MmapPacketSource;
+                    match MmapPacketSource::open(pcap_file) {
+                        Ok(source) => QueryEngine::with_streaming_source_cached_opts(
+                            Arc::new(source),
+                            args.batch_size,
+                            args.cache_size,
+                            !args.no_reader_eviction,
+                        )
+                        .await
+                        .with_context(|| {
+                            format!("Failed to open PCAP file: {}", pcap_file.display())
+                        })?,
+                        Err(e) => {
+                            eprintln!(
+                                "Warning: mmap not supported for this file ({e}), falling back to file source"
+                            );
+                            use pcapsql_core::FilePacketSource;
+                            let source =
+                                Arc::new(FilePacketSource::open(pcap_file).with_context(|| {
+                                    format!("Failed to open PCAP file: {}", pcap_file.display())
+                                })?);
+                            QueryEngine::with_streaming_source_cached_opts(
+                                source,
+                                args.batch_size,
+                                args.cache_size,
+                                !args.no_reader_eviction,
+                            )
+                            .await
+                            .with_context(|| "Failed to create engine".to_string())?
+                        }
+                    }
+                } else {
                     use pcapsql_core::FilePacketSource;
                     let source =
-                        Arc::new(FilePacketSource::open(&pcap_file).with_context(|| {
+                        Arc::new(FilePacketSource::open(pcap_file).with_context(|| {
                             format!("Failed to open PCAP file: {}", pcap_file.display())
                         })?);
                     QueryEngine::with_streaming_source_cached_opts(
@@ -93,27 +137,13 @@ async fn main() -> Result<()> {
                     .await
                     .with_context(|| "Failed to create engine".to_string())?
                 }
+            } else {
+                // In-memory mode (default for small files)
+                QueryEngine::with_progress(pcap_file, args.batch_size, args.progress)
+                    .await
+                    .with_context(|| format!("Failed to open PCAP file: {}", pcap_file.display()))?
             }
-        } else {
-            use pcapsql_core::FilePacketSource;
-            let source =
-                Arc::new(FilePacketSource::open(&pcap_file).with_context(|| {
-                    format!("Failed to open PCAP file: {}", pcap_file.display())
-                })?);
-            QueryEngine::with_streaming_source_cached_opts(
-                source,
-                args.batch_size,
-                args.cache_size,
-                !args.no_reader_eviction,
-            )
-            .await
-            .with_context(|| "Failed to create engine".to_string())?
         }
-    } else {
-        // In-memory mode (default for small files)
-        QueryEngine::with_progress(&pcap_file, args.batch_size, args.progress)
-            .await
-            .with_context(|| format!("Failed to open PCAP file: {}", pcap_file.display()))?
     };
 
     let formatter = OutputFormatter::new(args.format);
@@ -188,7 +218,7 @@ async fn main() -> Result<()> {
     }
 
     // Interactive REPL
-    run_repl(&engine, &formatter, &pcap_file).await
+    run_repl(&engine, &formatter, &source_name).await
 }
 
 fn print_cache_stats(engine: &QueryEngine) {
@@ -261,7 +291,7 @@ fn show_schema() {
 async fn run_repl(
     engine: &QueryEngine,
     formatter: &OutputFormatter,
-    pcap_file: &Path,
+    source_name: &str,
 ) -> Result<()> {
     use arrow::array::RecordBatch;
 
@@ -280,7 +310,7 @@ async fn run_repl(
     let mut last_result: Option<Vec<RecordBatch>> = None;
 
     println!("pcapsql - Query PCAP files with SQL");
-    println!("Loaded: {}", pcap_file.display());
+    println!("Loaded: {source_name}");
     println!("Type .help for help, .quit to exit");
     println!();
 

@@ -250,12 +250,62 @@ unsafe impl<R: Read + Send> Send for DecompressReader<R> {}
 impl<R: Read + Unpin> Unpin for DecompressReader<R> {}
 
 // =============================================================================
+// In-memory decompression for header detection
+// =============================================================================
+
+use std::io::Cursor;
+
+/// Decompress a header buffer in memory.
+///
+/// This is used during cloud source initialization to extract the PCAP header
+/// from compressed data without making additional HTTP requests.
+///
+/// # Arguments
+/// * `compressed` - Compressed bytes (e.g., first 64KB from cloud object)
+/// * `compression` - Detected compression format
+/// * `output_size` - Maximum bytes to decompress (e.g., 1024 for PCAP header)
+///
+/// # Returns
+/// Decompressed bytes, up to `output_size` bytes.
+pub fn decompress_header(
+    compressed: &[u8],
+    compression: Compression,
+    output_size: usize,
+) -> io::Result<Vec<u8>> {
+    if !compression.is_compressed() {
+        // No compression - just return a copy of the data
+        let len = compressed.len().min(output_size);
+        return Ok(compressed[..len].to_vec());
+    }
+
+    // Create a cursor over the compressed data
+    let cursor = Cursor::new(compressed);
+
+    // Create the appropriate decoder
+    let mut decoder = DecompressReader::new(cursor, compression)?;
+
+    // Read up to output_size bytes
+    let mut output = vec![0u8; output_size];
+    let mut total_read = 0;
+
+    while total_read < output_size {
+        match decoder.read(&mut output[total_read..]) {
+            Ok(0) => break, // EOF
+            Ok(n) => total_read += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+
+    output.truncate(total_read);
+    Ok(output)
+}
+
+// =============================================================================
 // Type aliases for convenience
 // =============================================================================
 
 use std::fs::File;
-#[cfg(feature = "mmap")]
-use std::io::Cursor;
 
 /// Type alias for file-based decompression.
 pub type FileDecoder = DecompressReader<File>;
@@ -351,5 +401,59 @@ mod tests {
     fn test_compression_is_compressed() {
         assert!(!Compression::None.is_compressed());
         assert!(Compression::Gzip.is_compressed());
+    }
+
+    #[test]
+    fn test_decompress_header_no_compression() {
+        let data = vec![0xd4, 0xc3, 0xb2, 0xa1, 0x00, 0x02, 0x00, 0x04];
+        let result = super::decompress_header(&data, Compression::None, 100).unwrap();
+        assert_eq!(result, data);
+    }
+
+    #[test]
+    fn test_decompress_header_no_compression_truncated() {
+        let data = vec![0xd4, 0xc3, 0xb2, 0xa1, 0x00, 0x02, 0x00, 0x04];
+        // Request less than available
+        let result = super::decompress_header(&data, Compression::None, 4).unwrap();
+        assert_eq!(result, vec![0xd4, 0xc3, 0xb2, 0xa1]);
+    }
+
+    #[test]
+    fn test_decompress_header_gzip() {
+        // PCAP header compressed with gzip
+        // This is a minimal gzip stream containing the PCAP magic bytes
+        use std::io::Write;
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder
+            .write_all(&[0xd4, 0xc3, 0xb2, 0xa1, 0x00, 0x02, 0x00, 0x04])
+            .unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        let result = super::decompress_header(&compressed, Compression::Gzip, 100).unwrap();
+        assert_eq!(result, vec![0xd4, 0xc3, 0xb2, 0xa1, 0x00, 0x02, 0x00, 0x04]);
+    }
+
+    #[test]
+    fn test_decompress_header_gzip_partial() {
+        // Request only first 4 bytes
+        use std::io::Write;
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder
+            .write_all(&[0xd4, 0xc3, 0xb2, 0xa1, 0x00, 0x02, 0x00, 0x04])
+            .unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        let result = super::decompress_header(&compressed, Compression::Gzip, 4).unwrap();
+        assert_eq!(result, vec![0xd4, 0xc3, 0xb2, 0xa1]);
+    }
+
+    #[cfg(feature = "compress-zstd")]
+    #[test]
+    fn test_decompress_header_zstd() {
+        let data = vec![0xd4, 0xc3, 0xb2, 0xa1, 0x00, 0x02, 0x00, 0x04];
+        let compressed = zstd::encode_all(data.as_slice(), 3).unwrap();
+
+        let result = super::decompress_header(&compressed, Compression::Zstd, 100).unwrap();
+        assert_eq!(result, data);
     }
 }

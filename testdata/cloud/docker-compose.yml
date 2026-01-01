@@ -1,0 +1,29 @@
+# LocalStack configuration for S3 integration testing
+#
+# Usage:
+#   docker compose up -d      # Start LocalStack
+#   ./setup.sh                # Upload test data
+#   docker compose down       # Stop LocalStack
+#
+# Then run integration tests:
+#   cargo test --features s3 --test cloud_integration -- --ignored
+
+services:
+  localstack:
+    image: localstack/localstack:latest
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=s3
+      - DEFAULT_REGION=us-east-1
+      - DEBUG=0
+    volumes:
+      - localstack_data:/var/lib/localstack
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  localstack_data:

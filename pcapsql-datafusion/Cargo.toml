@@ -25,6 +25,13 @@ compress-bzip2 = ["pcapsql-core/compress-bzip2"]
 compress-xz = ["pcapsql-core/compress-xz"]
 compress-all = ["pcapsql-core/compress-all"]
 
+# Cloud storage support
+cloud = ["pcapsql-core/cloud", "dep:url"]
+s3 = ["cloud", "pcapsql-core/s3"]
+gcs = ["cloud", "pcapsql-core/gcs"]
+azure = ["cloud", "pcapsql-core/azure"]
+cloud-all = ["s3", "gcs", "azure"]
+
 [dependencies]
 # Our core library
 pcapsql-core = { version = "0.2.0", path = "../pcapsql-core" }
@@ -66,12 +73,18 @@ rusqlite.workspace = true
 # BPF filter parsing
 nom.workspace = true
 
+# URL parsing for cloud storage detection
+url = { workspace = true, optional = true }
+
 [dev-dependencies]
 criterion.workspace = true
 tempfile.workspace = true
 hex.workspace = true
 smallvec.workspace = true
 compact_str.workspace = true
+
+# Cloud storage for integration tests
+pcapsql-core = { path = "../pcapsql-core", features = ["s3"] }
 
 [build-dependencies]
 clap = { version = "4", features = ["derive"] }

@@ -56,6 +56,9 @@ use pcapsql_core::{
     ProtocolRegistry,
 };
 
+#[cfg(feature = "cloud")]
+use pcapsql_core::io::{CloudLocation, CloudPacketSource};
+
 /// File size threshold for automatic streaming mode selection.
 /// Files >= 100MB use streaming mode.
 const STREAMING_THRESHOLD_BYTES: u64 = 100 * 1024 * 1024;
@@ -404,6 +407,61 @@ impl QueryEngine {
             registry: (*registry).clone(),
             cache: cache_dyn,
         })
+    }
+
+    /// Create a QueryEngine for a cloud storage URL.
+    ///
+    /// Supports S3, GCS, and Azure Blob Storage URLs:
+    /// - `s3://bucket/path/to/file.pcap`
+    /// - `gs://bucket/path/to/file.pcap`
+    /// - `az://container/path/to/blob.pcap`
+    ///
+    /// Cloud sources always use streaming mode since the data must be fetched
+    /// over the network.
+    ///
+    /// # Arguments
+    ///
+    /// * `url` - Cloud storage URL
+    /// * `batch_size` - Number of packets per RecordBatch
+    /// * `cache_size` - Cache size for parsed packets (0 to disable)
+    /// * `endpoint` - Custom endpoint URL (for S3-compatible services like MinIO)
+    /// * `anonymous` - Use anonymous (unsigned) requests for public buckets
+    /// * `chunk_size` - Buffer size for byte-range requests (default 8MB)
+    #[cfg(feature = "cloud")]
+    pub async fn with_cloud_source(
+        url: &str,
+        batch_size: usize,
+        cache_size: usize,
+        endpoint: Option<&str>,
+        anonymous: bool,
+        chunk_size: usize,
+    ) -> Result<Self, Error> {
+        // Parse cloud URL
+        let location = CloudLocation::parse(url)
+            .map_err(|e| Error::Query(QueryError::Execution(format!("Invalid cloud URL: {e}"))))?;
+
+        // Apply options
+        let location = if let Some(ep) = endpoint {
+            location.with_endpoint(ep)
+        } else {
+            location
+        };
+
+        let location = if anonymous {
+            location.with_anonymous(true)
+        } else {
+            location
+        };
+
+        let location = location.with_chunk_size(chunk_size);
+
+        // Create cloud packet source
+        // CloudPacketSource::open handles runtime nesting via run_async
+        let source = CloudPacketSource::open(location)
+            .map_err(|e| Error::Query(QueryError::Execution(format!("Cloud source error: {e}"))))?;
+
+        // Use streaming mode with cache
+        Self::with_streaming_source_cached(Arc::new(source), batch_size, cache_size).await
     }
 
     /// Create a QueryEngine with automatic mode selection.
