@@ -74,3 +74,46 @@ path = "fuzz_targets/fuzz_vxlan.rs"
 test = false
 doc = false
 bench = false
+
+# P2: Application Protocol Fuzz Targets
+[[bin]]
+name = "fuzz_dns"
+path = "fuzz_targets/fuzz_dns.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_icmp"
+path = "fuzz_targets/fuzz_icmp.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_tls"
+path = "fuzz_targets/fuzz_tls.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_tcp_options"
+path = "fuzz_targets/fuzz_tcp_options.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_quic"
+path = "fuzz_targets/fuzz_quic.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_ssh"
+path = "fuzz_targets/fuzz_ssh.rs"
+test = false
+doc = false
+bench = false
