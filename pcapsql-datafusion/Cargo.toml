@@ -34,7 +34,7 @@ cloud-all = ["s3", "gcs", "azure"]
 
 [dependencies]
 # Our core library
-pcapsql-core = { version = "0.2.0", path = "../pcapsql-core" }
+pcapsql-core = { version = "0.3.0", path = "../pcapsql-core" }
 
 # DataFusion ecosystem
 arrow.workspace = true
