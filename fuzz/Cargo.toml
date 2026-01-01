@@ -13,9 +13,9 @@ libfuzzer-sys = "0.4"
 [dependencies.pcapsql-core]
 path = "../pcapsql-core"
 
-# Uncomment when adding BPF parser fuzz target
-# [dependencies.pcapsql-datafusion]
-# path = "../pcapsql-datafusion"
+# BPF parser fuzz target requires pcapsql-datafusion
+[dependencies.pcapsql-datafusion]
+path = "../pcapsql-datafusion"
 
 # P0: Core Infrastructure Fuzz Targets
 [[bin]]
@@ -114,6 +114,28 @@ bench = false
 [[bin]]
 name = "fuzz_ssh"
 path = "fuzz_targets/fuzz_ssh.rs"
+test = false
+doc = false
+bench = false
+
+# P2 Continued: Advanced Parser Fuzz Targets
+[[bin]]
+name = "fuzz_ip_options"
+path = "fuzz_targets/fuzz_ip_options.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_http"
+path = "fuzz_targets/fuzz_http.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_bpf"
+path = "fuzz_targets/fuzz_bpf.rs"
 test = false
 doc = false
 bench = false
