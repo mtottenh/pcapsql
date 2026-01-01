@@ -96,3 +96,24 @@ path = "fuzz_targets/fuzz_tls.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_tcp_options"
+path = "fuzz_targets/fuzz_tcp_options.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_quic"
+path = "fuzz_targets/fuzz_quic.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_ssh"
+path = "fuzz_targets/fuzz_ssh.rs"
+test = false
+doc = false
+bench = false

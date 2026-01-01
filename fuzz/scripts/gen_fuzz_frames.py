@@ -128,6 +128,34 @@ def main():
             UDP(sport=12345, dport=4789),
             "Eth(14)+IP(20)+UDP(8)"
         ),
+
+        # QUIC: Ethernet + IPv4 + UDP(dst=443)
+        # QUIC uses UDP on port 443 (or 8443)
+        (
+            "QUIC_FRAME",
+            Ether(src="00:00:00:00:00:02", dst="00:00:00:00:00:01") /
+            IP(src="10.0.0.1", dst="10.0.0.2", proto=17) /
+            UDP(sport=12345, dport=443),
+            "Eth(14)+IP(20)+UDP(8)"
+        ),
+
+        # SSH: Ethernet + IPv4 + TCP(dst=22)
+        (
+            "SSH_FRAME",
+            Ether(src="00:00:00:00:00:02", dst="00:00:00:00:00:01") /
+            IP(src="10.0.0.1", dst="10.0.0.2", proto=6) /
+            TCP(sport=12345, dport=22, flags="PA", seq=1),
+            "Eth(14)+IP(20)+TCP(20)"
+        ),
+
+        # TCP_OPTIONS: Ethernet + IPv4(proto=6) only
+        # TCP header is built in fuzz target with variable options
+        (
+            "TCP_OPTIONS_FRAME",
+            Ether(src="00:00:00:00:00:02", dst="00:00:00:00:00:01") /
+            IP(src="10.0.0.1", dst="10.0.0.2", proto=6),
+            "Eth(14)+IP(20)"
+        ),
     ]
 
     for name, pkt, comment in frames:
