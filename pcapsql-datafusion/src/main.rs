@@ -855,7 +855,7 @@ fn apply_bpf_filter(query: &str, filter: &Option<bpf::SqlFilter>) -> String {
             )
         } else {
             // WHERE clause extends to end of query
-            format!("{} AND ({})", query, where_clause)
+            format!("{query} AND ({where_clause})")
         }
     } else {
         // No WHERE clause - find appropriate insertion point

@@ -3,20 +3,15 @@
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 /// Direction qualifier for host/port filters.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Direction {
     /// Match source only
     Src,
     /// Match destination only
     Dst,
     /// Match either source or destination (default)
+    #[default]
     SrcOrDst,
-}
-
-impl Default for Direction {
-    fn default() -> Self {
-        Direction::SrcOrDst
-    }
 }
 
 /// Protocol type for protocol filters.
@@ -75,8 +70,8 @@ impl IpAddress {
 impl std::fmt::Display for IpAddress {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            IpAddress::V4(addr) => write!(f, "{}", addr),
-            IpAddress::V6(addr) => write!(f, "{}", addr),
+            IpAddress::V4(addr) => write!(f, "{addr}"),
+            IpAddress::V6(addr) => write!(f, "{addr}"),
         }
     }
 }
@@ -145,7 +140,7 @@ pub enum BpfExpr {
 
 impl BpfExpr {
     /// Create a NOT expression.
-    pub fn not(expr: BpfExpr) -> Self {
+    pub fn negate(expr: BpfExpr) -> Self {
         BpfExpr::Not(Box::new(expr))
     }
 
@@ -218,7 +213,7 @@ mod tests {
         let or_expr = BpfExpr::or(tcp.clone(), port80.clone());
         assert!(matches!(or_expr, BpfExpr::Or(_, _)));
 
-        let not_expr = BpfExpr::not(tcp);
+        let not_expr = BpfExpr::negate(tcp);
         assert!(matches!(not_expr, BpfExpr::Not(_)));
     }
 }

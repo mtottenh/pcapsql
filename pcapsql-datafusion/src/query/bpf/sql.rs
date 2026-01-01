@@ -22,12 +22,19 @@ impl SqlFilter {
 fn expr_to_sql(expr: &BpfExpr) -> String {
     match expr {
         BpfExpr::Primitive(prim) => primitive_to_sql(prim),
-        BpfExpr::Not(inner) => format!("NOT ({})", expr_to_sql(inner)),
+        BpfExpr::Not(inner) => {
+            let inner_sql = expr_to_sql(inner);
+            format!("NOT ({inner_sql})")
+        }
         BpfExpr::And(left, right) => {
-            format!("({}) AND ({})", expr_to_sql(left), expr_to_sql(right))
+            let left_sql = expr_to_sql(left);
+            let right_sql = expr_to_sql(right);
+            format!("({left_sql}) AND ({right_sql})")
         }
         BpfExpr::Or(left, right) => {
-            format!("({}) OR ({})", expr_to_sql(left), expr_to_sql(right))
+            let left_sql = expr_to_sql(left);
+            let right_sql = expr_to_sql(right);
+            format!("({left_sql}) OR ({right_sql})")
         }
     }
 }
@@ -49,7 +56,7 @@ fn primitive_to_sql(prim: &Primitive) -> String {
             end,
         } => portrange_to_sql(*direction, *protocol, *start, *end),
         Primitive::Net { direction, cidr } => net_to_sql(*direction, cidr),
-        Primitive::Proto(num) => format!("protocol = {}", num),
+        Primitive::Proto(num) => format!("protocol = {num}"),
     }
 }
 
@@ -69,12 +76,13 @@ fn host_to_sql(direction: Direction, address: &IpAddress) -> String {
     let addr_str = address.to_string();
 
     match direction {
-        Direction::Src => format!("{}.src_ip = {}('{}')", table, udf, addr_str),
-        Direction::Dst => format!("{}.dst_ip = {}('{}')", table, udf, addr_str),
-        Direction::SrcOrDst => format!(
-            "({}.src_ip = {}('{}') OR {}.dst_ip = {}('{}'))",
-            table, udf, addr_str, table, udf, addr_str
-        ),
+        Direction::Src => format!("{table}.src_ip = {udf}('{addr_str}')"),
+        Direction::Dst => format!("{table}.dst_ip = {udf}('{addr_str}')"),
+        Direction::SrcOrDst => {
+            format!(
+                "({table}.src_ip = {udf}('{addr_str}') OR {table}.dst_ip = {udf}('{addr_str}'))"
+            )
+        }
     }
 }
 
@@ -85,13 +93,10 @@ fn port_to_sql(direction: Direction, protocol: Option<Protocol>, port: u16) -> S
             // Specific protocol
             let table = proto.table_name();
             match direction {
-                Direction::Src => format!("{}.src_port = {}", table, port),
-                Direction::Dst => format!("{}.dst_port = {}", table, port),
+                Direction::Src => format!("{table}.src_port = {port}"),
+                Direction::Dst => format!("{table}.dst_port = {port}"),
                 Direction::SrcOrDst => {
-                    format!(
-                        "({}.src_port = {} OR {}.dst_port = {})",
-                        table, port, table, port
-                    )
+                    format!("({table}.src_port = {port} OR {table}.dst_port = {port})")
                 }
             }
         }
@@ -99,7 +104,7 @@ fn port_to_sql(direction: Direction, protocol: Option<Protocol>, port: u16) -> S
             // No protocol specified - match both TCP and UDP
             let tcp = port_to_sql(direction, Some(Protocol::Tcp), port);
             let udp = port_to_sql(direction, Some(Protocol::Udp), port);
-            format!("({}) OR ({})", tcp, udp)
+            format!("({tcp}) OR ({udp})")
         }
     }
 }
@@ -116,16 +121,13 @@ fn portrange_to_sql(
             let table = proto.table_name();
             match direction {
                 Direction::Src => {
-                    format!("{}.src_port BETWEEN {} AND {}", table, start, end)
+                    format!("{table}.src_port BETWEEN {start} AND {end}")
                 }
                 Direction::Dst => {
-                    format!("{}.dst_port BETWEEN {} AND {}", table, start, end)
+                    format!("{table}.dst_port BETWEEN {start} AND {end}")
                 }
                 Direction::SrcOrDst => {
-                    format!(
-                        "({}.src_port BETWEEN {} AND {}) OR ({}.dst_port BETWEEN {} AND {})",
-                        table, start, end, table, start, end
-                    )
+                    format!("({table}.src_port BETWEEN {start} AND {end}) OR ({table}.dst_port BETWEEN {start} AND {end})")
                 }
             }
         }
@@ -133,7 +135,7 @@ fn portrange_to_sql(
             // No protocol specified - match both TCP and UDP
             let tcp = portrange_to_sql(direction, Some(Protocol::Tcp), start, end);
             let udp = portrange_to_sql(direction, Some(Protocol::Udp), start, end);
-            format!("({}) OR ({})", tcp, udp)
+            format!("({tcp}) OR ({udp})")
         }
     }
 }
@@ -148,12 +150,11 @@ fn net_to_sql(direction: Direction, cidr: &Cidr) -> String {
     let cidr_str = cidr.to_string();
 
     match direction {
-        Direction::Src => format!("{}({}.src_ip, '{}')", udf, table, cidr_str),
-        Direction::Dst => format!("{}({}.dst_ip, '{}')", udf, table, cidr_str),
-        Direction::SrcOrDst => format!(
-            "{}({}.src_ip, '{}') OR {}({}.dst_ip, '{}')",
-            udf, table, cidr_str, udf, table, cidr_str
-        ),
+        Direction::Src => format!("{udf}({table}.src_ip, '{cidr_str}')"),
+        Direction::Dst => format!("{udf}({table}.dst_ip, '{cidr_str}')"),
+        Direction::SrcOrDst => {
+            format!("{udf}({table}.src_ip, '{cidr_str}') OR {udf}({table}.dst_ip, '{cidr_str}')")
+        }
     }
 }
 

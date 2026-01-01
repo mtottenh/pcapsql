@@ -33,7 +33,7 @@ pub fn parse_filter(input: &str) -> Result<BpfExpr, BpfError> {
 
     match all_consuming(preceded(multispace0, expr))(input) {
         Ok((_, expr)) => Ok(expr),
-        Err(e) => Err(BpfError::parse_error(format!("{}", e))),
+        Err(e) => Err(BpfError::parse_error(format!("{e}"))),
     }
 }
 
@@ -49,7 +49,7 @@ fn expr(input: &str) -> IResult<&str, BpfExpr> {
         term,
     ))(input)?;
 
-    let result = rest.into_iter().fold(first, |acc, t| BpfExpr::or(acc, t));
+    let result = rest.into_iter().fold(first, BpfExpr::or);
     Ok((input, result))
 }
 
@@ -61,7 +61,7 @@ fn term(input: &str) -> IResult<&str, BpfExpr> {
         factor,
     ))(input)?;
 
-    let result = rest.into_iter().fold(first, |acc, f| BpfExpr::and(acc, f));
+    let result = rest.into_iter().fold(first, BpfExpr::and);
     Ok((input, result))
 }
 
@@ -75,7 +75,7 @@ fn not_expr(input: &str) -> IResult<&str, BpfExpr> {
     let (input, _) = tag_no_case("not")(input)?;
     let (input, _) = multispace1(input)?;
     let (input, expr) = factor(input)?;
-    Ok((input, BpfExpr::not(expr)))
+    Ok((input, BpfExpr::negate(expr)))
 }
 
 /// Parse parenthesized expression.
