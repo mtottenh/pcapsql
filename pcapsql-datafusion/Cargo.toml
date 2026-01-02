@@ -73,6 +73,9 @@ rusqlite.workspace = true
 # BPF filter parsing
 nom.workspace = true
 
+# DateTime formatting for UDFs
+chrono = "0.4"
+
 # URL parsing for cloud storage detection
 url = { workspace = true, optional = true }
 
