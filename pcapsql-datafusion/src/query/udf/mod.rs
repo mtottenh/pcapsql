@@ -109,7 +109,9 @@ pub use icmp::{
 };
 pub use ntp_proto::{create_ntp_mode_name_udf, create_ntp_stratum_name_udf};
 pub use ospf::{create_ospf_lsa_type_name_udf, create_ospf_packet_type_name_udf};
-pub use protocol::{create_ethertype_name_udf, create_ip_proto_name_udf};
+pub use protocol::{
+    create_dscp_name_udf, create_ecn_name_udf, create_ethertype_name_udf, create_ip_proto_name_udf,
+};
 pub use tcp::{create_has_tcp_flag_udf, create_tcp_flags_str_udf};
 pub use tls_proto::{create_tls_record_type_name_udf, create_tls_version_name_udf};
 
@@ -176,6 +178,10 @@ pub fn register_protocol_udfs(ctx: &SessionContext) -> Result<(), Error> {
     // Protocol numbers
     ctx.register_udf(create_ip_proto_name_udf());
     ctx.register_udf(create_ethertype_name_udf());
+
+    // IP header fields
+    ctx.register_udf(create_dscp_name_udf());
+    ctx.register_udf(create_ecn_name_udf());
 
     // BGP
     ctx.register_udf(create_bgp_message_type_name_udf());

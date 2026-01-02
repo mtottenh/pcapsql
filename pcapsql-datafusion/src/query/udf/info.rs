@@ -207,6 +207,22 @@ pub fn all_udfs() -> Vec<UdfInfo> {
             example: "ethertype_name(ethertype) -> 'IPv4'",
             category: UdfCategory::Protocol,
         },
+        UdfInfo {
+            name: "dscp_name",
+            description: "Convert DSCP value to name (CS, AF, EF, etc.)",
+            signature: "dscp_name(uint8)",
+            return_type: "String",
+            example: "dscp_name(dscp) -> 'EF'",
+            category: UdfCategory::Protocol,
+        },
+        UdfInfo {
+            name: "ecn_name",
+            description: "Convert ECN field value to name",
+            signature: "ecn_name(uint8)",
+            return_type: "String",
+            example: "ecn_name(ecn) -> 'CE'",
+            category: UdfCategory::Protocol,
+        },
         // === DateTime Functions ===
         UdfInfo {
             name: "strftime",
