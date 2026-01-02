@@ -37,6 +37,32 @@ pub mod icmpv6_type {
     pub const REDIRECT: u8 = 137;
 }
 
+/// ICMPv6 Destination Unreachable code constants (RFC 4443).
+pub mod dest_unreachable_code {
+    pub const NO_ROUTE: u8 = 0;
+    pub const ADMIN_PROHIBITED: u8 = 1;
+    pub const BEYOND_SCOPE: u8 = 2;
+    pub const ADDRESS_UNREACHABLE: u8 = 3;
+    pub const PORT_UNREACHABLE: u8 = 4;
+    pub const FAILED_POLICY: u8 = 5;
+    pub const REJECT_ROUTE: u8 = 6;
+    pub const SOURCE_ROUTING_ERROR: u8 = 7;
+}
+
+/// ICMPv6 Time Exceeded code constants.
+pub mod time_exceeded_code {
+    pub const HOP_LIMIT_EXCEEDED: u8 = 0;
+    pub const FRAGMENT_REASSEMBLY_EXCEEDED: u8 = 1;
+}
+
+/// ICMPv6 Parameter Problem code constants.
+pub mod parameter_problem_code {
+    pub const ERRONEOUS_HEADER: u8 = 0;
+    pub const UNRECOGNIZED_NEXT_HEADER: u8 = 1;
+    pub const UNRECOGNIZED_OPTION: u8 = 2;
+    pub const INCOMPLETE_HEADER: u8 = 3;
+}
+
 /// NDP option type constants.
 pub mod ndp_option {
     pub const SOURCE_LINK_LAYER_ADDR: u8 = 1;

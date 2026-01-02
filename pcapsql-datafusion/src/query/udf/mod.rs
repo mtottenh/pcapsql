@@ -40,6 +40,8 @@
 //!
 //! - `icmp_type_name(type)` - Convert ICMP type to name (e.g., "Echo Request")
 //! - `icmpv6_type_name(type)` - Convert ICMPv6 type to name
+//! - `icmp_code_name(type, code)` - Convert ICMP type+code to detailed name (e.g., "Port Unreachable")
+//! - `icmpv6_code_name(type, code)` - Convert ICMPv6 type+code to detailed name
 //!
 //! ### Protocol Numbers
 //!
@@ -74,8 +76,10 @@
 //! SELECT ip_proto_name(protocol) AS proto, COUNT(*) FROM ipv4 GROUP BY protocol;
 //! ```
 
+mod bgp;
 mod datetime;
 mod dns;
+mod gtp;
 mod hex;
 mod histogram;
 mod icmp;
@@ -83,9 +87,12 @@ pub mod info;
 mod ipv4;
 mod ipv6;
 mod mac;
+mod ntp_proto;
+mod ospf;
 mod protocol;
 mod tcp;
 mod time;
+mod tls_proto;
 
 // Re-export address UDFs
 pub use ipv4::{create_ip4_to_string_udf, create_ip4_udf, create_ip_in_cidr_udf};
@@ -93,10 +100,18 @@ pub use ipv6::{create_ip6_in_cidr_udf, create_ip6_to_string_udf, create_ip6_udf}
 pub use mac::{create_mac_to_string_udf, create_mac_udf};
 
 // Re-export protocol UDFs
+pub use bgp::{create_bgp_message_type_name_udf, create_bgp_origin_name_udf};
 pub use dns::{create_dns_class_name_udf, create_dns_rcode_name_udf, create_dns_type_name_udf};
-pub use icmp::{create_icmp_type_name_udf, create_icmpv6_type_name_udf};
+pub use gtp::create_gtp_message_type_name_udf;
+pub use icmp::{
+    create_icmp_code_name_udf, create_icmp_type_name_udf, create_icmpv6_code_name_udf,
+    create_icmpv6_type_name_udf,
+};
+pub use ntp_proto::{create_ntp_mode_name_udf, create_ntp_stratum_name_udf};
+pub use ospf::{create_ospf_lsa_type_name_udf, create_ospf_packet_type_name_udf};
 pub use protocol::{create_ethertype_name_udf, create_ip_proto_name_udf};
 pub use tcp::{create_has_tcp_flag_udf, create_tcp_flags_str_udf};
+pub use tls_proto::{create_tls_record_type_name_udf, create_tls_version_name_udf};
 
 // Re-export utility UDFs
 pub use hex::{create_hex_udf, create_unhex_udf};
@@ -155,10 +170,31 @@ pub fn register_protocol_udfs(ctx: &SessionContext) -> Result<(), Error> {
     // ICMP
     ctx.register_udf(create_icmp_type_name_udf());
     ctx.register_udf(create_icmpv6_type_name_udf());
+    ctx.register_udf(create_icmp_code_name_udf());
+    ctx.register_udf(create_icmpv6_code_name_udf());
 
     // Protocol numbers
     ctx.register_udf(create_ip_proto_name_udf());
     ctx.register_udf(create_ethertype_name_udf());
+
+    // BGP
+    ctx.register_udf(create_bgp_message_type_name_udf());
+    ctx.register_udf(create_bgp_origin_name_udf());
+
+    // OSPF
+    ctx.register_udf(create_ospf_packet_type_name_udf());
+    ctx.register_udf(create_ospf_lsa_type_name_udf());
+
+    // GTP
+    ctx.register_udf(create_gtp_message_type_name_udf());
+
+    // NTP
+    ctx.register_udf(create_ntp_mode_name_udf());
+    ctx.register_udf(create_ntp_stratum_name_udf());
+
+    // TLS
+    ctx.register_udf(create_tls_version_name_udf());
+    ctx.register_udf(create_tls_record_type_name_udf());
 
     Ok(())
 }

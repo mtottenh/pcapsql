@@ -1,6 +1,7 @@
 //! ICMP UDFs.
 //!
 //! Provides functions for converting ICMP and ICMPv6 type values to human-readable names.
+//! Uses protocol constants from pcapsql-core for consistency.
 
 use std::sync::Arc;
 
@@ -9,6 +10,12 @@ use arrow::datatypes::DataType;
 use datafusion::common::Result as DFResult;
 use datafusion::logical_expr::{
     ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
+};
+use pcapsql_core::protocol::{
+    icmp_dest_unreachable_code as dest_unreachable_code,
+    icmp_parameter_problem_code as parameter_problem_code, icmp_redirect_code as redirect_code,
+    icmp_time_exceeded_code as time_exceeded_code, icmp_type, icmpv6_dest_unreachable_code,
+    icmpv6_parameter_problem_code, icmpv6_time_exceeded_code, icmpv6_type,
 };
 
 /// Create the `icmp_type_name()` UDF that converts ICMP type to human-readable name.
@@ -30,6 +37,28 @@ pub fn create_icmp_type_name_udf() -> ScalarUDF {
 /// ```
 pub fn create_icmpv6_type_name_udf() -> ScalarUDF {
     ScalarUDF::new_from_impl(Icmpv6TypeNameUdf::new())
+}
+
+/// Create the `icmp_code_name()` UDF that converts ICMP type+code to human-readable name.
+///
+/// # Example
+/// ```sql
+/// SELECT icmp_code_name(type, code) FROM icmp;
+/// -- Returns: "Network Unreachable", "Host Unreachable", "Port Unreachable", etc.
+/// ```
+pub fn create_icmp_code_name_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(IcmpCodeNameUdf::new())
+}
+
+/// Create the `icmpv6_code_name()` UDF that converts ICMPv6 type+code to name.
+///
+/// # Example
+/// ```sql
+/// SELECT icmpv6_code_name(type, code) FROM icmpv6;
+/// -- Returns: "No Route to Destination", "Administratively Prohibited", etc.
+/// ```
+pub fn create_icmpv6_code_name_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(Icmpv6CodeNameUdf::new())
 }
 
 // ============================================================================
@@ -83,24 +112,24 @@ impl ScalarUDFImpl for IcmpTypeNameUdf {
 }
 
 /// Convert ICMP type to human-readable name.
-fn icmp_type_to_name(icmp_type: u8) -> String {
-    match icmp_type {
-        0 => "Echo Reply".to_string(),
-        3 => "Destination Unreachable".to_string(),
-        4 => "Source Quench".to_string(),
-        5 => "Redirect".to_string(),
+fn icmp_type_to_name(t: u8) -> String {
+    match t {
+        icmp_type::ECHO_REPLY => "Echo Reply".to_string(),
+        icmp_type::DESTINATION_UNREACHABLE => "Destination Unreachable".to_string(),
+        icmp_type::SOURCE_QUENCH => "Source Quench".to_string(),
+        icmp_type::REDIRECT => "Redirect".to_string(),
         6 => "Alternate Host Address".to_string(),
-        8 => "Echo Request".to_string(),
-        9 => "Router Advertisement".to_string(),
-        10 => "Router Solicitation".to_string(),
-        11 => "Time Exceeded".to_string(),
-        12 => "Parameter Problem".to_string(),
-        13 => "Timestamp".to_string(),
-        14 => "Timestamp Reply".to_string(),
-        15 => "Information Request".to_string(),
-        16 => "Information Reply".to_string(),
-        17 => "Address Mask Request".to_string(),
-        18 => "Address Mask Reply".to_string(),
+        icmp_type::ECHO_REQUEST => "Echo Request".to_string(),
+        icmp_type::ROUTER_ADVERTISEMENT => "Router Advertisement".to_string(),
+        icmp_type::ROUTER_SOLICITATION => "Router Solicitation".to_string(),
+        icmp_type::TIME_EXCEEDED => "Time Exceeded".to_string(),
+        icmp_type::PARAMETER_PROBLEM => "Parameter Problem".to_string(),
+        icmp_type::TIMESTAMP_REQUEST => "Timestamp".to_string(),
+        icmp_type::TIMESTAMP_REPLY => "Timestamp Reply".to_string(),
+        icmp_type::INFO_REQUEST => "Information Request".to_string(),
+        icmp_type::INFO_REPLY => "Information Reply".to_string(),
+        icmp_type::ADDRESS_MASK_REQUEST => "Address Mask Request".to_string(),
+        icmp_type::ADDRESS_MASK_REPLY => "Address Mask Reply".to_string(),
         30 => "Traceroute".to_string(),
         31 => "Datagram Conversion Error".to_string(),
         32 => "Mobile Host Redirect".to_string(),
@@ -115,7 +144,7 @@ fn icmp_type_to_name(icmp_type: u8) -> String {
         41 => "ICMP for Seamoby".to_string(),
         42 => "Extended Echo Request".to_string(),
         43 => "Extended Echo Reply".to_string(),
-        _ => format!("Type {icmp_type}"),
+        _ => format!("Type {t}"),
     }
 }
 
@@ -170,34 +199,34 @@ impl ScalarUDFImpl for Icmpv6TypeNameUdf {
 }
 
 /// Convert ICMPv6 type to human-readable name.
-fn icmpv6_type_to_name(icmp_type: u8) -> String {
-    match icmp_type {
+fn icmpv6_type_to_name(t: u8) -> String {
+    match t {
         // Error messages (0-127)
-        1 => "Destination Unreachable".to_string(),
-        2 => "Packet Too Big".to_string(),
-        3 => "Time Exceeded".to_string(),
-        4 => "Parameter Problem".to_string(),
+        icmpv6_type::DESTINATION_UNREACHABLE => "Destination Unreachable".to_string(),
+        icmpv6_type::PACKET_TOO_BIG => "Packet Too Big".to_string(),
+        icmpv6_type::TIME_EXCEEDED => "Time Exceeded".to_string(),
+        icmpv6_type::PARAMETER_PROBLEM => "Parameter Problem".to_string(),
         100 => "Private Experimentation".to_string(),
         101 => "Private Experimentation".to_string(),
         127 => "Reserved for Expansion".to_string(),
 
         // Informational messages (128-255)
-        128 => "Echo Request".to_string(),
-        129 => "Echo Reply".to_string(),
-        130 => "Multicast Listener Query".to_string(),
-        131 => "Multicast Listener Report".to_string(),
-        132 => "Multicast Listener Done".to_string(),
-        133 => "Router Solicitation".to_string(),
-        134 => "Router Advertisement".to_string(),
-        135 => "Neighbor Solicitation".to_string(),
-        136 => "Neighbor Advertisement".to_string(),
-        137 => "Redirect".to_string(),
+        icmpv6_type::ECHO_REQUEST => "Echo Request".to_string(),
+        icmpv6_type::ECHO_REPLY => "Echo Reply".to_string(),
+        icmpv6_type::MLD_QUERY => "Multicast Listener Query".to_string(),
+        icmpv6_type::MLDV1_REPORT => "Multicast Listener Report".to_string(),
+        icmpv6_type::MLDV1_DONE => "Multicast Listener Done".to_string(),
+        icmpv6_type::ROUTER_SOLICITATION => "Router Solicitation".to_string(),
+        icmpv6_type::ROUTER_ADVERTISEMENT => "Router Advertisement".to_string(),
+        icmpv6_type::NEIGHBOR_SOLICITATION => "Neighbor Solicitation".to_string(),
+        icmpv6_type::NEIGHBOR_ADVERTISEMENT => "Neighbor Advertisement".to_string(),
+        icmpv6_type::REDIRECT => "Redirect".to_string(),
         138 => "Router Renumbering".to_string(),
         139 => "ICMP Node Information Query".to_string(),
         140 => "ICMP Node Information Response".to_string(),
         141 => "Inverse Neighbor Discovery Solicitation".to_string(),
         142 => "Inverse Neighbor Discovery Advertisement".to_string(),
-        143 => "MLDv2 Multicast Listener Report".to_string(),
+        icmpv6_type::MLDV2_REPORT => "MLDv2 Multicast Listener Report".to_string(),
         144 => "Home Agent Address Discovery Request".to_string(),
         145 => "Home Agent Address Discovery Reply".to_string(),
         146 => "Mobile Prefix Solicitation".to_string(),
@@ -220,7 +249,290 @@ fn icmpv6_type_to_name(icmp_type: u8) -> String {
         201 => "Private Experimentation".to_string(),
         255 => "Reserved for Expansion".to_string(),
 
-        _ => format!("Type {icmp_type}"),
+        _ => format!("Type {t}"),
+    }
+}
+
+// ============================================================================
+// icmp_code_name() UDF Implementation
+// ============================================================================
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct IcmpCodeNameUdf {
+    signature: Signature,
+}
+
+impl IcmpCodeNameUdf {
+    fn new() -> Self {
+        Self {
+            signature: Signature::exact(
+                vec![DataType::UInt8, DataType::UInt8],
+                Volatility::Immutable,
+            ),
+        }
+    }
+}
+
+impl ScalarUDFImpl for IcmpCodeNameUdf {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        "icmp_code_name"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::Utf8)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
+        let type_values = args[0]
+            .as_any()
+            .downcast_ref::<UInt8Array>()
+            .expect("icmp_code_name: expected uint8 array for type");
+        let code_values = args[1]
+            .as_any()
+            .downcast_ref::<UInt8Array>()
+            .expect("icmp_code_name: expected uint8 array for code");
+
+        let result: StringArray = type_values
+            .iter()
+            .zip(code_values.iter())
+            .map(|(t, c)| match (t, c) {
+                (Some(t), Some(c)) => Some(icmp_code_to_name(t, c)),
+                _ => None,
+            })
+            .collect();
+
+        Ok(ColumnarValue::Array(Arc::new(result)))
+    }
+}
+
+/// Convert ICMP type+code to human-readable name.
+fn icmp_code_to_name(t: u8, code: u8) -> String {
+    match t {
+        // Destination Unreachable
+        icmp_type::DESTINATION_UNREACHABLE => match code {
+            dest_unreachable_code::NET_UNREACHABLE => "Network Unreachable".to_string(),
+            dest_unreachable_code::HOST_UNREACHABLE => "Host Unreachable".to_string(),
+            dest_unreachable_code::PROTOCOL_UNREACHABLE => "Protocol Unreachable".to_string(),
+            dest_unreachable_code::PORT_UNREACHABLE => "Port Unreachable".to_string(),
+            dest_unreachable_code::FRAGMENTATION_NEEDED => "Fragmentation Needed".to_string(),
+            dest_unreachable_code::SOURCE_ROUTE_FAILED => "Source Route Failed".to_string(),
+            dest_unreachable_code::DEST_NET_UNKNOWN => "Destination Network Unknown".to_string(),
+            dest_unreachable_code::DEST_HOST_UNKNOWN => "Destination Host Unknown".to_string(),
+            dest_unreachable_code::SOURCE_HOST_ISOLATED => "Source Host Isolated".to_string(),
+            dest_unreachable_code::NET_ADMIN_PROHIBITED => {
+                "Network Administratively Prohibited".to_string()
+            }
+            dest_unreachable_code::HOST_ADMIN_PROHIBITED => {
+                "Host Administratively Prohibited".to_string()
+            }
+            dest_unreachable_code::NET_TOS_UNREACHABLE => "Network Unreachable for TOS".to_string(),
+            dest_unreachable_code::HOST_TOS_UNREACHABLE => "Host Unreachable for TOS".to_string(),
+            dest_unreachable_code::COMM_ADMIN_PROHIBITED => {
+                "Communication Administratively Prohibited".to_string()
+            }
+            dest_unreachable_code::HOST_PRECEDENCE_VIOLATION => {
+                "Host Precedence Violation".to_string()
+            }
+            dest_unreachable_code::PRECEDENCE_CUTOFF => "Precedence Cutoff in Effect".to_string(),
+            _ => format!("Destination Unreachable (code {code})"),
+        },
+        // Redirect
+        icmp_type::REDIRECT => match code {
+            redirect_code::REDIRECT_NET => "Redirect for Network".to_string(),
+            redirect_code::REDIRECT_HOST => "Redirect for Host".to_string(),
+            redirect_code::REDIRECT_TOS_NET => "Redirect for TOS and Network".to_string(),
+            redirect_code::REDIRECT_TOS_HOST => "Redirect for TOS and Host".to_string(),
+            _ => format!("Redirect (code {code})"),
+        },
+        // Time Exceeded
+        icmp_type::TIME_EXCEEDED => match code {
+            time_exceeded_code::TTL_EXCEEDED => "TTL Exceeded in Transit".to_string(),
+            time_exceeded_code::FRAGMENT_REASSEMBLY_EXCEEDED => {
+                "Fragment Reassembly Time Exceeded".to_string()
+            }
+            _ => format!("Time Exceeded (code {code})"),
+        },
+        // Parameter Problem
+        icmp_type::PARAMETER_PROBLEM => match code {
+            parameter_problem_code::POINTER_ERROR => "Pointer Indicates Error".to_string(),
+            parameter_problem_code::MISSING_REQUIRED_OPTION => {
+                "Missing Required Option".to_string()
+            }
+            parameter_problem_code::BAD_LENGTH => "Bad Length".to_string(),
+            _ => format!("Parameter Problem (code {code})"),
+        },
+        // Echo Reply and Echo Request have code 0
+        icmp_type::ECHO_REPLY | icmp_type::ECHO_REQUEST => {
+            if code == 0 {
+                "No Code".to_string()
+            } else {
+                format!("Code {code}")
+            }
+        }
+        // Other types
+        _ => {
+            if code == 0 {
+                "No Code".to_string()
+            } else {
+                format!("Code {code}")
+            }
+        }
+    }
+}
+
+// ============================================================================
+// icmpv6_code_name() UDF Implementation
+// ============================================================================
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct Icmpv6CodeNameUdf {
+    signature: Signature,
+}
+
+impl Icmpv6CodeNameUdf {
+    fn new() -> Self {
+        Self {
+            signature: Signature::exact(
+                vec![DataType::UInt8, DataType::UInt8],
+                Volatility::Immutable,
+            ),
+        }
+    }
+}
+
+impl ScalarUDFImpl for Icmpv6CodeNameUdf {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        "icmpv6_code_name"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::Utf8)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
+        let type_values = args[0]
+            .as_any()
+            .downcast_ref::<UInt8Array>()
+            .expect("icmpv6_code_name: expected uint8 array for type");
+        let code_values = args[1]
+            .as_any()
+            .downcast_ref::<UInt8Array>()
+            .expect("icmpv6_code_name: expected uint8 array for code");
+
+        let result: StringArray = type_values
+            .iter()
+            .zip(code_values.iter())
+            .map(|(t, c)| match (t, c) {
+                (Some(t), Some(c)) => Some(icmpv6_code_to_name(t, c)),
+                _ => None,
+            })
+            .collect();
+
+        Ok(ColumnarValue::Array(Arc::new(result)))
+    }
+}
+
+/// Convert ICMPv6 type+code to human-readable name.
+fn icmpv6_code_to_name(t: u8, code: u8) -> String {
+    match t {
+        // Destination Unreachable
+        icmpv6_type::DESTINATION_UNREACHABLE => match code {
+            icmpv6_dest_unreachable_code::NO_ROUTE => "No Route to Destination".to_string(),
+            icmpv6_dest_unreachable_code::ADMIN_PROHIBITED => {
+                "Administratively Prohibited".to_string()
+            }
+            icmpv6_dest_unreachable_code::BEYOND_SCOPE => {
+                "Beyond Scope of Source Address".to_string()
+            }
+            icmpv6_dest_unreachable_code::ADDRESS_UNREACHABLE => "Address Unreachable".to_string(),
+            icmpv6_dest_unreachable_code::PORT_UNREACHABLE => "Port Unreachable".to_string(),
+            icmpv6_dest_unreachable_code::FAILED_POLICY => {
+                "Source Address Failed Ingress/Egress Policy".to_string()
+            }
+            icmpv6_dest_unreachable_code::REJECT_ROUTE => "Reject Route to Destination".to_string(),
+            icmpv6_dest_unreachable_code::SOURCE_ROUTING_ERROR => {
+                "Error in Source Routing Header".to_string()
+            }
+            _ => format!("Destination Unreachable (code {code})"),
+        },
+        // Packet Too Big
+        icmpv6_type::PACKET_TOO_BIG => "Packet Too Big".to_string(),
+        // Time Exceeded
+        icmpv6_type::TIME_EXCEEDED => match code {
+            icmpv6_time_exceeded_code::HOP_LIMIT_EXCEEDED => {
+                "Hop Limit Exceeded in Transit".to_string()
+            }
+            icmpv6_time_exceeded_code::FRAGMENT_REASSEMBLY_EXCEEDED => {
+                "Fragment Reassembly Time Exceeded".to_string()
+            }
+            _ => format!("Time Exceeded (code {code})"),
+        },
+        // Parameter Problem
+        icmpv6_type::PARAMETER_PROBLEM => match code {
+            icmpv6_parameter_problem_code::ERRONEOUS_HEADER => "Erroneous Header Field".to_string(),
+            icmpv6_parameter_problem_code::UNRECOGNIZED_NEXT_HEADER => {
+                "Unrecognized Next Header".to_string()
+            }
+            icmpv6_parameter_problem_code::UNRECOGNIZED_OPTION => {
+                "Unrecognized IPv6 Option".to_string()
+            }
+            _ => format!("Parameter Problem (code {code})"),
+        },
+        // Echo Request/Reply
+        icmpv6_type::ECHO_REQUEST | icmpv6_type::ECHO_REPLY => {
+            if code == 0 {
+                "No Code".to_string()
+            } else {
+                format!("Code {code}")
+            }
+        }
+        // Router Renumbering (type 138)
+        138 => match code {
+            0 => "Router Renumbering Command".to_string(),
+            1 => "Router Renumbering Result".to_string(),
+            255 => "Sequence Number Reset".to_string(),
+            _ => format!("Router Renumbering (code {code})"),
+        },
+        // Node Information Query (type 139)
+        139 => match code {
+            0 => "NI Query for IPv6 Address".to_string(),
+            1 => "NI Query for Name or Empty".to_string(),
+            2 => "NI Query for IPv4 Address".to_string(),
+            _ => format!("NI Query (code {code})"),
+        },
+        // Node Information Response (type 140)
+        140 => match code {
+            0 => "NI Response Success".to_string(),
+            1 => "NI Responder Refuses".to_string(),
+            2 => "NI Unknown Query Type".to_string(),
+            _ => format!("NI Response (code {code})"),
+        },
+        // Other types
+        _ => {
+            if code == 0 {
+                "No Code".to_string()
+            } else {
+                format!("Code {code}")
+            }
+        }
     }
 }
 
@@ -230,15 +542,27 @@ mod tests {
 
     #[test]
     fn test_icmp_type_name() {
-        assert_eq!(icmp_type_to_name(0), "Echo Reply");
-        assert_eq!(icmp_type_to_name(3), "Destination Unreachable");
-        assert_eq!(icmp_type_to_name(5), "Redirect");
-        assert_eq!(icmp_type_to_name(8), "Echo Request");
-        assert_eq!(icmp_type_to_name(9), "Router Advertisement");
-        assert_eq!(icmp_type_to_name(10), "Router Solicitation");
-        assert_eq!(icmp_type_to_name(11), "Time Exceeded");
-        assert_eq!(icmp_type_to_name(13), "Timestamp");
-        assert_eq!(icmp_type_to_name(14), "Timestamp Reply");
+        assert_eq!(icmp_type_to_name(icmp_type::ECHO_REPLY), "Echo Reply");
+        assert_eq!(
+            icmp_type_to_name(icmp_type::DESTINATION_UNREACHABLE),
+            "Destination Unreachable"
+        );
+        assert_eq!(icmp_type_to_name(icmp_type::REDIRECT), "Redirect");
+        assert_eq!(icmp_type_to_name(icmp_type::ECHO_REQUEST), "Echo Request");
+        assert_eq!(
+            icmp_type_to_name(icmp_type::ROUTER_ADVERTISEMENT),
+            "Router Advertisement"
+        );
+        assert_eq!(
+            icmp_type_to_name(icmp_type::ROUTER_SOLICITATION),
+            "Router Solicitation"
+        );
+        assert_eq!(icmp_type_to_name(icmp_type::TIME_EXCEEDED), "Time Exceeded");
+        assert_eq!(icmp_type_to_name(icmp_type::TIMESTAMP_REQUEST), "Timestamp");
+        assert_eq!(
+            icmp_type_to_name(icmp_type::TIMESTAMP_REPLY),
+            "Timestamp Reply"
+        );
         // Unknown type
         assert_eq!(icmp_type_to_name(99), "Type 99");
     }
@@ -246,21 +570,54 @@ mod tests {
     #[test]
     fn test_icmpv6_type_name() {
         // Error messages
-        assert_eq!(icmpv6_type_to_name(1), "Destination Unreachable");
-        assert_eq!(icmpv6_type_to_name(2), "Packet Too Big");
-        assert_eq!(icmpv6_type_to_name(3), "Time Exceeded");
-        assert_eq!(icmpv6_type_to_name(4), "Parameter Problem");
+        assert_eq!(
+            icmpv6_type_to_name(icmpv6_type::DESTINATION_UNREACHABLE),
+            "Destination Unreachable"
+        );
+        assert_eq!(
+            icmpv6_type_to_name(icmpv6_type::PACKET_TOO_BIG),
+            "Packet Too Big"
+        );
+        assert_eq!(
+            icmpv6_type_to_name(icmpv6_type::TIME_EXCEEDED),
+            "Time Exceeded"
+        );
+        assert_eq!(
+            icmpv6_type_to_name(icmpv6_type::PARAMETER_PROBLEM),
+            "Parameter Problem"
+        );
 
         // Informational messages
-        assert_eq!(icmpv6_type_to_name(128), "Echo Request");
-        assert_eq!(icmpv6_type_to_name(129), "Echo Reply");
-        assert_eq!(icmpv6_type_to_name(130), "Multicast Listener Query");
-        assert_eq!(icmpv6_type_to_name(131), "Multicast Listener Report");
-        assert_eq!(icmpv6_type_to_name(133), "Router Solicitation");
-        assert_eq!(icmpv6_type_to_name(134), "Router Advertisement");
-        assert_eq!(icmpv6_type_to_name(135), "Neighbor Solicitation");
-        assert_eq!(icmpv6_type_to_name(136), "Neighbor Advertisement");
-        assert_eq!(icmpv6_type_to_name(137), "Redirect");
+        assert_eq!(
+            icmpv6_type_to_name(icmpv6_type::ECHO_REQUEST),
+            "Echo Request"
+        );
+        assert_eq!(icmpv6_type_to_name(icmpv6_type::ECHO_REPLY), "Echo Reply");
+        assert_eq!(
+            icmpv6_type_to_name(icmpv6_type::MLD_QUERY),
+            "Multicast Listener Query"
+        );
+        assert_eq!(
+            icmpv6_type_to_name(icmpv6_type::MLDV1_REPORT),
+            "Multicast Listener Report"
+        );
+        assert_eq!(
+            icmpv6_type_to_name(icmpv6_type::ROUTER_SOLICITATION),
+            "Router Solicitation"
+        );
+        assert_eq!(
+            icmpv6_type_to_name(icmpv6_type::ROUTER_ADVERTISEMENT),
+            "Router Advertisement"
+        );
+        assert_eq!(
+            icmpv6_type_to_name(icmpv6_type::NEIGHBOR_SOLICITATION),
+            "Neighbor Solicitation"
+        );
+        assert_eq!(
+            icmpv6_type_to_name(icmpv6_type::NEIGHBOR_ADVERTISEMENT),
+            "Neighbor Advertisement"
+        );
+        assert_eq!(icmpv6_type_to_name(icmpv6_type::REDIRECT), "Redirect");
 
         // Unknown type
         assert_eq!(icmpv6_type_to_name(99), "Type 99");
@@ -268,20 +625,44 @@ mod tests {
 
     #[test]
     fn test_ndp_types() {
-        // NDP message types (133-137)
-        assert_eq!(icmpv6_type_to_name(133), "Router Solicitation");
-        assert_eq!(icmpv6_type_to_name(134), "Router Advertisement");
-        assert_eq!(icmpv6_type_to_name(135), "Neighbor Solicitation");
-        assert_eq!(icmpv6_type_to_name(136), "Neighbor Advertisement");
-        assert_eq!(icmpv6_type_to_name(137), "Redirect");
+        // NDP message types
+        assert_eq!(
+            icmpv6_type_to_name(icmpv6_type::ROUTER_SOLICITATION),
+            "Router Solicitation"
+        );
+        assert_eq!(
+            icmpv6_type_to_name(icmpv6_type::ROUTER_ADVERTISEMENT),
+            "Router Advertisement"
+        );
+        assert_eq!(
+            icmpv6_type_to_name(icmpv6_type::NEIGHBOR_SOLICITATION),
+            "Neighbor Solicitation"
+        );
+        assert_eq!(
+            icmpv6_type_to_name(icmpv6_type::NEIGHBOR_ADVERTISEMENT),
+            "Neighbor Advertisement"
+        );
+        assert_eq!(icmpv6_type_to_name(icmpv6_type::REDIRECT), "Redirect");
     }
 
     #[test]
     fn test_mld_types() {
-        // MLD message types (130, 131, 132, 143)
-        assert_eq!(icmpv6_type_to_name(130), "Multicast Listener Query");
-        assert_eq!(icmpv6_type_to_name(131), "Multicast Listener Report");
-        assert_eq!(icmpv6_type_to_name(132), "Multicast Listener Done");
-        assert_eq!(icmpv6_type_to_name(143), "MLDv2 Multicast Listener Report");
+        // MLD message types
+        assert_eq!(
+            icmpv6_type_to_name(icmpv6_type::MLD_QUERY),
+            "Multicast Listener Query"
+        );
+        assert_eq!(
+            icmpv6_type_to_name(icmpv6_type::MLDV1_REPORT),
+            "Multicast Listener Report"
+        );
+        assert_eq!(
+            icmpv6_type_to_name(icmpv6_type::MLDV1_DONE),
+            "Multicast Listener Done"
+        );
+        assert_eq!(
+            icmpv6_type_to_name(icmpv6_type::MLDV2_REPORT),
+            "MLDv2 Multicast Listener Report"
+        );
     }
 }

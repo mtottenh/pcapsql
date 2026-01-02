@@ -31,6 +31,74 @@ use crate::schema::{DataKind, FieldDescriptor};
 #[allow(dead_code)]
 pub const TLS_PORT: u16 = 443;
 
+/// TLS version constants.
+pub mod version {
+    /// SSL 2.0 (obsolete, insecure).
+    pub const SSL_2_0: u16 = 0x0200;
+    /// SSL 3.0 (obsolete, insecure).
+    pub const SSL_3_0: u16 = 0x0300;
+    /// TLS 1.0 (RFC 2246).
+    pub const TLS_1_0: u16 = 0x0301;
+    /// TLS 1.1 (RFC 4346).
+    pub const TLS_1_1: u16 = 0x0302;
+    /// TLS 1.2 (RFC 5246).
+    pub const TLS_1_2: u16 = 0x0303;
+    /// TLS 1.3 (RFC 8446).
+    pub const TLS_1_3: u16 = 0x0304;
+}
+
+/// TLS record type constants.
+pub mod record_type {
+    /// Change Cipher Spec message.
+    pub const CHANGE_CIPHER_SPEC: u8 = 20;
+    /// Alert message.
+    pub const ALERT: u8 = 21;
+    /// Handshake message.
+    pub const HANDSHAKE: u8 = 22;
+    /// Application data (encrypted).
+    pub const APPLICATION_DATA: u8 = 23;
+    /// Heartbeat (RFC 6520).
+    pub const HEARTBEAT: u8 = 24;
+}
+
+/// TLS alert description constants.
+pub mod alert {
+    pub const CLOSE_NOTIFY: u8 = 0;
+    pub const UNEXPECTED_MESSAGE: u8 = 10;
+    pub const BAD_RECORD_MAC: u8 = 20;
+    pub const DECRYPTION_FAILED: u8 = 21;
+    pub const RECORD_OVERFLOW: u8 = 22;
+    pub const DECOMPRESSION_FAILURE: u8 = 30;
+    pub const HANDSHAKE_FAILURE: u8 = 40;
+    pub const NO_CERTIFICATE: u8 = 41;
+    pub const BAD_CERTIFICATE: u8 = 42;
+    pub const UNSUPPORTED_CERTIFICATE: u8 = 43;
+    pub const CERTIFICATE_REVOKED: u8 = 44;
+    pub const CERTIFICATE_EXPIRED: u8 = 45;
+    pub const CERTIFICATE_UNKNOWN: u8 = 46;
+    pub const ILLEGAL_PARAMETER: u8 = 47;
+    pub const UNKNOWN_CA: u8 = 48;
+    pub const ACCESS_DENIED: u8 = 49;
+    pub const DECODE_ERROR: u8 = 50;
+    pub const DECRYPT_ERROR: u8 = 51;
+    pub const EXPORT_RESTRICTION: u8 = 60;
+    pub const PROTOCOL_VERSION: u8 = 70;
+    pub const INSUFFICIENT_SECURITY: u8 = 71;
+    pub const INTERNAL_ERROR: u8 = 80;
+    pub const INAPPROPRIATE_FALLBACK: u8 = 86;
+    pub const USER_CANCELED: u8 = 90;
+    pub const NO_RENEGOTIATION: u8 = 100;
+    pub const MISSING_EXTENSION: u8 = 109;
+    pub const UNSUPPORTED_EXTENSION: u8 = 110;
+    pub const CERTIFICATE_UNOBTAINABLE: u8 = 111;
+    pub const UNRECOGNIZED_NAME: u8 = 112;
+    pub const BAD_CERTIFICATE_STATUS_RESPONSE: u8 = 113;
+    pub const BAD_CERTIFICATE_HASH_VALUE: u8 = 114;
+    pub const UNKNOWN_PSK_IDENTITY: u8 = 115;
+    pub const CERTIFICATE_REQUIRED: u8 = 116;
+    pub const NO_APPLICATION_PROTOCOL: u8 = 120;
+}
+
 /// Common TLS ports for priority matching.
 const TLS_PORTS: &[u16] = &[
     443,   // HTTPS
@@ -631,13 +699,14 @@ fn is_grease_value(val: u16) -> bool {
 }
 
 /// Format TLS version from TlsVersion.
-fn format_tls_version(version: TlsVersion) -> String {
-    match version.0 {
-        0x0300 => "SSL 3.0".to_string(),
-        0x0301 => "TLS 1.0".to_string(),
-        0x0302 => "TLS 1.1".to_string(),
-        0x0303 => "TLS 1.2".to_string(),
-        0x0304 => "TLS 1.3".to_string(),
+fn format_tls_version(ver: TlsVersion) -> String {
+    match ver.0 {
+        version::SSL_2_0 => "SSL 2.0".to_string(),
+        version::SSL_3_0 => "SSL 3.0".to_string(),
+        version::TLS_1_0 => "TLS 1.0".to_string(),
+        version::TLS_1_1 => "TLS 1.1".to_string(),
+        version::TLS_1_2 => "TLS 1.2".to_string(),
+        version::TLS_1_3 => "TLS 1.3".to_string(),
         v if is_grease_value(v) => "GREASE".to_string(),
         v => format!("Unknown (0x{v:04x})"),
     }
@@ -744,40 +813,40 @@ fn format_ec_point_format(fmt: u8) -> String {
 /// Format TLS alert description.
 fn format_alert_description(code: u8) -> &'static str {
     match code {
-        0 => "close_notify",
-        10 => "unexpected_message",
-        20 => "bad_record_mac",
-        21 => "decryption_failed",
-        22 => "record_overflow",
-        30 => "decompression_failure",
-        40 => "handshake_failure",
-        41 => "no_certificate",
-        42 => "bad_certificate",
-        43 => "unsupported_certificate",
-        44 => "certificate_revoked",
-        45 => "certificate_expired",
-        46 => "certificate_unknown",
-        47 => "illegal_parameter",
-        48 => "unknown_ca",
-        49 => "access_denied",
-        50 => "decode_error",
-        51 => "decrypt_error",
-        60 => "export_restriction",
-        70 => "protocol_version",
-        71 => "insufficient_security",
-        80 => "internal_error",
-        86 => "inappropriate_fallback",
-        90 => "user_canceled",
-        100 => "no_renegotiation",
-        109 => "missing_extension",
-        110 => "unsupported_extension",
-        111 => "certificate_unobtainable",
-        112 => "unrecognized_name",
-        113 => "bad_certificate_status_response",
-        114 => "bad_certificate_hash_value",
-        115 => "unknown_psk_identity",
-        116 => "certificate_required",
-        120 => "no_application_protocol",
+        alert::CLOSE_NOTIFY => "close_notify",
+        alert::UNEXPECTED_MESSAGE => "unexpected_message",
+        alert::BAD_RECORD_MAC => "bad_record_mac",
+        alert::DECRYPTION_FAILED => "decryption_failed",
+        alert::RECORD_OVERFLOW => "record_overflow",
+        alert::DECOMPRESSION_FAILURE => "decompression_failure",
+        alert::HANDSHAKE_FAILURE => "handshake_failure",
+        alert::NO_CERTIFICATE => "no_certificate",
+        alert::BAD_CERTIFICATE => "bad_certificate",
+        alert::UNSUPPORTED_CERTIFICATE => "unsupported_certificate",
+        alert::CERTIFICATE_REVOKED => "certificate_revoked",
+        alert::CERTIFICATE_EXPIRED => "certificate_expired",
+        alert::CERTIFICATE_UNKNOWN => "certificate_unknown",
+        alert::ILLEGAL_PARAMETER => "illegal_parameter",
+        alert::UNKNOWN_CA => "unknown_ca",
+        alert::ACCESS_DENIED => "access_denied",
+        alert::DECODE_ERROR => "decode_error",
+        alert::DECRYPT_ERROR => "decrypt_error",
+        alert::EXPORT_RESTRICTION => "export_restriction",
+        alert::PROTOCOL_VERSION => "protocol_version",
+        alert::INSUFFICIENT_SECURITY => "insufficient_security",
+        alert::INTERNAL_ERROR => "internal_error",
+        alert::INAPPROPRIATE_FALLBACK => "inappropriate_fallback",
+        alert::USER_CANCELED => "user_canceled",
+        alert::NO_RENEGOTIATION => "no_renegotiation",
+        alert::MISSING_EXTENSION => "missing_extension",
+        alert::UNSUPPORTED_EXTENSION => "unsupported_extension",
+        alert::CERTIFICATE_UNOBTAINABLE => "certificate_unobtainable",
+        alert::UNRECOGNIZED_NAME => "unrecognized_name",
+        alert::BAD_CERTIFICATE_STATUS_RESPONSE => "bad_certificate_status_response",
+        alert::BAD_CERTIFICATE_HASH_VALUE => "bad_certificate_hash_value",
+        alert::UNKNOWN_PSK_IDENTITY => "unknown_psk_identity",
+        alert::CERTIFICATE_REQUIRED => "certificate_required",
+        alert::NO_APPLICATION_PROTOCOL => "no_application_protocol",
         _ => "unknown",
     }
 }

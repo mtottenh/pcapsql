@@ -24,7 +24,7 @@ pub mod packet_type {
     pub const LINK_STATE_ACK: u8 = 5;
 }
 
-/// OSPF LSA types (RFC 2328).
+/// OSPF LSA types (RFC 2328, RFC 5250).
 pub mod lsa_type {
     /// Router-LSA: Describes router's links within an area.
     pub const ROUTER: u8 = 1;
@@ -36,6 +36,18 @@ pub mod lsa_type {
     pub const SUMMARY_ASBR: u8 = 4;
     /// AS-External-LSA: Describes route to external network.
     pub const AS_EXTERNAL: u8 = 5;
+    /// Group-Membership-LSA (RFC 1584): MOSPF group membership.
+    pub const GROUP_MEMBERSHIP: u8 = 6;
+    /// NSSA-External-LSA (RFC 3101): Not-so-stubby area external routes.
+    pub const NSSA_EXTERNAL: u8 = 7;
+    /// External-Attributes-LSA (deprecated).
+    pub const EXTERNAL_ATTRIBUTES: u8 = 8;
+    /// Opaque-Link-LSA (RFC 5250): Link-local scope opaque LSA.
+    pub const OPAQUE_LINK: u8 = 9;
+    /// Opaque-Area-LSA (RFC 5250): Area scope opaque LSA.
+    pub const OPAQUE_AREA: u8 = 10;
+    /// Opaque-AS-LSA (RFC 5250): AS scope opaque LSA.
+    pub const OPAQUE_AS: u8 = 11;
 }
 
 /// Get the name of an LSA type.
@@ -46,6 +58,12 @@ fn lsa_type_name(ls_type: u8) -> &'static str {
         lsa_type::SUMMARY_NETWORK => "Summary-LSA-Network",
         lsa_type::SUMMARY_ASBR => "Summary-LSA-ASBR",
         lsa_type::AS_EXTERNAL => "AS-External-LSA",
+        lsa_type::GROUP_MEMBERSHIP => "Group-Membership-LSA",
+        lsa_type::NSSA_EXTERNAL => "NSSA-External-LSA",
+        lsa_type::EXTERNAL_ATTRIBUTES => "External-Attributes-LSA",
+        lsa_type::OPAQUE_LINK => "Opaque-Link-LSA",
+        lsa_type::OPAQUE_AREA => "Opaque-Area-LSA",
+        lsa_type::OPAQUE_AS => "Opaque-AS-LSA",
         _ => "Unknown",
     }
 }
