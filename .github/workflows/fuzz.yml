@@ -1,0 +1,129 @@
+name: Fuzz Testing
+
+on:
+  schedule:
+    # Run nightly at midnight UTC
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    inputs:
+      fuzz_seconds:
+        description: 'Seconds to run each fuzz target'
+        required: false
+        default: '300'
+      targets:
+        description: 'Comma-separated list of targets (empty = all)'
+        required: false
+        default: ''
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180  # 3 hour timeout for nightly runs
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-cargo-fuzz-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Restore fuzz corpus cache
+        uses: actions/cache/restore@v4
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ github.sha }}
+          restore-keys: |
+            fuzz-corpus-
+
+      - name: Get fuzz targets
+        id: targets
+        run: |
+          cd fuzz
+          if [ -n "${{ github.event.inputs.targets }}" ]; then
+            # Use specified targets
+            echo "targets=${{ github.event.inputs.targets }}" >> $GITHUB_OUTPUT
+          else
+            # Get all targets
+            TARGETS=$(cargo fuzz list | tr '\n' ',' | sed 's/,$//')
+            echo "targets=$TARGETS" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run fuzz targets
+        run: |
+          cd fuzz
+          FUZZ_SECONDS="${{ github.event.inputs.fuzz_seconds || '300' }}"
+          TARGETS="${{ steps.targets.outputs.targets }}"
+
+          echo "Running fuzz targets for $FUZZ_SECONDS seconds each"
+          echo "Targets: $TARGETS"
+
+          # Track failures
+          FAILED=""
+
+          # Run each target
+          IFS=',' read -ra TARGET_ARRAY <<< "$TARGETS"
+          for target in "${TARGET_ARRAY[@]}"; do
+            target=$(echo "$target" | xargs)  # Trim whitespace
+            if [ -z "$target" ]; then continue; fi
+
+            echo ""
+            echo "=========================================="
+            echo "Fuzzing: $target"
+            echo "=========================================="
+
+            # Run fuzzer with timeout
+            # -max_total_time: stop after N seconds
+            # -jobs=0: use all CPUs for fuzzing
+            if ! cargo fuzz run "$target" -- \
+              -max_total_time="$FUZZ_SECONDS" \
+              -jobs=0 \
+              2>&1; then
+              echo "CRASH DETECTED in $target"
+              FAILED="$FAILED $target"
+            fi
+          done
+
+          # Report results
+          if [ -n "$FAILED" ]; then
+            echo ""
+            echo "=========================================="
+            echo "FAILURES DETECTED"
+            echo "=========================================="
+            echo "The following targets had crashes:$FAILED"
+            exit 1
+          fi
+
+          echo ""
+          echo "=========================================="
+          echo "All fuzz targets passed"
+          echo "=========================================="
+
+      - name: Save fuzz corpus cache
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ github.sha }}
+
+      - name: Upload crash artifacts
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fuzz-crashes
+          path: fuzz/artifacts/
+          retention-days: 30
