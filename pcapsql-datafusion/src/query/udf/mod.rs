@@ -88,9 +88,18 @@ mod tcp;
 mod time;
 
 // Re-export address UDFs
-pub use ipv4::{create_ip4_to_string_udf, create_ip4_udf, create_ip_in_cidr_udf};
-pub use ipv6::{create_ip6_in_cidr_udf, create_ip6_to_string_udf, create_ip6_udf};
-pub use mac::{create_mac_to_string_udf, create_mac_udf};
+pub use ipv4::{
+    create_ip4_to_string_udf, create_ip4_udf, create_ip_in_cidr_udf, create_is_loopback_ip_udf,
+    create_is_multicast_ip_udf, create_is_private_ip_udf,
+};
+pub use ipv6::{
+    create_ip6_in_cidr_udf, create_ip6_to_string_udf, create_ip6_udf, create_is_link_local_ip6_udf,
+    create_is_multicast_ip6_udf,
+};
+pub use mac::{
+    create_mac_is_broadcast_udf, create_mac_is_local_udf, create_mac_is_multicast_udf,
+    create_mac_to_string_udf, create_mac_udf,
+};
 
 // Re-export protocol UDFs
 pub use dns::{create_dns_class_name_udf, create_dns_rcode_name_udf, create_dns_type_name_udf};
@@ -128,15 +137,23 @@ pub fn register_network_udfs(ctx: &SessionContext) -> Result<(), Error> {
     ctx.register_udf(create_ip4_udf());
     ctx.register_udf(create_ip4_to_string_udf());
     ctx.register_udf(create_ip_in_cidr_udf());
+    ctx.register_udf(create_is_private_ip_udf());
+    ctx.register_udf(create_is_multicast_ip_udf());
+    ctx.register_udf(create_is_loopback_ip_udf());
 
     // IPv6 functions
     ctx.register_udf(create_ip6_udf());
     ctx.register_udf(create_ip6_to_string_udf());
     ctx.register_udf(create_ip6_in_cidr_udf());
+    ctx.register_udf(create_is_link_local_ip6_udf());
+    ctx.register_udf(create_is_multicast_ip6_udf());
 
     // MAC functions
     ctx.register_udf(create_mac_udf());
     ctx.register_udf(create_mac_to_string_udf());
+    ctx.register_udf(create_mac_is_broadcast_udf());
+    ctx.register_udf(create_mac_is_multicast_udf());
+    ctx.register_udf(create_mac_is_local_udf());
 
     Ok(())
 }
