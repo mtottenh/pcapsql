@@ -83,7 +83,8 @@ md5 = "0.7"
 ring = "0.17"
 
 # HTTP/2 HPACK header compression (RFC 7541)
-hpack = "0.3"
+# Using hpack-patched to fix panic vulnerability (https://github.com/mlalic/hpack-rs/issues/11)
+hpack = { package = "hpack-patched", version = "0.3" }
 
 # Netlink protocol parsing
 netlink-packet-core = "0.7"

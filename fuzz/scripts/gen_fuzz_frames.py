@@ -156,6 +156,42 @@ def main():
             IP(src="10.0.0.1", dst="10.0.0.2", proto=6),
             "Eth(14)+IP(20)"
         ),
+
+        # HTTP: Ethernet + IPv4 + TCP(dst=80)
+        # HTTP parser triggered by port 80
+        (
+            "HTTP_FRAME",
+            Ether(src="00:00:00:00:00:02", dst="00:00:00:00:00:01") /
+            IP(src="10.0.0.1", dst="10.0.0.2", proto=6) /
+            TCP(sport=12345, dport=80, flags="PA", seq=1),
+            "Eth(14)+IP(20)+TCP(20)"
+        ),
+
+        # HTTP2: Ethernet + IPv4 + TCP(dst=443)
+        # HTTP/2 parser triggered by port 443 (usually over TLS)
+        (
+            "HTTP2_FRAME",
+            Ether(src="00:00:00:00:00:02", dst="00:00:00:00:00:01") /
+            IP(src="10.0.0.1", dst="10.0.0.2", proto=6) /
+            TCP(sport=12345, dport=443, flags="PA", seq=1),
+            "Eth(14)+IP(20)+TCP(20)"
+        ),
+
+        # IPV4_OPTIONS: Ethernet only, IPv4 header built in fuzz target
+        # Allows fuzzing IHL and options fields
+        (
+            "IPV4_OPTIONS_FRAME",
+            Ether(src="00:00:00:00:00:02", dst="00:00:00:00:00:01", type=0x0800),
+            "Eth(14)"
+        ),
+
+        # IPV6_EXT: Ethernet only, IPv6 header built in fuzz target
+        # Allows fuzzing extension header chains
+        (
+            "IPV6_EXT_FRAME",
+            Ether(src="00:00:00:00:00:02", dst="00:00:00:00:00:01", type=0x86DD),
+            "Eth(14)"
+        ),
     ]
 
     for name, pkt, comment in frames:
