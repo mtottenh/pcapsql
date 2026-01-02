@@ -109,10 +109,25 @@ pub use vlan::VlanProtocol;
 pub use vxlan::VxlanProtocol;
 
 // Re-export protocol constants for use in UDFs and other crates
+pub use bgp::{message_type as bgp_message_type, origin_type as bgp_origin_type};
 pub use dns::{rcode, record_type};
 pub use ethernet::ethertype;
+pub use gtp::message_type as gtp_message_type;
+pub use icmp::{
+    dest_unreachable_code as icmp_dest_unreachable_code, icmp_type,
+    parameter_problem_code as icmp_parameter_problem_code, redirect_code as icmp_redirect_code,
+    time_exceeded_code as icmp_time_exceeded_code,
+};
+pub use icmpv6::{
+    dest_unreachable_code as icmpv6_dest_unreachable_code, icmpv6_type,
+    parameter_problem_code as icmpv6_parameter_problem_code,
+    time_exceeded_code as icmpv6_time_exceeded_code,
+};
 pub use ipv6::next_header;
 pub use netlink::family as netlink_family;
+pub use ntp::{mode as ntp_mode, stratum as ntp_stratum};
+pub use ospf::{lsa_type as ospf_lsa_type, packet_type as ospf_packet_type};
+pub use tls::{record_type as tls_record_type, version as tls_version};
 
 /// Create a registry with all built-in protocol parsers.
 pub fn default_registry() -> ProtocolRegistry {

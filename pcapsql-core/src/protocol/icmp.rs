@@ -15,10 +15,57 @@ pub mod icmp_type {
     pub const SOURCE_QUENCH: u8 = 4;
     pub const REDIRECT: u8 = 5;
     pub const ECHO_REQUEST: u8 = 8;
+    pub const ROUTER_ADVERTISEMENT: u8 = 9;
+    pub const ROUTER_SOLICITATION: u8 = 10;
     pub const TIME_EXCEEDED: u8 = 11;
     pub const PARAMETER_PROBLEM: u8 = 12;
     pub const TIMESTAMP_REQUEST: u8 = 13;
     pub const TIMESTAMP_REPLY: u8 = 14;
+    pub const INFO_REQUEST: u8 = 15;
+    pub const INFO_REPLY: u8 = 16;
+    pub const ADDRESS_MASK_REQUEST: u8 = 17;
+    pub const ADDRESS_MASK_REPLY: u8 = 18;
+}
+
+/// ICMP Destination Unreachable code constants (RFC 792, RFC 1122).
+pub mod dest_unreachable_code {
+    pub const NET_UNREACHABLE: u8 = 0;
+    pub const HOST_UNREACHABLE: u8 = 1;
+    pub const PROTOCOL_UNREACHABLE: u8 = 2;
+    pub const PORT_UNREACHABLE: u8 = 3;
+    pub const FRAGMENTATION_NEEDED: u8 = 4;
+    pub const SOURCE_ROUTE_FAILED: u8 = 5;
+    pub const DEST_NET_UNKNOWN: u8 = 6;
+    pub const DEST_HOST_UNKNOWN: u8 = 7;
+    pub const SOURCE_HOST_ISOLATED: u8 = 8;
+    pub const NET_ADMIN_PROHIBITED: u8 = 9;
+    pub const HOST_ADMIN_PROHIBITED: u8 = 10;
+    pub const NET_TOS_UNREACHABLE: u8 = 11;
+    pub const HOST_TOS_UNREACHABLE: u8 = 12;
+    pub const COMM_ADMIN_PROHIBITED: u8 = 13;
+    pub const HOST_PRECEDENCE_VIOLATION: u8 = 14;
+    pub const PRECEDENCE_CUTOFF: u8 = 15;
+}
+
+/// ICMP Redirect code constants.
+pub mod redirect_code {
+    pub const REDIRECT_NET: u8 = 0;
+    pub const REDIRECT_HOST: u8 = 1;
+    pub const REDIRECT_TOS_NET: u8 = 2;
+    pub const REDIRECT_TOS_HOST: u8 = 3;
+}
+
+/// ICMP Time Exceeded code constants.
+pub mod time_exceeded_code {
+    pub const TTL_EXCEEDED: u8 = 0;
+    pub const FRAGMENT_REASSEMBLY_EXCEEDED: u8 = 1;
+}
+
+/// ICMP Parameter Problem code constants.
+pub mod parameter_problem_code {
+    pub const POINTER_ERROR: u8 = 0;
+    pub const MISSING_REQUIRED_OPTION: u8 = 1;
+    pub const BAD_LENGTH: u8 = 2;
 }
 
 /// ICMP protocol parser.
@@ -69,8 +116,8 @@ impl Protocol for IcmpProtocol {
                 fields.push(("sequence", FieldValue::UInt16(sequence)));
             }
             icmp_type::DESTINATION_UNREACHABLE => {
-                // Next-hop MTU for "fragmentation needed" (code 4)
-                if icmp_code == 4 && data.len() >= 8 {
+                // Next-hop MTU for "fragmentation needed"
+                if icmp_code == dest_unreachable_code::FRAGMENTATION_NEEDED && data.len() >= 8 {
                     let mtu = u16::from_be_bytes([data[6], data[7]]);
                     fields.push(("next_hop_mtu", FieldValue::UInt16(mtu)));
                 }
@@ -94,10 +141,16 @@ impl Protocol for IcmpProtocol {
             icmp_type::SOURCE_QUENCH => "Source Quench",
             icmp_type::REDIRECT => "Redirect",
             icmp_type::ECHO_REQUEST => "Echo Request",
+            icmp_type::ROUTER_ADVERTISEMENT => "Router Advertisement",
+            icmp_type::ROUTER_SOLICITATION => "Router Solicitation",
             icmp_type::TIME_EXCEEDED => "Time Exceeded",
             icmp_type::PARAMETER_PROBLEM => "Parameter Problem",
             icmp_type::TIMESTAMP_REQUEST => "Timestamp Request",
             icmp_type::TIMESTAMP_REPLY => "Timestamp Reply",
+            icmp_type::INFO_REQUEST => "Information Request",
+            icmp_type::INFO_REPLY => "Information Reply",
+            icmp_type::ADDRESS_MASK_REQUEST => "Address Mask Request",
+            icmp_type::ADDRESS_MASK_REPLY => "Address Mask Reply",
             _ => "Unknown",
         };
         fields.push(("type_name", FieldValue::Str(type_name)));

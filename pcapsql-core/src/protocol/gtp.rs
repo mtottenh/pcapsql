@@ -23,13 +23,49 @@ pub const GTP_C_PORT: u16 = 2123;
 /// Maximum extension headers to parse (safety limit).
 const MAX_EXTENSION_HEADERS: usize = 16;
 
-/// GTP message types.
-#[allow(dead_code)]
+/// GTP message types (GTPv1-C, GTPv1-U, GTPv2-C).
 pub mod message_type {
+    // Common messages
     pub const ECHO_REQUEST: u8 = 1;
     pub const ECHO_RESPONSE: u8 = 2;
+    pub const VERSION_NOT_SUPPORTED: u8 = 3;
+
+    // GTPv1-C messages (3GPP TS 29.060)
+    pub const CREATE_PDP_CONTEXT_REQUEST: u8 = 16;
+    pub const CREATE_PDP_CONTEXT_RESPONSE: u8 = 17;
+    pub const UPDATE_PDP_CONTEXT_REQUEST: u8 = 18;
+    pub const UPDATE_PDP_CONTEXT_RESPONSE: u8 = 19;
+    pub const DELETE_PDP_CONTEXT_REQUEST: u8 = 20;
+    pub const DELETE_PDP_CONTEXT_RESPONSE: u8 = 21;
     pub const ERROR_INDICATION: u8 = 26;
+    pub const PDU_NOTIFICATION_REQUEST: u8 = 27;
+    pub const PDU_NOTIFICATION_RESPONSE: u8 = 28;
     pub const SUPPORTED_EXTENSION_HEADERS_NOTIFICATION: u8 = 31;
+
+    // GTPv2-C messages (3GPP TS 29.274)
+    pub const CREATE_SESSION_REQUEST: u8 = 32;
+    pub const CREATE_SESSION_RESPONSE: u8 = 33;
+    pub const MODIFY_BEARER_REQUEST: u8 = 34;
+    pub const MODIFY_BEARER_RESPONSE: u8 = 35;
+    pub const DELETE_SESSION_REQUEST: u8 = 36;
+    pub const DELETE_SESSION_RESPONSE: u8 = 37;
+    pub const CHANGE_NOTIFICATION_REQUEST: u8 = 38;
+    pub const CHANGE_NOTIFICATION_RESPONSE: u8 = 39;
+    pub const MODIFY_BEARER_COMMAND: u8 = 64;
+    pub const MODIFY_BEARER_FAILURE_INDICATION: u8 = 65;
+    pub const DELETE_BEARER_COMMAND: u8 = 66;
+    pub const DELETE_BEARER_FAILURE_INDICATION: u8 = 67;
+    pub const BEARER_RESOURCE_COMMAND: u8 = 68;
+    pub const BEARER_RESOURCE_FAILURE_INDICATION: u8 = 69;
+    pub const DOWNLINK_DATA_NOTIFICATION_FAILURE_INDICATION: u8 = 70;
+    pub const CREATE_BEARER_REQUEST: u8 = 95;
+    pub const CREATE_BEARER_RESPONSE: u8 = 96;
+    pub const UPDATE_BEARER_REQUEST: u8 = 97;
+    pub const UPDATE_BEARER_RESPONSE: u8 = 98;
+    pub const DELETE_BEARER_REQUEST: u8 = 99;
+    pub const DELETE_BEARER_RESPONSE: u8 = 100;
+
+    // GTPv1-U messages (3GPP TS 29.281)
     pub const END_MARKER: u8 = 254;
     pub const G_PDU: u8 = 255;
 }

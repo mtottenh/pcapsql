@@ -176,6 +176,22 @@ pub fn all_udfs() -> Vec<UdfInfo> {
             category: UdfCategory::Protocol,
         },
         UdfInfo {
+            name: "icmp_code_name",
+            description: "Convert ICMP type+code to detailed name",
+            signature: "icmp_code_name(uint8, uint8)",
+            return_type: "String",
+            example: "icmp_code_name(type, code) -> 'Port Unreachable'",
+            category: UdfCategory::Protocol,
+        },
+        UdfInfo {
+            name: "icmpv6_code_name",
+            description: "Convert ICMPv6 type+code to detailed name",
+            signature: "icmpv6_code_name(uint8, uint8)",
+            return_type: "String",
+            example: "icmpv6_code_name(type, code) -> 'No Route to Destination'",
+            category: UdfCategory::Protocol,
+        },
+        UdfInfo {
             name: "ip_proto_name",
             description: "Convert IP protocol number to name",
             signature: "ip_proto_name(uint8)",
