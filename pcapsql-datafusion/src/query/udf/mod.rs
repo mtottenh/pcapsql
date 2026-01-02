@@ -74,6 +74,7 @@
 //! SELECT ip_proto_name(protocol) AS proto, COUNT(*) FROM ipv4 GROUP BY protocol;
 //! ```
 
+mod datetime;
 mod dns;
 mod hex;
 mod histogram;
@@ -98,6 +99,12 @@ pub use tcp::{create_has_tcp_flag_udf, create_tcp_flags_str_udf};
 
 // Re-export utility UDFs
 pub use hex::{create_hex_udf, create_unhex_udf};
+
+// Re-export datetime UDFs
+pub use datetime::{
+    create_date_udf, create_datetime_udf, create_epoch_ms_udf, create_epoch_udf,
+    create_strftime_udf, create_time_udf,
+};
 
 // Re-export time UDFs
 pub use time::{
@@ -162,6 +169,25 @@ pub fn register_utility_udfs(ctx: &SessionContext) -> Result<(), Error> {
     Ok(())
 }
 
+/// Register datetime formatting UDFs with the DataFusion context.
+///
+/// Provides functions for formatting and manipulating timestamps:
+/// - `strftime(format, timestamp)` - Format using strftime codes
+/// - `datetime(timestamp)` - ISO 8601 datetime string
+/// - `date(timestamp)` - Extract date (YYYY-MM-DD)
+/// - `time(timestamp)` - Extract time (HH:MM:SS.ffffff)
+/// - `epoch(timestamp)` - Unix epoch seconds (Float64)
+/// - `epoch_ms(timestamp)` - Unix epoch milliseconds (Int64)
+pub fn register_datetime_udfs(ctx: &SessionContext) -> Result<(), Error> {
+    ctx.register_udf(create_strftime_udf());
+    ctx.register_udf(create_datetime_udf());
+    ctx.register_udf(create_date_udf());
+    ctx.register_udf(create_time_udf());
+    ctx.register_udf(create_epoch_udf());
+    ctx.register_udf(create_epoch_ms_udf());
+    Ok(())
+}
+
 /// Register HdrHistogram UDAFs and UDFs with the DataFusion context.
 ///
 /// Provides streaming histogram aggregation with constant memory footprint:
@@ -186,7 +212,7 @@ pub fn register_histogram_udfs(ctx: &SessionContext) -> Result<(), Error> {
 /// Register ALL UDFs with the DataFusion context.
 ///
 /// This is a convenience function that registers all network, protocol, utility,
-/// and histogram UDFs.
+/// datetime, and histogram UDFs.
 ///
 /// Note: Time UDFs are NOT included here because they require capture metadata.
 /// Use `register_time_udfs_eager()` or `register_time_udfs_lazy()` separately.
@@ -194,6 +220,7 @@ pub fn register_all_udfs(ctx: &SessionContext) -> Result<(), Error> {
     register_network_udfs(ctx)?;
     register_protocol_udfs(ctx)?;
     register_utility_udfs(ctx)?;
+    register_datetime_udfs(ctx)?;
     register_histogram_udfs(ctx)?;
     Ok(())
 }
@@ -270,6 +297,12 @@ mod tests {
     fn test_register_all_udfs() {
         let ctx = SessionContext::new();
         register_all_udfs(&ctx).unwrap();
+    }
+
+    #[test]
+    fn test_register_datetime_udfs() {
+        let ctx = SessionContext::new();
+        register_datetime_udfs(&ctx).unwrap();
     }
 
     #[test]
