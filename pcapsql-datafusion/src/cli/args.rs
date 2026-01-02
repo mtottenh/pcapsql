@@ -115,6 +115,10 @@ pub struct Args {
     #[arg(long = "list-protocols")]
     pub list_protocols: bool,
 
+    /// List available SQL functions (UDFs)
+    #[arg(long = "list-udfs")]
+    pub list_udfs: bool,
+
     /// Show table schemas
     #[arg(long = "schema")]
     pub show_schema: bool,

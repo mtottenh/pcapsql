@@ -14,6 +14,8 @@ pub enum ReplCommand {
     Schema,
     /// List protocols
     Protocols,
+    /// List UDFs (SQL functions)
+    Udfs,
     /// Exit the REPL
     Quit,
     /// Execute SQL query
@@ -85,6 +87,7 @@ impl ReplCommand {
                 ".tables" | ".t" => ReplCommand::Tables,
                 ".schema" | ".s" => ReplCommand::Schema,
                 ".protocols" | ".p" => ReplCommand::Protocols,
+                ".udfs" | ".functions" | ".funcs" => ReplCommand::Udfs,
                 ".quit" | ".exit" | ".q" => ReplCommand::Quit,
                 ".timeinfo" | ".ti" => ReplCommand::TimeInfo,
                 _ => ReplCommand::Unknown(trimmed.to_string()),

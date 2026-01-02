@@ -226,10 +226,15 @@ impl CloudLocation {
             ))
         })?;
 
-        let mut builder = GoogleCloudStorageBuilder::from_env().with_bucket_name(bucket);
+        let builder = GoogleCloudStorageBuilder::from_env().with_bucket_name(bucket);
 
+        // Note: object_store 0.11 doesn't support anonymous access for GCS.
+        // GCS public buckets typically work via Application Default Credentials.
         if self.anonymous {
-            builder = builder.with_anonymous(true);
+            tracing::warn!(
+                "Anonymous access not supported for GCS in this version; \
+                 using default credentials"
+            );
         }
 
         let store = builder.build().map_err(|e| {
