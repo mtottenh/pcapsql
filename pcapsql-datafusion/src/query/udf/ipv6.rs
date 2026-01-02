@@ -43,6 +43,28 @@ pub fn create_ip6_in_cidr_udf() -> ScalarUDF {
     ScalarUDF::new_from_impl(Ip6InCidrUdf::new())
 }
 
+/// Create the `is_link_local_ip6()` UDF that checks if an IPv6 is link-local.
+///
+/// # Example
+/// ```sql
+/// SELECT * FROM ipv6 WHERE is_link_local_ip6(src_ip);
+/// -- Matches: fe80::/10
+/// ```
+pub fn create_is_link_local_ip6_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(IsLinkLocalIp6Udf::new())
+}
+
+/// Create the `is_multicast_ip6()` UDF that checks if an IPv6 is multicast.
+///
+/// # Example
+/// ```sql
+/// SELECT * FROM ipv6 WHERE is_multicast_ip6(dst_ip);
+/// -- Matches: ff00::/8
+/// ```
+pub fn create_is_multicast_ip6_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(IsMulticastIp6Udf::new())
+}
+
 // ============================================================================
 // ip6() UDF Implementation
 // ============================================================================
@@ -267,6 +289,130 @@ fn ipv6_in_prefix(ip: &[u8], network: &[u8; 16], prefix_len: u32) -> bool {
     true
 }
 
+// ============================================================================
+// Classification Helper Functions
+// ============================================================================
+
+/// Check if IPv6 address is link-local (fe80::/10).
+fn is_link_local_ipv6(bytes: &[u8]) -> bool {
+    bytes.len() >= 2 && bytes[0] == 0xfe && (bytes[1] & 0xc0) == 0x80
+}
+
+/// Check if IPv6 address is multicast (ff00::/8).
+fn is_multicast_ipv6(bytes: &[u8]) -> bool {
+    !bytes.is_empty() && bytes[0] == 0xff
+}
+
+// ============================================================================
+// is_link_local_ip6() UDF Implementation
+// ============================================================================
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct IsLinkLocalIp6Udf {
+    signature: Signature,
+}
+
+impl IsLinkLocalIp6Udf {
+    fn new() -> Self {
+        Self {
+            signature: Signature::exact(vec![DataType::FixedSizeBinary(16)], Volatility::Immutable),
+        }
+    }
+}
+
+impl ScalarUDFImpl for IsLinkLocalIp6Udf {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        "is_link_local_ip6"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::Boolean)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
+        let ip_values = args[0]
+            .as_any()
+            .downcast_ref::<FixedSizeBinaryArray>()
+            .expect("is_link_local_ip6: expected FixedSizeBinary(16) array");
+
+        let result: BooleanArray = (0..ip_values.len())
+            .map(|i| {
+                if ip_values.is_null(i) {
+                    None
+                } else {
+                    Some(is_link_local_ipv6(ip_values.value(i)))
+                }
+            })
+            .collect();
+
+        Ok(ColumnarValue::Array(Arc::new(result)))
+    }
+}
+
+// ============================================================================
+// is_multicast_ip6() UDF Implementation
+// ============================================================================
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct IsMulticastIp6Udf {
+    signature: Signature,
+}
+
+impl IsMulticastIp6Udf {
+    fn new() -> Self {
+        Self {
+            signature: Signature::exact(vec![DataType::FixedSizeBinary(16)], Volatility::Immutable),
+        }
+    }
+}
+
+impl ScalarUDFImpl for IsMulticastIp6Udf {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        "is_multicast_ip6"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::Boolean)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
+        let ip_values = args[0]
+            .as_any()
+            .downcast_ref::<FixedSizeBinaryArray>()
+            .expect("is_multicast_ip6: expected FixedSizeBinary(16) array");
+
+        let result: BooleanArray = (0..ip_values.len())
+            .map(|i| {
+                if ip_values.is_null(i) {
+                    None
+                } else {
+                    Some(is_multicast_ipv6(ip_values.value(i)))
+                }
+            })
+            .collect();
+
+        Ok(ColumnarValue::Array(Arc::new(result)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,5 +445,45 @@ mod tests {
         // Should not match
         let ip2 = Ipv6Addr::from_str("fe80::1").unwrap().octets();
         assert!(!ipv6_in_prefix(&ip2, &network, prefix_len));
+    }
+
+    // Helper to convert IPv6 string to bytes
+    fn ip6(s: &str) -> [u8; 16] {
+        Ipv6Addr::from_str(s).unwrap().octets()
+    }
+
+    #[test]
+    fn test_is_link_local_ipv6() {
+        // Link-local range: fe80::/10
+        assert!(is_link_local_ipv6(&ip6("fe80::1")));
+        assert!(is_link_local_ipv6(&ip6("fe80:1234::5678")));
+        assert!(is_link_local_ipv6(&ip6(
+            "fe80:ffff:ffff:ffff:ffff:ffff:ffff:ffff"
+        )));
+        // fe80::/10 means first 10 bits = 1111111010, so fe8x and fe9x are valid
+        assert!(is_link_local_ipv6(&ip6("fe90::1")));
+        assert!(is_link_local_ipv6(&ip6("febf::1"))); // fe10111111 -> still within /10
+
+        // Not link-local
+        assert!(!is_link_local_ipv6(&ip6("fe00::1"))); // fec0 would be site-local
+        assert!(!is_link_local_ipv6(&ip6("fec0::1"))); // Site-local (deprecated)
+        assert!(!is_link_local_ipv6(&ip6("2001:db8::1"))); // Global unicast
+        assert!(!is_link_local_ipv6(&ip6("ff02::1"))); // Multicast
+    }
+
+    #[test]
+    fn test_is_multicast_ipv6() {
+        // Multicast range: ff00::/8
+        assert!(is_multicast_ipv6(&ip6("ff02::1"))); // All nodes (link-local)
+        assert!(is_multicast_ipv6(&ip6("ff05::2"))); // Site-local routers
+        assert!(is_multicast_ipv6(&ip6("ff0e::1"))); // Global multicast
+        assert!(is_multicast_ipv6(&ip6(
+            "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"
+        )));
+
+        // Not multicast
+        assert!(!is_multicast_ipv6(&ip6("fe80::1"))); // Link-local unicast
+        assert!(!is_multicast_ipv6(&ip6("2001:db8::1"))); // Global unicast
+        assert!(!is_multicast_ipv6(&ip6("::1"))); // Loopback
     }
 }
