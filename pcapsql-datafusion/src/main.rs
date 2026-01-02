@@ -265,7 +265,7 @@ fn list_udfs() {
     for (category, funcs) in udf::info::udfs_by_category() {
         println!("{}:", category.as_str());
         println!("{:-<70}", "");
-        println!("{:<22} {:<25} {}", "Function", "Returns", "Description");
+        println!("{:<22} {:<25} Description", "Function", "Returns");
         println!("{:-<70}", "");
 
         for f in &funcs {
