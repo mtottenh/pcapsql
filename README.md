@@ -62,6 +62,9 @@ pcapsql capture.pcap --keylog sslkeys.log -e "SELECT * FROM http2"
 
 # Export to Parquet
 pcapsql capture.pcap -e "SELECT * FROM dns" -o dns.parquet
+
+# Query directly from S3 (requires cloud feature)
+pcapsql s3://bucket/capture.pcap.gz -e "SELECT * FROM tcp LIMIT 10"
 ```
 
 ## Features
@@ -95,6 +98,15 @@ Reassemble TCP streams for application-layer parsing:
 - Out-of-order segment handling
 - Connection tracking
 - Configurable memory limits and timeouts
+
+### Cloud Storage
+Query PCAP files directly from cloud storage without downloading:
+- **AWS S3** (`s3://bucket/key`)
+- **Google Cloud Storage** (`gs://bucket/key`)
+- **Azure Blob Storage** (`az://container/blob`)
+- **S3-compatible** services (MinIO, Cloudflare R2, LocalStack)
+- Automatic compression detection (gzip, zstd, bzip2, xz, lz4)
+- Efficient streaming with configurable chunk sizes
 
 ## Example Queries
 
@@ -132,6 +144,61 @@ SELECT * FROM ipv4 WHERE tunnel_type = 'vxlan';
 | `vxlan`, `gre`, `mpls`, `gtp` | Tunnel headers |
 | `bgp`, `ospf` | Routing protocols |
 
+## SQL Functions (UDFs)
+
+pcapsql provides specialized functions for network analysis. Run `pcapsql --list-udfs` for the complete list.
+
+### Address Functions
+
+| Function | Description |
+|----------|-------------|
+| `ip4('192.168.1.1')` | Parse IPv4 string to UInt32 |
+| `ip4_to_string(ip)` | Convert UInt32 to IPv4 string |
+| `ip_in_cidr(ip, '10.0.0.0/8')` | Check if IPv4 is in CIDR range |
+| `ip6('fe80::1')` | Parse IPv6 string to Binary(16) |
+| `ip6_to_string(ip)` | Convert Binary(16) to IPv6 string |
+| `ip6_in_cidr(ip, '2001::/16')` | Check if IPv6 is in CIDR prefix |
+| `mac('aa:bb:cc:dd:ee:ff')` | Parse MAC address to Binary(6) |
+| `mac_to_string(mac)` | Convert Binary(6) to MAC string |
+
+### Protocol Functions
+
+| Function | Description |
+|----------|-------------|
+| `tcp_flags_str(flags)` | Convert TCP flags to string (e.g., "SYN,ACK") |
+| `has_tcp_flag(flags, 'SYN')` | Check if TCP flag is set |
+| `dns_type_name(type)` | DNS type number to name (A, AAAA, MX, etc.) |
+| `dns_rcode_name(rcode)` | DNS response code to name (NXDOMAIN, etc.) |
+| `icmp_type_name(type)` | ICMP type to name |
+| `ip_proto_name(proto)` | IP protocol number to name (TCP, UDP, etc.) |
+| `ethertype_name(type)` | EtherType to name (IPv4, ARP, etc.) |
+
+### DateTime Functions
+
+| Function | Description |
+|----------|-------------|
+| `strftime('%Y-%m-%d', ts)` | Format timestamp with strftime |
+| `datetime(ts)` | ISO 8601 datetime string |
+| `date(ts)`, `time(ts)` | Extract date or time portion |
+| `epoch(ts)`, `epoch_ms(ts)` | Unix timestamp (seconds/milliseconds) |
+| `start_time()`, `end_time()` | Capture start/end timestamps |
+| `relative_time(ts)` | Seconds elapsed from capture start |
+
+### Histogram Functions
+
+| Function | Description |
+|----------|-------------|
+| `hdr_histogram(value)` | Build histogram (aggregate function) |
+| `hdr_percentile(hist, 0.99)` | Extract percentile from histogram |
+| `hdr_count/min/max/mean(hist)` | Extract statistics from histogram |
+
+### Utility Functions
+
+| Function | Description |
+|----------|-------------|
+| `hex(binary)` | Convert binary to hex string |
+| `unhex('48656c6c6f')` | Parse hex string to binary |
+
 ## CLI Options
 
 ```
@@ -140,6 +207,7 @@ pcapsql <PCAP> [OPTIONS]
 Query:
   -e, --execute <SQL>       Execute query and exit
   -o, --output <FILE>       Export results (.parquet, .csv, .json)
+  --filter <EXPR>           BPF filter (tcpdump syntax)
 
 TLS Decryption:
   --keylog <FILE>           SSLKEYLOGFILE for TLS decryption
@@ -153,6 +221,11 @@ Stream Reassembly:
   --track-streams           Enable TCP stream tracking
   --max-stream-memory <N>   Buffer limit (default: 1G)
   --stream-timeout <SECS>   Connection timeout (default: 300)
+
+Cloud Storage:
+  --cloud-endpoint <URL>    Custom S3-compatible endpoint
+  --cloud-anonymous         Use unsigned requests (public buckets)
+  --cloud-chunk-size <N>    Download chunk size (default: 8M)
 ```
 
 ## REPL Commands
@@ -163,6 +236,71 @@ Stream Reassembly:
 .export <file> [query]  Export query results
 .quit                   Exit
 ```
+
+## Cloud Storage
+
+Query PCAP files directly from AWS S3, Google Cloud Storage, or Azure Blob Storage without downloading.
+
+### Building with Cloud Support
+
+Cloud support is an optional feature. To enable it:
+
+```bash
+# S3 only
+cargo build --release --features s3
+
+# All cloud providers
+cargo build --release --features cloud-all
+```
+
+Pre-built packages include S3 support by default.
+
+### Usage Examples
+
+```bash
+# AWS S3
+pcapsql s3://my-bucket/captures/traffic.pcap -e "SELECT * FROM tcp"
+
+# Compressed files (auto-detected)
+pcapsql s3://my-bucket/traffic.pcap.gz -e "SELECT COUNT(*) FROM packets"
+pcapsql s3://my-bucket/traffic.pcap.zst -e "SELECT * FROM dns"
+
+# Public buckets (no credentials required)
+pcapsql s3://public-pcaps/sample.pcap --cloud-anonymous
+
+# S3-compatible services (MinIO, Cloudflare R2, LocalStack)
+pcapsql s3://bucket/file.pcap --cloud-endpoint http://localhost:9000
+
+# Google Cloud Storage
+pcapsql gs://my-bucket/capture.pcap -e "SELECT * FROM http"
+
+# Azure Blob Storage
+pcapsql az://container/capture.pcap -e "SELECT * FROM tls"
+```
+
+### Authentication
+
+**AWS S3**: Uses standard AWS credential chain:
+- Environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`)
+- AWS credentials file (`~/.aws/credentials`)
+- IAM instance roles (EC2, ECS, Lambda)
+
+**Google Cloud**: Uses Application Default Credentials:
+- `GOOGLE_APPLICATION_CREDENTIALS` environment variable
+- `gcloud auth application-default login`
+- GCE metadata service
+
+**Azure**: Uses Azure Identity credential chain:
+- Environment variables (`AZURE_STORAGE_ACCOUNT`, `AZURE_STORAGE_KEY`)
+- Azure CLI (`az login`)
+- Managed Identity
+
+### Performance Notes
+
+- Cloud sources always use streaming mode for memory efficiency
+- Default chunk size is 8MB; increase for high-latency connections
+- Compression is recommended to reduce transfer time
+- Both legacy PCAP and PCAPNG formats are supported
 
 ## License
 

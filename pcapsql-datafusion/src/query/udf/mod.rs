@@ -79,6 +79,7 @@ mod dns;
 mod hex;
 mod histogram;
 mod icmp;
+pub mod info;
 mod ipv4;
 mod ipv6;
 mod mac;

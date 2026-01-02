@@ -12,7 +12,7 @@ use pcapsql_core::{default_registry, KeyLog, Protocol};
 use pcapsql_datafusion::cli::{
     Args, ExportFormat, Exporter, InputSource, OutputFormatter, Repl, ReplCommand, ReplInput,
 };
-use pcapsql_datafusion::query::{bpf, tables, views, QueryEngine};
+use pcapsql_datafusion::query::{bpf, tables, udf, views, QueryEngine};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -33,6 +33,11 @@ async fn main() -> Result<()> {
     // Handle info-only commands
     if args.list_protocols {
         list_protocols();
+        return Ok(());
+    }
+
+    if args.list_udfs {
+        list_udfs();
         return Ok(());
     }
 
@@ -252,6 +257,45 @@ fn list_protocols() {
     }
 }
 
+fn list_udfs() {
+    println!("Available SQL Functions (UDFs)");
+    println!("{:=<70}", "");
+    println!();
+
+    for (category, funcs) in udf::info::udfs_by_category() {
+        println!("{}:", category.as_str());
+        println!("{:-<70}", "");
+        println!("{:<22} {:<25} {}", "Function", "Returns", "Description");
+        println!("{:-<70}", "");
+
+        for f in &funcs {
+            println!(
+                "{:<22} {:<25} {}",
+                f.signature, f.return_type, f.description
+            );
+        }
+        println!();
+    }
+
+    println!("Examples:");
+    println!("{:-<70}", "");
+    println!();
+    println!("  -- Convert IP addresses for display");
+    println!("  SELECT ip4_to_string(src_ip), ip4_to_string(dst_ip) FROM ipv4;");
+    println!();
+    println!("  -- Filter by CIDR range");
+    println!("  SELECT * FROM ipv4 WHERE ip_in_cidr(src_ip, '192.168.0.0/16');");
+    println!();
+    println!("  -- TCP flag analysis");
+    println!("  SELECT * FROM tcp WHERE has_tcp_flag(tcp_flags, 'SYN');");
+    println!();
+    println!("  -- Protocol distribution");
+    println!("  SELECT ip_proto_name(protocol), COUNT(*) FROM ipv4 GROUP BY protocol;");
+    println!();
+    println!("  -- Latency histogram");
+    println!("  SELECT hdr_percentile(hdr_histogram(length), 0.99) as p99 FROM frames;");
+}
+
 fn show_schema() {
     println!("=== Protocol Tables ===");
     println!();
@@ -331,6 +375,7 @@ async fn run_repl(
                     ReplCommand::Tables => print_tables(),
                     ReplCommand::Schema => show_schema(),
                     ReplCommand::Protocols => list_protocols(),
+                    ReplCommand::Udfs => list_udfs(),
                     ReplCommand::CacheStats => {
                         if let Some(stats) = engine.cache_stats() {
                             println!("{}", stats.format_summary());
@@ -807,6 +852,7 @@ fn print_help() {
     println!("  .tables          List available tables");
     println!("  .schema          Show table schemas");
     println!("  .protocols       List registered protocols");
+    println!("  .udfs            List available SQL functions");
     println!("  .export <file> [query]  Export to file (format inferred from extension)");
     println!("  .timeinfo        Show capture time information");
     println!("  .hexdump <frame> Hex dump of packet data");
