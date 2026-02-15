@@ -96,7 +96,10 @@ pub mod windowing;
 pub use cache::{CacheStats, CachedParse, LruParseCache, NoCache, OwnedParseResult, ParseCache};
 pub use error::{Error, PcapError, ProtocolError, Result};
 pub use format::{detect_address_column, format_ipv4, format_ipv6, format_mac, AddressKind};
-pub use io::{FilePacketReader, FilePacketSource, PacketReader, PacketSource, RawPacket};
+pub use io::{
+    FilePacketReader, FilePacketSource, PacketReader, PacketSource, RawPacket, StdinPacketReader,
+    StdinPacketSource,
+};
 #[cfg(feature = "mmap")]
 pub use io::{MmapPacketReader, MmapPacketSource};
 pub use pcap::PcapReader;

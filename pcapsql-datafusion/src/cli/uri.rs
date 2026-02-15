@@ -6,11 +6,14 @@
 
 use std::path::PathBuf;
 
-/// Represents a parsed input source - either a local file or cloud URL.
+/// Represents a parsed input source - either a local file, cloud URL, or stdin.
 #[derive(Debug, Clone)]
 pub enum InputSource {
     /// Local file path.
     LocalFile(PathBuf),
+
+    /// Standard input (piped PCAP data).
+    Stdin,
 
     /// Cloud storage URL (requires `cloud` feature).
     #[cfg(feature = "cloud")]
@@ -50,6 +53,7 @@ impl InputSource {
     pub fn display_name(&self) -> String {
         match self {
             InputSource::LocalFile(path) => path.display().to_string(),
+            InputSource::Stdin => "<stdin>".to_string(),
             #[cfg(feature = "cloud")]
             InputSource::CloudUrl(url) => url.clone(),
         }
@@ -111,8 +115,7 @@ mod tests {
             InputSource::LocalFile(path) => {
                 assert_eq!(path, PathBuf::from("/path/to/file.pcap"));
             }
-            #[cfg(feature = "cloud")]
-            InputSource::CloudUrl(_) => panic!("Expected LocalFile"),
+            _ => panic!("Expected LocalFile"),
         }
     }
 
@@ -123,8 +126,7 @@ mod tests {
             InputSource::LocalFile(path) => {
                 assert_eq!(path, PathBuf::from("./data/test.pcap"));
             }
-            #[cfg(feature = "cloud")]
-            InputSource::CloudUrl(_) => panic!("Expected LocalFile"),
+            _ => panic!("Expected LocalFile"),
         }
     }
 
@@ -136,7 +138,7 @@ mod tests {
             InputSource::CloudUrl(url) => {
                 assert_eq!(url, "s3://bucket/key.pcap");
             }
-            InputSource::LocalFile(_) => panic!("Expected CloudUrl"),
+            _ => panic!("Expected CloudUrl"),
         }
     }
 
@@ -148,7 +150,7 @@ mod tests {
             InputSource::CloudUrl(url) => {
                 assert_eq!(url, "gs://bucket/path/to/file.pcap");
             }
-            InputSource::LocalFile(_) => panic!("Expected CloudUrl"),
+            _ => panic!("Expected CloudUrl"),
         }
     }
 
@@ -160,7 +162,7 @@ mod tests {
             InputSource::CloudUrl(url) => {
                 assert_eq!(url, "az://container/blob.pcap");
             }
-            InputSource::LocalFile(_) => panic!("Expected CloudUrl"),
+            _ => panic!("Expected CloudUrl"),
         }
     }
 

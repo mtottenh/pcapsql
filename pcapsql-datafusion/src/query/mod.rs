@@ -331,8 +331,11 @@ impl QueryEngine {
         // Register all UDFs (network addresses, protocol names, utilities)
         udf::register_all_udfs(&ctx)?;
 
-        // Get first packet timestamp for start_time() and relative_time()
-        let start_us = {
+        // Get first packet timestamp for start_time() and relative_time().
+        // For non-seekable sources (stdin), skip the pre-scan since it would
+        // consume the single-use reader needed for actual query execution.
+        let metadata = source.metadata();
+        let start_us = if metadata.seekable {
             let mut reader = source.reader(None)?;
             let mut first_ts = 0i64;
             reader.process_packets(1, |packet| {
@@ -340,11 +343,18 @@ impl QueryEngine {
                 Ok(())
             })?;
             first_ts
+        } else {
+            0i64
         };
 
-        // Create lazy closure for end_time() that scans on demand
+        // Create lazy closure for end_time() that scans on demand.
+        // For non-seekable sources, end_time() returns 0 (unknown).
+        let seekable = metadata.seekable;
         let source_for_end_scan = source.clone();
         let end_scan_fn = move || {
+            if !seekable {
+                return 0i64;
+            }
             let mut reader = match source_for_end_scan.reader(None) {
                 Ok(r) => r,
                 Err(_) => return 0i64,

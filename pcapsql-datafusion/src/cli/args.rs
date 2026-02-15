@@ -79,6 +79,13 @@ pub struct Args {
     #[arg(value_name = "FILE")]
     pub file: Option<PathBuf>,
 
+    /// Read PCAP data from standard input instead of a file.
+    ///
+    /// Use with piped input from tools like tcpdump:
+    ///   tcpdump -w - | pcapsql --stdin -e "SELECT COUNT(*) FROM frames"
+    #[arg(long = "stdin")]
+    pub stdin: bool,
+
     /// Execute a single SQL query and exit
     #[arg(short = 'e', long = "execute", value_name = "SQL")]
     pub query: Option<String>,
@@ -394,5 +401,24 @@ mod tests {
         assert!(args.cloud_endpoint.is_none());
         assert!(!args.cloud_anonymous);
         assert_eq!(args.cloud_chunk_size, 8 * 1024 * 1024); // 8MB default
+    }
+
+    // Test 11: --stdin flag
+    #[test]
+    fn test_stdin_flag() {
+        let args =
+            Args::try_parse_from(["pcapsql", "--stdin", "-e", "SELECT COUNT(*) FROM frames"])
+                .unwrap();
+
+        assert!(args.stdin);
+        assert!(args.file.is_none());
+    }
+
+    // Test 12: --stdin without file is valid
+    #[test]
+    fn test_stdin_no_file() {
+        let args = Args::try_parse_from(["pcapsql", "--stdin"]).unwrap();
+        assert!(args.stdin);
+        assert!(args.file.is_none());
     }
 }

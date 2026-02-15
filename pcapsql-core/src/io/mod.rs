@@ -33,6 +33,7 @@ mod decompress;
 mod mmap;
 mod pcap_stream;
 mod source;
+mod stdin;
 
 pub use decompress::{decompress_header, Compression, DecompressReader, FileDecoder};
 #[cfg(feature = "mmap")]
@@ -44,6 +45,8 @@ pub use source::{
     FilePacketReader, FilePacketSource, PacketPosition, PacketRange, PacketReader, PacketRef,
     PacketSource, PacketSourceMetadata, RawPacket,
 };
+
+pub use stdin::{StdinPacketReader, StdinPacketSource};
 
 #[cfg(feature = "cloud")]
 pub use cloud::{

@@ -52,18 +52,38 @@ async fn main() -> Result<()> {
         print_tls_status(&keylog);
     }
 
-    // Require a PCAP file for query operations
-    let pcap_file_arg = args
-        .file
-        .as_ref()
-        .context("PCAP file required. Use --help for usage.")?;
-
-    // Parse input source (local file or cloud URL)
-    let input_source = InputSource::parse(&pcap_file_arg.to_string_lossy());
+    // Determine input source: --stdin flag or file argument
+    let input_source = if args.stdin {
+        InputSource::Stdin
+    } else {
+        let pcap_file_arg = args
+            .file
+            .as_ref()
+            .context("PCAP file required (or use --stdin). Use --help for usage.")?;
+        InputSource::parse(&pcap_file_arg.to_string_lossy())
+    };
     let source_name = input_source.display_name();
 
     // Create query engine - choose mode based on source type and flags
     let engine = match input_source {
+        InputSource::Stdin => {
+            // Stdin always uses streaming mode
+            if args.verbose > 0 {
+                eprintln!("Reading PCAP data from stdin...");
+            }
+
+            use pcapsql_core::StdinPacketSource;
+            let source = StdinPacketSource::new().context("Failed to read PCAP data from stdin")?;
+            QueryEngine::with_streaming_source_cached_opts(
+                Arc::new(source),
+                args.batch_size,
+                args.cache_size,
+                !args.no_reader_eviction,
+            )
+            .await
+            .context("Failed to create engine from stdin")?
+        }
+
         #[cfg(feature = "cloud")]
         InputSource::CloudUrl(url) => {
             // Cloud URLs always use streaming mode
