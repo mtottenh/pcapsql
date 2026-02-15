@@ -28,6 +28,7 @@ mod frames;
 mod provider;
 pub mod providers;
 pub mod stream_tables;
+pub mod streaming;
 pub mod tables;
 pub mod udf;
 pub mod udtf;
@@ -78,7 +79,13 @@ fn create_session_context() -> SessionContext {
     config.optimizer.prefer_hash_join = false;
     config.optimizer.repartition_joins = true;
 
-    SessionContext::new_with_config(config.into())
+    let state = datafusion::execution::session_state::SessionStateBuilder::new()
+        .with_config(config.into())
+        .with_default_features()
+        .with_physical_optimizer_rule(Arc::new(streaming::StreamingWindowAggregateRule))
+        .build();
+
+    SessionContext::new_with_state(state)
 }
 
 /// Query engine for PCAP files.

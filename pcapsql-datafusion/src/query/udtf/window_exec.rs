@@ -70,15 +70,13 @@ impl WindowAssignExec {
     }
 
     /// Get the window specification.
-    /// Used by the streaming optimizer rule (PR #4) to extract window params.
-    #[allow(dead_code)]
+    /// Used by the streaming optimizer rule to extract window params.
     pub fn window_type(&self) -> &WindowType {
         &self.window_type
     }
 
     /// Get the timestamp column name.
-    /// Used by the streaming optimizer rule (PR #4) to extract window params.
-    #[allow(dead_code)]
+    /// Used by the streaming optimizer rule to extract window params.
     pub fn timestamp_col(&self) -> &str {
         &self.timestamp_col
     }

@@ -29,7 +29,7 @@ mod cache_stats;
 mod hop;
 mod tumble;
 mod window_args;
-mod window_exec;
+pub mod window_exec;
 mod window_provider;
 
 pub use cache_stats::{CacheStatsFunction, CacheStatsTable};
