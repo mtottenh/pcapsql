@@ -38,6 +38,8 @@ enum TableMode<S: PacketSource> {
         batch_size: usize,
         /// Optional parse cache for reducing redundant parsing
         cache: Option<Arc<dyn ParseCache>>,
+        /// Whether this is a continuous (unbounded) source
+        continuous: bool,
     },
 }
 
@@ -67,6 +69,7 @@ impl<S: PacketSource + 'static> ProtocolTableProvider<S> {
                 registry,
                 batch_size,
                 cache: None,
+                continuous: false,
             },
         }
     }
@@ -88,7 +91,22 @@ impl<S: PacketSource + 'static> ProtocolTableProvider<S> {
                 registry,
                 batch_size,
                 cache: Some(cache),
+                continuous: false,
             },
+        }
+    }
+
+    /// Mark this provider as continuous (unbounded source).
+    ///
+    /// When continuous, the execution plan will be marked as unbounded,
+    /// enabling the streaming window aggregation optimizer rule.
+    pub fn set_continuous(&mut self, continuous: bool) {
+        if let TableMode::Streaming {
+            continuous: ref mut c,
+            ..
+        } = self.mode
+        {
+            *c = continuous;
         }
     }
 }
@@ -125,6 +143,7 @@ impl<S: PacketSource + 'static> TableProvider for ProtocolTableProvider<S> {
                 registry,
                 batch_size,
                 cache,
+                continuous,
             } => {
                 // Get partitions from source (single partition in Phase 2)
                 let partitions = source
@@ -154,7 +173,7 @@ impl<S: PacketSource + 'static> TableProvider for ProtocolTableProvider<S> {
                     Arc::new(projections)
                 });
 
-                Ok(Arc::new(ProtocolStreamExec::new_with_optimizations(
+                let exec = ProtocolStreamExec::new_with_optimizations(
                     self.table_name.clone(),
                     self.schema.clone(),
                     source.clone(),
@@ -166,7 +185,13 @@ impl<S: PacketSource + 'static> TableProvider for ProtocolTableProvider<S> {
                     limit,
                     required_protocols,
                     field_projections,
-                )))
+                );
+
+                if *continuous {
+                    Ok(Arc::new(exec.into_continuous()))
+                } else {
+                    Ok(Arc::new(exec))
+                }
             }
         }
     }

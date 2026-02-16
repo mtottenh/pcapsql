@@ -57,6 +57,10 @@ pub struct ProtocolStreamExec<S: PacketSource> {
     /// Optional per-protocol field projections.
     /// When set, only specified fields are extracted for each protocol.
     field_projections: Option<Arc<HashMap<String, HashSet<String>>>>,
+    /// Whether this source is continuous (unbounded).
+    /// When true, the plan is marked as Unbounded so that the streaming
+    /// window aggregation optimizer rule can fire.
+    continuous: bool,
 }
 
 impl<S: PacketSource + 'static> ProtocolStreamExec<S> {
@@ -161,7 +165,26 @@ impl<S: PacketSource + 'static> ProtocolStreamExec<S> {
             limit,
             required_protocols,
             field_projections,
+            continuous: false,
         }
+    }
+
+    /// Mark this execution plan as continuous (unbounded).
+    ///
+    /// When continuous, the plan properties use `Boundedness::Unbounded`
+    /// which enables the streaming window aggregation optimizer rule.
+    pub fn into_continuous(mut self) -> Self {
+        self.continuous = true;
+        let eq_props = Self::compute_equivalence_properties(&self.projected_schema);
+        self.properties = PlanProperties::new(
+            eq_props,
+            Partitioning::UnknownPartitioning(self.partitions.len()),
+            EmissionType::Incremental,
+            Boundedness::Unbounded {
+                requires_infinite_memory: false,
+            },
+        );
+        self
     }
 
     fn compute_equivalence_properties(schema: &SchemaRef) -> EquivalenceProperties {

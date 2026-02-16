@@ -3,8 +3,9 @@
 //! Detects the pattern:
 //! ```text
 //! AggregateExec
-//!   └── WindowAssignExec
-//!         └── child with Boundedness::Unbounded
+//!   └── [ProjectionExec / RepartitionExec / ...]*
+//!         └── WindowAssignExec
+//!               └── child with Boundedness::Unbounded
 //! ```
 //! and replaces it with `StreamingWindowAggregateExec` that fuses window
 //! assignment and aggregation for incremental result emission.
@@ -24,7 +25,8 @@ use crate::query::udtf::window_exec::WindowAssignExec;
 /// unbounded sources into a single `StreamingWindowAggregateExec`.
 ///
 /// This rule only fires when:
-/// 1. The plan contains `AggregateExec` with a `WindowAssignExec` child
+/// 1. The plan contains `AggregateExec` with a `WindowAssignExec` descendant
+///    (possibly through intermediate ProjectionExec, RepartitionExec, etc.)
 /// 2. The `WindowAssignExec`'s child is unbounded (stdin, live capture, etc.)
 ///
 /// For bounded sources, the rule does nothing and DataFusion's standard
@@ -81,14 +83,34 @@ fn optimize_plan(plan: Arc<dyn ExecutionPlan>) -> DFResult<Arc<dyn ExecutionPlan
     }
 }
 
-/// Try to match and fuse `AggregateExec → WindowAssignExec → Unbounded child`.
+/// Walk down through single-child intermediate nodes to find a WindowAssignExec.
+///
+/// DataFusion may insert ProjectionExec, RepartitionExec, CoalescePartitionsExec,
+/// or other nodes between AggregateExec and WindowAssignExec. This function
+/// looks through these transparent wrapper nodes.
+fn find_window_assign(plan: &dyn ExecutionPlan) -> Option<&WindowAssignExec> {
+    // Direct match
+    if let Some(wa) = plan.as_any().downcast_ref::<WindowAssignExec>() {
+        return Some(wa);
+    }
+
+    // Look through single-child intermediate nodes
+    let children = plan.children();
+    if children.len() == 1 {
+        return find_window_assign(children[0].as_ref());
+    }
+
+    None
+}
+
+/// Try to match and fuse `AggregateExec → ... → WindowAssignExec → Unbounded child`.
 fn try_fuse_aggregate_window(plan: &Arc<dyn ExecutionPlan>) -> Option<Arc<dyn ExecutionPlan>> {
     // Step 1: Is this an AggregateExec?
     let aggregate = plan.as_any().downcast_ref::<AggregateExec>()?;
 
-    // Step 2: Is its child a WindowAssignExec?
+    // Step 2: Find WindowAssignExec in the child tree (possibly through projections)
     let child = aggregate.input();
-    let window_assign = child.as_any().downcast_ref::<WindowAssignExec>()?;
+    let window_assign = find_window_assign(child.as_ref())?;
 
     // Step 3: Is the WindowAssignExec's child unbounded?
     let window_child = &window_assign.children()[0];

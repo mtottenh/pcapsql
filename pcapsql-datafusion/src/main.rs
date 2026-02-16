@@ -1,6 +1,6 @@
 //! pcapsql CLI entry point.
 
-use std::io;
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -52,6 +52,13 @@ async fn main() -> Result<()> {
         print_tls_status(&keylog);
     }
 
+    // Validate --continuous requires --stdin
+    if args.continuous && !args.stdin {
+        anyhow::bail!(
+            "--continuous requires --stdin (continuous mode only works with piped input)"
+        );
+    }
+
     // Determine input source: --stdin flag or file argument
     let input_source = if args.stdin {
         InputSource::Stdin
@@ -70,18 +77,33 @@ async fn main() -> Result<()> {
             // Stdin always uses streaming mode
             if args.verbose > 0 {
                 eprintln!("Reading PCAP data from stdin...");
+                if args.continuous {
+                    eprintln!("Continuous mode enabled - results will stream as windows close");
+                }
             }
 
             use pcapsql_core::StdinPacketSource;
             let source = StdinPacketSource::new().context("Failed to read PCAP data from stdin")?;
-            QueryEngine::with_streaming_source_cached_opts(
-                Arc::new(source),
-                args.batch_size,
-                args.cache_size,
-                !args.no_reader_eviction,
-            )
-            .await
-            .context("Failed to create engine from stdin")?
+
+            if args.continuous {
+                QueryEngine::with_continuous_source(
+                    Arc::new(source),
+                    args.batch_size,
+                    args.cache_size,
+                    !args.no_reader_eviction,
+                )
+                .await
+                .context("Failed to create continuous engine from stdin")?
+            } else {
+                QueryEngine::with_streaming_source_cached_opts(
+                    Arc::new(source),
+                    args.batch_size,
+                    args.cache_size,
+                    !args.no_reader_eviction,
+                )
+                .await
+                .context("Failed to create engine from stdin")?
+            }
         }
 
         #[cfg(feature = "cloud")]
@@ -186,6 +208,12 @@ async fn main() -> Result<()> {
     // Execute query from -e flag
     if let Some(query) = args.query {
         let query = apply_bpf_filter(&query, &bpf_filter);
+
+        // Continuous mode: stream results incrementally
+        if args.continuous {
+            return run_continuous_query(&engine, &query, &formatter).await;
+        }
+
         let batches = engine.query(&query).await?;
 
         // Export if output file specified
@@ -244,6 +272,77 @@ async fn main() -> Result<()> {
 
     // Interactive REPL
     run_repl(&engine, &formatter, &source_name).await
+}
+
+/// Run a query in continuous streaming mode.
+///
+/// Results are printed incrementally as batches arrive (e.g., when windows close).
+/// The function returns when the input stream ends or when interrupted by SIGINT.
+async fn run_continuous_query(
+    engine: &QueryEngine,
+    query: &str,
+    formatter: &OutputFormatter,
+) -> Result<()> {
+    use futures::StreamExt;
+
+    let mut stream = engine
+        .query_stream(query)
+        .await
+        .context("Failed to start continuous query")?;
+
+    let mut stdout = io::stdout();
+    let mut total_rows: u64 = 0;
+    let mut batch_count: u64 = 0;
+    let mut header_written = false;
+
+    // Set up SIGINT handler
+    let ctrl_c = tokio::signal::ctrl_c();
+    tokio::pin!(ctrl_c);
+
+    loop {
+        tokio::select! {
+            batch_result = stream.next() => {
+                match batch_result {
+                    Some(Ok(batch)) => {
+                        if batch.num_rows() == 0 {
+                            continue;
+                        }
+                        total_rows += batch.num_rows() as u64;
+                        batch_count += 1;
+
+                        // For CSV format, only write the header once
+                        if !header_written {
+                            header_written = true;
+                            formatter.write(&batch, &mut stdout)?;
+                        } else {
+                            // For subsequent batches, use write() which includes
+                            // headers for table format (each window emission is
+                            // a self-contained mini-table) and JSON lines.
+                            // For CSV, we need to skip the header.
+                            formatter.write(&batch, &mut stdout)?;
+                        }
+                        stdout.flush()?;
+                    }
+                    Some(Err(e)) => {
+                        eprintln!("Error: {e}");
+                        return Err(e.into());
+                    }
+                    None => {
+                        // Stream ended (input exhausted)
+                        break;
+                    }
+                }
+            }
+            _ = &mut ctrl_c => {
+                eprintln!();
+                eprintln!("Interrupted. Shutting down...");
+                break;
+            }
+        }
+    }
+
+    eprintln!("Continuous query complete: {total_rows} rows in {batch_count} batches");
+    Ok(())
 }
 
 fn print_cache_stats(engine: &QueryEngine) {

@@ -86,6 +86,18 @@ pub struct Args {
     #[arg(long = "stdin")]
     pub stdin: bool,
 
+    /// Enable continuous streaming mode for live packet analysis.
+    ///
+    /// In continuous mode, the source is treated as unbounded (never-ending)
+    /// and windowed aggregation results are emitted incrementally as windows
+    /// close. Requires --stdin and a windowed query (using tumble() or hop()).
+    ///
+    /// Example:
+    ///   tcpdump -w - | pcapsql --stdin --continuous -e \
+    ///     "SELECT window_start, COUNT(*) FROM tumble(tcp, INTERVAL '10' SECOND) GROUP BY 1"
+    #[arg(long = "continuous")]
+    pub continuous: bool,
+
     /// Execute a single SQL query and exit
     #[arg(short = 'e', long = "execute", value_name = "SQL")]
     pub query: Option<String>,
@@ -420,5 +432,28 @@ mod tests {
         let args = Args::try_parse_from(["pcapsql", "--stdin"]).unwrap();
         assert!(args.stdin);
         assert!(args.file.is_none());
+    }
+
+    // Test 13: --continuous flag
+    #[test]
+    fn test_continuous_flag() {
+        let args = Args::try_parse_from([
+            "pcapsql",
+            "--stdin",
+            "--continuous",
+            "-e",
+            "SELECT window_start, COUNT(*) FROM tumble(tcp, INTERVAL '10' SECOND) GROUP BY 1",
+        ])
+        .unwrap();
+
+        assert!(args.stdin);
+        assert!(args.continuous);
+    }
+
+    // Test 14: --continuous defaults to false
+    #[test]
+    fn test_continuous_default_false() {
+        let args = Args::try_parse_from(["pcapsql", "--stdin"]).unwrap();
+        assert!(!args.continuous);
     }
 }

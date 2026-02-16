@@ -79,10 +79,22 @@ fn create_session_context() -> SessionContext {
     config.optimizer.prefer_hash_join = false;
     config.optimizer.repartition_joins = true;
 
+    // Build optimizer rules with our streaming rule inserted before SanityCheckPlan.
+    // SanityCheckPlan (the last default rule) rejects pipeline-breaking operators on
+    // unbounded sources. Our rule must run first to replace AggregateExec with
+    // StreamingWindowAggregateExec for windowed queries on continuous sources.
+    let default_optimizer = datafusion::physical_optimizer::optimizer::PhysicalOptimizer::new();
+    let mut rules = default_optimizer.rules;
+    let sanity_check = rules
+        .pop()
+        .expect("default rules should include SanityCheckPlan");
+    rules.push(Arc::new(streaming::StreamingWindowAggregateRule));
+    rules.push(sanity_check);
+
     let state = datafusion::execution::session_state::SessionStateBuilder::new()
         .with_config(config.into())
         .with_default_features()
-        .with_physical_optimizer_rule(Arc::new(streaming::StreamingWindowAggregateRule))
+        .with_physical_optimizer_rules(rules)
         .build();
 
     SessionContext::new_with_state(state)
@@ -326,11 +338,39 @@ impl QueryEngine {
         }
     }
 
+    /// Create a streaming QueryEngine in continuous (unbounded) mode.
+    ///
+    /// Sources are marked as unbounded, enabling the streaming window
+    /// aggregation optimizer rule for live packet analysis.
+    pub async fn with_continuous_source<S: PacketSource + 'static>(
+        source: Arc<S>,
+        batch_size: usize,
+        cache_size: usize,
+        reader_eviction: bool,
+    ) -> Result<Self, Error> {
+        if cache_size > 0 {
+            let cache = Arc::new(LruParseCache::with_options(cache_size, reader_eviction));
+            Self::with_streaming_source_impl(source, batch_size, Some(cache), true).await
+        } else {
+            Self::with_streaming_source_impl::<S, NoCache>(source, batch_size, None, true).await
+        }
+    }
+
     /// Internal method: Create a streaming QueryEngine with optional cache.
     async fn with_streaming_source_and_cache<S: PacketSource + 'static, C: ParseCache + 'static>(
         source: Arc<S>,
         batch_size: usize,
         cache: Option<Arc<C>>,
+    ) -> Result<Self, Error> {
+        Self::with_streaming_source_impl(source, batch_size, cache, false).await
+    }
+
+    /// Internal implementation for streaming source creation.
+    async fn with_streaming_source_impl<S: PacketSource + 'static, C: ParseCache + 'static>(
+        source: Arc<S>,
+        batch_size: usize,
+        cache: Option<Arc<C>>,
+        continuous: bool,
     ) -> Result<Self, Error> {
         let registry = Arc::new(default_registry());
         let ctx = create_session_context();
@@ -395,7 +435,7 @@ impl QueryEngine {
                 )))
             })?);
 
-            let provider = if let Some(ref cache) = cache_dyn {
+            let mut provider = if let Some(ref cache) = cache_dyn {
                 providers::ProtocolTableProvider::<S>::streaming_cached(
                     table_name.to_string(),
                     schema,
@@ -413,6 +453,10 @@ impl QueryEngine {
                     batch_size,
                 )
             };
+
+            if continuous {
+                provider.set_continuous(true);
+            }
 
             ctx.register_table(table_name, Arc::new(provider))
                 .map_err(|e| Error::Query(QueryError::Execution(e.to_string())))?;
@@ -664,6 +708,29 @@ impl QueryEngine {
             .map_err(|e| Error::Query(QueryError::from(e)))?;
 
         Ok(batches)
+    }
+
+    /// Execute a SQL query and return a stream of record batches.
+    ///
+    /// Unlike `query()`, this does not collect all results before returning.
+    /// Each batch is yielded as it becomes available, making it suitable for
+    /// continuous streaming queries where results arrive incrementally.
+    pub async fn query_stream(
+        &self,
+        sql: &str,
+    ) -> Result<datafusion::physical_plan::SendableRecordBatchStream, Error> {
+        let df = self
+            .ctx
+            .sql(sql)
+            .await
+            .map_err(|e| Error::Query(QueryError::from(e)))?;
+
+        let stream = df
+            .execute_stream()
+            .await
+            .map_err(|e| Error::Query(QueryError::from(e)))?;
+
+        Ok(stream)
     }
 
     /// Get the protocol registry.
