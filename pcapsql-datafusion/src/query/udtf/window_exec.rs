@@ -223,6 +223,9 @@ fn assign_windows(
         WindowType::Hop { slide, size } => {
             assign_hop_windows(batch, ts_array, *slide, *size, output_schema)
         }
+        WindowType::Session { .. } => Err(datafusion::error::DataFusionError::Internal(
+            "Session windows should use SessionAssignExec, not WindowAssignExec".to_string(),
+        )),
     }
 }
 

@@ -11,6 +11,7 @@
 //! - [`WindowBounds`] — Half-open `[start, end)` time interval in microseconds.
 //! - [`TumblingWindowAssigner`] — Fixed-size, non-overlapping, epoch-aligned windows.
 //! - [`HoppingWindowAssigner`] — Fixed-size windows with a slide interval (overlap).
+//! - [`SessionWindowAssigner`] / [`SessionTracker`] — Variable-length windows based on activity gaps.
 //!
 //! ## Example
 //!
@@ -39,11 +40,13 @@
 //! ```
 
 pub mod hop;
+pub mod session;
 pub mod tumble;
 pub mod watermark;
 pub mod window;
 
 pub use hop::HoppingWindowAssigner;
+pub use session::{SessionTracker, SessionWindowAssigner};
 pub use tumble::TumblingWindowAssigner;
 pub use watermark::{
     Watermark, WatermarkConfig, WatermarkEmitStrategy, WatermarkGenerator, WatermarkStats,
@@ -68,6 +71,12 @@ pub enum WindowType {
         /// Duration of each window.
         size: std::time::Duration,
     },
+    /// Variable-length windows based on activity gaps per key.
+    Session {
+        /// Gap duration. If no event arrives within this duration
+        /// after the last event for a key, the session closes.
+        gap: std::time::Duration,
+    },
 }
 
 impl WindowType {
@@ -80,6 +89,11 @@ impl WindowType {
     pub fn hop(slide: std::time::Duration, size: std::time::Duration) -> Self {
         WindowType::Hop { slide, size }
     }
+
+    /// Create a session window specification.
+    pub fn session(gap: std::time::Duration) -> Self {
+        WindowType::Session { gap }
+    }
 }
 
 impl std::fmt::Display for WindowType {
@@ -89,6 +103,7 @@ impl std::fmt::Display for WindowType {
             WindowType::Hop { slide, size } => {
                 write!(f, "HOP({}s, {}s)", slide.as_secs(), size.as_secs())
             }
+            WindowType::Session { gap } => write!(f, "SESSION({}s)", gap.as_secs()),
         }
     }
 }

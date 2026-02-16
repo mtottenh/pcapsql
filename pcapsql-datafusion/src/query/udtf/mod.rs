@@ -27,6 +27,8 @@
 
 mod cache_stats;
 mod hop;
+mod session;
+pub mod session_exec;
 mod tumble;
 mod window_args;
 pub mod window_exec;
@@ -34,4 +36,5 @@ mod window_provider;
 
 pub use cache_stats::{CacheStatsFunction, CacheStatsTable};
 pub use hop::HopFunction;
+pub use session::SessionFunction;
 pub use tumble::TumbleFunction;

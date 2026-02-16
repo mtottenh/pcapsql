@@ -291,6 +291,13 @@ impl StreamingWindowAggregateStream {
                     let assigner = HoppingWindowAssigner::new(*slide, *size);
                     assigner.assign(ts)
                 }
+                WindowType::Session { .. } => {
+                    return Err(DataFusionError::NotImplemented(
+                        "Session windows in streaming mode are not yet supported. \
+                         Use session() with bounded (file) sources."
+                            .to_string(),
+                    ));
+                }
             };
 
             // Extract group key (excluding window_start/window_end which aren't in child schema)

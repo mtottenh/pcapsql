@@ -171,9 +171,10 @@ impl QueryEngine {
         let stats_fn = udtf::CacheStatsFunction::new(|| None);
         ctx.register_udtf("cache_stats", Arc::new(stats_fn));
 
-        // Register window TVFs (tumble, hop)
+        // Register window TVFs (tumble, hop, session)
         ctx.register_udtf("tumble", Arc::new(udtf::TumbleFunction::new(ctx.clone())));
         ctx.register_udtf("hop", Arc::new(udtf::HopFunction::new(ctx.clone())));
+        ctx.register_udtf("session", Arc::new(udtf::SessionFunction::new(ctx.clone())));
 
         Ok(Self {
             ctx,
@@ -263,9 +264,10 @@ impl QueryEngine {
         let stats_fn = udtf::CacheStatsFunction::new(|| None);
         ctx.register_udtf("cache_stats", Arc::new(stats_fn));
 
-        // Register window TVFs (tumble, hop)
+        // Register window TVFs (tumble, hop, session)
         ctx.register_udtf("tumble", Arc::new(udtf::TumbleFunction::new(ctx.clone())));
         ctx.register_udtf("hop", Arc::new(udtf::HopFunction::new(ctx.clone())));
+        ctx.register_udtf("session", Arc::new(udtf::SessionFunction::new(ctx.clone())));
 
         Ok(Self {
             ctx,
@@ -471,9 +473,10 @@ impl QueryEngine {
             udtf::CacheStatsFunction::new(move || cache_for_udtf.as_ref().and_then(|c| c.stats()));
         ctx.register_udtf("cache_stats", Arc::new(stats_fn));
 
-        // Register window TVFs (tumble, hop)
+        // Register window TVFs (tumble, hop, session)
         ctx.register_udtf("tumble", Arc::new(udtf::TumbleFunction::new(ctx.clone())));
         ctx.register_udtf("hop", Arc::new(udtf::HopFunction::new(ctx.clone())));
+        ctx.register_udtf("session", Arc::new(udtf::SessionFunction::new(ctx.clone())));
 
         Ok(Self {
             ctx,
