@@ -170,9 +170,9 @@ async fn main() -> Result<()> {
             formatter.write_batches(&batches, &mut stdout)?;
         }
 
-        // Show cache stats if requested
+        // Show parse/partition stats if requested
         if args.show_stats {
-            print_cache_stats(&engine);
+            print_parse_stats(&engine);
         }
 
         return Ok(());
@@ -201,9 +201,9 @@ async fn main() -> Result<()> {
             formatter.write_batches(&batches, &mut stdout)?;
         }
 
-        // Show cache stats if requested
+        // Show parse/partition stats if requested
         if args.show_stats {
-            print_cache_stats(&engine);
+            print_parse_stats(&engine);
         }
 
         return Ok(());
@@ -213,7 +213,7 @@ async fn main() -> Result<()> {
     run_repl(&engine, &formatter, &source_name).await
 }
 
-fn print_cache_stats(engine: &QueryEngine) {
+fn print_parse_stats(engine: &QueryEngine) {
     // The parse cache was removed in favor of a single shared parse pass; report
     // the parse-pass / partition instrumentation instead.
     eprintln!();

@@ -677,7 +677,7 @@ mod tests {
                         "https://example.com/new"
                     )))
                 );
-                assert!(msg.fields.get("set_cookie").is_some());
+                assert!(msg.fields.contains_key("set_cookie"));
                 assert_eq!(
                     msg.fields.get("cache_control"),
                     Some(&FieldValue::OwnedString(CompactString::new("no-cache")))

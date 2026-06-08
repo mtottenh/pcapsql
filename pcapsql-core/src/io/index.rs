@@ -325,7 +325,7 @@ impl IndexBuilder {
     fn observe_packet(&mut self, byte_offset: u64, ts_ns: i64, pcapng: bool) {
         self.frame_number += 1;
         let frame = self.frame_number;
-        let starts_window = frame == 1 || (frame - 1) % self.stride == 0;
+        let starts_window = frame == 1 || (frame - 1).is_multiple_of(self.stride);
         if starts_window {
             let interface_state = if pcapng {
                 Some(InterfaceState {

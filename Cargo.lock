@@ -3542,6 +3542,7 @@ dependencies = [
  "hex",
  "indicatif",
  "nom 7.1.3",
+ "object_store 0.11.2",
  "parquet",
  "pcapsql-core",
  "pcapsql-testgen",

@@ -142,7 +142,7 @@ fn legacy_all_four_variants() {
         let packets: Vec<GenPacket> = (0..20)
             .map(|i| GenPacket {
                 ts_sec: 1_700_000_000 + i,
-                ts_frac: (i as u32 * 12345) % 1_000_000_000,
+                ts_frac: (i * 12345) % 1_000_000_000,
                 data: vec![(i % 256) as u8; 14 + (i as usize % 50)],
                 origlen: 14 + (i % 50),
             })

@@ -13,7 +13,8 @@
 //! - **PCAP Reading**: Support for PCAP and PCAPNG formats, including gzip/zstd
 //!   compression
 //! - **Memory-Mapped I/O**: Efficient reading of large capture files
-//! - **Parse Caching**: LRU cache to avoid redundant parsing during JOINs
+//! - **Parallel Parsing**: Seekable sources split into partitions parsed
+//!   concurrently, backed by a persisted boundary index
 //! - **TCP Stream Reassembly**: Connection tracking and application-layer parsing
 //!
 //! ## Quick Start

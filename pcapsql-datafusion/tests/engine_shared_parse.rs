@@ -35,7 +35,7 @@ fn udp_packet(src_port: u16, dst_port: u16, payload_len: usize) -> Vec<u8> {
     p.extend_from_slice(&dst_port.to_be_bytes());
     p.extend_from_slice(&udp_len.to_be_bytes());
     p.extend_from_slice(&[0x00, 0x00]); // checksum 0
-    p.extend(std::iter::repeat(0xAB).take(payload_len));
+    p.extend(std::iter::repeat_n(0xAB, payload_len));
     p
 }
 
