@@ -27,7 +27,7 @@
 //!
 //! // Open a PCAP file
 //! let source = FilePacketSource::open("capture.pcap").unwrap();
-//! let mut reader = source.reader(None).unwrap();
+//! let mut reader = source.sequential_reader().unwrap();
 //!
 //! // Read and parse packets using callback pattern
 //! reader.process_packets(1000, |packet| {
@@ -54,7 +54,6 @@
 //! |  protocol/   - Protocol trait, 17 parsers, FieldValue               |
 //! |  io/         - PacketSource, PacketReader, mmap support             |
 //! |  pcap/       - PCAP/PCAPNG reading, compression                     |
-//! |  cache/      - LRU parse cache                                      |
 //! |  stream/     - TCP reassembly, HTTP/TLS stream parsing              |
 //! |  format/     - Address formatting utilities                         |
 //! |  error/      - Error types                                          |
