@@ -80,7 +80,6 @@
 //! | Transport | TCP, UDP |
 //! | Application | DNS, DHCP, NTP, HTTP, TLS, SSH, QUIC |
 
-pub mod cache;
 pub mod error;
 pub mod format;
 pub mod io;
@@ -92,10 +91,12 @@ pub mod stream;
 pub mod tls;
 
 // Re-export commonly used types at crate root for convenience
-pub use cache::{CacheStats, CachedParse, LruParseCache, NoCache, OwnedParseResult, ParseCache};
 pub use error::{Error, PcapError, ProtocolError, Result};
 pub use format::{detect_address_column, format_ipv4, format_ipv6, format_mac, AddressKind};
-pub use io::{FilePacketReader, FilePacketSource, PacketReader, PacketSource, RawPacket};
+pub use io::{
+    BoundaryIndex, FilePacketReader, FilePacketSource, PacketReader, PacketSource, RawPacket,
+    SeekCost, SeekablePacketSource,
+};
 #[cfg(feature = "mmap")]
 pub use io::{MmapPacketReader, MmapPacketSource};
 pub use pcap::PcapReader;

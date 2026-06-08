@@ -1,34 +1,25 @@
 //! Packet I/O abstractions.
 //!
-//! This module provides traits and implementations for reading packets from
-//! various sources (files, memory-mapped files, network streams, etc.)
+//! This module provides the trait hierarchy and implementations for reading
+//! packets from various sources.
 //!
 //! ## Design
 //!
-//! The module uses generics with associated types for zero-vtable hot path:
-//! - [`PacketSource`] trait with associated `Reader` type
-//! - [`PacketReader`] trait for sequential reading
-//! - Type erasure happens only at DataFusion boundaries
+//! - [`PacketSource`] is the sequential floor every backend meets.
+//! - [`SeekablePacketSource`] is the opt-in random-access capability, with a
+//!   [`SeekCost`] hint, backed by a persisted [`BoundaryIndex`].
+//! - Type erasure happens only at DataFusion boundaries.
 //!
 //! ## Available Sources
 //!
-//! - [`FilePacketSource`] - Standard buffered file I/O (works with all file types)
-//! - [`MmapPacketSource`] - Memory-mapped I/O for PCAP/PCAPNG files (requires `mmap` feature)
-//! - [`CloudPacketSource`] - Cloud storage I/O for S3, GCS, Azure (requires `cloud` feature)
-//!
-//! ## Compression Support
-//!
-//! Both sources support transparent decompression of compressed files.
-//! Supported formats (via feature flags):
-//! - Gzip (.gz) - always enabled
-//! - Zstd (.zst) - `compress-zstd` feature
-//! - LZ4 (.lz4) - `compress-lz4` feature
-//! - Bzip2 (.bz2) - `compress-bzip2` feature
-//! - XZ (.xz) - `compress-xz` feature
+//! - [`FilePacketSource`] - Standard buffered file I/O (`SeekCost::Cheap`)
+//! - [`MmapPacketSource`] - Memory-mapped I/O (`SeekCost::Free`; requires `mmap`)
+//! - [`CloudPacketSource`] - Object-store I/O (`SeekCost::RangeRequest`; requires `cloud`)
 
 #[cfg(feature = "cloud")]
 mod cloud;
 mod decompress;
+mod index;
 #[cfg(feature = "mmap")]
 mod mmap;
 mod pcap_stream;
@@ -37,12 +28,16 @@ mod source;
 pub use decompress::{decompress_header, Compression, DecompressReader, FileDecoder};
 #[cfg(feature = "mmap")]
 pub use decompress::{AnyDecoder, MmapSlice};
+pub use index::{
+    build_boundary_index, header_hash, sidecar_path, BoundaryIndex, Checkpoint,
+    DEFAULT_CHECKPOINT_STRIDE,
+};
 #[cfg(feature = "mmap")]
 pub use mmap::{MmapPacketReader, MmapPacketSource};
-pub use pcap_stream::{GenericPcapReader, PcapFormat};
+pub use pcap_stream::{GenericPcapReader, InterfaceInfo, InterfaceState, PcapFormat};
 pub use source::{
     FilePacketReader, FilePacketSource, PacketPosition, PacketRange, PacketReader, PacketRef,
-    PacketSource, PacketSourceMetadata, RawPacket,
+    PacketSource, PacketSourceMetadata, RawPacket, SeekCost, SeekablePacketSource,
 };
 
 #[cfg(feature = "cloud")]
