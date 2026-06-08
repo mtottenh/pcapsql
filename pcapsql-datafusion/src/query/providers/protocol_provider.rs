@@ -44,7 +44,11 @@ impl ProtocolTableProvider {
     }
 
     /// Create a provider over pre-loaded per-partition batches.
-    pub fn in_memory(table_name: String, schema: SchemaRef, partitions: Vec<Vec<RecordBatch>>) -> Self {
+    pub fn in_memory(
+        table_name: String,
+        schema: SchemaRef,
+        partitions: Vec<Vec<RecordBatch>>,
+    ) -> Self {
         Self {
             table_name,
             schema,

@@ -114,9 +114,7 @@ impl BoundaryIndex {
 
     /// Find the checkpoint whose frame number exactly matches `frame`.
     pub fn checkpoint_at(&self, frame: u64) -> Option<&Checkpoint> {
-        self.checkpoints
-            .iter()
-            .find(|c| c.frame_number == frame)
+        self.checkpoints.iter().find(|c| c.frame_number == frame)
     }
 
     /// Validate this index against the current state of a source.
@@ -496,7 +494,14 @@ pub fn synth_pcapng_header(state: &InterfaceState) -> Vec<u8> {
         put_u32_le(&mut v, 32); // total length
         put_u16_le(&mut v, iface.link_type as u16); // linktype
         put_u16_le(&mut v, 0); // reserved
-        put_u32_le(&mut v, if iface.snaplen == 0 { 65535 } else { iface.snaplen });
+        put_u32_le(
+            &mut v,
+            if iface.snaplen == 0 {
+                65535
+            } else {
+                iface.snaplen
+            },
+        );
         // Option: if_tsresol (code 9, len 1), value padded to 4 bytes.
         put_u16_le(&mut v, 9);
         put_u16_le(&mut v, 1);

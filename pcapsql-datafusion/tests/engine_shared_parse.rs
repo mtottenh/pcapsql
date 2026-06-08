@@ -4,8 +4,8 @@
 use std::sync::Arc;
 
 use arrow::util::pretty::pretty_format_batches;
-use pcapsql_datafusion::query::QueryEngine;
 use pcapsql_core::io::MmapPacketSource;
+use pcapsql_datafusion::query::QueryEngine;
 use pcapsql_testgen::{legacy_pcap, GenPacket, GeneratedCapture, LegacyVariant};
 use tempfile::TempDir;
 
@@ -17,7 +17,7 @@ fn udp_packet(src_port: u16, dst_port: u16, payload_len: usize) -> Vec<u8> {
     p.extend_from_slice(&[0xff, 0xff, 0xff, 0xff, 0xff, 0xff]); // dst mac
     p.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]); // src mac
     p.extend_from_slice(&[0x08, 0x00]); // ethertype IPv4
-    // IPv4
+                                        // IPv4
     let ip_total = (20 + 8 + payload_len) as u16;
     p.push(0x45); // version 4, IHL 5
     p.push(0x00); // DSCP/ECN
@@ -29,7 +29,7 @@ fn udp_packet(src_port: u16, dst_port: u16, payload_len: usize) -> Vec<u8> {
     p.extend_from_slice(&[0x00, 0x00]); // header checksum (0 = unchecked)
     p.extend_from_slice(&[192, 168, 0, 1]); // src ip
     p.extend_from_slice(&[192, 168, 0, 2]); // dst ip
-    // UDP
+                                            // UDP
     let udp_len = (8 + payload_len) as u16;
     p.extend_from_slice(&src_port.to_be_bytes());
     p.extend_from_slice(&dst_port.to_be_bytes());
@@ -68,9 +68,7 @@ async fn engine(path: &std::path::Path, partitions: usize) -> QueryEngine {
 
 async fn run(engine: &QueryEngine, sql: &str) -> String {
     let batches = engine.query(sql).await.expect("query ok");
-    pretty_format_batches(&batches)
-        .expect("format")
-        .to_string()
+    pretty_format_batches(&batches).expect("format").to_string()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -115,11 +115,7 @@ impl ExecutionPlan for ProtocolScanExec {
         partition: usize,
         _context: Arc<TaskContext>,
     ) -> DFResult<SendableRecordBatchStream> {
-        let batches = self
-            .partitions
-            .get(partition)
-            .cloned()
-            .unwrap_or_default();
+        let batches = self.partitions.get(partition).cloned().unwrap_or_default();
         let projection = self.projection.clone();
         let iter = batches.into_iter().map(move |batch| match &projection {
             Some(indices) => batch

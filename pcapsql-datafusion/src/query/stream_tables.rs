@@ -62,7 +62,11 @@ impl StreamTableBuilder {
         loop {
             let processed = reader.process_packets(1000, |packet| {
                 // process_packet expects microseconds; reader timestamps are ns.
-                self.process_packet(packet.data, packet.frame_number, packet.timestamp_ns / 1_000)?;
+                self.process_packet(
+                    packet.data,
+                    packet.frame_number,
+                    packet.timestamp_ns / 1_000,
+                )?;
                 Ok(())
             })?;
 

@@ -697,7 +697,12 @@ pub fn oversized_frame_capture(caplen: usize) -> GeneratedCapture {
         data,
     };
     // snaplen large enough to admit the frame.
-    legacy_pcap(LegacyVariant::LeMicro, 1, (caplen as u32).max(262_144), &[p])
+    legacy_pcap(
+        LegacyVariant::LeMicro,
+        1,
+        (caplen as u32).max(262_144),
+        &[p],
+    )
 }
 
 /// A jumbo frame sized to straddle an arbitrary partition seam, surrounded by
@@ -714,18 +719,19 @@ pub fn jumbo_straddle_capture(
     let mut packets = Vec::with_capacity(normal_count * 2 + 1);
     let mut frame_number: u64 = 0;
 
-    let push_normal = |packets: &mut Vec<GenPacket>, frame_number: &mut u64, rng: &mut SplitMix64| {
-        *frame_number += 1;
-        let len = rng.next_in_range(64, 256);
-        let data = make_payload(seed, *frame_number, len);
-        let ts_sec = (BASE_SEC + *frame_number) as u32;
-        packets.push(GenPacket {
-            ts_sec,
-            ts_frac: 0,
-            origlen: data.len() as u32,
-            data,
-        });
-    };
+    let push_normal =
+        |packets: &mut Vec<GenPacket>, frame_number: &mut u64, rng: &mut SplitMix64| {
+            *frame_number += 1;
+            let len = rng.next_in_range(64, 256);
+            let data = make_payload(seed, *frame_number, len);
+            let ts_sec = (BASE_SEC + *frame_number) as u32;
+            packets.push(GenPacket {
+                ts_sec,
+                ts_frac: 0,
+                origlen: data.len() as u32,
+                data,
+            });
+        };
 
     for _ in 0..normal_count {
         push_normal(&mut packets, &mut frame_number, &mut size_rng);
@@ -946,11 +952,9 @@ mod tests {
                             }
                             Block::EnhancedPacket(epb) => {
                                 let (lt, res) = ifaces[epb.if_id as usize];
-                                let ticks =
-                                    ((epb.ts_high as u64) << 32) | (epb.ts_low as u64);
-                                let ts_ns = ((ticks as u128 * 1_000_000_000u128)
-                                    / res as u128)
-                                    as i64;
+                                let ticks = ((epb.ts_high as u64) << 32) | (epb.ts_low as u64);
+                                let ts_ns =
+                                    ((ticks as u128 * 1_000_000_000u128) / res as u128) as i64;
                                 out.push(ParsedFrame {
                                     caplen: epb.caplen,
                                     origlen: epb.origlen,
@@ -988,20 +992,29 @@ mod tests {
             gc.expected.len()
         );
         for (p, e) in parsed.iter().zip(gc.expected.iter()) {
-            assert_eq!(p.caplen, e.caplen, "caplen mismatch frame {}", e.frame_number);
+            assert_eq!(
+                p.caplen, e.caplen,
+                "caplen mismatch frame {}",
+                e.frame_number
+            );
             assert_eq!(
                 p.origlen, e.origlen,
                 "origlen mismatch frame {}",
                 e.frame_number
             );
             assert_eq!(
-                p.data, e.data,
+                p.data,
+                e.data,
                 "data mismatch frame {} (len {} vs {})",
                 e.frame_number,
                 p.data.len(),
                 e.data.len()
             );
-            assert_eq!(p.ts_ns, e.timestamp_ns, "ts mismatch frame {}", e.frame_number);
+            assert_eq!(
+                p.ts_ns, e.timestamp_ns,
+                "ts mismatch frame {}",
+                e.frame_number
+            );
             if is_pcapng {
                 assert_eq!(
                     p.link_type, e.link_type,
@@ -1099,7 +1112,7 @@ mod tests {
                 PcapngPacket {
                     interface_id: 0,
                     ts_sec: 1_600_000_001,
-                    ts_frac_units: 1, // forces non-4-aligned data path too
+                    ts_frac_units: 1,     // forces non-4-aligned data path too
                     data: vec![0x22; 17], // not a multiple of 4 -> padding exercised
                     origlen: 17,
                 },
@@ -1298,7 +1311,10 @@ mod tests {
             let a = generate(&spec);
             let b = generate(&spec);
             assert_eq!(a.bytes, b.bytes, "non-deterministic bytes for {spec:?}");
-            assert_eq!(a.expected, b.expected, "non-deterministic model for {spec:?}");
+            assert_eq!(
+                a.expected, b.expected,
+                "non-deterministic model for {spec:?}"
+            );
         }
     }
 
@@ -1331,12 +1347,8 @@ mod tests {
         let mut off = 0usize;
         let mut count = 0usize;
         while off + 8 <= bytes.len() {
-            let bt = u32::from_le_bytes([
-                bytes[off],
-                bytes[off + 1],
-                bytes[off + 2],
-                bytes[off + 3],
-            ]);
+            let bt =
+                u32::from_le_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]]);
             let len = u32::from_le_bytes([
                 bytes[off + 4],
                 bytes[off + 5],

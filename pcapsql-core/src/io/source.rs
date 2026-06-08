@@ -528,7 +528,11 @@ pub(crate) fn synth_header_for(
         })?;
         Ok(index::synth_pcapng_header(state))
     } else {
-        Ok(index::synth_legacy_header(format, idx.link_type, idx.snaplen))
+        Ok(index::synth_legacy_header(
+            format,
+            idx.link_type,
+            idx.snaplen,
+        ))
     }
 }
 
@@ -553,9 +557,11 @@ fn detect_file(path: &Path) -> Result<FileDetected, Error> {
     let size = meta.len();
     let mtime = meta.modified().ok();
 
-    let mut file = File::open(path).map_err(|_| Error::Pcap(PcapError::FileNotFound {
-        path: path.display().to_string(),
-    }))?;
+    let mut file = File::open(path).map_err(|_| {
+        Error::Pcap(PcapError::FileNotFound {
+            path: path.display().to_string(),
+        })
+    })?;
     let mut head = vec![0u8; 4096.min(size as usize).max(4)];
     let n = file.read(&mut head).map_err(Error::Io)?;
     head.truncate(n);

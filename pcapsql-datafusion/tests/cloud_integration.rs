@@ -160,7 +160,10 @@ async fn s3_partition_equivalence_source_level() {
         let mut r = source.reader_at(range).expect("reader_at over network");
         part.extend(drain(&mut r));
     }
-    assert_eq!(part, seq, "partitioned (range-GET) read must equal sequential");
+    assert_eq!(
+        part, seq,
+        "partitioned (range-GET) read must equal sequential"
+    );
 }
 
 /// Engine-level: a SQL query returns identical results whether the cloud object

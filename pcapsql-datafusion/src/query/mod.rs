@@ -277,7 +277,8 @@ impl QueryEngine {
         source: Arc<S>,
         batch_size: usize,
     ) -> Result<Self, Error> {
-        Self::with_streaming_source_partitions(source, batch_size, default_target_partitions()).await
+        Self::with_streaming_source_partitions(source, batch_size, default_target_partitions())
+            .await
     }
 
     /// Like [`with_streaming_source`](Self::with_streaming_source) but with an
@@ -313,7 +314,9 @@ impl QueryEngine {
         // One provider per table, all sharing the single parse result.
         for table_name in tables::all_table_names() {
             let schema = Arc::new(tables::get_table_schema(table_name).ok_or_else(|| {
-                Error::Query(QueryError::Execution(format!("Unknown table: {table_name}")))
+                Error::Query(QueryError::Execution(format!(
+                    "Unknown table: {table_name}"
+                )))
             })?);
             let provider = providers::ProtocolTableProvider::shared(
                 table_name.to_string(),
@@ -570,7 +573,10 @@ impl QueryEngine {
     /// Number of partitions the shared parse pass used (1 if non-partitioned or
     /// in-memory mode).
     pub fn partition_count(&self) -> usize {
-        self.shared.as_ref().map(|s| s.num_partitions()).unwrap_or(1)
+        self.shared
+            .as_ref()
+            .map(|s| s.num_partitions())
+            .unwrap_or(1)
     }
 
     /// Register cross-layer views that JOIN normalized protocol tables.

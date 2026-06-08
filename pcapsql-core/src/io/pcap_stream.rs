@@ -389,32 +389,30 @@ where
     let mut count = 0;
     while count < max {
         match reader.next() {
-            Ok((offset, block)) => {
-                match block {
-                    PcapBlockOwned::Legacy(packet) => {
-                        *frame_number += 1;
-                        let timestamp_ns = ns_from_legacy(packet.ts_sec, packet.ts_usec, nano);
-                        let packet_ref = PacketRef {
-                            frame_number: *frame_number,
-                            timestamp_ns,
-                            captured_len: packet.caplen,
-                            original_len: packet.origlen,
-                            link_type: *link_type as u16,
-                            data: packet.data,
-                        };
-                        f(packet_ref)?;
-                        reader.consume(offset);
-                        count += 1;
-                    }
-                    PcapBlockOwned::LegacyHeader(header) => {
-                        *link_type = header.network.0 as u32;
-                        reader.consume(offset);
-                    }
-                    _ => {
-                        reader.consume(offset);
-                    }
+            Ok((offset, block)) => match block {
+                PcapBlockOwned::Legacy(packet) => {
+                    *frame_number += 1;
+                    let timestamp_ns = ns_from_legacy(packet.ts_sec, packet.ts_usec, nano);
+                    let packet_ref = PacketRef {
+                        frame_number: *frame_number,
+                        timestamp_ns,
+                        captured_len: packet.caplen,
+                        original_len: packet.origlen,
+                        link_type: *link_type as u16,
+                        data: packet.data,
+                    };
+                    f(packet_ref)?;
+                    reader.consume(offset);
+                    count += 1;
                 }
-            }
+                PcapBlockOwned::LegacyHeader(header) => {
+                    *link_type = header.network.0 as u32;
+                    reader.consume(offset);
+                }
+                _ => {
+                    reader.consume(offset);
+                }
+            },
             // Graceful stop on clean EOF and on truncated captures (declared
             // length exceeds bytes present).
             Err(PcapParserError::Eof) | Err(PcapParserError::UnexpectedEof) => break,
@@ -497,7 +495,10 @@ where
                         }
                         Block::SimplePacket(spb) => {
                             *frame_number += 1;
-                            let lt = interfaces.first().map(|i| i.link_type).unwrap_or(*link_type);
+                            let lt = interfaces
+                                .first()
+                                .map(|i| i.link_type)
+                                .unwrap_or(*link_type);
                             let data = spb.packet_data();
                             let packet_ref = PacketRef {
                                 frame_number: *frame_number,
@@ -592,7 +593,10 @@ mod tests {
         // ticks at microsecond resolution
         assert_eq!(ns_from_ticks(0, 1_500_000, 1_000_000), 1_500_000_000);
         // ticks at nanosecond resolution
-        assert_eq!(ns_from_ticks(0, 1_500_000_000, 1_000_000_000), 1_500_000_000);
+        assert_eq!(
+            ns_from_ticks(0, 1_500_000_000, 1_000_000_000),
+            1_500_000_000
+        );
     }
 
     /// Create a minimal valid legacy PCAP (LE micro) with one packet.
@@ -631,7 +635,10 @@ mod tests {
         assert_eq!(packet.captured_length, 14);
         assert_eq!(packet.link_type, 1);
         // 1_000_000_000 s + 500_000 us = 1e18 + 5e11 ns
-        assert_eq!(packet.timestamp_ns, 1_000_000_000i64 * 1_000_000_000 + 500_000_000);
+        assert_eq!(
+            packet.timestamp_ns,
+            1_000_000_000i64 * 1_000_000_000 + 500_000_000
+        );
         assert!(reader.next_packet().expect("read").is_none());
     }
 

@@ -97,14 +97,13 @@ async fn main() -> Result<()> {
                     // Try mmap first
                     use pcapsql_core::MmapPacketSource;
                     match MmapPacketSource::open(pcap_file) {
-                        Ok(source) => QueryEngine::with_streaming_source(
-                            Arc::new(source),
-                            args.batch_size,
-                        )
-                        .await
-                        .with_context(|| {
-                            format!("Failed to open PCAP file: {}", pcap_file.display())
-                        })?,
+                        Ok(source) => {
+                            QueryEngine::with_streaming_source(Arc::new(source), args.batch_size)
+                                .await
+                                .with_context(|| {
+                                    format!("Failed to open PCAP file: {}", pcap_file.display())
+                                })?
+                        }
                         Err(e) => {
                             eprintln!(
                                 "Warning: mmap not supported for this file ({e}), falling back to file source"

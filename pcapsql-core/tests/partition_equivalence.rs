@@ -12,9 +12,9 @@ use pcapsql_core::io::{
     FilePacketSource, MmapPacketSource, PacketReader, PacketSource, SeekablePacketSource,
 };
 use pcapsql_testgen::{
-    generate, jumbo_straddle_capture, legacy_pcap, oversized_frame_capture, pcapng, truncated_capture,
-    CaptureSpec, ExpectedFrame, Format, GenPacket, GeneratedCapture, LegacyVariant,
-    PcapngInterface, PcapngPacket, PcapngSection,
+    generate, jumbo_straddle_capture, legacy_pcap, oversized_frame_capture, pcapng,
+    truncated_capture, CaptureSpec, ExpectedFrame, Format, GenPacket, GeneratedCapture,
+    LegacyVariant, PcapngInterface, PcapngPacket, PcapngSection,
 };
 use proptest::prelude::*;
 use tempfile::TempDir;
@@ -117,13 +117,22 @@ fn assert_equivalent(gc: &GeneratedCapture, stride: u64) {
     let expected = expected_frames(gc);
 
     let seq = read_sequential_mmap(&path, stride);
-    assert_eq!(seq, expected, "sequential mmap read must equal ground truth");
+    assert_eq!(
+        seq, expected,
+        "sequential mmap read must equal ground truth"
+    );
 
     for n in [1usize, 2, 3, 5, 8] {
         let mm = read_partitioned_mmap(&path, stride, n);
-        assert_eq!(mm, expected, "mmap partitioned (n={n}) must equal ground truth");
+        assert_eq!(
+            mm, expected,
+            "mmap partitioned (n={n}) must equal ground truth"
+        );
         let fi = read_partitioned_file(&path, stride, n);
-        assert_eq!(fi, expected, "file partitioned (n={n}) must equal ground truth");
+        assert_eq!(
+            fi, expected,
+            "file partitioned (n={n}) must equal ground truth"
+        );
     }
 }
 
@@ -195,7 +204,11 @@ fn pcapng_multi_interface_differing_tsresol() {
                 interface_id: (i % 2) as u32,
                 ts_sec: 1_700_000_000 + i,
                 // ts_frac_units is in the interface's own units.
-                ts_frac_units: if i % 2 == 0 { (i * 11) % 1_000_000 } else { (i * 13) % 1_000_000_000 },
+                ts_frac_units: if i % 2 == 0 {
+                    (i * 11) % 1_000_000
+                } else {
+                    (i * 13) % 1_000_000_000
+                },
                 data: vec![(i % 256) as u8; 30],
                 origlen: 30,
             })

@@ -184,9 +184,13 @@ pub fn run_shared_parse<S: SeekablePacketSource>(
                 .collect();
             handles
                 .into_iter()
-                .map(|h| h.join().unwrap_or_else(|_| Err(Error::Query(
-                    crate::error::QueryError::Execution("parse worker panicked".into()),
-                ))))
+                .map(|h| {
+                    h.join().unwrap_or_else(|_| {
+                        Err(Error::Query(crate::error::QueryError::Execution(
+                            "parse worker panicked".into(),
+                        )))
+                    })
+                })
                 .collect()
         })
     };

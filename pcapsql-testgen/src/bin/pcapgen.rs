@@ -33,14 +33,8 @@ fn main() -> ExitCode {
 
     let kind = args[1].as_str();
     let out_path = args[2].as_str();
-    let seed: u64 = args
-        .get(3)
-        .map(|s| s.parse().unwrap_or(0))
-        .unwrap_or(0);
-    let count: usize = args
-        .get(4)
-        .map(|s| s.parse().unwrap_or(16))
-        .unwrap_or(16);
+    let seed: u64 = args.get(3).map(|s| s.parse().unwrap_or(0)).unwrap_or(0);
+    let count: usize = args.get(4).map(|s| s.parse().unwrap_or(16)).unwrap_or(16);
 
     let capture = match build(kind, seed, count) {
         Some(c) => c,
