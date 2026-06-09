@@ -51,12 +51,21 @@ use indicatif::{ProgressBar, ProgressStyle};
 use crate::error::{Error, QueryError};
 use crate::query::providers::run_shared_parse;
 use pcapsql_core::{
-    default_registry, parse_packet, FilePacketSource, KeyLog, MmapPacketSource, PacketSource,
-    PcapReader, ProtocolRegistry,
+    default_registry, parse_packet, FilePacketSource, KeyLog, MmapPacketSource, PcapReader,
+    ProtocolRegistry, SeekablePacketSource,
 };
 
 #[cfg(feature = "cloud")]
 use pcapsql_core::io::{CloudLocation, CloudPacketSource};
+
+/// Default number of partitions to split a seekable source into for the shared
+/// parallel parse pass.
+fn default_target_partitions() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .clamp(1, 16)
+}
 
 /// File size threshold for automatic streaming mode selection.
 /// Files >= 100MB use streaming mode.
@@ -237,35 +246,57 @@ impl QueryEngine {
 
     /// Create a QueryEngine in streaming mode for large files.
     ///
-    /// In streaming mode the capture is parsed in a single shared pass instead
-    /// of being loaded through the in-memory loader, so very large files are
-    /// handled without the per-table re-reads of the old streaming providers.
+    /// In streaming mode, packets are read on-demand as DataFusion pulls batches,
+    /// rather than loading the entire file into memory upfront. This allows
+    /// querying very large PCAP files (10GB+) with bounded memory usage.
+    ///
+    /// Each protocol table gets its own streaming provider that reads
+    /// the PCAP file independently. JOINs work via sort-merge since
+    /// all tables emit rows sorted by frame_number.
     ///
     /// # Type Parameters
     ///
     /// This method is generic over the packet source, but defaults to
-    /// `FilePacketSource`. Other backends (mmap, S3) can use
+    /// `FilePacketSource`. Future backends (mmap, S3) can use
     /// `with_streaming_source()` directly.
     pub async fn with_streaming<P: AsRef<Path>>(path: P, batch_size: usize) -> Result<Self, Error> {
         let source = FilePacketSource::open(path)?;
         Self::with_streaming_source(Arc::new(source), batch_size).await
     }
 
-    /// Create a QueryEngine with a custom packet source.
+    /// Create a QueryEngine with a custom seekable packet source.
     ///
-    /// Performs a single shared parse pass over the source, fanning out to all
-    /// protocol tables, then serves every table from the shared result — so a
-    /// query joining N tables parses the capture once, not N times.
-    pub async fn with_streaming_source<S: PacketSource>(
+    /// Performs a single shared parse pass over the source (fanning out to all
+    /// protocol tables), parallelized across partitions for seekable sources,
+    /// then serves every table from the shared result — so a query joining N
+    /// tables parses the capture once, not N times.
+    pub async fn with_streaming_source<S: SeekablePacketSource>(
         source: Arc<S>,
         batch_size: usize,
+    ) -> Result<Self, Error> {
+        Self::with_streaming_source_partitions(source, batch_size, default_target_partitions())
+            .await
+    }
+
+    /// Like [`with_streaming_source`](Self::with_streaming_source) but with an
+    /// explicit target partition count for the shared parse pass (mainly for
+    /// tests and benchmarks).
+    pub async fn with_streaming_source_partitions<S: SeekablePacketSource>(
+        source: Arc<S>,
+        batch_size: usize,
+        target_partitions: usize,
     ) -> Result<Self, Error> {
         let registry = Arc::new(default_registry());
         let ctx = create_session_context();
         udf::register_all_udfs(&ctx)?;
 
-        // ONE parse pass, fanned out to all tables.
-        let shared = Arc::new(run_shared_parse(&source, &registry, batch_size)?);
+        // ONE parse pass, fanned out to all tables, parallel across partitions.
+        let shared = Arc::new(run_shared_parse(
+            &source,
+            &registry,
+            batch_size,
+            target_partitions,
+        )?);
 
         if shared.total_frames() == 0 {
             return Err(Error::Query(QueryError::Execution(
@@ -528,11 +559,21 @@ impl QueryEngine {
 
     /// Number of parse passes performed over the source.
     ///
-    /// For the shared (streaming) path this is `1` regardless of how many
-    /// protocol tables a query touches. Returns `0` for the in-memory path
-    /// (which also parses once, via a separate code path).
+    /// For the shared (streaming/parallel) path this is `1` regardless of how
+    /// many protocol tables a query touches — the instrumentation behind #6.
+    /// Returns `0` for the in-memory path (which also parses once, via a
+    /// separate code path).
     pub fn parse_pass_count(&self) -> usize {
         self.shared.as_ref().map(|s| s.parse_passes()).unwrap_or(0)
+    }
+
+    /// Number of partitions the shared parse pass used (1 if non-partitioned or
+    /// in-memory mode).
+    pub fn partition_count(&self) -> usize {
+        self.shared
+            .as_ref()
+            .map(|s| s.num_partitions())
+            .unwrap_or(1)
     }
 
     /// Register cross-layer views that JOIN normalized protocol tables.
