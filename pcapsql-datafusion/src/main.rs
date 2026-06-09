@@ -74,7 +74,6 @@ async fn main() -> Result<()> {
             QueryEngine::with_cloud_source(
                 &url,
                 args.batch_size,
-                args.cache_size,
                 args.cloud_endpoint.as_deref(),
                 args.cloud_anonymous,
                 args.cloud_chunk_size,
@@ -98,16 +97,13 @@ async fn main() -> Result<()> {
                     // Try mmap first
                     use pcapsql_core::MmapPacketSource;
                     match MmapPacketSource::open(pcap_file) {
-                        Ok(source) => QueryEngine::with_streaming_source_cached_opts(
-                            Arc::new(source),
-                            args.batch_size,
-                            args.cache_size,
-                            !args.no_reader_eviction,
-                        )
-                        .await
-                        .with_context(|| {
-                            format!("Failed to open PCAP file: {}", pcap_file.display())
-                        })?,
+                        Ok(source) => {
+                            QueryEngine::with_streaming_source(Arc::new(source), args.batch_size)
+                                .await
+                                .with_context(|| {
+                                    format!("Failed to open PCAP file: {}", pcap_file.display())
+                                })?
+                        }
                         Err(e) => {
                             eprintln!(
                                 "Warning: mmap not supported for this file ({e}), falling back to file source"
@@ -117,14 +113,9 @@ async fn main() -> Result<()> {
                                 Arc::new(FilePacketSource::open(pcap_file).with_context(|| {
                                     format!("Failed to open PCAP file: {}", pcap_file.display())
                                 })?);
-                            QueryEngine::with_streaming_source_cached_opts(
-                                source,
-                                args.batch_size,
-                                args.cache_size,
-                                !args.no_reader_eviction,
-                            )
-                            .await
-                            .with_context(|| "Failed to create engine".to_string())?
+                            QueryEngine::with_streaming_source(source, args.batch_size)
+                                .await
+                                .with_context(|| "Failed to create engine".to_string())?
                         }
                     }
                 } else {
@@ -133,14 +124,9 @@ async fn main() -> Result<()> {
                         Arc::new(FilePacketSource::open(pcap_file).with_context(|| {
                             format!("Failed to open PCAP file: {}", pcap_file.display())
                         })?);
-                    QueryEngine::with_streaming_source_cached_opts(
-                        source,
-                        args.batch_size,
-                        args.cache_size,
-                        !args.no_reader_eviction,
-                    )
-                    .await
-                    .with_context(|| "Failed to create engine".to_string())?
+                    QueryEngine::with_streaming_source(source, args.batch_size)
+                        .await
+                        .with_context(|| "Failed to create engine".to_string())?
                 }
             } else {
                 // In-memory mode (default for small files)
@@ -183,9 +169,9 @@ async fn main() -> Result<()> {
             formatter.write_batches(&batches, &mut stdout)?;
         }
 
-        // Show cache stats if requested
+        // Show parse/partition stats if requested
         if args.show_stats {
-            print_cache_stats(&engine);
+            print_parse_stats(&engine);
         }
 
         return Ok(());
@@ -214,9 +200,9 @@ async fn main() -> Result<()> {
             formatter.write_batches(&batches, &mut stdout)?;
         }
 
-        // Show cache stats if requested
+        // Show parse/partition stats if requested
         if args.show_stats {
-            print_cache_stats(&engine);
+            print_parse_stats(&engine);
         }
 
         return Ok(());
@@ -226,14 +212,11 @@ async fn main() -> Result<()> {
     run_repl(&engine, &formatter, &source_name).await
 }
 
-fn print_cache_stats(engine: &QueryEngine) {
-    if let Some(stats) = engine.cache_stats() {
-        eprintln!();
-        eprintln!("{}", stats.format_summary());
-    } else {
-        eprintln!();
-        eprintln!("Cache statistics not available (cache disabled or in-memory mode)");
-    }
+fn print_parse_stats(engine: &QueryEngine) {
+    // The parse cache was removed in favor of a single shared parse pass; report
+    // the parse-pass / partition instrumentation instead.
+    eprintln!();
+    eprintln!("Parse passes: {}", engine.parse_pass_count());
 }
 
 fn list_protocols() {
@@ -377,20 +360,10 @@ async fn run_repl(
                     ReplCommand::Protocols => list_protocols(),
                     ReplCommand::Udfs => list_udfs(),
                     ReplCommand::CacheStats => {
-                        if let Some(stats) = engine.cache_stats() {
-                            println!("{}", stats.format_summary());
-                        } else {
-                            println!("Cache statistics not available.");
-                            println!("Cache is only used in streaming mode with --cache-size > 0");
-                        }
+                        println!("Parse passes: {}", engine.parse_pass_count());
                     }
                     ReplCommand::CacheStatsReset => {
-                        if let Some(cache) = engine.cache() {
-                            cache.reset_stats();
-                            println!("Cache statistics reset.");
-                        } else {
-                            println!("No cache to reset.");
-                        }
+                        println!("Caching has been removed; nothing to reset.");
                     }
                     ReplCommand::TimeInfo => {
                         use arrow::array::{Array, Int64Array, TimestampMicrosecondArray};

@@ -1,7 +1,6 @@
-//! Protocol table provider for DataFusion.
+//! Protocol table provider backed by the shared parse pass.
 
 use std::any::Any;
-use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
@@ -12,89 +11,61 @@ use datafusion::datasource::{TableProvider, TableType};
 use datafusion::error::Result as DFResult;
 use datafusion::logical_expr::Expr;
 use datafusion::physical_plan::ExecutionPlan;
-use datafusion_datasource::memory::MemorySourceConfig;
 
-use pcapsql_core::{compute_required_protocols, PacketSource, ParseCache, ProtocolRegistry};
+use super::shared::SharedParseState;
+use super::ProtocolScanExec;
 
-use super::ProtocolStreamExec;
-
-/// Table provider for a protocol table.
+/// Table provider for a single protocol table.
 ///
-/// Generic over the packet source type to enable static dispatch
-/// in the streaming hot path.
-pub struct ProtocolTableProvider<S: PacketSource> {
+/// All providers for a query share one [`SharedParseState`] (the result of the
+/// single parse pass), so a query touching N tables parses the capture once.
+pub struct ProtocolTableProvider {
     table_name: String,
     schema: SchemaRef,
-    mode: TableMode<S>,
+    /// Shared parse result, or pre-loaded batches for the in-memory path.
+    source: TableSource,
 }
 
-enum TableMode<S: PacketSource> {
-    /// Pre-loaded batches in memory
-    InMemory { batches: Vec<RecordBatch> },
-    /// Streaming from packet source
-    Streaming {
-        source: Arc<S>,
-        registry: Arc<ProtocolRegistry>,
-        batch_size: usize,
-        /// Optional parse cache for reducing redundant parsing
-        cache: Option<Arc<dyn ParseCache>>,
-    },
+enum TableSource {
+    /// Slice of the shared parse pass.
+    Shared(Arc<SharedParseState>),
+    /// Pre-loaded batches (used for empty tables / direct registration).
+    InMemory(Vec<Vec<RecordBatch>>),
 }
 
-impl<S: PacketSource + 'static> ProtocolTableProvider<S> {
-    /// Create an in-memory provider with pre-loaded batches.
-    pub fn in_memory(table_name: String, schema: SchemaRef, batches: Vec<RecordBatch>) -> Self {
+impl ProtocolTableProvider {
+    /// Create a provider that draws this table's batches from the shared parse.
+    pub fn shared(table_name: String, schema: SchemaRef, state: Arc<SharedParseState>) -> Self {
         Self {
             table_name,
             schema,
-            mode: TableMode::InMemory { batches },
+            source: TableSource::Shared(state),
         }
     }
 
-    /// Create a streaming provider.
-    pub fn streaming(
+    /// Create a provider over pre-loaded per-partition batches.
+    pub fn in_memory(
         table_name: String,
         schema: SchemaRef,
-        source: Arc<S>,
-        registry: Arc<ProtocolRegistry>,
-        batch_size: usize,
+        partitions: Vec<Vec<RecordBatch>>,
     ) -> Self {
         Self {
             table_name,
             schema,
-            mode: TableMode::Streaming {
-                source,
-                registry,
-                batch_size,
-                cache: None,
-            },
+            source: TableSource::InMemory(partitions),
         }
     }
 
-    /// Create a streaming provider with parse cache.
-    pub fn streaming_cached(
-        table_name: String,
-        schema: SchemaRef,
-        source: Arc<S>,
-        registry: Arc<ProtocolRegistry>,
-        batch_size: usize,
-        cache: Arc<dyn ParseCache>,
-    ) -> Self {
-        Self {
-            table_name,
-            schema,
-            mode: TableMode::Streaming {
-                source,
-                registry,
-                batch_size,
-                cache: Some(cache),
-            },
+    fn partitions(&self) -> Vec<Vec<RecordBatch>> {
+        match &self.source {
+            TableSource::Shared(state) => state.table_partitions(&self.table_name),
+            TableSource::InMemory(parts) => parts.clone(),
         }
     }
 }
 
 #[async_trait]
-impl<S: PacketSource + 'static> TableProvider for ProtocolTableProvider<S> {
+impl TableProvider for ProtocolTableProvider {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -112,75 +83,27 @@ impl<S: PacketSource + 'static> TableProvider for ProtocolTableProvider<S> {
         _state: &dyn Session,
         projection: Option<&Vec<usize>>,
         _filters: &[Expr],
-        limit: Option<usize>,
+        _limit: Option<usize>,
     ) -> DFResult<Arc<dyn ExecutionPlan>> {
-        match &self.mode {
-            TableMode::InMemory { batches } => Ok(MemorySourceConfig::try_new_exec(
-                std::slice::from_ref(batches),
-                self.schema.clone(),
-                projection.cloned(),
-            )? as Arc<dyn ExecutionPlan>),
-            TableMode::Streaming {
-                source,
-                registry,
-                batch_size,
-                cache,
-            } => {
-                // Get partitions from source (single partition in Phase 2)
-                let partitions = source
-                    .partitions(1)
-                    .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
-
-                // Protocol pruning: only parse protocols needed for this table.
-                // Disabled when caching since cache entries need all protocols.
-                let required_protocols = if cache.is_none() {
-                    Some(Arc::new(compute_required_protocols(
-                        &[self.table_name.as_str()],
-                        registry,
-                    )))
-                } else {
-                    None
-                };
-
-                // Field projection: only extract fields in the SELECT list.
-                let field_projections = projection.map(|indices| {
-                    let field_names: HashSet<String> = indices
-                        .iter()
-                        .filter_map(|&idx| self.schema.field(idx).name().to_string().into())
-                        .collect();
-
-                    let mut projections = HashMap::new();
-                    projections.insert(self.table_name.clone(), field_names);
-                    Arc::new(projections)
-                });
-
-                Ok(Arc::new(ProtocolStreamExec::new_with_optimizations(
-                    self.table_name.clone(),
-                    self.schema.clone(),
-                    source.clone(),
-                    registry.clone(),
-                    partitions,
-                    *batch_size,
-                    projection.cloned(),
-                    cache.clone(),
-                    limit,
-                    required_protocols,
-                    field_projections,
-                )))
-            }
-        }
+        let partitions = Arc::new(self.partitions());
+        Ok(Arc::new(ProtocolScanExec::new(
+            self.table_name.clone(),
+            self.schema.clone(),
+            partitions,
+            projection.cloned(),
+        )))
     }
 }
 
-impl<S: PacketSource> std::fmt::Debug for ProtocolTableProvider<S> {
+impl std::fmt::Debug for ProtocolTableProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ProtocolTableProvider")
             .field("table_name", &self.table_name)
             .field(
                 "mode",
-                &match &self.mode {
-                    TableMode::InMemory { .. } => "InMemory",
-                    TableMode::Streaming { .. } => "Streaming",
+                &match &self.source {
+                    TableSource::Shared(_) => "Shared",
+                    TableSource::InMemory(_) => "InMemory",
                 },
             )
             .finish()
