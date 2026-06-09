@@ -1,29 +1,44 @@
-# LocalStack configuration for S3 integration testing
+# Local S3-compatible object store for the cloud integration tests.
+#
+# Brings up MinIO (Chainguard image, no Docker Hub rate limit) and creates the
+# `test-pcaps` bucket. The tests upload their own fixtures, so only the bucket is
+# needed here.
 #
 # Usage:
-#   docker compose up -d      # Start LocalStack
-#   ./setup.sh                # Upload test data
-#   docker compose down       # Stop LocalStack
+#   docker compose -f testdata/cloud/docker-compose.yml up -d
+#   AWS_ACCESS_KEY_ID=pcapsqlkey AWS_SECRET_ACCESS_KEY=pcapsqlsecret \
+#   AWS_REGION=us-east-1 PCAPSQL_S3_TEST_ENDPOINT=http://127.0.0.1:9000 \
+#     cargo test -p pcapsql-datafusion --features s3 --test cloud_integration
+#   docker compose -f testdata/cloud/docker-compose.yml down
 #
-# Then run integration tests:
-#   cargo test --features s3 --test cloud_integration -- --ignored
+# If your environment cannot pull container images, see `setup.sh` for a
+# Docker-free SeaweedFS fallback that the tests also run against.
 
 services:
-  localstack:
-    image: localstack/localstack:latest
+  minio:
+    image: cgr.dev/chainguard/minio:latest
+    command: ["server", "/data", "--address", ":9000", "--console-address", ":9001"]
     ports:
-      - "4566:4566"
+      - "9000:9000"
+      - "9001:9001"
     environment:
-      - SERVICES=s3
-      - DEFAULT_REGION=us-east-1
-      - DEBUG=0
-    volumes:
-      - localstack_data:/var/lib/localstack
+      - MINIO_ROOT_USER=pcapsqlkey
+      - MINIO_ROOT_PASSWORD=pcapsqlsecret
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9000/minio/health/live || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
 
-volumes:
-  localstack_data:
+  # One-shot: create the test bucket, then exit.
+  createbucket:
+    image: cgr.dev/chainguard/minio-client:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 pcapsqlkey pcapsqlsecret &&
+      mc mb --ignore-existing local/test-pcaps &&
+      echo 'bucket test-pcaps ready'
+      "
