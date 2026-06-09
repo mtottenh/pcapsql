@@ -1,4 +1,4 @@
-//! Shared single-pass parse: one parse of the capture feeds every table.
+//! Shared single-pass parse — the implementation of #6 and #9.
 //!
 //! A query touching N protocol tables must parse the capture **once**, not once
 //! per table. This module performs a single fan-out parse pass over the source,
@@ -6,25 +6,39 @@
 //! exactly as the in-memory path does, and memoizes the per-table batches so all
 //! table providers share them.
 //!
-//! Batches are stored per partition (`Vec<Vec<RecordBatch>>`) so the scan plan
-//! can expose DataFusion partitions; this pass currently always produces one
-//! partition (a sequential read), which keeps the door open for splitting the
-//! same pass across seekable sources later without reshaping the output.
+//! For a [`SeekablePacketSource`] the single pass is split into partitions and
+//! parsed in parallel — one worker per partition, each owning its own reader and
+//! builders, with no shared mutable state to lock (mmap is the zero-cost case).
+//! The cost hint gates whether partitioning is worthwhile. Non-seekable sources
+//! degrade honestly to a single partition.
+//!
+//! Partitions are range-partitioned by frame number and reassembled in frame
+//! order, so the result is identical to a single-partition parse — the property
+//! the partition-equivalence tests assert.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow::record_batch::RecordBatch;
 
-use pcapsql_core::{parse_packet, PacketReader, PacketSource, ProtocolRegistry};
+use pcapsql_core::io::PacketRange;
+use pcapsql_core::{parse_packet, PacketReader, ProtocolRegistry, SeekablePacketSource};
 
 use crate::error::Error;
 use crate::query::builders::{NormalizedBatchSet, ProtocolBatches};
+
+/// Minimum object size before a `Cheap`-seek source is partitioned.
+const CHEAP_MIN_BYTES: u64 = 4 * 1024 * 1024;
+/// Minimum object size before a `RangeRequest`-seek source is partitioned
+/// (network round trips must be amortized).
+const RANGE_MIN_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Result of the shared parse pass: per-table batches grouped by partition.
 pub struct SharedParseState {
     /// table name -> (one `Vec<RecordBatch>` per partition, in frame order).
     tables: HashMap<String, Vec<Vec<RecordBatch>>>,
+    /// Number of partitions the pass used.
+    num_partitions: usize,
     /// Number of parse passes performed (always 1; exposed for instrumentation).
     parse_passes: usize,
     /// Earliest / latest packet timestamp seen (microseconds), for time UDFs.
@@ -40,8 +54,12 @@ impl SharedParseState {
         self.tables.get(table).cloned().unwrap_or_default()
     }
 
-    /// Number of parse passes performed over the source (the instrumentation
-    /// behind "a view over N tables parses the file once").
+    /// Number of output partitions.
+    pub fn num_partitions(&self) -> usize {
+        self.num_partitions
+    }
+
+    /// Number of parse passes performed over the source (instrumentation for #6).
     pub fn parse_passes(&self) -> usize {
         self.parse_passes
     }
@@ -57,14 +75,52 @@ impl SharedParseState {
     }
 }
 
-/// Parse the whole source sequentially into per-protocol batches, returning the
-/// batches and the (min, max) timestamps (microseconds) seen.
-fn parse_source<S: PacketSource>(
+/// Decide the partition ranges for a source, gating on seek cost and size.
+fn decide_ranges<S: SeekablePacketSource>(
+    source: &S,
+    target_partitions: usize,
+) -> Result<Vec<PacketRange>, Error> {
+    use pcapsql_core::SeekCost;
+    let size = source.metadata().size_bytes.unwrap_or(0);
+    let target = target_partitions.max(1);
+    let want = match source.seek_cost() {
+        SeekCost::Free => target,
+        SeekCost::Cheap => {
+            if size >= CHEAP_MIN_BYTES {
+                target
+            } else {
+                1
+            }
+        }
+        SeekCost::RangeRequest => {
+            if size >= RANGE_MIN_BYTES {
+                target
+            } else {
+                1
+            }
+        }
+    };
+    if want <= 1 {
+        Ok(vec![PacketRange::whole()])
+    } else {
+        Ok(source.partitions(want)?)
+    }
+}
+
+/// Parse a single partition into per-protocol batches, returning the batches and
+/// the (min, max) timestamps (microseconds) seen.
+fn parse_partition<S: SeekablePacketSource>(
     source: &S,
     registry: &ProtocolRegistry,
     batch_size: usize,
+    range: &PacketRange,
+    single: bool,
 ) -> Result<(ProtocolBatches, i64, i64), Error> {
-    let mut reader = source.sequential_reader()?;
+    let mut reader = if single {
+        source.sequential_reader()?
+    } else {
+        source.reader_at(range)?
+    };
 
     let mut batch_set = NormalizedBatchSet::new(batch_size);
     let mut min_us = i64::MAX;
@@ -92,31 +148,95 @@ fn parse_source<S: PacketSource>(
     Ok((batch_set.finish()?, min_us, max_us))
 }
 
-/// Run the shared parse pass over a source, fanning out to all protocol tables.
-pub fn run_shared_parse<S: PacketSource>(
+/// Run the shared parse pass over a seekable source, fanning out to all protocol
+/// tables. Parses partitions in parallel when more than one.
+pub fn run_shared_parse<S: SeekablePacketSource>(
     source: &Arc<S>,
     registry: &Arc<ProtocolRegistry>,
     batch_size: usize,
+    target_partitions: usize,
 ) -> Result<SharedParseState, Error> {
-    let (batches, min_us, max_us) = parse_source(source.as_ref(), registry, batch_size)?;
+    let ranges = decide_ranges(source.as_ref(), target_partitions)?;
+    let single = ranges.len() == 1;
 
-    let (start_ts_us, end_ts_us) = if min_us == i64::MAX {
-        (0, 0)
+    // Parse each partition in its own worker. Each worker owns its reader and
+    // builders — no shared mutable state, so nothing to lock.
+    let results: Vec<Result<(ProtocolBatches, i64, i64), Error>> = if single {
+        vec![parse_partition(
+            source.as_ref(),
+            registry,
+            batch_size,
+            &ranges[0],
+            true,
+        )]
     } else {
-        (min_us, max_us)
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = ranges
+                .iter()
+                .map(|range| {
+                    let source = source.clone();
+                    let registry = registry.clone();
+                    let range = range.clone();
+                    scope.spawn(move || {
+                        parse_partition(source.as_ref(), &registry, batch_size, &range, false)
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| {
+                    h.join().unwrap_or_else(|_| {
+                        Err(Error::Query(crate::error::QueryError::Execution(
+                            "parse worker panicked".into(),
+                        )))
+                    })
+                })
+                .collect()
+        })
     };
 
-    // Reorganize: table -> [per-partition Vec<RecordBatch>] (one partition).
+    // Surface the first error, if any; otherwise collect partition batches.
+    let mut partition_batches: Vec<ProtocolBatches> = Vec::with_capacity(results.len());
+    let mut start_ts_us = i64::MAX;
+    let mut end_ts_us = i64::MIN;
+    for r in results {
+        let (batches, min_us, max_us) = r?;
+        if min_us != i64::MAX {
+            start_ts_us = start_ts_us.min(min_us);
+        }
+        if max_us != i64::MIN {
+            end_ts_us = end_ts_us.max(max_us);
+        }
+        partition_batches.push(batches);
+    }
+    if start_ts_us == i64::MAX {
+        start_ts_us = 0;
+        end_ts_us = 0;
+    }
+
+    // Reorganize: table -> [per-partition Vec<RecordBatch>] (partition/frame order).
     let mut tables: HashMap<String, Vec<Vec<RecordBatch>>> = HashMap::new();
     let mut total_frames = 0usize;
-    for (key, partition) in batches {
-        if key == "frames" {
-            total_frames = partition.iter().map(|b| b.num_rows()).sum();
+    if let Some(first) = partition_batches.first() {
+        let keys: Vec<String> = first.keys().cloned().collect();
+        for key in keys {
+            let per_partition: Vec<Vec<RecordBatch>> = partition_batches
+                .iter()
+                .map(|pb| pb.get(&key).cloned().unwrap_or_default())
+                .collect();
+            if key == "frames" {
+                total_frames = per_partition
+                    .iter()
+                    .flat_map(|v| v.iter())
+                    .map(|b| b.num_rows())
+                    .sum();
+            }
+            tables.insert(key, per_partition);
         }
-        tables.insert(key, vec![partition]);
     }
 
     Ok(SharedParseState {
+        num_partitions: partition_batches.len(),
         tables,
         parse_passes: 1,
         start_ts_us,

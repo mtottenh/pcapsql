@@ -216,7 +216,11 @@ fn print_parse_stats(engine: &QueryEngine) {
     // The parse cache was removed in favor of a single shared parse pass; report
     // the parse-pass / partition instrumentation instead.
     eprintln!();
-    eprintln!("Parse passes: {}", engine.parse_pass_count());
+    eprintln!(
+        "Parse passes: {}  (partitions: {})",
+        engine.parse_pass_count(),
+        engine.partition_count()
+    );
 }
 
 fn list_protocols() {
@@ -360,7 +364,11 @@ async fn run_repl(
                     ReplCommand::Protocols => list_protocols(),
                     ReplCommand::Udfs => list_udfs(),
                     ReplCommand::CacheStats => {
-                        println!("Parse passes: {}", engine.parse_pass_count());
+                        println!(
+                            "Parse passes: {}  (partitions: {})",
+                            engine.parse_pass_count(),
+                            engine.partition_count()
+                        );
                     }
                     ReplCommand::CacheStatsReset => {
                         println!("Caching has been removed; nothing to reset.");

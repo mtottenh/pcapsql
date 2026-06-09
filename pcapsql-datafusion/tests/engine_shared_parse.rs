@@ -1,6 +1,5 @@
-//! End-to-end tests for the shared single-parse-pass engine path: a query
-//! touching N protocol tables parses the capture once, and produces exactly
-//! the same results as the in-memory path.
+//! End-to-end tests for the shared single-parse-pass engine path (#6) and
+//! 1-vs-N partition equivalence at the SQL layer (#9).
 
 use std::sync::Arc;
 
@@ -56,9 +55,13 @@ fn make_capture(n: usize) -> GeneratedCapture {
     legacy_pcap(LegacyVariant::LeMicro, 1, 65535, &packets)
 }
 
-async fn engine(path: &std::path::Path) -> QueryEngine {
-    let source = Arc::new(MmapPacketSource::open(path).expect("open mmap"));
-    QueryEngine::with_streaming_source(source, 1000)
+async fn engine(path: &std::path::Path, partitions: usize) -> QueryEngine {
+    let source = Arc::new(
+        MmapPacketSource::open(path)
+            .expect("open mmap")
+            .with_index_stride(4),
+    );
+    QueryEngine::with_streaming_source_partitions(source, 1000, partitions)
         .await
         .expect("build engine")
 }
@@ -69,32 +72,39 @@ async fn run(engine: &QueryEngine, sql: &str) -> String {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn shared_parse_is_one_pass_and_matches_in_memory() {
+async fn shared_parse_one_pass_and_partition_equivalence() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("cap.pcap");
     std::fs::write(&path, make_capture(60).bytes).unwrap();
 
-    let shared = engine(&path).await;
+    let e1 = engine(&path, 1).await;
+    let e4 = engine(&path, 4).await;
 
-    // A view query touching multiple protocol tables performs exactly ONE
-    // parse pass over the file, not one per table.
+    // Real partition counts are reported.
+    assert_eq!(e1.partition_count(), 1);
+    assert!(
+        e4.partition_count() >= 2,
+        "mmap (SeekCost::Free) should split into multiple partitions, got {}",
+        e4.partition_count()
+    );
+
+    // A view query touching multiple protocol tables performs exactly ONE parse
+    // pass over the file, not one per table (#6).
     let _ = run(
-        &shared,
+        &e4,
         "SELECT f.frame_number, u.dst_port \
          FROM frames f JOIN udp u USING (frame_number) \
          JOIN ipv4 v USING (frame_number)",
     )
     .await;
     assert_eq!(
-        shared.parse_pass_count(),
+        e4.parse_pass_count(),
         1,
         "shared parse must perform exactly one pass regardless of tables touched"
     );
 
-    // Results are identical to the in-memory path on the same capture.
-    let in_memory = QueryEngine::with_progress(&path, 1000, false)
-        .await
-        .expect("in-memory engine");
+    // 1-vs-N partition equivalence at the SQL layer: identical rows, identical
+    // order, for frames, protocol tables and a join.
     let queries = [
         "SELECT count(*) AS c FROM frames",
         "SELECT count(*) AS c FROM udp",
@@ -105,15 +115,15 @@ async fn shared_parse_is_one_pass_and_matches_in_memory() {
          JOIN udp u USING (frame_number) ORDER BY f.frame_number",
     ];
     for sql in queries {
-        let a = run(&shared, sql).await;
-        let b = run(&in_memory, sql).await;
-        assert_eq!(a, b, "shared-parse vs in-memory mismatch for: {sql}");
+        let r1 = run(&e1, sql).await;
+        let r4 = run(&e4, sql).await;
+        assert_eq!(r1, r4, "1-vs-N partition mismatch for: {sql}");
     }
 
     // Sanity: the data actually populated the protocol tables.
-    let frames = run(&shared, "SELECT count(*) AS c FROM frames").await;
+    let frames = run(&e1, "SELECT count(*) AS c FROM frames").await;
     assert!(frames.contains("60"), "expected 60 frames:\n{frames}");
-    let udp = run(&shared, "SELECT count(*) AS c FROM udp").await;
+    let udp = run(&e1, "SELECT count(*) AS c FROM udp").await;
     assert!(udp.contains("60"), "expected 60 udp rows:\n{udp}");
 }
 
@@ -125,6 +135,6 @@ async fn empty_capture_is_rejected() {
     let path = dir.path().join("empty.pcap");
     std::fs::write(&path, gc.bytes).unwrap();
     let source = Arc::new(MmapPacketSource::open(&path).unwrap());
-    let result = QueryEngine::with_streaming_source(source, 1000).await;
+    let result = QueryEngine::with_streaming_source_partitions(source, 1000, 4).await;
     assert!(result.is_err(), "empty capture should be rejected");
 }
