@@ -48,7 +48,8 @@ impl FramesBatchBuilder {
         self.rows += 1;
 
         self.frame_numbers.append_value(raw.frame_number);
-        self.timestamps.append_value(raw.timestamp_us);
+        // Arrow timestamp column is microseconds; reader timestamps are ns.
+        self.timestamps.append_value(raw.timestamp_ns / 1_000);
         self.lengths.append_value(raw.captured_length);
         self.original_lengths.append_value(raw.original_length);
         self.link_types.append_value(raw.link_type);
@@ -121,7 +122,7 @@ mod tests {
     fn create_test_raw_packet(frame_number: u64, data: Vec<u8>) -> RawPacket {
         RawPacket {
             frame_number,
-            timestamp_us: 1000000 * frame_number as i64,
+            timestamp_ns: 1_000_000_000 * frame_number as i64,
             captured_length: data.len() as u32,
             original_length: data.len() as u32,
             link_type: 1, // Ethernet

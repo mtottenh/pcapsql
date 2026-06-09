@@ -217,7 +217,7 @@ impl VTab for ReadPcapVTab {
                     output,
                     row_count,
                     frame_num,
-                    packet.timestamp_us,
+                    packet.timestamp_ns / 1_000,
                     packet.captured_len,
                     packet.original_len,
                     packet.link_type,
