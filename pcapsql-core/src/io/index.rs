@@ -459,7 +459,87 @@ fn grow<I: PcapReaderIterator>(reader: &mut I, capacity: usize) -> Result<usize,
     Ok(new_cap)
 }
 
-// ---- little-endian encoding helpers (sidecar format) ----
+// ---- Header synthesis for mid-file (headerless) partition starts ----
+
+/// Synthesize a 24-byte legacy global header for a mid-file partition.
+pub fn synth_legacy_header(format: PcapFormat, link_type: u32, snaplen: u32) -> Vec<u8> {
+    let be = format.is_big_endian();
+    let mut v = Vec::with_capacity(24);
+    put_u32_e(&mut v, format.legacy_magic_u32(), be);
+    put_u16_e(&mut v, 2, be); // version major
+    put_u16_e(&mut v, 4, be); // version minor
+    put_u32_e(&mut v, 0, be); // thiszone
+    put_u32_e(&mut v, 0, be); // sigfigs
+    put_u32_e(&mut v, if snaplen == 0 { 65535 } else { snaplen }, be);
+    put_u32_e(&mut v, link_type, be);
+    v
+}
+
+/// Synthesize a PCAPNG section header + interface descriptions for a mid-file
+/// partition, reconstructing the interface table (link type + `if_tsresol`).
+pub fn synth_pcapng_header(state: &InterfaceState) -> Vec<u8> {
+    let mut v = Vec::new();
+    // Section Header Block (little-endian on disk), 28 bytes, no options.
+    put_u32_le(&mut v, 0x0A0D_0D0A); // block type
+    put_u32_le(&mut v, 28); // total length
+    put_u32_le(&mut v, 0x1A2B_3C4D); // byte-order magic
+    put_u16_le(&mut v, 1); // major
+    put_u16_le(&mut v, 0); // minor
+    put_u64_le(&mut v, u64::MAX); // section length: unknown
+    put_u32_le(&mut v, 28); // total length (trailer)
+
+    for iface in &state.interfaces {
+        // Interface Description Block, 32 bytes with if_tsresol option.
+        put_u32_le(&mut v, 0x0000_0001); // block type
+        put_u32_le(&mut v, 32); // total length
+        put_u16_le(&mut v, iface.link_type as u16); // linktype
+        put_u16_le(&mut v, 0); // reserved
+        put_u32_le(
+            &mut v,
+            if iface.snaplen == 0 {
+                65535
+            } else {
+                iface.snaplen
+            },
+        );
+        // Option: if_tsresol (code 9, len 1), value padded to 4 bytes.
+        put_u16_le(&mut v, 9);
+        put_u16_le(&mut v, 1);
+        v.push(iface.if_tsresol);
+        v.extend_from_slice(&[0, 0, 0]);
+        // opt_endofopt
+        put_u16_le(&mut v, 0);
+        put_u16_le(&mut v, 0);
+        put_u32_le(&mut v, 32); // total length (trailer)
+    }
+    v
+}
+
+// ---- little-endian / endian-aware encoding helpers ----
+
+fn put_u16_le(v: &mut Vec<u8>, x: u16) {
+    v.extend_from_slice(&x.to_le_bytes());
+}
+fn put_u32_le(v: &mut Vec<u8>, x: u32) {
+    v.extend_from_slice(&x.to_le_bytes());
+}
+fn put_u64_le(v: &mut Vec<u8>, x: u64) {
+    v.extend_from_slice(&x.to_le_bytes());
+}
+fn put_u16_e(v: &mut Vec<u8>, x: u16, be: bool) {
+    if be {
+        v.extend_from_slice(&x.to_be_bytes());
+    } else {
+        v.extend_from_slice(&x.to_le_bytes());
+    }
+}
+fn put_u32_e(v: &mut Vec<u8>, x: u32, be: bool) {
+    if be {
+        v.extend_from_slice(&x.to_be_bytes());
+    } else {
+        v.extend_from_slice(&x.to_le_bytes());
+    }
+}
 
 fn put_u32(v: &mut Vec<u8>, x: u32) {
     v.extend_from_slice(&x.to_le_bytes());
@@ -666,6 +746,35 @@ mod tests {
         // first starts at frame 1, last is open-ended
         assert_eq!(ranges[0].start.frame_number, 1);
         assert!(ranges.last().unwrap().end.is_none());
+    }
+
+    #[test]
+    fn test_synth_legacy_header_len() {
+        let h = synth_legacy_header(PcapFormat::LegacyLeMicro, 1, 65535);
+        assert_eq!(h.len(), 24);
+        // magic LE micro = D4 C3 B2 A1
+        assert_eq!(&h[0..4], &[0xd4, 0xc3, 0xb2, 0xa1]);
+    }
+
+    #[test]
+    fn test_synth_pcapng_header_len() {
+        let state = InterfaceState {
+            interfaces: vec![
+                InterfaceInfo {
+                    link_type: 1,
+                    if_tsresol: 6,
+                    snaplen: 65535,
+                },
+                InterfaceInfo {
+                    link_type: 1,
+                    if_tsresol: 9,
+                    snaplen: 65535,
+                },
+            ],
+        };
+        let h = synth_pcapng_header(&state);
+        // SHB(28) + 2 * IDB(32)
+        assert_eq!(h.len(), 28 + 64);
     }
 }
 

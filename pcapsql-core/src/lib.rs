@@ -13,6 +13,8 @@
 //! - **PCAP Reading**: Support for PCAP and PCAPNG formats, including gzip/zstd
 //!   compression
 //! - **Memory-Mapped I/O**: Efficient reading of large capture files
+//! - **Parallel Parsing**: Seekable sources split into partitions parsed
+//!   concurrently, backed by a persisted boundary index
 //! - **TCP Stream Reassembly**: Connection tracking and application-layer parsing
 //!
 //! ## Quick Start
@@ -26,7 +28,7 @@
 //!
 //! // Open a PCAP file
 //! let source = FilePacketSource::open("capture.pcap").unwrap();
-//! let mut reader = source.reader(None).unwrap();
+//! let mut reader = source.sequential_reader().unwrap();
 //!
 //! // Read and parse packets using callback pattern
 //! reader.process_packets(1000, |packet| {
@@ -93,6 +95,7 @@ pub use error::{Error, PcapError, ProtocolError, Result};
 pub use format::{detect_address_column, format_ipv4, format_ipv6, format_mac, AddressKind};
 pub use io::{
     BoundaryIndex, FilePacketReader, FilePacketSource, PacketReader, PacketSource, RawPacket,
+    SeekCost, SeekablePacketSource,
 };
 #[cfg(feature = "mmap")]
 pub use io::{MmapPacketReader, MmapPacketSource};
