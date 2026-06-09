@@ -18,10 +18,13 @@
 //! same order as parsing it at 1 partition.
 #![cfg(feature = "s3")]
 
+use std::sync::Arc;
+
 use object_store::{ObjectStore, PutPayload};
 use pcapsql_core::io::{
     CloudLocation, CloudPacketSource, PacketReader, PacketSource, SeekablePacketSource,
 };
+use pcapsql_datafusion::query::QueryEngine;
 use pcapsql_testgen::{legacy_pcap, GenPacket, LegacyVariant};
 
 /// Endpoint of the test object store, or `None` to skip (store unavailable).
@@ -111,6 +114,13 @@ fn drain<R: PacketReader>(reader: &mut R) -> Vec<u64> {
     out
 }
 
+async fn run(engine: &QueryEngine, sql: &str) -> String {
+    let batches = engine.query(sql).await.expect("query ok");
+    arrow::util::pretty::pretty_format_batches(&batches)
+        .expect("format")
+        .to_string()
+}
+
 /// Source-level: byte-range partitioned reads over the network reproduce the
 /// sequential read exactly.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -130,7 +140,7 @@ async fn s3_partition_equivalence_source_level() {
 
     assert!(
         source.metadata().size_bytes.unwrap() > 16 * 1024 * 1024,
-        "object must be large enough to be worth partitioning"
+        "object must exceed the RangeRequest gate"
     );
 
     // Sequential read over the network.
@@ -156,9 +166,63 @@ async fn s3_partition_equivalence_source_level() {
     );
 }
 
-/// A small object still reads correctly sequentially.
+/// Engine-level: a SQL query returns identical results whether the cloud object
+/// is parsed in 1 partition or N, and the shared pass runs exactly once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s3_partition_equivalence_engine_level() {
+    let Some(ep) = endpoint() else {
+        eprintln!("skipping cloud test: PCAPSQL_S3_TEST_ENDPOINT not set");
+        return;
+    };
+
+    let key = "equiv/engine_level.pcap";
+    upload(&ep, key, big_capture(20_000, 1000)).await;
+
+    let mk = || {
+        CloudPacketSource::open(location(&ep, key))
+            .expect("open cloud source")
+            .with_index_stride(2048)
+    };
+
+    let e1 = QueryEngine::with_streaming_source_partitions(Arc::new(mk()), 4096, 1)
+        .await
+        .expect("engine n=1");
+    let e4 = QueryEngine::with_streaming_source_partitions(Arc::new(mk()), 4096, 4)
+        .await
+        .expect("engine n=4");
+
+    assert_eq!(e1.partition_count(), 1);
+    assert!(
+        e4.partition_count() > 1,
+        "cloud object should be parsed in multiple partitions, got {}",
+        e4.partition_count()
+    );
+
+    // One parse pass for a multi-table query.
+    let _ = run(
+        &e4,
+        "SELECT f.frame_number, u.dst_port FROM frames f JOIN udp u USING (frame_number)",
+    )
+    .await;
+    assert_eq!(e4.parse_pass_count(), 1);
+
+    for sql in [
+        "SELECT count(*) AS c FROM frames",
+        "SELECT count(*) AS c FROM udp",
+        "SELECT count(*) AS c FROM ipv4",
+        "SELECT frame_number, length FROM frames ORDER BY frame_number LIMIT 500",
+        "SELECT frame_number, dst_port FROM udp ORDER BY frame_number LIMIT 500",
+    ] {
+        let r1 = run(&e1, sql).await;
+        let r4 = run(&e4, sql).await;
+        assert_eq!(r1, r4, "cloud 1-vs-N mismatch for: {sql}");
+    }
+}
+
+/// A small object is served single-partition (the cost gate avoids firing many
+/// range GETs at a tiny object), and still queries correctly.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn s3_small_object_sequential() {
+async fn s3_small_object_single_partition() {
     let Some(ep) = endpoint() else {
         eprintln!("skipping cloud test: PCAPSQL_S3_TEST_ENDPOINT not set");
         return;
@@ -167,7 +231,16 @@ async fn s3_small_object_sequential() {
     let key = "small/tiny.pcap";
     upload(&ep, key, big_capture(50, 20)).await;
 
-    let source = CloudPacketSource::open(location(&ep, key)).expect("open");
-    let mut r = source.sequential_reader().expect("reader");
-    assert_eq!(drain(&mut r).len(), 50);
+    let engine = QueryEngine::with_streaming_source_partitions(
+        Arc::new(CloudPacketSource::open(location(&ep, key)).expect("open")),
+        1000,
+        4,
+    )
+    .await
+    .expect("engine");
+
+    // Below the RangeRequest size gate -> single partition.
+    assert_eq!(engine.partition_count(), 1);
+    let frames = run(&engine, "SELECT count(*) AS c FROM frames").await;
+    assert!(frames.contains("50"), "expected 50 frames:\n{frames}");
 }
