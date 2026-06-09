@@ -1,42 +1,27 @@
-//! Table providers for protocol tables.
-//!
-//! Supports both in-memory (pre-loaded) and streaming modes.
-//!
-//! ## Architecture
+//! Table providers for protocol tables, backed by a single shared parse pass.
 //!
 //! ```text
-//! ┌─────────────────────────────────────────────────────────────────────────┐
-//! │                   Query: SELECT d.query_name, t.sni                     │
-//! │                   FROM dns d JOIN tls t USING (frame_number)            │
-//! └─────────────────────────────────────────────────────────────────────────┘
-//!                                     │
-//!                                     ▼
-//! ┌─────────────────────────────────────────────────────────────────────────┐
-//! │                   SortMergeJoinExec                                      │
-//! │            (frame_number is sorted in both inputs)                       │
-//! └─────────────────────────────────────────────────────────────────────────┘
-//!               │                                    │
-//!               ▼                                    ▼
-//! ┌─────────────────────────────────┐    ┌─────────────────────────────────┐
-//! │  ProtocolStreamExec(dns)        │    │  ProtocolStreamExec(tls)        │
-//! │  - Opens own file reader        │    │  - Opens own file reader        │
-//! │  - Filters to DNS packets       │    │  - Filters to TLS packets       │
-//! │  - Emits sorted by frame#       │    │  - Emits sorted by frame#       │
-//! └──────────────┬──────────────────┘    └──────────────┬──────────────────┘
-//!                │                                       │
-//!                └──────────────┬────────────────────────┘
+//!                         capture (one source)
 //!                               │
-//!                               ▼
-//!                     ┌─────────────────┐
-//!                     │   PCAP File     │
-//!                     │ (OS file cache) │
-//!                     └─────────────────┘
+//!                    SharedParseState (ONE parse pass)
+//!              ┌──────────────┬───┴───┬──────────────┐   parallel partitions
+//!              ▼              ▼        ▼              ▼   (seekable sources)
+//!         per-protocol Arrow builders (NormalizedBatchSet fan-out)
+//!              │              │        │              │
+//!              ▼              ▼        ▼              ▼
+//!        frames table    ipv4 table  tcp table   dns table   ...
+//!              └──────────────┴───────┴──────────────┘
+//!                     shared by every ProtocolTableProvider
 //! ```
+//!
+//! A query joining N protocol tables therefore parses the capture once, not N
+//! times (#6), and that single pass is parallelized across partitions for
+//! seekable sources (#9).
 
-mod batch_stream;
 mod protocol_provider;
-mod stream_exec;
+mod scan_exec;
+mod shared;
 
-pub use batch_stream::ProtocolBatchStream;
 pub use protocol_provider::ProtocolTableProvider;
-pub use stream_exec::ProtocolStreamExec;
+pub use scan_exec::ProtocolScanExec;
+pub use shared::{run_shared_parse, SharedParseState};

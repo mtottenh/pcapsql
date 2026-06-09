@@ -1,557 +1,246 @@
-//! Cloud storage integration tests.
+//! Integration tests against a real S3-compatible object store (MinIO/SeaweedFS).
 //!
-//! These tests require a running LocalStack or MinIO instance and are marked
-//! with `#[ignore]` so they don't run in normal CI. To run them:
+//! Gated two ways so the normal `cargo test` run needs no object store:
+//!   1. the `s3` cargo feature, and
+//!   2. the `PCAPSQL_S3_TEST_ENDPOINT` environment variable.
 //!
-//! ```bash
-//! # Start LocalStack
-//! docker compose -f testdata/cloud/docker-compose.yml up -d
-//!
-//! # Generate and upload test data
-//! ./testdata/cloud/setup.sh
-//!
-//! # Run integration tests
-//! cargo test -p pcapsql-datafusion --features s3,compress-zstd,compress-lz4 \
-//!     --test cloud_integration -- --ignored
+//! To run against a local store (see `testdata/cloud/`):
+//! ```text
+//! docker compose -f testdata/cloud/docker-compose.yml up -d   # MinIO
+//! # or run SeaweedFS:  weed server -s3 -s3.config=testdata/cloud/s3.json
+//! AWS_ACCESS_KEY_ID=pcapsqlkey AWS_SECRET_ACCESS_KEY=pcapsqlsecret \
+//! AWS_REGION=us-east-1 PCAPSQL_S3_TEST_ENDPOINT=http://127.0.0.1:8333 \
+//!   cargo test -p pcapsql-datafusion --features s3 --test cloud_integration -- --nocapture
 //! ```
 //!
-//! All test files are generated dynamically by gen_format_tests.py.
+//! The key property mirrors the local sources: parsing a cloud object at N
+//! partitions (independent byte-range GETs) yields exactly the same rows in the
+//! same order as parsing it at 1 partition.
+#![cfg(feature = "s3")]
 
-#[cfg(feature = "s3")]
-mod cloud_tests {
-    use pcapsql_core::io::{CloudLocation, CloudPacketSource, PacketReader, PacketSource};
-    use pcapsql_datafusion::query::QueryEngine;
+use std::sync::Arc;
 
-    /// LocalStack endpoint for S3-compatible testing.
-    const TEST_ENDPOINT: &str = "http://localhost:4566";
+use object_store::{ObjectStore, PutPayload};
+use pcapsql_core::io::{
+    CloudLocation, CloudPacketSource, PacketReader, PacketSource, SeekablePacketSource,
+};
+use pcapsql_datafusion::query::QueryEngine;
+use pcapsql_testgen::{legacy_pcap, GenPacket, LegacyVariant};
 
-    /// Test bucket name (created by setup.sh).
-    const TEST_BUCKET: &str = "test-pcaps";
+/// Endpoint of the test object store, or `None` to skip (store unavailable).
+fn endpoint() -> Option<String> {
+    std::env::var("PCAPSQL_S3_TEST_ENDPOINT")
+        .ok()
+        .filter(|s| !s.is_empty())
+}
 
-    // =========================================================================
-    // Basic connectivity tests (using generated small_dns.pcap)
-    // =========================================================================
+fn bucket() -> String {
+    std::env::var("PCAPSQL_S3_TEST_BUCKET").unwrap_or_else(|_| "test-pcaps".to_string())
+}
 
-    #[test]
-    #[ignore]
-    fn test_s3_read_uncompressed_pcap() {
-        let url = format!("s3://{}/small_dns.pcap", TEST_BUCKET);
-        let location = CloudLocation::parse(&url)
-            .expect("Failed to parse URL")
-            .with_endpoint(TEST_ENDPOINT)
-            .with_anonymous(true);
+fn location(ep: &str, key: &str) -> CloudLocation {
+    CloudLocation::parse(&format!("s3://{}/{}", bucket(), key))
+        .expect("parse s3 url")
+        .with_endpoint(ep)
+}
 
-        let source = CloudPacketSource::open(location).expect("Failed to open cloud source");
-        let meta = source.metadata();
-
-        assert!(meta.size_bytes.is_some());
-        assert!(meta.size_bytes.unwrap() > 0);
-        assert!(!meta.seekable); // Cloud sources are non-seekable
-        assert_eq!(meta.link_type, 1); // Ethernet
-    }
-
-    #[test]
-    #[ignore]
-    fn test_s3_not_found_returns_error() {
-        let url = format!("s3://{}/nonexistent.pcap", TEST_BUCKET);
-        let location = CloudLocation::parse(&url)
-            .expect("Failed to parse URL")
-            .with_endpoint(TEST_ENDPOINT)
-            .with_anonymous(true);
-
-        let result = CloudPacketSource::open(location);
-        assert!(result.is_err());
-    }
-
-    // =========================================================================
-    // Packet reading tests
-    // =========================================================================
-
-    #[test]
-    #[ignore]
-    fn test_s3_read_packets() {
-        let url = format!("s3://{}/small_dns.pcap", TEST_BUCKET);
-        let location = CloudLocation::parse(&url)
-            .expect("Failed to parse URL")
-            .with_endpoint(TEST_ENDPOINT)
-            .with_anonymous(true);
-
-        let source = CloudPacketSource::open(location).expect("Failed to open cloud source");
-        let mut reader = source.reader(None).expect("Failed to create reader");
-
-        let mut packet_count = 0;
-        loop {
-            let count = reader
-                .process_packets(100, |_packet| {
-                    packet_count += 1;
-                    Ok(())
-                })
-                .expect("Failed to process packets");
-
-            if count == 0 {
-                break;
-            }
-        }
-
-        // small_dns.pcap has 200 packets (100 queries + 100 responses)
-        assert_eq!(packet_count, 200, "Expected 200 DNS packets");
-    }
-
-    // =========================================================================
-    // Query engine integration tests (async - use QueryEngine)
-    // =========================================================================
-
-    #[tokio::test(flavor = "multi_thread")]
-    #[ignore]
-    async fn test_s3_query_with_cache() {
-        let url = format!("s3://{}/small_dns.pcap", TEST_BUCKET);
-
-        let engine = QueryEngine::with_cloud_source(
-            &url,
-            1000,  // batch_size
-            10000, // cache_size
-            Some(TEST_ENDPOINT),
-            true,            // anonymous
-            8 * 1024 * 1024, // chunk_size
-        )
+/// Upload bytes through the same object_store backend the source reads through.
+async fn upload(ep: &str, key: &str, bytes: Vec<u8>) {
+    let loc = location(ep, key);
+    let store = loc.build_store().expect("build store");
+    store
+        .put(&loc.object_path(), PutPayload::from(bytes))
         .await
-        .expect("Failed to create QueryEngine");
+        .expect("put object");
+}
 
-        // Simple count query
-        let result = engine
-            .query("SELECT COUNT(*) as cnt FROM frames")
-            .await
-            .expect("Query failed");
+/// A real Ethernet/IPv4/UDP frame so protocol tables populate.
+fn udp_packet(src_port: u16, payload_len: usize) -> Vec<u8> {
+    let mut p = Vec::with_capacity(42 + payload_len);
+    p.extend_from_slice(&[0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
+    p.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+    p.extend_from_slice(&[0x08, 0x00]);
+    let ip_total = (20 + 8 + payload_len) as u16;
+    p.push(0x45);
+    p.push(0x00);
+    p.extend_from_slice(&ip_total.to_be_bytes());
+    p.extend_from_slice(&[0x00, 0x00, 0x40, 0x00]);
+    p.push(64);
+    p.push(17);
+    p.extend_from_slice(&[0x00, 0x00]);
+    p.extend_from_slice(&[192, 168, 0, 1]);
+    p.extend_from_slice(&[192, 168, 0, 2]);
+    let udp_len = (8 + payload_len) as u16;
+    p.extend_from_slice(&src_port.to_be_bytes());
+    p.extend_from_slice(&53u16.to_be_bytes());
+    p.extend_from_slice(&udp_len.to_be_bytes());
+    p.extend_from_slice(&[0x00, 0x00]);
+    p.extend(std::iter::repeat_n(0xAB, payload_len));
+    p
+}
 
-        assert!(!result.is_empty());
-        let count: i64 = result[0]
-            .column(0)
-            .as_any()
-            .downcast_ref::<arrow::array::Int64Array>()
-            .unwrap()
-            .value(0);
+/// Generate a capture > 16 MiB so the RangeRequest cost gate allows partitioning.
+fn big_capture(count: usize, payload: usize) -> Vec<u8> {
+    let packets: Vec<GenPacket> = (0..count)
+        .map(|i| {
+            let data = udp_packet(10_000 + (i % 5000) as u16, payload);
+            let origlen = data.len() as u32;
+            GenPacket {
+                ts_sec: 1_700_000_000 + (i / 1000) as u32,
+                ts_frac: (i as u32 * 251) % 1_000_000,
+                data,
+                origlen,
+            }
+        })
+        .collect();
+    legacy_pcap(LegacyVariant::LeMicro, 1, 65535, &packets).bytes
+}
 
-        assert_eq!(count, 200, "Should have 200 frames");
+fn drain<R: PacketReader>(reader: &mut R) -> Vec<u64> {
+    let mut out = Vec::new();
+    loop {
+        let mut batch = Vec::new();
+        let n = reader
+            .process_packets(256, |p| {
+                batch.push(p.frame_number);
+                Ok(())
+            })
+            .expect("process_packets");
+        out.extend(batch);
+        if n == 0 {
+            break;
+        }
     }
+    out
+}
 
-    #[tokio::test(flavor = "multi_thread")]
-    #[ignore]
-    async fn test_s3_streaming_join() {
-        let url = format!("s3://{}/small_dns.pcap", TEST_BUCKET);
+async fn run(engine: &QueryEngine, sql: &str) -> String {
+    let batches = engine.query(sql).await.expect("query ok");
+    arrow::util::pretty::pretty_format_batches(&batches)
+        .expect("format")
+        .to_string()
+}
 
-        let engine = QueryEngine::with_cloud_source(
-            &url,
-            1000,
-            10000,
-            Some(TEST_ENDPOINT),
-            true,
-            8 * 1024 * 1024,
-        )
+/// Source-level: byte-range partitioned reads over the network reproduce the
+/// sequential read exactly.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s3_partition_equivalence_source_level() {
+    let Some(ep) = endpoint() else {
+        eprintln!("skipping cloud test: PCAPSQL_S3_TEST_ENDPOINT not set");
+        return;
+    };
+
+    let key = "equiv/source_level.pcap";
+    let total = 20_000u64;
+    upload(&ep, key, big_capture(total as usize, 1000)).await;
+
+    let source = CloudPacketSource::open(location(&ep, key))
+        .expect("open cloud source")
+        .with_index_stride(2048);
+
+    assert!(
+        source.metadata().size_bytes.unwrap() > 16 * 1024 * 1024,
+        "object must exceed the RangeRequest gate"
+    );
+
+    // Sequential read over the network.
+    let mut seq_reader = source.sequential_reader().expect("sequential reader");
+    let seq = drain(&mut seq_reader);
+    assert_eq!(seq, (1..=total).collect::<Vec<_>>());
+
+    // Partitioned: independent byte-range GETs, reassembled in order.
+    let ranges = source.partitions(4).expect("partitions");
+    assert!(
+        ranges.len() > 1,
+        "a >16MiB object should split into multiple partitions, got {}",
+        ranges.len()
+    );
+    let mut part = Vec::new();
+    for range in &ranges {
+        let mut r = source.reader_at(range).expect("reader_at over network");
+        part.extend(drain(&mut r));
+    }
+    assert_eq!(
+        part, seq,
+        "partitioned (range-GET) read must equal sequential"
+    );
+}
+
+/// Engine-level: a SQL query returns identical results whether the cloud object
+/// is parsed in 1 partition or N, and the shared pass runs exactly once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s3_partition_equivalence_engine_level() {
+    let Some(ep) = endpoint() else {
+        eprintln!("skipping cloud test: PCAPSQL_S3_TEST_ENDPOINT not set");
+        return;
+    };
+
+    let key = "equiv/engine_level.pcap";
+    upload(&ep, key, big_capture(20_000, 1000)).await;
+
+    let mk = || {
+        CloudPacketSource::open(location(&ep, key))
+            .expect("open cloud source")
+            .with_index_stride(2048)
+    };
+
+    let e1 = QueryEngine::with_streaming_source_partitions(Arc::new(mk()), 4096, 1)
         .await
-        .expect("Failed to create QueryEngine");
-
-        // JOIN query across tables
-        let result = engine
-            .query(
-                "SELECT f.frame_number, d.query_name
-                 FROM frames f
-                 JOIN dns d ON f.frame_number = d.frame_number
-                 LIMIT 5",
-            )
-            .await
-            .expect("JOIN query failed");
-
-        assert!(!result.is_empty());
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    #[ignore]
-    async fn test_s3_dns_query() {
-        let url = format!("s3://{}/small_dns.pcap", TEST_BUCKET);
-
-        let engine = QueryEngine::with_cloud_source(
-            &url,
-            1000,
-            10000,
-            Some(TEST_ENDPOINT),
-            true,
-            8 * 1024 * 1024,
-        )
+        .expect("engine n=1");
+    let e4 = QueryEngine::with_streaming_source_partitions(Arc::new(mk()), 4096, 4)
         .await
-        .expect("Failed to create QueryEngine");
+        .expect("engine n=4");
 
-        // Query DNS table
-        let result = engine
-            .query("SELECT query_name, is_query FROM dns LIMIT 10")
-            .await
-            .expect("DNS query failed");
+    assert_eq!(e1.partition_count(), 1);
+    assert!(
+        e4.partition_count() > 1,
+        "cloud object should be parsed in multiple partitions, got {}",
+        e4.partition_count()
+    );
 
-        let total_rows: usize = result.iter().map(|b| b.num_rows()).sum();
-        assert!(total_rows > 0, "DNS table should have rows");
+    // One parse pass for a multi-table query.
+    let _ = run(
+        &e4,
+        "SELECT f.frame_number, u.dst_port FROM frames f JOIN udp u USING (frame_number)",
+    )
+    .await;
+    assert_eq!(e4.parse_pass_count(), 1);
+
+    for sql in [
+        "SELECT count(*) AS c FROM frames",
+        "SELECT count(*) AS c FROM udp",
+        "SELECT count(*) AS c FROM ipv4",
+        "SELECT frame_number, length FROM frames ORDER BY frame_number LIMIT 500",
+        "SELECT frame_number, dst_port FROM udp ORDER BY frame_number LIMIT 500",
+    ] {
+        let r1 = run(&e1, sql).await;
+        let r4 = run(&e4, sql).await;
+        assert_eq!(r1, r4, "cloud 1-vs-N mismatch for: {sql}");
     }
+}
 
-    // =========================================================================
-    // Edge case tests
-    // =========================================================================
+/// A small object is served single-partition (the cost gate avoids firing many
+/// range GETs at a tiny object), and still queries correctly.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_small_object_single_partition() {
+    let Some(ep) = endpoint() else {
+        eprintln!("skipping cloud test: PCAPSQL_S3_TEST_ENDPOINT not set");
+        return;
+    };
 
-    #[test]
-    #[ignore]
-    fn test_s3_small_chunk_size() {
-        // Test with very small chunk size to exercise buffering
-        let url = format!("s3://{}/small_dns.pcap", TEST_BUCKET);
-        let location = CloudLocation::parse(&url)
-            .expect("Failed to parse URL")
-            .with_endpoint(TEST_ENDPOINT)
-            .with_anonymous(true)
-            .with_chunk_size(1024); // 1KB chunks
+    let key = "small/tiny.pcap";
+    upload(&ep, key, big_capture(50, 20)).await;
 
-        let source = CloudPacketSource::open(location).expect("Failed to open cloud source");
-        let mut reader = source.reader(None).expect("Failed to create reader");
+    let engine = QueryEngine::with_streaming_source_partitions(
+        Arc::new(CloudPacketSource::open(location(&ep, key)).expect("open")),
+        1000,
+        4,
+    )
+    .await
+    .expect("engine");
 
-        let mut packet_count = 0;
-        loop {
-            let count = reader
-                .process_packets(10, |_| {
-                    packet_count += 1;
-                    Ok(())
-                })
-                .expect("Failed to process packets");
-
-            if count == 0 {
-                break;
-            }
-        }
-
-        assert_eq!(
-            packet_count, 200,
-            "Should read all 200 packets with small chunks"
-        );
-    }
-
-    #[test]
-    #[ignore]
-    fn test_s3_partitions_returns_single() {
-        let url = format!("s3://{}/small_dns.pcap", TEST_BUCKET);
-        let location = CloudLocation::parse(&url)
-            .expect("Failed to parse URL")
-            .with_endpoint(TEST_ENDPOINT)
-            .with_anonymous(true);
-
-        let source = CloudPacketSource::open(location).expect("Failed to open cloud source");
-        let partitions = source.partitions(4).expect("Failed to get partitions");
-
-        // Cloud sources should return a single partition
-        assert_eq!(partitions.len(), 1);
-    }
-
-    // =========================================================================
-    // Large file tests (chunk boundary crossing)
-    // =========================================================================
-
-    #[test]
-    #[ignore]
-    fn test_s3_large_file_chunk_boundary() {
-        // large_10mb.pcap is >8MB, default chunk is 8MB
-        // This tests reading across multiple chunks
-        let url = format!("s3://{}/large_10mb.pcap", TEST_BUCKET);
-        let location = CloudLocation::parse(&url)
-            .expect("Failed to parse URL")
-            .with_endpoint(TEST_ENDPOINT)
-            .with_anonymous(true);
-
-        let source = CloudPacketSource::open(location).expect("Failed to open cloud source");
-        let meta = source.metadata();
-
-        // Verify file size (large_10mb.pcap is ~6.3MB in practice)
-        assert!(
-            meta.size_bytes.unwrap() > 5 * 1024 * 1024,
-            "Large file should be >5MB, got {} bytes",
-            meta.size_bytes.unwrap()
-        );
-
-        let mut reader = source.reader(None).expect("Failed to create reader");
-
-        let mut packet_count = 0;
-        loop {
-            let count = reader
-                .process_packets(1000, |_| {
-                    packet_count += 1;
-                    Ok(())
-                })
-                .expect("Failed to process packets");
-
-            if count == 0 {
-                break;
-            }
-        }
-
-        // large_10mb.pcap has 65536 packets
-        assert!(
-            packet_count > 50000,
-            "Expected many packets from large file, got {}",
-            packet_count
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    #[ignore]
-    async fn test_s3_large_file_query() {
-        let url = format!("s3://{}/large_10mb.pcap", TEST_BUCKET);
-
-        let engine = QueryEngine::with_cloud_source(
-            &url,
-            1000,
-            50000, // Larger cache for big file
-            Some(TEST_ENDPOINT),
-            true,
-            8 * 1024 * 1024,
-        )
-        .await
-        .expect("Failed to create QueryEngine");
-
-        let result = engine
-            .query("SELECT COUNT(*) FROM frames")
-            .await
-            .expect("Query failed");
-
-        let count: i64 = result[0]
-            .column(0)
-            .as_any()
-            .downcast_ref::<arrow::array::Int64Array>()
-            .unwrap()
-            .value(0);
-
-        assert!(count > 50000, "Expected many frames from large file");
-    }
-
-    // =========================================================================
-    // Format variant tests
-    // =========================================================================
-
-    #[test]
-    #[ignore]
-    fn test_s3_pcapng_format() {
-        let url = format!("s3://{}/format_pcapng.pcapng", TEST_BUCKET);
-        let location = CloudLocation::parse(&url)
-            .expect("Failed to parse URL")
-            .with_endpoint(TEST_ENDPOINT)
-            .with_anonymous(true);
-
-        let source = CloudPacketSource::open(location).expect("Failed to open PCAPNG source");
-        let meta = source.metadata();
-
-        // Verify PCAPNG was detected and link type parsed
-        assert_eq!(meta.link_type, 1, "PCAPNG should have Ethernet link type");
-
-        // Read and count packets
-        let mut reader = source.reader(None).expect("Failed to create reader");
-        let mut packet_count = 0;
-        loop {
-            let count = reader
-                .process_packets(100, |_| {
-                    packet_count += 1;
-                    Ok(())
-                })
-                .expect("Failed to process packets");
-            if count == 0 {
-                break;
-            }
-        }
-        assert_eq!(packet_count, 200, "PCAPNG should have 200 packets");
-    }
-
-    #[test]
-    #[ignore]
-    fn test_s3_legacy_be_micro_format() {
-        let url = format!("s3://{}/format_be_micro.pcap", TEST_BUCKET);
-        let location = CloudLocation::parse(&url)
-            .expect("Failed to parse URL")
-            .with_endpoint(TEST_ENDPOINT)
-            .with_anonymous(true);
-
-        let source = CloudPacketSource::open(location).expect("Failed to open BE micro source");
-        let meta = source.metadata();
-
-        assert_eq!(meta.link_type, 1, "BE micro should have Ethernet link type");
-
-        let mut reader = source.reader(None).expect("Failed to create reader");
-        let mut packet_count = 0;
-        loop {
-            let count = reader
-                .process_packets(100, |_| {
-                    packet_count += 1;
-                    Ok(())
-                })
-                .expect("Failed to process packets");
-            if count == 0 {
-                break;
-            }
-        }
-        assert_eq!(packet_count, 200, "BE micro should have 200 packets");
-    }
-
-    #[test]
-    #[ignore]
-    fn test_s3_legacy_le_nano_format() {
-        let url = format!("s3://{}/format_le_nano.pcap", TEST_BUCKET);
-        let location = CloudLocation::parse(&url)
-            .expect("Failed to parse URL")
-            .with_endpoint(TEST_ENDPOINT)
-            .with_anonymous(true);
-
-        let source = CloudPacketSource::open(location).expect("Failed to open LE nano source");
-        let meta = source.metadata();
-
-        assert_eq!(meta.link_type, 1, "LE nano should have Ethernet link type");
-
-        let mut reader = source.reader(None).expect("Failed to create reader");
-        let mut packet_count = 0;
-        loop {
-            let count = reader
-                .process_packets(100, |_| {
-                    packet_count += 1;
-                    Ok(())
-                })
-                .expect("Failed to process packets");
-            if count == 0 {
-                break;
-            }
-        }
-        assert_eq!(packet_count, 200, "LE nano should have 200 packets");
-    }
-
-    #[test]
-    #[ignore]
-    fn test_s3_legacy_be_nano_format() {
-        let url = format!("s3://{}/format_be_nano.pcap", TEST_BUCKET);
-        let location = CloudLocation::parse(&url)
-            .expect("Failed to parse URL")
-            .with_endpoint(TEST_ENDPOINT)
-            .with_anonymous(true);
-
-        let source = CloudPacketSource::open(location).expect("Failed to open BE nano source");
-        let meta = source.metadata();
-
-        assert_eq!(meta.link_type, 1, "BE nano should have Ethernet link type");
-
-        let mut reader = source.reader(None).expect("Failed to create reader");
-        let mut packet_count = 0;
-        loop {
-            let count = reader
-                .process_packets(100, |_| {
-                    packet_count += 1;
-                    Ok(())
-                })
-                .expect("Failed to process packets");
-            if count == 0 {
-                break;
-            }
-        }
-        assert_eq!(packet_count, 200, "BE nano should have 200 packets");
-    }
-
-    // =========================================================================
-    // Compression tests
-    // =========================================================================
-
-    #[test]
-    #[ignore]
-    fn test_s3_gzip_compression() {
-        let url = format!("s3://{}/small_dns.pcap.gz", TEST_BUCKET);
-        let location = CloudLocation::parse(&url)
-            .expect("Failed to parse URL")
-            .with_endpoint(TEST_ENDPOINT)
-            .with_anonymous(true);
-
-        let source = CloudPacketSource::open(location).expect("Failed to open gzip source");
-        let meta = source.metadata();
-
-        assert_eq!(meta.link_type, 1, "Gzip should detect Ethernet link type");
-
-        let mut reader = source.reader(None).expect("Failed to create reader");
-        let mut packet_count = 0;
-        loop {
-            let count = reader
-                .process_packets(100, |_| {
-                    packet_count += 1;
-                    Ok(())
-                })
-                .expect("Failed to process packets");
-            if count == 0 {
-                break;
-            }
-        }
-        assert_eq!(
-            packet_count, 200,
-            "Gzip compressed file should have 200 packets"
-        );
-    }
-
-    #[cfg(feature = "compress-zstd")]
-    #[test]
-    #[ignore]
-    fn test_s3_zstd_compression() {
-        let url = format!("s3://{}/small_dns.pcap.zst", TEST_BUCKET);
-        let location = CloudLocation::parse(&url)
-            .expect("Failed to parse URL")
-            .with_endpoint(TEST_ENDPOINT)
-            .with_anonymous(true);
-
-        let source = CloudPacketSource::open(location).expect("Failed to open zstd source");
-        let meta = source.metadata();
-
-        assert_eq!(meta.link_type, 1, "Zstd should detect Ethernet link type");
-
-        let mut reader = source.reader(None).expect("Failed to create reader");
-        let mut packet_count = 0;
-        loop {
-            let count = reader
-                .process_packets(100, |_| {
-                    packet_count += 1;
-                    Ok(())
-                })
-                .expect("Failed to process packets");
-            if count == 0 {
-                break;
-            }
-        }
-        assert_eq!(
-            packet_count, 200,
-            "Zstd compressed file should have 200 packets"
-        );
-    }
-
-    #[cfg(feature = "compress-lz4")]
-    #[test]
-    #[ignore]
-    fn test_s3_lz4_compression() {
-        let url = format!("s3://{}/small_dns.pcap.lz4", TEST_BUCKET);
-        let location = CloudLocation::parse(&url)
-            .expect("Failed to parse URL")
-            .with_endpoint(TEST_ENDPOINT)
-            .with_anonymous(true);
-
-        let source = CloudPacketSource::open(location).expect("Failed to open lz4 source");
-        let meta = source.metadata();
-
-        assert_eq!(meta.link_type, 1, "LZ4 should detect Ethernet link type");
-
-        let mut reader = source.reader(None).expect("Failed to create reader");
-        let mut packet_count = 0;
-        loop {
-            let count = reader
-                .process_packets(100, |_| {
-                    packet_count += 1;
-                    Ok(())
-                })
-                .expect("Failed to process packets");
-            if count == 0 {
-                break;
-            }
-        }
-        assert_eq!(
-            packet_count, 200,
-            "LZ4 compressed file should have 200 packets"
-        );
-    }
+    // Below the RangeRequest size gate -> single partition.
+    assert_eq!(engine.partition_count(), 1);
+    let frames = run(&engine, "SELECT count(*) AS c FROM frames").await;
+    assert!(frames.contains("50"), "expected 50 frames:\n{frames}");
 }

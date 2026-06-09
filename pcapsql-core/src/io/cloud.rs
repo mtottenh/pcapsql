@@ -23,8 +23,8 @@
 //! let engine = QueryEngine::with_streaming_source(source).await?;
 //! ```
 
-use std::io::{self, Read};
-use std::sync::Arc;
+use std::io::{self, Chain, Cursor, Read};
+use std::sync::{Arc, Mutex};
 
 use object_store::{path::Path as ObjectPath, ObjectStore};
 use url::Url;
@@ -57,9 +57,12 @@ where
         }
     }
 }
+use super::index::{self, BoundaryIndex};
+use super::source::synth_header_for;
 use crate::io::{
     decompress_header, Compression, DecompressReader, GenericPcapReader, PacketPosition,
-    PacketRange, PacketReader, PacketRef, PacketSource, PacketSourceMetadata, PcapFormat,
+    PacketRange, PacketReader, PacketRef, PacketSource, PacketSourceMetadata, PcapFormat, SeekCost,
+    SeekablePacketSource,
 };
 
 /// Default chunk size for cloud reads (8MB).
@@ -323,6 +326,15 @@ impl ObjectStoreReader {
         })
     }
 
+    /// Open a reader positioned at a byte offset (for mid-file partitions).
+    pub fn open_at(location: &CloudLocation, start: u64) -> Result<Self, Error> {
+        let mut reader = Self::open(location)?;
+        reader.position = start;
+        reader.buffer_start = start;
+        reader.buffer.clear();
+        Ok(reader)
+    }
+
     /// Create a reader with pre-fetched header bytes.
     ///
     /// This is an optimization to avoid re-fetching the header when the
@@ -441,6 +453,10 @@ pub struct CloudPacketSource {
     metadata: PacketSourceMetadata,
     compression: Compression,
     pcap_format: PcapFormat,
+    /// Lazily built boundary index (uncompressed objects only).
+    index: Arc<Mutex<Option<Arc<BoundaryIndex>>>>,
+    index_stride: u64,
+    header_hash: u64,
 }
 
 impl CloudPacketSource {
@@ -542,16 +558,54 @@ impl CloudPacketSource {
             link_type,
             snaplen: 65535,
             size_bytes: Some(object_size),
-            packet_count: None, // Would require scanning
-            seekable: false,    // Cloud doesn't support efficient seeking
+            packet_count: None, // Filled by the index if built
         };
+
+        let header_hash = index::header_hash(&header_bytes);
 
         Ok(Self {
             location,
             metadata,
             compression,
             pcap_format,
+            index: Arc::new(Mutex::new(None)),
+            index_stride: index::DEFAULT_CHECKPOINT_STRIDE,
+            header_hash,
         })
+    }
+
+    /// Set the checkpoint stride for index building (smaller = finer partitions).
+    pub fn with_index_stride(mut self, stride: u64) -> Self {
+        self.index_stride = stride.max(1);
+        self
+    }
+
+    /// Build (and memoize) the boundary index by scanning the uncompressed
+    /// object. This is the one full read; subsequent partition reads use exact
+    /// offsets from the index (no byte-range re-sync).
+    fn ensure_index(&self) -> Result<Arc<BoundaryIndex>, Error> {
+        if self.compression.is_compressed() {
+            return Err(Error::Io(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "compressed cloud objects are not seekable; cannot build boundary index",
+            )));
+        }
+        let mut guard = self.index.lock().expect("index mutex poisoned");
+        if let Some(idx) = guard.as_ref() {
+            return Ok(idx.clone());
+        }
+        let reader = ObjectStoreReader::open(&self.location)?;
+        let idx = index::build_boundary_index(
+            reader,
+            self.pcap_format,
+            self.index_stride,
+            self.metadata.size_bytes.unwrap_or(0),
+            None,
+            self.header_hash,
+        )?;
+        let idx = Arc::new(idx);
+        *guard = Some(idx.clone());
+        Ok(idx)
     }
 
     /// Parse link type from decompressed PCAP header bytes.
@@ -714,69 +768,123 @@ impl PacketSource for CloudPacketSource {
         &self.metadata
     }
 
-    fn reader(&self, _range: Option<&PacketRange>) -> Result<Self::Reader, Error> {
-        // Note: Range support would require index or sequential scan
-        // For now, we always read from the beginning
-        CloudPacketReader::new(
+    fn sequential_reader(&self) -> Result<Self::Reader, Error> {
+        CloudPacketReader::sequential(&self.location, self.compression, self.pcap_format)
+    }
+}
+
+impl SeekablePacketSource for CloudPacketSource {
+    fn seek_cost(&self) -> SeekCost {
+        SeekCost::RangeRequest
+    }
+
+    fn reader_at(&self, range: &PacketRange) -> Result<Self::Reader, Error> {
+        if self.compression.is_compressed() {
+            return self.sequential_reader();
+        }
+        let idx = self.ensure_index()?;
+        let header = synth_header_for(&idx, range.start.frame_number, self.pcap_format)?;
+        let end_frame = range.end.as_ref().map(|e| e.frame_number);
+        CloudPacketReader::at(
             &self.location,
-            self.compression,
             self.pcap_format,
-            self.metadata.link_type,
+            header,
+            range.start.byte_offset,
+            range.start.frame_number,
+            end_frame,
         )
     }
 
-    fn partitions(&self, _max_partitions: usize) -> Result<Vec<PacketRange>, Error> {
-        // Cloud doesn't support efficient partitioning without an index
-        // Return single partition covering entire object
-        Ok(vec![PacketRange::whole()])
+    fn partitions(&self, max: usize) -> Result<Vec<PacketRange>, Error> {
+        if self.compression.is_compressed() {
+            return Ok(vec![PacketRange::whole()]);
+        }
+        let idx = self.ensure_index()?;
+        Ok(idx.partition_ranges(max))
     }
 }
 
+/// The concrete `Read` stack for cloud readers: an optional synthesized header
+/// (empty for sequential reads) chained before the object-store range reader,
+/// wrapped in decompression.
+type CloudInner = GenericPcapReader<DecompressReader<Chain<Cursor<Vec<u8>>, ObjectStoreReader>>>;
+
 /// Cloud-backed packet reader.
-///
-/// Wraps the ObjectStoreReader → DecompressReader → GenericPcapReader stack
-/// and implements [`PacketReader`] for the query engine.
 pub struct CloudPacketReader {
-    inner: GenericPcapReader<DecompressReader<ObjectStoreReader>>,
+    inner: CloudInner,
     link_type: u32,
-    position: PacketPosition,
+    end_frame: Option<u64>,
 }
 
 impl CloudPacketReader {
-    /// Create a new cloud packet reader.
-    fn new(
+    /// Sequential reader over the whole object (honors compression).
+    fn sequential(
         location: &CloudLocation,
         compression: Compression,
         format: PcapFormat,
-        link_type: u32,
     ) -> Result<Self, Error> {
         let cloud_reader = ObjectStoreReader::open(location)?;
-        let decompress = DecompressReader::new(cloud_reader, compression)?;
+        let chain = Cursor::new(Vec::new()).chain(cloud_reader);
+        let decompress = DecompressReader::new(chain, compression)?;
         let inner = GenericPcapReader::with_format(decompress, format)?;
-
+        let link_type = inner.link_type();
         Ok(Self {
             inner,
             link_type,
-            position: PacketPosition::START,
+            end_frame: None,
+        })
+    }
+
+    /// Reader at a byte offset, prepending a synthesized header. Uncompressed
+    /// objects only (the only ones that are partitioned).
+    fn at(
+        location: &CloudLocation,
+        format: PcapFormat,
+        synth_header: Vec<u8>,
+        byte_offset: u64,
+        start_frame: u64,
+        end_frame: Option<u64>,
+    ) -> Result<Self, Error> {
+        let cloud_reader = ObjectStoreReader::open_at(location, byte_offset)?;
+        let chain = Cursor::new(synth_header).chain(cloud_reader);
+        let decompress = DecompressReader::new(chain, Compression::None)?;
+        let inner = GenericPcapReader::with_format_starting_at(decompress, format, start_frame)?;
+        let link_type = inner.link_type();
+        Ok(Self {
+            inner,
+            link_type,
+            end_frame,
         })
     }
 }
 
 impl PacketReader for CloudPacketReader {
-    fn process_packets<F>(&mut self, max: usize, mut f: F) -> Result<usize, Error>
+    fn process_packets<F>(&mut self, max: usize, f: F) -> Result<usize, Error>
     where
         F: FnMut(PacketRef<'_>) -> Result<(), Error>,
     {
-        let count = self.inner.process_packets(max, |packet| {
-            self.position.frame_number = packet.frame_number + 1;
-            f(packet)
-        })?;
-
+        // `end_frame` is exclusive: emit frames with number < end_frame.
+        let effective_max = match self.end_frame {
+            Some(end) => {
+                let current = self.inner.frame_count();
+                let remaining = end.saturating_sub(current).saturating_sub(1);
+                if remaining == 0 {
+                    return Ok(0);
+                }
+                max.min(remaining as usize)
+            }
+            None => max,
+        };
+        let count = self.inner.process_packets(effective_max, f)?;
+        self.link_type = self.inner.link_type();
         Ok(count)
     }
 
     fn position(&self) -> PacketPosition {
-        self.position.clone()
+        PacketPosition {
+            byte_offset: self.inner.consumed_bytes(),
+            frame_number: self.inner.frame_count(),
+        }
     }
 
     fn link_type(&self) -> u32 {

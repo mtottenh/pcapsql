@@ -30,7 +30,6 @@ pub mod providers;
 pub mod stream_tables;
 pub mod tables;
 pub mod udf;
-pub mod udtf;
 pub mod views;
 
 pub use arrow_schema::{descriptors_to_arrow_schema, protocol_to_arrow_schema, to_arrow_field};
@@ -38,7 +37,7 @@ pub use builders::NormalizedBatchSet;
 pub use filter::FilterEvaluator;
 pub use frames::{frames_schema, FramesBatchBuilder};
 pub use provider::PcapTableProvider;
-pub use providers::{ProtocolBatchStream, ProtocolStreamExec, ProtocolTableProvider};
+pub use providers::{ProtocolScanExec, ProtocolTableProvider, SharedParseState};
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -50,14 +49,23 @@ use datafusion::prelude::*;
 use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::error::{Error, QueryError};
+use crate::query::providers::run_shared_parse;
 use pcapsql_core::{
-    default_registry, parse_packet, CacheStats, FilePacketSource, KeyLog, LruParseCache,
-    MmapPacketSource, NoCache, PacketReader, PacketSource, ParseCache, PcapReader,
-    ProtocolRegistry,
+    default_registry, parse_packet, FilePacketSource, KeyLog, MmapPacketSource, PcapReader,
+    ProtocolRegistry, SeekablePacketSource,
 };
 
 #[cfg(feature = "cloud")]
 use pcapsql_core::io::{CloudLocation, CloudPacketSource};
+
+/// Default number of partitions to split a seekable source into for the shared
+/// parallel parse pass.
+fn default_target_partitions() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .clamp(1, 16)
+}
 
 /// File size threshold for automatic streaming mode selection.
 /// Files >= 100MB use streaming mode.
@@ -85,8 +93,8 @@ fn create_session_context() -> SessionContext {
 pub struct QueryEngine {
     ctx: SessionContext,
     registry: ProtocolRegistry,
-    /// Parse cache for streaming mode (if enabled)
-    cache: Option<Arc<dyn ParseCache>>,
+    /// Shared parse state for the streaming/parallel path (None for in-memory).
+    shared: Option<Arc<SharedParseState>>,
 }
 
 impl QueryEngine {
@@ -148,14 +156,10 @@ impl QueryEngine {
         // Register cross-layer views (including backward-compatible packets view)
         Self::register_cross_layer_views(&ctx).await?;
 
-        // Register cache_stats() table function (returns default stats in in-memory mode)
-        let stats_fn = udtf::CacheStatsFunction::new(|| None);
-        ctx.register_udtf("cache_stats", Arc::new(stats_fn));
-
         Ok(Self {
             ctx,
             registry,
-            cache: None,
+            shared: None,
         })
     }
 
@@ -236,14 +240,10 @@ impl QueryEngine {
         // Register cross-layer views
         Self::register_cross_layer_views(&ctx).await?;
 
-        // Register cache_stats() table function
-        let stats_fn = udtf::CacheStatsFunction::new(|| None);
-        ctx.register_udtf("cache_stats", Arc::new(stats_fn));
-
         Ok(Self {
             ctx,
             registry,
-            cache: None,
+            shared: None,
         })
     }
 
@@ -267,145 +267,72 @@ impl QueryEngine {
         Self::with_streaming_source(Arc::new(source), batch_size).await
     }
 
-    /// Create a QueryEngine with a custom packet source.
+    /// Create a QueryEngine with a custom seekable packet source.
     ///
-    /// This is the generic entry point that works with any `PacketSource`
-    /// implementation (File, Mmap, S3, etc.).
-    pub async fn with_streaming_source<S: PacketSource + 'static>(
+    /// Performs a single shared parse pass over the source (fanning out to all
+    /// protocol tables), parallelized across partitions for seekable sources,
+    /// then serves every table from the shared result — so a query joining N
+    /// tables parses the capture once, not N times.
+    pub async fn with_streaming_source<S: SeekablePacketSource>(
         source: Arc<S>,
         batch_size: usize,
     ) -> Result<Self, Error> {
-        Self::with_streaming_source_and_cache::<S, NoCache>(source, batch_size, None).await
+        Self::with_streaming_source_partitions(source, batch_size, default_target_partitions())
+            .await
     }
 
-    /// Create a QueryEngine with streaming and parse cache.
-    ///
-    /// The cache reduces redundant parsing when multiple protocol readers
-    /// traverse the same PCAP file (e.g., during JOIN queries).
-    ///
-    /// # Arguments
-    ///
-    /// * `source` - The packet source to read from
-    /// * `batch_size` - Number of packets per RecordBatch
-    /// * `cache_size` - Maximum number of parsed packets to cache (0 to disable)
-    pub async fn with_streaming_source_cached<S: PacketSource + 'static>(
+    /// Like [`with_streaming_source`](Self::with_streaming_source) but with an
+    /// explicit target partition count for the shared parse pass (mainly for
+    /// tests and benchmarks).
+    pub async fn with_streaming_source_partitions<S: SeekablePacketSource>(
         source: Arc<S>,
         batch_size: usize,
-        cache_size: usize,
-    ) -> Result<Self, Error> {
-        Self::with_streaming_source_cached_opts(source, batch_size, cache_size, true).await
-    }
-
-    /// Create a streaming QueryEngine with cache options.
-    pub async fn with_streaming_source_cached_opts<S: PacketSource + 'static>(
-        source: Arc<S>,
-        batch_size: usize,
-        cache_size: usize,
-        reader_eviction: bool,
-    ) -> Result<Self, Error> {
-        if cache_size > 0 {
-            let cache = Arc::new(LruParseCache::with_options(cache_size, reader_eviction));
-            Self::with_streaming_source_and_cache(source, batch_size, Some(cache)).await
-        } else {
-            Self::with_streaming_source_and_cache::<S, NoCache>(source, batch_size, None).await
-        }
-    }
-
-    /// Internal method: Create a streaming QueryEngine with optional cache.
-    async fn with_streaming_source_and_cache<S: PacketSource + 'static, C: ParseCache + 'static>(
-        source: Arc<S>,
-        batch_size: usize,
-        cache: Option<Arc<C>>,
+        target_partitions: usize,
     ) -> Result<Self, Error> {
         let registry = Arc::new(default_registry());
         let ctx = create_session_context();
-
-        // Register all UDFs (network addresses, protocol names, utilities)
         udf::register_all_udfs(&ctx)?;
 
-        // Get first packet timestamp for start_time() and relative_time()
-        let start_us = {
-            let mut reader = source.reader(None)?;
-            let mut first_ts = 0i64;
-            reader.process_packets(1, |packet| {
-                first_ts = packet.timestamp_us;
-                Ok(())
-            })?;
-            first_ts
-        };
+        // ONE parse pass, fanned out to all tables, parallel across partitions.
+        let shared = Arc::new(run_shared_parse(
+            &source,
+            &registry,
+            batch_size,
+            target_partitions,
+        )?);
 
-        // Create lazy closure for end_time() that scans on demand
-        let source_for_end_scan = source.clone();
-        let end_scan_fn = move || {
-            let mut reader = match source_for_end_scan.reader(None) {
-                Ok(r) => r,
-                Err(_) => return 0i64,
-            };
-            let mut last_ts = 0i64;
-            loop {
-                let count = reader
-                    .process_packets(1000, |packet| {
-                        last_ts = packet.timestamp_us;
-                        Ok(())
-                    })
-                    .unwrap_or(0);
-                if count == 0 {
-                    break;
-                }
-            }
-            last_ts
-        };
+        if shared.total_frames() == 0 {
+            return Err(Error::Query(QueryError::Execution(
+                "No packets found in PCAP source".to_string(),
+            )));
+        }
 
-        // Register time UDFs with lazy end_time evaluation
-        udf::register_time_udfs_lazy(&ctx, start_us, end_scan_fn)?;
+        // Timestamp range comes from the shared pass (no extra scan).
+        let (start_us, end_us) = shared.timestamp_range_us();
+        udf::register_time_udfs_eager(&ctx, start_us, end_us)?;
 
-        // Convert cache to trait object if present
-        let cache_dyn: Option<Arc<dyn ParseCache>> = cache.map(|c| c as Arc<dyn ParseCache>);
-
-        // Register streaming provider for each protocol table
+        // One provider per table, all sharing the single parse result.
         for table_name in tables::all_table_names() {
             let schema = Arc::new(tables::get_table_schema(table_name).ok_or_else(|| {
                 Error::Query(QueryError::Execution(format!(
                     "Unknown table: {table_name}"
                 )))
             })?);
-
-            let provider = if let Some(ref cache) = cache_dyn {
-                providers::ProtocolTableProvider::<S>::streaming_cached(
-                    table_name.to_string(),
-                    schema,
-                    source.clone(),
-                    registry.clone(),
-                    batch_size,
-                    cache.clone(),
-                )
-            } else {
-                providers::ProtocolTableProvider::<S>::streaming(
-                    table_name.to_string(),
-                    schema,
-                    source.clone(),
-                    registry.clone(),
-                    batch_size,
-                )
-            };
-
+            let provider = providers::ProtocolTableProvider::shared(
+                table_name.to_string(),
+                schema,
+                shared.clone(),
+            );
             ctx.register_table(table_name, Arc::new(provider))
                 .map_err(|e| Error::Query(QueryError::Execution(e.to_string())))?;
         }
 
-        // Register cross-layer views (including backward-compatible packets view)
         Self::register_cross_layer_views(&ctx).await?;
-
-        // Register cache_stats() table function
-        let cache_for_udtf = cache_dyn.clone();
-        let stats_fn =
-            udtf::CacheStatsFunction::new(move || cache_for_udtf.as_ref().and_then(|c| c.stats()));
-        ctx.register_udtf("cache_stats", Arc::new(stats_fn));
 
         Ok(Self {
             ctx,
             registry: (*registry).clone(),
-            cache: cache_dyn,
+            shared: Some(shared),
         })
     }
 
@@ -423,7 +350,6 @@ impl QueryEngine {
     ///
     /// * `url` - Cloud storage URL
     /// * `batch_size` - Number of packets per RecordBatch
-    /// * `cache_size` - Cache size for parsed packets (0 to disable)
     /// * `endpoint` - Custom endpoint URL (for S3-compatible services like MinIO)
     /// * `anonymous` - Use anonymous (unsigned) requests for public buckets
     /// * `chunk_size` - Buffer size for byte-range requests (default 8MB)
@@ -431,7 +357,6 @@ impl QueryEngine {
     pub async fn with_cloud_source(
         url: &str,
         batch_size: usize,
-        cache_size: usize,
         endpoint: Option<&str>,
         anonymous: bool,
         chunk_size: usize,
@@ -460,15 +385,15 @@ impl QueryEngine {
         let source = CloudPacketSource::open(location)
             .map_err(|e| Error::Query(QueryError::Execution(format!("Cloud source error: {e}"))))?;
 
-        // Use streaming mode with cache
-        Self::with_streaming_source_cached(Arc::new(source), batch_size, cache_size).await
+        // Cloud sources use the shared (parallel) parse path.
+        Self::with_streaming_source(Arc::new(source), batch_size).await
     }
 
     /// Create a QueryEngine with automatic mode selection.
     ///
     /// Mode is selected based on file size:
     /// - Files < 100MB: In-memory mode (fastest for small files)
-    /// - Files >= 100MB: Streaming mode with cache (bounded memory)
+    /// - Files >= 100MB: Shared parallel parse over a seekable source
     ///
     /// Use `new()` or `with_streaming()` to force a specific mode.
     ///
@@ -476,12 +401,10 @@ impl QueryEngine {
     ///
     /// * `path` - Path to the PCAP file
     /// * `batch_size` - Number of packets per RecordBatch
-    /// * `cache_size` - Cache size for streaming mode (0 to disable)
     /// * `use_mmap` - Use memory-mapped I/O for large files
     pub async fn auto<P: AsRef<Path>>(
         path: P,
         batch_size: usize,
-        cache_size: usize,
         use_mmap: bool,
     ) -> Result<Self, Error> {
         let file_size = std::fs::metadata(path.as_ref())
@@ -489,27 +412,17 @@ impl QueryEngine {
             .unwrap_or(0);
 
         if file_size >= STREAMING_THRESHOLD_BYTES {
-            // Large file: use streaming mode
+            // Large file: shared parallel parse.
             if use_mmap {
-                match MmapPacketSource::open(&path) {
-                    Ok(source) => {
-                        return Self::with_streaming_source_cached(
-                            Arc::new(source),
-                            batch_size,
-                            cache_size,
-                        )
-                        .await;
-                    }
-                    Err(_) => {
-                        // Fall back to file source if mmap fails (e.g., PCAPNG)
-                    }
+                if let Ok(source) = MmapPacketSource::open(&path) {
+                    return Self::with_streaming_source(Arc::new(source), batch_size).await;
                 }
+                // Fall back to file source if mmap fails.
             }
-
             let source = Arc::new(FilePacketSource::open(&path)?);
-            Self::with_streaming_source_cached(source, batch_size, cache_size).await
+            Self::with_streaming_source(source, batch_size).await
         } else {
-            // Small file: use in-memory mode
+            // Small file: use in-memory mode.
             Self::with_progress(path, batch_size, false).await
         }
     }
@@ -647,18 +560,23 @@ impl QueryEngine {
         &self.ctx
     }
 
-    /// Get current cache statistics, if caching is enabled.
+    /// Number of parse passes performed over the source.
     ///
-    /// Returns `None` if cache is disabled or in non-streaming mode.
-    pub fn cache_stats(&self) -> Option<CacheStats> {
-        self.cache.as_ref().and_then(|c| c.stats())
+    /// For the shared (streaming/parallel) path this is `1` regardless of how
+    /// many protocol tables a query touches — the instrumentation behind #6.
+    /// Returns `0` for the in-memory path (which also parses once, via a
+    /// separate code path).
+    pub fn parse_pass_count(&self) -> usize {
+        self.shared.as_ref().map(|s| s.parse_passes()).unwrap_or(0)
     }
 
-    /// Get a reference to the parse cache, if enabled.
-    ///
-    /// This can be used to reset statistics or access advanced cache features.
-    pub fn cache(&self) -> Option<&Arc<dyn ParseCache>> {
-        self.cache.as_ref()
+    /// Number of partitions the shared parse pass used (1 if non-partitioned or
+    /// in-memory mode).
+    pub fn partition_count(&self) -> usize {
+        self.shared
+            .as_ref()
+            .map(|s| s.num_partitions())
+            .unwrap_or(1)
     }
 
     /// Register cross-layer views that JOIN normalized protocol tables.

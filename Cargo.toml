@@ -4,6 +4,7 @@ members = [
     "pcapsql-core",
     "pcapsql-datafusion",
     "pcapsql-duckdb",
+    "pcapsql-testgen",
 ]
 exclude = ["fuzz"]
 
@@ -23,7 +24,7 @@ homepage = "https://github.com/mtottenh/pcapsql"
 thiserror = "1.0"
 bytes = "1.0"
 etherparse = "0.15"
-pcap-parser = "0.15"
+pcap-parser = "0.17"
 httparse = "1.8"
 simple-dns = "0.11"
 flate2 = "1.0"
@@ -65,6 +66,8 @@ hdrhistogram = "7"
 criterion = { version = "0.5", features = ["html_reports"] }
 tempfile = "3"
 hex = "0.4"
+proptest = "1"
+pcapsql-testgen = { path = "pcapsql-testgen" }
 
 # Small collections
 smallvec = "1.13"

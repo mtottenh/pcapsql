@@ -13,7 +13,8 @@
 //! - **PCAP Reading**: Support for PCAP and PCAPNG formats, including gzip/zstd
 //!   compression
 //! - **Memory-Mapped I/O**: Efficient reading of large capture files
-//! - **Parse Caching**: LRU cache to avoid redundant parsing during JOINs
+//! - **Parallel Parsing**: Seekable sources split into partitions parsed
+//!   concurrently, backed by a persisted boundary index
 //! - **TCP Stream Reassembly**: Connection tracking and application-layer parsing
 //!
 //! ## Quick Start
@@ -27,7 +28,7 @@
 //!
 //! // Open a PCAP file
 //! let source = FilePacketSource::open("capture.pcap").unwrap();
-//! let mut reader = source.reader(None).unwrap();
+//! let mut reader = source.sequential_reader().unwrap();
 //!
 //! // Read and parse packets using callback pattern
 //! reader.process_packets(1000, |packet| {
@@ -54,7 +55,6 @@
 //! |  protocol/   - Protocol trait, 17 parsers, FieldValue               |
 //! |  io/         - PacketSource, PacketReader, mmap support             |
 //! |  pcap/       - PCAP/PCAPNG reading, compression                     |
-//! |  cache/      - LRU parse cache                                      |
 //! |  stream/     - TCP reassembly, HTTP/TLS stream parsing              |
 //! |  format/     - Address formatting utilities                         |
 //! |  error/      - Error types                                          |
@@ -80,7 +80,6 @@
 //! | Transport | TCP, UDP |
 //! | Application | DNS, DHCP, NTP, HTTP, TLS, SSH, QUIC |
 
-pub mod cache;
 pub mod error;
 pub mod format;
 pub mod io;
@@ -92,10 +91,12 @@ pub mod stream;
 pub mod tls;
 
 // Re-export commonly used types at crate root for convenience
-pub use cache::{CacheStats, CachedParse, LruParseCache, NoCache, OwnedParseResult, ParseCache};
 pub use error::{Error, PcapError, ProtocolError, Result};
 pub use format::{detect_address_column, format_ipv4, format_ipv6, format_mac, AddressKind};
-pub use io::{FilePacketReader, FilePacketSource, PacketReader, PacketSource, RawPacket};
+pub use io::{
+    BoundaryIndex, FilePacketReader, FilePacketSource, PacketReader, PacketSource, RawPacket,
+    SeekCost, SeekablePacketSource,
+};
 #[cfg(feature = "mmap")]
 pub use io::{MmapPacketReader, MmapPacketSource};
 pub use pcap::PcapReader;

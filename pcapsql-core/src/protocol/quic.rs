@@ -452,7 +452,7 @@ mod tests {
         let mut packet = Vec::new();
 
         // First byte: Form=1, Fixed=1, Type=00 (Initial), Reserved + Packet Number Length
-        packet.push(0xC0 | 0x00);
+        packet.push(0xC0);
 
         // Version
         packet.extend_from_slice(&version.to_be_bytes());
@@ -473,7 +473,7 @@ mod tests {
         packet.push(0x64); // 100
 
         // Some payload data (would be encrypted in real QUIC)
-        packet.extend(std::iter::repeat(0u8).take(100));
+        packet.extend(std::iter::repeat_n(0u8, 100));
 
         packet
     }
@@ -501,7 +501,7 @@ mod tests {
         packet.push(0x32); // 50
 
         // Payload
-        packet.extend(std::iter::repeat(0u8).take(50));
+        packet.extend(std::iter::repeat_n(0u8, 50));
 
         packet
     }
@@ -524,7 +524,7 @@ mod tests {
         packet.extend_from_slice(dcid);
 
         // Some encrypted payload
-        packet.extend(std::iter::repeat(0u8).take(20));
+        packet.extend(std::iter::repeat_n(0u8, 20));
 
         packet
     }

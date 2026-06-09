@@ -12,7 +12,7 @@ use arrow::record_batch::RecordBatch;
 
 use crate::error::{Error, QueryError};
 use crate::query::tables;
-use pcapsql_core::{FieldValue, OwnedParseResult, ParseResult, RawPacket};
+use pcapsql_core::{FieldValue, ParseResult, RawPacket};
 
 /// Dynamic array builder that can hold different builder types.
 enum DynamicBuilder {
@@ -453,7 +453,8 @@ impl ProtocolBatchBuilder {
             let builder = &mut self.builders[*idx];
             match field_name.as_str() {
                 "frame_number" => builder.append_u64(raw.frame_number),
-                "timestamp" => builder.append_timestamp(raw.timestamp_us),
+                // Arrow timestamp column is microseconds; reader timestamps are ns.
+                "timestamp" => builder.append_timestamp(raw.timestamp_ns / 1_000),
                 "length" => {
                     if let DynamicBuilder::UInt32(b) = builder {
                         b.append_value(raw.captured_length);
@@ -482,7 +483,7 @@ impl ProtocolBatchBuilder {
     pub fn add_frame_from_raw(
         &mut self,
         frame_number: u64,
-        timestamp_us: i64,
+        timestamp_ns: i64,
         captured_len: u32,
         original_len: u32,
         data: &[u8],
@@ -498,7 +499,8 @@ impl ProtocolBatchBuilder {
             let builder = &mut self.builders[*idx];
             match field_name.as_str() {
                 "frame_number" => builder.append_u64(frame_number),
-                "timestamp" => builder.append_timestamp(timestamp_us),
+                // Arrow timestamp column is microseconds; reader timestamps are ns.
+                "timestamp" => builder.append_timestamp(timestamp_ns / 1_000),
                 "length" => {
                     if let DynamicBuilder::UInt32(b) = builder {
                         b.append_value(captured_len);
@@ -553,49 +555,6 @@ impl ProtocolBatchBuilder {
                 }
             } else if field_name == "tunnel_id" {
                 // Special handling for tunnel_id from ParseResult
-                if let DynamicBuilder::UInt64(b) = builder {
-                    if let Some(id) = parsed.tunnel_id {
-                        b.append_value(id);
-                    } else {
-                        b.append_null();
-                    }
-                }
-            } else if let Some(value) = parsed.get(field_name) {
-                builder.append_field_value(value);
-            } else {
-                builder.append_null();
-            }
-        }
-    }
-
-    /// Add a row for a protocol table from cached parsed data.
-    ///
-    /// Similar to `add_parsed_row` but takes an `OwnedParseResult` from the cache.
-    /// Also populates encapsulation context fields from the cached result.
-    pub fn add_cached_row(&mut self, frame_number: u64, parsed: &OwnedParseResult) {
-        self.rows += 1;
-
-        for (field_name, idx) in &self.field_index {
-            let builder = &mut self.builders[*idx];
-
-            if field_name == "frame_number" {
-                builder.append_u64(frame_number);
-            } else if field_name == "encap_depth" {
-                // Special handling for encap_depth from OwnedParseResult
-                if let DynamicBuilder::UInt8(b) = builder {
-                    b.append_value(parsed.encap_depth);
-                }
-            } else if field_name == "tunnel_type" {
-                // Special handling for tunnel_type from OwnedParseResult
-                if let DynamicBuilder::Utf8(b) = builder {
-                    if let Some(type_str) = parsed.tunnel_type.as_str() {
-                        b.append_value(type_str);
-                    } else {
-                        b.append_null();
-                    }
-                }
-            } else if field_name == "tunnel_id" {
-                // Special handling for tunnel_id from OwnedParseResult
                 if let DynamicBuilder::UInt64(b) = builder {
                     if let Some(id) = parsed.tunnel_id {
                         b.append_value(id);
@@ -681,7 +640,7 @@ mod tests {
 
         let raw = RawPacket {
             frame_number: 1,
-            timestamp_us: 1000000,
+            timestamp_ns: 1_000_000_000,
             captured_length: 100,
             original_length: 100,
             link_type: 1,
