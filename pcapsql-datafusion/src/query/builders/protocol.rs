@@ -453,7 +453,8 @@ impl ProtocolBatchBuilder {
             let builder = &mut self.builders[*idx];
             match field_name.as_str() {
                 "frame_number" => builder.append_u64(raw.frame_number),
-                "timestamp" => builder.append_timestamp(raw.timestamp_us),
+                // Arrow timestamp column is microseconds; reader timestamps are ns.
+                "timestamp" => builder.append_timestamp(raw.timestamp_ns / 1_000),
                 "length" => {
                     if let DynamicBuilder::UInt32(b) = builder {
                         b.append_value(raw.captured_length);
@@ -482,7 +483,7 @@ impl ProtocolBatchBuilder {
     pub fn add_frame_from_raw(
         &mut self,
         frame_number: u64,
-        timestamp_us: i64,
+        timestamp_ns: i64,
         captured_len: u32,
         original_len: u32,
         data: &[u8],
@@ -498,7 +499,8 @@ impl ProtocolBatchBuilder {
             let builder = &mut self.builders[*idx];
             match field_name.as_str() {
                 "frame_number" => builder.append_u64(frame_number),
-                "timestamp" => builder.append_timestamp(timestamp_us),
+                // Arrow timestamp column is microseconds; reader timestamps are ns.
+                "timestamp" => builder.append_timestamp(timestamp_ns / 1_000),
                 "length" => {
                     if let DynamicBuilder::UInt32(b) = builder {
                         b.append_value(captured_len);
@@ -681,7 +683,7 @@ mod tests {
 
         let raw = RawPacket {
             frame_number: 1,
-            timestamp_us: 1000000,
+            timestamp_ns: 1_000_000_000,
             captured_length: 100,
             original_length: 100,
             link_type: 1,

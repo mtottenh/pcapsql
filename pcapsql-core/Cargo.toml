@@ -89,3 +89,4 @@ netlink-packet-utils.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 hex.workspace = true
+pcapsql-testgen.workspace = true

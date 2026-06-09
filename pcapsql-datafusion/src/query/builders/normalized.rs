@@ -125,7 +125,7 @@ impl NormalizedBatchSet {
         // Always add to frames table
         self.frames_builder.add_frame_from_raw(
             packet.frame_number,
-            packet.timestamp_us,
+            packet.timestamp_ns,
             packet.captured_len,
             packet.original_len,
             packet.data,
@@ -230,7 +230,7 @@ mod tests {
     fn create_test_packet(frame_number: u64) -> RawPacket {
         RawPacket {
             frame_number,
-            timestamp_us: 1000000 * frame_number as i64,
+            timestamp_ns: 1_000_000_000 * frame_number as i64,
             captured_length: 100,
             original_length: 100,
             link_type: 1,
