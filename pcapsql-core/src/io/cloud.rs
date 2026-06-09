@@ -59,7 +59,7 @@ where
 }
 use crate::io::{
     decompress_header, Compression, DecompressReader, GenericPcapReader, PacketPosition,
-    PacketRange, PacketReader, PacketRef, PacketSource, PacketSourceMetadata, PcapFormat,
+    PacketReader, PacketRef, PacketSource, PacketSourceMetadata, PcapFormat,
 };
 
 /// Default chunk size for cloud reads (8MB).
@@ -543,7 +543,6 @@ impl CloudPacketSource {
             snaplen: 65535,
             size_bytes: Some(object_size),
             packet_count: None, // Would require scanning
-            seekable: false,    // Cloud doesn't support efficient seeking
         };
 
         Ok(Self {
@@ -714,21 +713,13 @@ impl PacketSource for CloudPacketSource {
         &self.metadata
     }
 
-    fn reader(&self, _range: Option<&PacketRange>) -> Result<Self::Reader, Error> {
-        // Note: Range support would require index or sequential scan
-        // For now, we always read from the beginning
+    fn sequential_reader(&self) -> Result<Self::Reader, Error> {
         CloudPacketReader::new(
             &self.location,
             self.compression,
             self.pcap_format,
             self.metadata.link_type,
         )
-    }
-
-    fn partitions(&self, _max_partitions: usize) -> Result<Vec<PacketRange>, Error> {
-        // Cloud doesn't support efficient partitioning without an index
-        // Return single partition covering entire object
-        Ok(vec![PacketRange::whole()])
     }
 }
 

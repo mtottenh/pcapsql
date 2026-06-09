@@ -1,21 +1,22 @@
-//! Sequential ground-truth tests for the PCAP/PCAPNG reader.
+//! Partition-equivalence property tests for the source/reader layer.
 //!
-//! Every capture produced by `pcapsql-testgen` carries its expected frames
-//! (numbers, nanosecond timestamps, lengths, link types, payload bytes). These
-//! tests assert that a sequential read through the source layer reproduces that
-//! ground truth exactly — across all four legacy magic variants, PCAPNG with
-//! single/multiple interfaces (differing `if_tsresol`), multiple sections,
-//! interfaces added midstream, oversized frames (larger than the read buffer),
-//! and truncated captures.
+//! Centerpiece property: for any generated capture C (across formats,
+//! endiannesses, resolutions, interface configurations and size distributions)
+//! and any partition count N, parsing C at N partitions yields exactly the same
+//! rows in the same order as parsing C at 1 partition — and both equal the
+//! generator's ground truth (which validates timestamp/`if_tsresol` decoding too).
 
 use std::path::{Path, PathBuf};
 
-use pcapsql_core::io::{FilePacketSource, MmapPacketSource, PacketReader, PacketSource};
+use pcapsql_core::io::{
+    FilePacketSource, MmapPacketSource, PacketReader, PacketSource, SeekablePacketSource,
+};
 use pcapsql_testgen::{
     generate, jumbo_straddle_capture, legacy_pcap, oversized_frame_capture, pcapng,
     truncated_capture, CaptureSpec, ExpectedFrame, Format, GenPacket, GeneratedCapture,
     LegacyVariant, PcapngInterface, PcapngPacket, PcapngSection,
 };
+use proptest::prelude::*;
 use tempfile::TempDir;
 
 /// A decoded frame in comparable form.
@@ -74,30 +75,65 @@ fn write_capture(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
     path
 }
 
-fn read_sequential_mmap(path: &Path) -> Vec<Frame> {
-    let source = MmapPacketSource::open(path).expect("open mmap");
-    let mut r = source.reader(None).expect("mmap reader");
+fn read_sequential_mmap(path: &Path, stride: u64) -> Vec<Frame> {
+    let source = MmapPacketSource::open(path)
+        .expect("open mmap")
+        .with_index_stride(stride);
+    let mut r = source.sequential_reader().expect("sequential reader");
     drain(&mut r)
 }
 
-fn read_sequential_file(path: &Path) -> Vec<Frame> {
-    let source = FilePacketSource::open(path).expect("open file");
-    let mut r = source.reader(None).expect("file reader");
-    drain(&mut r)
+fn read_partitioned_mmap(path: &Path, stride: u64, n: usize) -> Vec<Frame> {
+    let source = MmapPacketSource::open(path)
+        .expect("open mmap")
+        .with_index_stride(stride);
+    let ranges = source.partitions(n).expect("partitions");
+    let mut frames = Vec::new();
+    for range in &ranges {
+        let mut r = source.reader_at(range).expect("reader_at");
+        frames.extend(drain(&mut r));
+    }
+    frames
 }
 
-/// Core assertion: a sequential read (mmap and file backends) equals the
-/// generator's ground truth, frame for frame.
-fn assert_equivalent(gc: &GeneratedCapture) {
+fn read_partitioned_file(path: &Path, stride: u64, n: usize) -> Vec<Frame> {
+    let source = FilePacketSource::open(path)
+        .expect("open file")
+        .with_index_stride(stride);
+    let ranges = source.partitions(n).expect("partitions");
+    let mut frames = Vec::new();
+    for range in &ranges {
+        let mut r = source.reader_at(range).expect("reader_at");
+        frames.extend(drain(&mut r));
+    }
+    frames
+}
+
+/// Core assertion: sequential == ground truth, and every partition count
+/// reproduces the same frames in the same order (mmap and file backends).
+fn assert_equivalent(gc: &GeneratedCapture, stride: u64) {
     let dir = TempDir::new().expect("tempdir");
     let path = write_capture(dir.path(), "cap", &gc.bytes);
     let expected = expected_frames(gc);
 
-    let mm = read_sequential_mmap(&path);
-    assert_eq!(mm, expected, "sequential mmap read must equal ground truth");
+    let seq = read_sequential_mmap(&path, stride);
+    assert_eq!(
+        seq, expected,
+        "sequential mmap read must equal ground truth"
+    );
 
-    let fi = read_sequential_file(&path);
-    assert_eq!(fi, expected, "sequential file read must equal ground truth");
+    for n in [1usize, 2, 3, 5, 8] {
+        let mm = read_partitioned_mmap(&path, stride, n);
+        assert_eq!(
+            mm, expected,
+            "mmap partitioned (n={n}) must equal ground truth"
+        );
+        let fi = read_partitioned_file(&path, stride, n);
+        assert_eq!(
+            fi, expected,
+            "file partitioned (n={n}) must equal ground truth"
+        );
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -121,7 +157,7 @@ fn legacy_all_four_variants() {
             })
             .collect();
         let gc = legacy_pcap(variant, 1, 65535, &packets);
-        assert_equivalent(&gc);
+        assert_equivalent(&gc, 3);
     }
 }
 
@@ -143,13 +179,13 @@ fn pcapng_single_interface() {
             })
             .collect(),
     }]);
-    assert_equivalent(&gc);
+    assert_equivalent(&gc, 4);
 }
 
 #[test]
 fn pcapng_multi_interface_differing_tsresol() {
     // Interface 0 microsecond, interface 1 nanosecond. Both must decode to the
-    // correct nanosecond wall-clock.
+    // correct nanosecond wall-clock in every partition.
     let gc = pcapng(&[PcapngSection {
         interfaces: vec![
             PcapngInterface {
@@ -178,7 +214,7 @@ fn pcapng_multi_interface_differing_tsresol() {
             })
             .collect(),
     }]);
-    assert_equivalent(&gc);
+    assert_equivalent(&gc, 3);
 }
 
 #[test]
@@ -204,7 +240,7 @@ fn pcapng_multi_section() {
         mk_section(9, 1_700_001_000),
         mk_section(3, 1_700_002_000),
     ]);
-    assert_equivalent(&gc);
+    assert_equivalent(&gc, 4);
 }
 
 #[test]
@@ -221,65 +257,96 @@ fn pcapng_interface_added_midstream() {
         add_interface_midstream: true,
     };
     let gc = generate(&spec);
-    assert_equivalent(&gc);
+    assert_equivalent(&gc, 3);
 }
 
 #[test]
 fn oversized_frame_exceeds_read_buffer() {
     // A single frame larger than the 256 KiB read buffer exercises the grow path.
     let gc = oversized_frame_capture(300_000);
-    assert_equivalent(&gc);
+    assert_equivalent(&gc, 2);
 }
 
 #[test]
-fn jumbo_frames_among_normal_frames() {
+fn jumbo_frame_straddles_partition_seam() {
     let gc = jumbo_straddle_capture(7, 280_000, 30);
-    assert_equivalent(&gc);
+    assert_equivalent(&gc, 2);
 }
 
 #[test]
 fn truncated_capture_reads_complete_prefix() {
-    // Declared length exceeds bytes present: the reader must stop gracefully
-    // after the complete frames, matching the ground-truth prefix.
+    // Declared length exceeds bytes present: reader must stop gracefully after
+    // the complete frames, matching the ground-truth prefix.
     let gc = truncated_capture(123);
     let dir = TempDir::new().unwrap();
     let path = write_capture(dir.path(), "trunc.pcap", &gc.bytes);
     let expected = expected_frames(&gc);
-    assert_eq!(read_sequential_mmap(&path), expected);
-    assert_eq!(read_sequential_file(&path), expected);
+    let seq = read_sequential_mmap(&path, 4);
+    assert_eq!(seq, expected, "truncated capture: complete prefix only");
 }
 
-/// Deterministic sweep of the generator's edge-case space (seeds × formats ×
-/// interface configurations), all checked against ground truth.
-#[test]
-fn generated_capture_sweep() {
-    let formats = [
-        Format::LegacyLeMicro,
-        Format::LegacyBeMicro,
-        Format::LegacyLeNano,
-        Format::LegacyBeNano,
-        Format::Pcapng,
-    ];
-    for seed in [1u64, 42, 0xDEAD_BEEF] {
-        for format in formats {
-            for (interfaces, sections, midstream) in [
-                (vec![6u8], 1usize, false),
-                (vec![6, 9], 1, false),
-                (vec![9], 2, true),
-            ] {
-                let spec = CaptureSpec {
-                    format,
-                    seed,
-                    packet_count: 30,
-                    min_size: 14,
-                    max_size: 120,
-                    link_type: 1,
-                    interfaces,
-                    sections,
-                    add_interface_midstream: midstream,
-                };
-                assert_equivalent(&generate(&spec));
-            }
+// ----------------------------------------------------------------------------
+// Property: partition equivalence across the generated edge-case space
+// ----------------------------------------------------------------------------
+
+fn format_strategy() -> impl Strategy<Value = Format> {
+    prop_oneof![
+        Just(Format::LegacyLeMicro),
+        Just(Format::LegacyBeMicro),
+        Just(Format::LegacyLeNano),
+        Just(Format::LegacyBeNano),
+        Just(Format::Pcapng),
+    ]
+}
+
+prop_compose! {
+    fn capture_spec_strategy()(
+        format in format_strategy(),
+        seed in any::<u64>(),
+        packet_count in 1usize..40,
+        min_size in 14usize..30,
+        extra in 0usize..120,
+        tsresols in proptest::collection::vec(prop_oneof![Just(3u8), Just(6u8), Just(9u8)], 1..3),
+        sections in 1usize..3,
+        midstream in any::<bool>(),
+    ) -> CaptureSpec {
+        CaptureSpec {
+            format,
+            seed,
+            packet_count,
+            min_size,
+            max_size: min_size + extra,
+            link_type: 1,
+            interfaces: tsresols,
+            sections,
+            add_interface_midstream: midstream,
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 96, ..ProptestConfig::default() })]
+
+    #[test]
+    fn prop_partition_equivalence(spec in capture_spec_strategy()) {
+        let gc = generate(&spec);
+        // Fine stride so even small captures split into several partitions.
+        assert_equivalent(&gc, 2);
+    }
+
+    /// No frame dropped or duplicated across a seam: the multiset and the
+    /// ordered set of frame numbers are exactly 1..=packet_count.
+    #[test]
+    fn prop_no_dropped_or_duplicated_frames(spec in capture_spec_strategy()) {
+        let gc = generate(&spec);
+        let dir = TempDir::new().unwrap();
+        let path = write_capture(dir.path(), "cap", &gc.bytes);
+        let total = gc.expected.len() as u64;
+        for n in [1usize, 4, 7] {
+            let frames = read_partitioned_mmap(&path, 2, n);
+            let nums: Vec<u64> = frames.iter().map(|f| f.frame_number).collect();
+            let want: Vec<u64> = (1..=total).collect();
+            prop_assert_eq!(nums, want);
         }
     }
 }
