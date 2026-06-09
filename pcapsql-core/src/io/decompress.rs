@@ -151,6 +151,9 @@ impl AsRef<[u8]> for MmapSlice {
 /// Uses enum dispatch rather than trait objects to avoid allocation
 /// and enable potential inlining. The `Read` implementation simply
 /// delegates to the inner decoder.
+// The zstd decoder state is intentionally larger than the other variants;
+// boxing it would add indirection on every read in the hot path.
+#[allow(clippy::large_enum_variant)]
 pub enum DecompressReader<R: Read> {
     /// No compression - pass-through
     None(R),

@@ -64,7 +64,6 @@ pub use vtab::{
 };
 
 // Required imports for the duckdb_entrypoint_c_api macro
-use duckdb::ffi;
 use duckdb::Connection;
 use duckdb_loadable_macros::duckdb_entrypoint_c_api;
 

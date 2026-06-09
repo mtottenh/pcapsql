@@ -195,7 +195,7 @@ mod tests {
     #[test]
     fn test_add_protocol_fields() {
         let mut config = ProjectionConfig::new();
-        config.add_protocol_fields("tcp", &["src_port", "dst_port"]);
+        config.add_protocol_fields("tcp", ["src_port", "dst_port"]);
 
         let fields = config.get("tcp");
         assert!(fields.is_some());
@@ -208,8 +208,8 @@ mod tests {
     #[test]
     fn test_builder_pattern() {
         let config = ProjectionConfig::new()
-            .with_protocol_fields("tcp", &["src_port", "dst_port"])
-            .with_protocol_fields("udp", &["src_port", "dst_port", "length"]);
+            .with_protocol_fields("tcp", ["src_port", "dst_port"])
+            .with_protocol_fields("udp", ["src_port", "dst_port", "length"]);
 
         assert!(!config.is_empty());
         assert!(config.get("tcp").is_some());
@@ -246,7 +246,7 @@ mod tests {
 
     #[test]
     fn test_from_field_names() {
-        let config = ProjectionConfig::from_field_names("dns", &["query_name", "query_type"]);
+        let config = ProjectionConfig::from_field_names("dns", ["query_name", "query_type"]);
 
         let fields = config.get("dns").unwrap();
         assert_eq!(fields.len(), 2);
