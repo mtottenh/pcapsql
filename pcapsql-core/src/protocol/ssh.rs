@@ -474,7 +474,7 @@ mod tests {
         packet.push(padding_length as u8);
         packet.push(msg_type);
         packet.extend_from_slice(payload);
-        packet.extend(std::iter::repeat(0u8).take(padding_length));
+        packet.extend(std::iter::repeat_n(0u8, padding_length));
 
         packet
     }
@@ -734,7 +734,7 @@ mod tests {
         let encrypted_length: u32 = 128;
         packet.extend_from_slice(&encrypted_length.to_be_bytes());
         packet.push(16);
-        packet.extend(std::iter::repeat(0xFFu8).take(127));
+        packet.extend(std::iter::repeat_n(0xFFu8, 127));
 
         let parser = SshProtocol;
         let mut context = ParseContext::new(1);

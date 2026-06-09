@@ -78,6 +78,7 @@ impl EthernetBuilder {
 pub struct Ipv4Builder {
     version_ihl: u8,
     dscp_ecn: u8,
+    #[allow(dead_code)]
     total_length: u16,
     identification: u16,
     flags_fragment: u16,
@@ -266,7 +267,7 @@ impl TcpBuilder {
         header.extend_from_slice(&self.dst_port.to_be_bytes());
         header.extend_from_slice(&self.seq.to_be_bytes());
         header.extend_from_slice(&self.ack.to_be_bytes());
-        header.push((self.data_offset << 4) | 0x00); // Data offset + reserved
+        header.push(self.data_offset << 4); // Data offset + reserved
         header.push(self.flags);
         header.extend_from_slice(&self.window.to_be_bytes());
         header.extend_from_slice(&[0x00, 0x00]); // Checksum

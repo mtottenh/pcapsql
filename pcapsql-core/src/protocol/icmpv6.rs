@@ -431,16 +431,14 @@ fn parse_ndp_options(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldVal
                     ));
                 }
             }
-            ndp_option::MTU => {
-                if opt_len >= 8 {
-                    let mtu = u32::from_be_bytes([
-                        data[offset + 4],
-                        data[offset + 5],
-                        data[offset + 6],
-                        data[offset + 7],
-                    ]);
-                    fields.push(("mtu", FieldValue::UInt32(mtu)));
-                }
+            ndp_option::MTU if opt_len >= 8 => {
+                let mtu = u32::from_be_bytes([
+                    data[offset + 4],
+                    data[offset + 5],
+                    data[offset + 6],
+                    data[offset + 7],
+                ]);
+                fields.push(("mtu", FieldValue::UInt32(mtu)));
             }
             _ => {
                 // Unknown option, skip it
