@@ -29,6 +29,7 @@
 #[cfg(feature = "cloud")]
 mod cloud;
 mod decompress;
+mod index;
 #[cfg(feature = "mmap")]
 mod mmap;
 mod pcap_stream;
@@ -37,6 +38,10 @@ mod source;
 pub use decompress::{decompress_header, Compression, DecompressReader, FileDecoder};
 #[cfg(feature = "mmap")]
 pub use decompress::{AnyDecoder, MmapSlice};
+pub use index::{
+    build_boundary_index, header_hash, sidecar_path, BoundaryIndex, Checkpoint,
+    DEFAULT_CHECKPOINT_STRIDE,
+};
 #[cfg(feature = "mmap")]
 pub use mmap::{MmapPacketReader, MmapPacketSource};
 pub use pcap_stream::{GenericPcapReader, InterfaceInfo, InterfaceState, PcapFormat};

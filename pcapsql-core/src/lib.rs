@@ -91,7 +91,9 @@ pub mod tls;
 // Re-export commonly used types at crate root for convenience
 pub use error::{Error, PcapError, ProtocolError, Result};
 pub use format::{detect_address_column, format_ipv4, format_ipv6, format_mac, AddressKind};
-pub use io::{FilePacketReader, FilePacketSource, PacketReader, PacketSource, RawPacket};
+pub use io::{
+    BoundaryIndex, FilePacketReader, FilePacketSource, PacketReader, PacketSource, RawPacket,
+};
 #[cfg(feature = "mmap")]
 pub use io::{MmapPacketReader, MmapPacketSource};
 pub use pcap::PcapReader;
