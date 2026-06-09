@@ -243,6 +243,39 @@ fn pcapng_multi_section() {
     assert_equivalent(&gc, 4);
 }
 
+/// True if the second Interface Description Block appears *after* the first
+/// Enhanced Packet Block in `bytes` — i.e. an interface is declared mid-stream.
+fn second_idb_after_first_epb(bytes: &[u8]) -> bool {
+    const NG_IDB_TYPE: u32 = 0x0000_0001;
+    const NG_EPB_TYPE: u32 = 0x0000_0006;
+    let mut off = 0usize;
+    let mut idb_seen = 0usize;
+    let mut first_epb: Option<usize> = None;
+    let mut second_idb: Option<usize> = None;
+    while off + 8 <= bytes.len() {
+        let bt = u32::from_le_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]]);
+        let len = u32::from_le_bytes([
+            bytes[off + 4],
+            bytes[off + 5],
+            bytes[off + 6],
+            bytes[off + 7],
+        ]) as usize;
+        if len < 12 || off + len > bytes.len() {
+            break;
+        }
+        if bt == NG_IDB_TYPE {
+            idb_seen += 1;
+            if idb_seen == 2 {
+                second_idb = Some(off);
+            }
+        } else if bt == NG_EPB_TYPE && first_epb.is_none() {
+            first_epb = Some(off);
+        }
+        off += len;
+    }
+    matches!((first_epb, second_idb), (Some(e), Some(i)) if e < i)
+}
+
 #[test]
 fn pcapng_interface_added_midstream() {
     let spec = CaptureSpec {
@@ -257,6 +290,15 @@ fn pcapng_interface_added_midstream() {
         add_interface_midstream: true,
     };
     let gc = generate(&spec);
+    // The capture must use a *literal* mid-stream IDB: at least one packet block
+    // precedes the second interface description block on disk. Partitions
+    // therefore start before the second interface is declared, exercising the
+    // reader's "pick up the IDB from the byte stream" path and the index's
+    // per-checkpoint interface table.
+    assert!(
+        second_idb_after_first_epb(&gc.bytes),
+        "midstream capture must place an EPB before the second IDB on disk"
+    );
     assert_equivalent(&gc, 3);
 }
 

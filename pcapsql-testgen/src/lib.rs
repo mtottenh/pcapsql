@@ -309,6 +309,28 @@ pub struct PcapngSection {
     pub packets: Vec<PcapngPacket>,
 }
 
+/// One block within a section, in exact on-disk order: an interface declaration
+/// (IDB) or a packet (EPB).
+///
+/// This is the general form used to express captures where an interface is
+/// declared *mid-stream* — after one or more packets have already been written —
+/// which [`PcapngSection`] (all IDBs, then all EPBs) cannot represent. Interface
+/// IDs are assigned in IDB appearance order across the section, exactly as a
+/// reader assigns them, so a [`PcapngBlock::Packet`]'s `interface_id` must refer
+/// to an interface whose IDB appears earlier in the same section.
+#[derive(Clone, Debug)]
+pub enum PcapngBlock {
+    Interface(PcapngInterface),
+    Packet(PcapngPacket),
+}
+
+/// One section as an explicit, ordered list of blocks (IDBs and EPBs interleaved
+/// exactly as they appear on disk). See [`pcapng_ordered`].
+#[derive(Clone, Debug)]
+pub struct PcapngOrderedSection {
+    pub blocks: Vec<PcapngBlock>,
+}
+
 /// `10^exp` as a u64 (exp expected to be one of {3,6,9}).
 #[inline]
 fn pow10(exp: u8) -> u64 {
@@ -424,35 +446,66 @@ impl NgWriter {
 /// Frame numbering for `expected` is global and increments for every EPB across
 /// all sections, in file order. Interface IDs are per-section, 0-based in IDB
 /// order; `PcapngPacket::interface_id` indexes its section's `interfaces`.
+///
+/// This is the common case where every IDB precedes every EPB. It is a thin
+/// wrapper over [`pcapng_ordered`]: each section becomes "all interfaces, then
+/// all packets", which is byte-identical to emitting them in that order.
 pub fn pcapng(sections: &[PcapngSection]) -> GeneratedCapture {
+    let ordered: Vec<PcapngOrderedSection> = sections
+        .iter()
+        .map(|s| {
+            let mut blocks = Vec::with_capacity(s.interfaces.len() + s.packets.len());
+            blocks.extend(s.interfaces.iter().cloned().map(PcapngBlock::Interface));
+            blocks.extend(s.packets.iter().cloned().map(PcapngBlock::Packet));
+            PcapngOrderedSection { blocks }
+        })
+        .collect();
+    pcapng_ordered(&ordered)
+}
+
+/// Build a PCAPNG capture from sections whose blocks are emitted in exactly the
+/// given order, allowing an IDB to appear *mid-stream* (after one or more EPBs).
+///
+/// Within each section the interface table is built up as IDBs are encountered,
+/// exactly as a reader does: the `interface_id` of each [`PcapngBlock::Packet`]
+/// indexes the interfaces declared *so far* in that section. A new section
+/// header resets the table. Timestamp and link-type ground truth are computed
+/// against the referenced interface, identically to [`pcapng`].
+pub fn pcapng_ordered(sections: &[PcapngOrderedSection]) -> GeneratedCapture {
     let mut w = NgWriter::new();
     let mut expected = Vec::new();
     let mut frame_number: u64 = 0;
 
     for section in sections {
         w.shb();
-        for iface in &section.interfaces {
-            w.idb(iface);
-        }
+        // Interface table for THIS section, grown as IDBs appear in the stream.
+        let mut interfaces: Vec<PcapngInterface> = Vec::new();
+        for block in &section.blocks {
+            match block {
+                PcapngBlock::Interface(iface) => {
+                    w.idb(iface);
+                    interfaces.push(iface.clone());
+                }
+                PcapngBlock::Packet(p) => {
+                    let iface = &interfaces[p.interface_id as usize];
+                    let resolution = pow10(iface.tsresol);
+                    let ticks = p.ts_sec * resolution + p.ts_frac_units;
+                    let ts_high = (ticks >> 32) as u32;
+                    let ts_low = (ticks & 0xFFFF_FFFF) as u32;
 
-        for p in &section.packets {
-            let iface = &section.interfaces[p.interface_id as usize];
-            let resolution = pow10(iface.tsresol);
-            let ticks = p.ts_sec * resolution + p.ts_frac_units;
-            let ts_high = (ticks >> 32) as u32;
-            let ts_low = (ticks & 0xFFFF_FFFF) as u32;
+                    w.epb(p.interface_id, ts_high, ts_low, &p.data, p.origlen);
 
-            w.epb(p.interface_id, ts_high, ts_low, &p.data, p.origlen);
-
-            frame_number += 1;
-            expected.push(ExpectedFrame {
-                frame_number,
-                timestamp_ns: pcapng_ts_ns(ticks, resolution),
-                caplen: p.data.len() as u32,
-                origlen: p.origlen,
-                link_type: iface.link_type as u32,
-                data: p.data.clone(),
-            });
+                    frame_number += 1;
+                    expected.push(ExpectedFrame {
+                        frame_number,
+                        timestamp_ns: pcapng_ts_ns(ticks, resolution),
+                        caplen: p.data.len() as u32,
+                        origlen: p.origlen,
+                        link_type: iface.link_type as u32,
+                        data: p.data.clone(),
+                    });
+                }
+            }
         }
     }
 
@@ -611,8 +664,10 @@ fn generate_pcapng(spec: &CaptureSpec) -> GeneratedCapture {
     let mut global_frame: u64 = 0;
 
     for s in 0..spec.sections {
-        // Interfaces: a copy of `spec.interfaces` for this section.
-        let mut interfaces: Vec<PcapngInterface> = spec
+        let count = base + if s < extra { 1 } else { 0 };
+
+        // Base interfaces (one per `spec.interfaces` tsresol), declared up front.
+        let base_ifaces: Vec<PcapngInterface> = spec
             .interfaces
             .iter()
             .map(|&tsresol| PcapngInterface {
@@ -621,25 +676,44 @@ fn generate_pcapng(spec: &CaptureSpec) -> GeneratedCapture {
                 snaplen,
             })
             .collect();
+        let base_len = base_ifaces.len();
 
-        let count = base + if s < extra { 1 } else { 0 };
-
-        // Optionally add a second interface partway through this section.
-        let midstream_iface_id = interfaces.len() as u32;
+        // A midstream interface (tsresol 9) is declared *after* `switch_at`
+        // packets, so its IDB lands literally mid-stream in the byte layout
+        // (preceded by EPBs). Its interface id is `base_len` — it is the next
+        // IDB a reader encounters in this section.
+        let midstream_iface_id = base_len as u32;
         let switch_at = if spec.add_interface_midstream {
-            interfaces.push(PcapngInterface {
-                link_type: spec.link_type,
-                tsresol: 9,
-                snaplen,
-            });
             count / 2
         } else {
             usize::MAX
         };
 
-        let mut packets = Vec::with_capacity(count);
+        // Emit the base IDBs first, then walk the packets, inserting the
+        // midstream IDB at the switch point so it sits between EPBs on disk.
+        let mut blocks: Vec<PcapngBlock> = Vec::with_capacity(base_len + 1 + count);
+        for iface in &base_ifaces {
+            blocks.push(PcapngBlock::Interface(iface.clone()));
+        }
+        // tsresol by interface id, grown when the midstream IDB is declared.
+        let mut tsresol_by_id: Vec<u8> = base_ifaces.iter().map(|i| i.tsresol).collect();
+        let mut midstream_declared = false;
+
         for j in 0..count {
             global_frame += 1;
+
+            // Declare the midstream interface right before the first packet that
+            // routes to it, so the IDB is genuinely mid-stream.
+            if spec.add_interface_midstream && j == switch_at && !midstream_declared {
+                blocks.push(PcapngBlock::Interface(PcapngInterface {
+                    link_type: spec.link_type,
+                    tsresol: 9,
+                    snaplen,
+                }));
+                tsresol_by_id.push(9);
+                midstream_declared = true;
+            }
+
             let len = size_rng.next_in_range(spec.min_size, spec.max_size);
             let data = make_payload(spec.seed, global_frame, len);
 
@@ -648,11 +722,10 @@ fn generate_pcapng(spec: &CaptureSpec) -> GeneratedCapture {
                 midstream_iface_id
             } else {
                 // Spread across the section's base interfaces deterministically.
-                (j % spec.interfaces.len()) as u32
+                (j % base_len) as u32
             };
 
-            let tsresol = interfaces[interface_id as usize].tsresol;
-            let resolution = pow10(tsresol);
+            let resolution = pow10(tsresol_by_id[interface_id as usize]);
 
             // Monotonic timestamps across the whole file: one frame per ~ms.
             let idx = global_frame - 1;
@@ -663,22 +736,19 @@ fn generate_pcapng(spec: &CaptureSpec) -> GeneratedCapture {
             let ts_frac_units = within_ms * (resolution / 1000);
 
             let origlen = data.len() as u32;
-            packets.push(PcapngPacket {
+            blocks.push(PcapngBlock::Packet(PcapngPacket {
                 interface_id,
                 ts_sec,
                 ts_frac_units,
                 data,
                 origlen,
-            });
+            }));
         }
 
-        sections.push(PcapngSection {
-            interfaces,
-            packets,
-        });
+        sections.push(PcapngOrderedSection { blocks });
     }
 
-    pcapng(&sections)
+    pcapng_ordered(&sections)
 }
 
 // ---------------------------------------------------------------------------
@@ -1335,10 +1405,53 @@ mod tests {
         assert_roundtrip(&gc, true);
         // The first half uses tsresol-6, the second half uses tsresol-9; both
         // have link_type 1, so the round-trip alone proves routing/ts work.
-        // Additionally confirm two interfaces actually got written by checking
-        // there are two IDBs in the byte stream.
+        // Confirm two interfaces actually got written.
         let idb_count = count_blocks(&gc.bytes, IDB_TYPE);
         assert_eq!(idb_count, 2, "expected two IDBs for midstream interface");
+
+        // The defining property: the second IDB is emitted *mid-stream* — at
+        // least one EPB precedes it in the byte layout. (The generator
+        // previously declared both interfaces up front, so this never held and
+        // the literal mid-stream byte layout went untested by the reader/index.)
+        let seq = block_type_sequence(&gc.bytes);
+        let second_idb = seq
+            .iter()
+            .enumerate()
+            .filter(|(_, &bt)| bt == IDB_TYPE)
+            .nth(1)
+            .map(|(i, _)| i)
+            .expect("a second IDB");
+        let first_epb = seq
+            .iter()
+            .position(|&bt| bt == EPB_TYPE)
+            .expect("at least one EPB");
+        assert!(
+            first_epb < second_idb,
+            "second IDB must appear after at least one EPB (mid-stream); \
+             block sequence = {seq:?}"
+        );
+    }
+
+    /// The on-disk block types in file order (little-endian total-length walk).
+    fn block_type_sequence(bytes: &[u8]) -> Vec<u32> {
+        let mut off = 0usize;
+        let mut seq = Vec::new();
+        while off + 8 <= bytes.len() {
+            let bt =
+                u32::from_le_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]]);
+            let len = u32::from_le_bytes([
+                bytes[off + 4],
+                bytes[off + 5],
+                bytes[off + 6],
+                bytes[off + 7],
+            ]) as usize;
+            if len < 12 || off + len > bytes.len() {
+                break;
+            }
+            seq.push(bt);
+            off += len;
+        }
+        seq
     }
 
     /// Count little-endian PCAPNG blocks of a given type by walking total-length

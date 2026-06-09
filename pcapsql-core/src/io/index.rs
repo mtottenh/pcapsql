@@ -876,11 +876,14 @@ mod build_tests {
     }
 
     #[test]
-    fn pcapng_checkpoints_record_full_interface_tables() {
-        // Two sections, each declaring a microsecond interface plus a second
-        // nanosecond interface that packets switch to halfway. Every
-        // checkpoint must carry the full table for ITS section so a partition
-        // starting there can decode either interface's packets.
+    fn pcapng_checkpoints_track_midstream_interface_growth() {
+        // Two sections, each declaring a microsecond interface, then a second
+        // nanosecond interface *mid-stream* (after half the section's packets).
+        // A checkpoint records the interface table as of ITS byte offset, so
+        // checkpoints before the mid-stream IDB carry only [6] and those at or
+        // after it carry [6, 9]. A partition starting at an early checkpoint
+        // still decodes the later interface because it re-reads the mid-stream
+        // IDB from its byte range (see the partition-equivalence tests).
         let spec = CaptureSpec {
             format: Format::Pcapng,
             seed: 21,
@@ -895,15 +898,46 @@ mod build_tests {
         let (idx, expected_count, _) = build_for(&spec, 3);
         assert_eq!(idx.packet_count, expected_count as u64);
 
-        for cp in &idx.checkpoints {
-            let state = cp.interface_state.as_ref().expect("pcapng state");
-            let resols: Vec<u8> = state.interfaces.iter().map(|i| i.if_tsresol).collect();
-            assert_eq!(
-                resols,
-                vec![6, 9],
-                "checkpoint at frame {} must carry the section's full interface table",
-                cp.frame_number
+        let tables: Vec<Vec<u8>> = idx
+            .checkpoints
+            .iter()
+            .map(|cp| {
+                cp.interface_state
+                    .as_ref()
+                    .expect("pcapng state")
+                    .interfaces
+                    .iter()
+                    .map(|i| i.if_tsresol)
+                    .collect()
+            })
+            .collect();
+
+        // Every checkpoint's table is a prefix of the section's full table:
+        // either [6] (before the mid-stream IDB) or [6, 9] (at/after it).
+        for (cp, resols) in idx.checkpoints.iter().zip(&tables) {
+            assert!(
+                resols.as_slice() == [6] || resols.as_slice() == [6, 9],
+                "checkpoint at frame {} has unexpected interface table {:?}",
+                cp.frame_number,
+                resols
             );
         }
+        // The first checkpoint (frame 1) precedes any mid-stream IDB, so it must
+        // carry only the base interface. This is the property the old generator
+        // could not produce — it declared both interfaces up front.
+        assert_eq!(
+            tables.first().map(Vec::as_slice),
+            Some([6].as_slice()),
+            "first checkpoint must precede the mid-stream IDB and carry only [6]"
+        );
+        // Both phases are present across the index.
+        assert!(
+            tables.iter().any(|r| r.as_slice() == [6]),
+            "expected at least one pre-switch checkpoint with table [6]"
+        );
+        assert!(
+            tables.iter().any(|r| r.as_slice() == [6, 9]),
+            "expected at least one post-switch checkpoint with table [6, 9]"
+        );
     }
 }
