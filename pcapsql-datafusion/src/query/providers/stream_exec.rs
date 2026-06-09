@@ -11,6 +11,7 @@ use datafusion::error::Result as DFResult;
 use datafusion::execution::context::TaskContext;
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalSortExpr};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
+use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricBuilder, MetricsSet};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
     SendableRecordBatchStream,
@@ -20,6 +21,7 @@ use pcapsql_core::io::PacketRange;
 use pcapsql_core::{PacketSource, ParseCache, ProtocolRegistry};
 
 use super::ProtocolBatchStream;
+use crate::query::filter::PushdownPredicate;
 
 /// Streaming execution plan for a protocol table.
 ///
@@ -57,6 +59,11 @@ pub struct ProtocolStreamExec<S: PacketSource> {
     /// Optional per-protocol field projections.
     /// When set, only specified fields are extracted for each protocol.
     field_projections: Option<Arc<HashMap<String, HashSet<String>>>>,
+    /// Optional pushed-down filter predicate, evaluated against parsed
+    /// fields before rows are materialized into Arrow.
+    predicate: Option<Arc<PushdownPredicate>>,
+    /// Execution metrics (exposes `pushdown_rows_pruned`).
+    metrics: ExecutionPlanMetricsSet,
 }
 
 impl<S: PacketSource + 'static> ProtocolStreamExec<S> {
@@ -161,7 +168,19 @@ impl<S: PacketSource + 'static> ProtocolStreamExec<S> {
             limit,
             required_protocols,
             field_projections,
+            predicate: None,
+            metrics: ExecutionPlanMetricsSet::new(),
         }
+    }
+
+    /// Attach a pushed-down filter predicate to this plan.
+    ///
+    /// The predicate is evaluated against parsed packet fields before rows
+    /// are materialized into Arrow. Filters are reported as `Inexact`, so
+    /// DataFusion re-applies them above the scan.
+    pub fn with_predicate(mut self, predicate: Option<Arc<PushdownPredicate>>) -> Self {
+        self.predicate = predicate;
+        self
     }
 
     fn compute_equivalence_properties(schema: &SchemaRef) -> EquivalenceProperties {
@@ -234,6 +253,9 @@ impl<S: PacketSource + 'static> ExecutionPlan for ProtocolStreamExec<S> {
             .reader(Some(range))
             .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
 
+        let pruned_rows =
+            MetricBuilder::new(&self.metrics).counter("pushdown_rows_pruned", partition);
+
         let stream = ProtocolBatchStream::new_with_field_projections(
             self.table_name.clone(),
             self.schema.clone(),
@@ -247,9 +269,14 @@ impl<S: PacketSource + 'static> ExecutionPlan for ProtocolStreamExec<S> {
             self.required_protocols.clone(),
             self.field_projections.clone(),
         )
-        .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+        .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?
+        .with_pushdown(self.predicate.clone(), pruned_rows);
 
         Ok(Box::pin(stream))
+    }
+
+    fn metrics(&self) -> Option<MetricsSet> {
+        Some(self.metrics.clone_inner())
     }
 }
 
@@ -283,6 +310,9 @@ impl<S: PacketSource> DisplayAs for ProtocolStreamExec<S> {
                 }
                 if self.field_projections.is_some() {
                     write!(f, ", field_projection=true")?;
+                }
+                if self.predicate.is_some() {
+                    write!(f, ", pushdown=true")?;
                 }
                 Ok(())
             }

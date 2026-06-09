@@ -35,7 +35,7 @@ pub mod views;
 
 pub use arrow_schema::{descriptors_to_arrow_schema, protocol_to_arrow_schema, to_arrow_field};
 pub use builders::NormalizedBatchSet;
-pub use filter::FilterEvaluator;
+pub use filter::{CompareOp, FrameRow, PushdownFields, PushdownPredicate};
 pub use frames::{frames_schema, FramesBatchBuilder};
 pub use provider::PcapTableProvider;
 pub use providers::{ProtocolBatchStream, ProtocolStreamExec, ProtocolTableProvider};

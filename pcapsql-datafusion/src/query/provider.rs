@@ -14,6 +14,12 @@ use datafusion::prelude::*;
 use datafusion_datasource::memory::MemorySourceConfig;
 
 /// A TableProvider backed by in-memory Arrow RecordBatches.
+///
+/// This provider does not implement filter pushdown: the batches are fully
+/// materialized at load time (before any query is known), so evaluating
+/// predicates in the scan would only duplicate the work of the FilterExec
+/// DataFusion places above it. Filter pushdown for the streaming scan path
+/// lives in `ProtocolTableProvider`.
 #[derive(Debug)]
 pub struct PcapTableProvider {
     schema: SchemaRef,

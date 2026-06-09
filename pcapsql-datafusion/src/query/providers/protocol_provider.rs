@@ -10,13 +10,14 @@ use async_trait::async_trait;
 use datafusion::catalog::Session;
 use datafusion::datasource::{TableProvider, TableType};
 use datafusion::error::Result as DFResult;
-use datafusion::logical_expr::Expr;
+use datafusion::logical_expr::{Expr, TableProviderFilterPushDown};
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion_datasource::memory::MemorySourceConfig;
 
 use pcapsql_core::{compute_required_protocols, PacketSource, ParseCache, ProtocolRegistry};
 
 use super::ProtocolStreamExec;
+use crate::query::filter::PushdownPredicate;
 
 /// Table provider for a protocol table.
 ///
@@ -107,11 +108,38 @@ impl<S: PacketSource + 'static> TableProvider for ProtocolTableProvider<S> {
         TableType::Base
     }
 
+    fn supports_filters_pushdown(
+        &self,
+        filters: &[&Expr],
+    ) -> DFResult<Vec<TableProviderFilterPushDown>> {
+        match &self.mode {
+            // In-memory batches are already materialized; filtering them in
+            // the scan would duplicate the FilterExec above it for no gain.
+            TableMode::InMemory { .. } => Ok(vec![
+                TableProviderFilterPushDown::Unsupported;
+                filters.len()
+            ]),
+            // Streaming scans evaluate supported predicates against parsed
+            // fields before Arrow materialization. Inexact: DataFusion still
+            // re-applies the filter above the scan.
+            TableMode::Streaming { .. } => Ok(filters
+                .iter()
+                .map(|f| {
+                    if PushdownPredicate::try_compile(f, &self.schema).is_some() {
+                        TableProviderFilterPushDown::Inexact
+                    } else {
+                        TableProviderFilterPushDown::Unsupported
+                    }
+                })
+                .collect()),
+        }
+    }
+
     async fn scan(
         &self,
         _state: &dyn Session,
         projection: Option<&Vec<usize>>,
-        _filters: &[Expr],
+        filters: &[Expr],
         limit: Option<usize>,
     ) -> DFResult<Arc<dyn ExecutionPlan>> {
         match &self.mode {
@@ -154,19 +182,26 @@ impl<S: PacketSource + 'static> TableProvider for ProtocolTableProvider<S> {
                     Arc::new(projections)
                 });
 
-                Ok(Arc::new(ProtocolStreamExec::new_with_optimizations(
-                    self.table_name.clone(),
-                    self.schema.clone(),
-                    source.clone(),
-                    registry.clone(),
-                    partitions,
-                    *batch_size,
-                    projection.cloned(),
-                    cache.clone(),
-                    limit,
-                    required_protocols,
-                    field_projections,
-                )))
+                // Compile pushed-down filters into a predicate evaluated
+                // before rows are materialized into Arrow.
+                let predicate = PushdownPredicate::compile_all(filters, &self.schema).map(Arc::new);
+
+                Ok(Arc::new(
+                    ProtocolStreamExec::new_with_optimizations(
+                        self.table_name.clone(),
+                        self.schema.clone(),
+                        source.clone(),
+                        registry.clone(),
+                        partitions,
+                        *batch_size,
+                        projection.cloned(),
+                        cache.clone(),
+                        limit,
+                        required_protocols,
+                        field_projections,
+                    )
+                    .with_predicate(predicate),
+                ))
             }
         }
     }

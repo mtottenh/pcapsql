@@ -18,8 +18,11 @@ use futures::Stream;
 /// Global sequence counter for tracking batch scheduling order across all streams.
 static BATCH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+use datafusion::physical_plan::metrics::Count;
+
 use crate::error::{Error, Result};
 use crate::query::builders::ProtocolBatchBuilder;
+use crate::query::filter::{FrameRow, PushdownPredicate};
 use pcapsql_core::io::PacketRef;
 use pcapsql_core::{
     parse_packet, parse_packet_projected, parse_packet_pruned, parse_packet_pruned_projected,
@@ -77,6 +80,14 @@ pub struct ProtocolBatchStream<R: PacketReader> {
     /// Key is protocol name, value is set of field names to extract.
     /// When set, only requested fields are extracted during parsing.
     field_projections: Option<Arc<HashMap<String, HashSet<String>>>>,
+    /// Optional pushed-down filter predicate. Rows that definitively fail
+    /// the predicate are skipped before Arrow materialization.
+    predicate: Option<Arc<PushdownPredicate>>,
+    /// Upper bound on frame_number implied by the predicate. Once exceeded,
+    /// the stream stops reading the file.
+    max_frame: Option<u64>,
+    /// Counter for rows skipped by the pushed-down predicate.
+    pruned_rows: Option<Count>,
 }
 
 impl<R: PacketReader> ProtocolBatchStream<R> {
@@ -150,21 +161,58 @@ impl<R: PacketReader> ProtocolBatchStream<R> {
             rows_emitted: 0,
             required_protocols,
             field_projections,
+            predicate: None,
+            max_frame: None,
+            pruned_rows: None,
         })
     }
 
-    /// Read and process the next batch of packets.
+    /// Attach a pushed-down filter predicate and its pruned-rows counter.
+    ///
+    /// The predicate is evaluated against parsed fields before rows are
+    /// materialized into Arrow; rows it rejects would also be dropped by
+    /// the re-applied filter above the scan.
+    pub fn with_pushdown(
+        mut self,
+        predicate: Option<Arc<PushdownPredicate>>,
+        pruned_rows: Count,
+    ) -> Self {
+        self.max_frame = predicate.as_ref().and_then(|p| p.max_frame_number());
+        self.predicate = predicate;
+        self.pruned_rows = Some(pruned_rows);
+        self
+    }
+
+    /// Read packets until a non-empty batch is produced or EOF is reached.
+    ///
+    /// A chunk of packets can yield zero rows for this table (no packets of
+    /// this protocol, or all rows pruned by the pushed-down predicate), so
+    /// keep reading chunks until rows appear or the stream is finished.
+    fn read_next_batch(&mut self) -> Result<Option<RecordBatch>> {
+        loop {
+            match self.read_chunk()? {
+                Some(batch) => return Ok(Some(batch)),
+                None if self.finished => return Ok(None),
+                None => continue,
+            }
+        }
+    }
+
+    /// Read and process the next chunk of packets.
     ///
     /// Uses the zero-copy `process_packets()` API to avoid copying packet data.
     /// The callback receives borrowed packet data that is parsed and added to
     /// Arrow builders before the borrow ends.
+    ///
+    /// Returns `Ok(None)` when this chunk produced no rows; that only means
+    /// end-of-stream if `self.finished` is also set.
     ///
     /// # Limit Pushdown
     ///
     /// When a limit is set, this method tracks rows emitted and stops reading
     /// once the limit is satisfied. The final batch may be sliced to not exceed
     /// the limit.
-    fn read_next_batch(&mut self) -> Result<Option<RecordBatch>> {
+    fn read_chunk(&mut self) -> Result<Option<RecordBatch>> {
         if self.finished {
             return Ok(None);
         }
@@ -191,6 +239,8 @@ impl<R: PacketReader> ProtocolBatchStream<R> {
         let mut last_frame = 0u64;
         let mut batch_hits = 0usize;
         let mut batch_misses = 0usize;
+        let mut pruned = 0usize;
+        let mut past_max_frame = false;
 
         // Capture references for the closure
         let table_name = &self.table_name;
@@ -199,6 +249,8 @@ impl<R: PacketReader> ProtocolBatchStream<R> {
         let link_type = self.link_type;
         let required_protocols = &self.required_protocols;
         let field_projections = &self.field_projections;
+        let predicate = &self.predicate;
+        let max_frame = self.max_frame;
 
         // Process packets using zero-copy callback API
         let packets_processed =
@@ -210,8 +262,31 @@ impl<R: PacketReader> ProtocolBatchStream<R> {
                     }
                     last_frame = packet.frame_number;
 
+                    // Frames are ordered: once past the predicate's upper
+                    // bound on frame_number, no further packet can match.
+                    if let Some(mf) = max_frame {
+                        if packet.frame_number > mf {
+                            past_max_frame = true;
+                            pruned += 1;
+                            return Ok(());
+                        }
+                    }
+
                     // For frames table, add all packets without parsing
                     if table_name == "frames" {
+                        if let Some(pred) = predicate {
+                            let frame = FrameRow {
+                                frame_number: packet.frame_number,
+                                timestamp_us: packet.timestamp_us,
+                                captured_len: packet.captured_len,
+                                original_len: packet.original_len,
+                                link_type: packet.link_type,
+                            };
+                            if !pred.matches_frame(&frame) {
+                                pruned += 1;
+                                return Ok(());
+                            }
+                        }
                         builder.add_frame_from_raw(
                             packet.frame_number,
                             packet.timestamp_us,
@@ -277,6 +352,12 @@ impl<R: PacketReader> ProtocolBatchStream<R> {
                         // get_all_protocols handles tunneled packets with multiple
                         // occurrences of the same protocol at different encap depths
                         for result in cached.get_all_protocols(table_name) {
+                            if let Some(pred) = predicate {
+                                if !pred.matches_row(packet.frame_number, result) {
+                                    pruned += 1;
+                                    continue;
+                                }
+                            }
                             builder.add_cached_row(packet.frame_number, result);
                             rows_added += 1;
                         }
@@ -315,6 +396,12 @@ impl<R: PacketReader> ProtocolBatchStream<R> {
                         // For example, a VXLAN packet may have two Ethernet/IPv4 layers at different depths
                         for (proto_name, result) in &parsed {
                             if *proto_name == *table_name {
+                                if let Some(pred) = predicate {
+                                    if !pred.matches_row(packet.frame_number, result) {
+                                        pruned += 1;
+                                        continue;
+                                    }
+                                }
                                 builder.add_parsed_row(packet.frame_number, result);
                                 rows_added += 1;
                                 // NO break - include all occurrences for tunnel support
@@ -344,6 +431,18 @@ impl<R: PacketReader> ProtocolBatchStream<R> {
         // Check if we've reached EOF
         if packets_processed == 0 {
             self.finished = true;
+        }
+
+        // Stop reading once past the predicate's frame_number upper bound.
+        if past_max_frame {
+            self.finished = true;
+        }
+
+        // Report rows skipped by the pushed-down predicate.
+        if pruned > 0 {
+            if let Some(counter) = &self.pruned_rows {
+                counter.add(pruned);
+            }
         }
 
         // Notify cache of progress for eviction
