@@ -634,9 +634,9 @@ impl BgpProtocol {
                     // Presence indicates atomic aggregate (no value)
                     fields.push(("atomic_aggregate", FieldValue::Bool(true)));
                 }
-                path_attr_type::AGGREGATOR => {
+                path_attr_type::AGGREGATOR
                     // Can be 6 bytes (2-byte AS + 4-byte IP) or 8 bytes (4-byte AS + 4-byte IP)
-                    if attr_data.len() >= 6 {
+                    if attr_data.len() >= 6 => {
                         let (asn, ip_offset) = if attr_data.len() >= 8 {
                             // 4-byte AS
                             (
@@ -668,7 +668,6 @@ impl BgpProtocol {
                             ));
                         }
                     }
-                }
                 _ => {
                     // Unknown or unhandled attribute type
                 }
