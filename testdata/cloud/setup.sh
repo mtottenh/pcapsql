@@ -1,89 +1,60 @@
-#!/bin/bash
-# Generate and upload test PCAP files to LocalStack S3 for integration testing.
+#!/usr/bin/env bash
+# Bring up a local S3-compatible object store for the cloud integration tests
+# and create the `test-pcaps` bucket. The tests upload their own fixtures.
 #
-# This script generates ALL test files dynamically - no binary files in git.
+# Two backends are supported:
 #
-# Prerequisites:
-#   - LocalStack running (docker compose up -d)
-#   - AWS CLI installed (or awslocal)
-#   - uvx (for Python dependency management)
-#   - compression tools: gzip, zstd, lz4
+#   MinIO via Docker (preferred, matches CI):
+#       docker compose -f testdata/cloud/docker-compose.yml up -d
+#       export PCAPSQL_S3_TEST_ENDPOINT=http://127.0.0.1:9000
 #
-# Usage:
-#   ./setup.sh
+#   SeaweedFS native binary (Docker-free fallback; used when image registries
+#   are unreachable). This script implements that fallback:
+#       ./testdata/cloud/setup.sh seaweedfs
+#       export PCAPSQL_S3_TEST_ENDPOINT=http://127.0.0.1:8333
+#
+# Then run:
+#   AWS_ACCESS_KEY_ID=pcapsqlkey AWS_SECRET_ACCESS_KEY=pcapsqlsecret \
+#   AWS_REGION=us-east-1 \
+#     cargo test -p pcapsql-datafusion --features s3 --test cloud_integration
+set -euo pipefail
 
-set -e
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BUCKET="${PCAPSQL_S3_TEST_BUCKET:-test-pcaps}"
+MODE="${1:-docker}"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ENDPOINT="http://localhost:4566"
-BUCKET="test-pcaps"
-REGION="us-east-1"
-OUTPUT_DIR="/tmp/generated"
+case "$MODE" in
+  docker|minio)
+    echo "Starting MinIO via docker compose..."
+    docker compose -f "$HERE/docker-compose.yml" up -d
+    echo "MinIO up on http://127.0.0.1:9000 (bucket: $BUCKET)"
+    echo "export PCAPSQL_S3_TEST_ENDPOINT=http://127.0.0.1:9000"
+    ;;
 
-# Use awslocal if available, otherwise aws with endpoint override
-if command -v awslocal &> /dev/null; then
-    AWS="awslocal"
-else
-    AWS="aws --endpoint-url=$ENDPOINT --region=$REGION"
-fi
-
-echo "=== Step 1: Generate test PCAP files ==="
-echo "Using uvx to run generator with scapy..."
-
-# Generate all test files
-uvx --with scapy python "$SCRIPT_DIR/../scripts/gen_format_tests.py" --output-dir "$OUTPUT_DIR"
-
-echo ""
-echo "=== Step 2: Wait for LocalStack ==="
-echo "Waiting for LocalStack to be ready..."
-until curl -s "$ENDPOINT/_localstack/health" | grep -q '"s3": *"available"'; do
-    sleep 1
-done
-echo "LocalStack is ready!"
-
-echo ""
-echo "=== Step 3: Create S3 bucket ==="
-$AWS s3 mb "s3://$BUCKET" 2>/dev/null || echo "Bucket already exists"
-
-echo ""
-echo "=== Step 4: Upload generated PCAP files ==="
-for f in "$OUTPUT_DIR"/*.pcap "$OUTPUT_DIR"/*.pcapng; do
-    if [ -f "$f" ]; then
-        echo "Uploading $(basename "$f")..."
-        $AWS s3 cp "$f" "s3://$BUCKET/$(basename "$f")"
+  seaweedfs|weed)
+    # Docker-free fallback using the SeaweedFS binary on PATH (or ./weed).
+    WEED="${WEED_BIN:-weed}"
+    if ! command -v "$WEED" >/dev/null 2>&1 && [ -x "$HERE/weed" ]; then
+      WEED="$HERE/weed"
     fi
-done
+    DATA="$(mktemp -d)"
+    echo "Starting SeaweedFS S3 (data dir: $DATA)..."
+    "$WEED" server -dir="$DATA" -ip=127.0.0.1 -s3 \
+      -s3.config="$HERE/s3.json" -s3.port=8333 >"$DATA/weed.log" 2>&1 &
+    echo $! > "$DATA/weed.pid"
+    # Wait for the S3 endpoint to come up.
+    for _ in $(seq 1 30); do
+      code="$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8333 || true)"
+      [ -n "$code" ] && [ "$code" != "000" ] && break
+      sleep 1
+    done
+    echo "s3.bucket.create -name $BUCKET" | "$WEED" shell >/dev/null 2>&1 || true
+    echo "SeaweedFS up on http://127.0.0.1:8333 (bucket: $BUCKET, pid $(cat "$DATA/weed.pid"))"
+    echo "export PCAPSQL_S3_TEST_ENDPOINT=http://127.0.0.1:8333"
+    ;;
 
-echo ""
-echo "=== Step 5: Create and upload compressed versions ==="
-# Use small_dns.pcap as the base for compression tests
-if [ -f "$OUTPUT_DIR/small_dns.pcap" ]; then
-    echo "Creating gzip compressed version..."
-    gzip -c "$OUTPUT_DIR/small_dns.pcap" > "$OUTPUT_DIR/small_dns.pcap.gz"
-    $AWS s3 cp "$OUTPUT_DIR/small_dns.pcap.gz" "s3://$BUCKET/"
-
-    if command -v zstd &> /dev/null; then
-        echo "Creating zstd compressed version..."
-        zstd -q -c "$OUTPUT_DIR/small_dns.pcap" > "$OUTPUT_DIR/small_dns.pcap.zst"
-        $AWS s3 cp "$OUTPUT_DIR/small_dns.pcap.zst" "s3://$BUCKET/"
-    else
-        echo "Warning: zstd not installed, skipping zstd compression test"
-    fi
-
-    if command -v lz4 &> /dev/null; then
-        echo "Creating lz4 compressed version..."
-        lz4 -q -c "$OUTPUT_DIR/small_dns.pcap" > "$OUTPUT_DIR/small_dns.pcap.lz4"
-        $AWS s3 cp "$OUTPUT_DIR/small_dns.pcap.lz4" "s3://$BUCKET/"
-    else
-        echo "Warning: lz4 not installed, skipping lz4 compression test"
-    fi
-fi
-
-echo ""
-echo "=== Uploaded files ==="
-$AWS s3 ls "s3://$BUCKET/"
-
-echo ""
-echo "=== Setup complete! ==="
-echo "Run integration tests with:"
-echo "  cargo test -p pcapsql-datafusion --features s3 --test cloud_integration -- --ignored"
+  *)
+    echo "usage: $0 [docker|seaweedfs]" >&2
+    exit 2
+    ;;
+esac
