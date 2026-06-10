@@ -164,6 +164,16 @@ pub trait SeekablePacketSource: PacketSource {
     /// Compute up to `max` non-overlapping ranges that cover the source.
     /// Builds (or loads) the boundary index as needed.
     fn partitions(&self, max: usize) -> Result<Vec<PacketRange>, Error>;
+
+    /// Total frame count from the boundary index, if cheaply available.
+    ///
+    /// The index is a header-only scan (and is persisted in a sidecar), so this
+    /// answers a pure `count(*)` without parsing packet payloads. Returns
+    /// `None` when no index can be built (e.g. compressed, non-seekable
+    /// sources), in which case the caller falls back to a full parse.
+    fn frame_count(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// Sequential reader of packets from a source (the hot path).
@@ -348,6 +358,13 @@ impl SeekablePacketSource for FilePacketSource {
         }
         let idx = self.ensure_index()?;
         Ok(idx.partition_ranges(max))
+    }
+
+    fn frame_count(&self) -> Option<u64> {
+        if self.compression.is_compressed() {
+            return None;
+        }
+        self.ensure_index().ok().map(|idx| idx.packet_count)
     }
 }
 

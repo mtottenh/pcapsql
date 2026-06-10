@@ -189,6 +189,9 @@ trait ParseSource: Send + Sync {
     /// Run the stream-analysis pass (one sequential read, single partition):
     /// TCP reassembly + TLS decryption + HTTP/2, producing the [`STREAM_TABLES`].
     fn stream_pass(&self) -> Result<HashMap<String, TableData>, Error>;
+    /// Total frame count from the boundary index, if cheaply available
+    /// (header-only scan; `None` for compressed/non-seekable sources).
+    fn frame_count(&self) -> Option<u64>;
 }
 
 /// Binds a concrete seekable source to the parse parameters.
@@ -223,6 +226,10 @@ impl<S: SeekablePacketSource> ParseSource for SourceParser<S> {
             self.progress.clone(),
             sub,
         )
+    }
+
+    fn frame_count(&self) -> Option<u64> {
+        self.source.frame_count()
     }
 
     fn stream_pass(&self) -> Result<HashMap<String, TableData>, Error> {
@@ -508,6 +515,41 @@ impl QueryEngine {
             stream_passes = 1;
         }
 
+        // Fast path: a pure `count(*) FROM frames` (frames only, no columns,
+        // no filter, no limit, single scan) is answered from the boundary
+        // index's frame count — a header-only scan (persisted in a sidecar),
+        // no packet parse. Falls through to a normal parse when the count
+        // isn't cheaply available (compressed/non-seekable) or frames is
+        // already prepared.
+        let mut fast_frame_count: Option<u64> = None;
+        let is_count_only_frames = needs.len() == 1
+            && needs.get("frames").is_some_and(|n| {
+                n.scan_count == 1
+                    && n.filters.is_empty()
+                    && n.fetch.is_none()
+                    && matches!(&n.columns, Some(c) if c.is_empty())
+            });
+        if is_count_only_frames && !self.tables.contains("frames") {
+            if let Some(n) = self.parse_source.frame_count() {
+                let schema = std::sync::Arc::new(arrow::datatypes::Schema::empty());
+                let options =
+                    arrow::array::RecordBatchOptions::new().with_row_count(Some(n as usize));
+                let batch = RecordBatch::try_new_with_options(schema.clone(), vec![], &options)
+                    .map_err(|e| Error::Query(QueryError::Arrow(e.to_string())))?;
+                let mut tables = HashMap::new();
+                tables.insert(
+                    "frames".to_string(),
+                    std::sync::Arc::new(TableData {
+                        schema,
+                        partitions: vec![vec![batch]],
+                    }),
+                );
+                self.tables.install(tables);
+                needs.clear();
+                fast_frame_count = Some(n);
+            }
+        }
+
         let subscription = self.build_subscription(needs);
 
         // CacheOnTouch materializes (so the cache can serve any later query);
@@ -518,7 +560,13 @@ impl QueryEngine {
 
         let mut producers: Vec<JoinHandle<Result<PartitionStat, Error>>> = Vec::new();
         if subscription.tables.is_empty() {
-            *self.last_stats.write().expect("stats lock poisoned") = ParseStats::default();
+            let mut stats = ParseStats::default();
+            if let Some(n) = fast_frame_count {
+                stats.partitions = 1;
+                stats.complete_scan = true;
+                stats.rows_built.insert("frames".to_string(), n as usize);
+            }
+            *self.last_stats.write().expect("stats lock poisoned") = stats;
         } else if streaming {
             let mut handle = self.parse_source.stream(&subscription)?;
             self.tables.install_streams(&mut handle);
