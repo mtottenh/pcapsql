@@ -143,11 +143,6 @@ pub struct Args {
     #[arg(long = "streaming")]
     pub streaming: bool,
 
-    /// Cache size for streaming mode (number of parsed packets to cache).
-    /// Disabled by default (0) since cache overhead typically exceeds parsing cost.
-    #[arg(long = "cache-size", default_value = "0")]
-    pub cache_size: usize,
-
     /// Use memory-mapped I/O for reading PCAP files.
     ///
     /// Can improve performance for large files by letting the OS handle
@@ -201,10 +196,6 @@ pub struct Args {
     /// cache performance metrics. Useful for tuning --cache-size.
     #[arg(long = "stats")]
     pub show_stats: bool,
-
-    /// Use LRU-only cache eviction (disable reader-position-based eviction).
-    #[arg(long = "no-reader-eviction")]
-    pub no_reader_eviction: bool,
 
     // --- Cloud Storage Options ---
     /// Custom cloud storage endpoint (for S3-compatible services like MinIO, R2).
