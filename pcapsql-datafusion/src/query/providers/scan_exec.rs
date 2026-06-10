@@ -12,6 +12,7 @@ use std::sync::Arc;
 use arrow::compute::SortOptions;
 use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
+use datafusion::common::stats::Precision;
 use datafusion::error::{DataFusionError, Result as DFResult};
 use datafusion::execution::context::TaskContext;
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalSortExpr};
@@ -19,7 +20,7 @@ use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
-    SendableRecordBatchStream,
+    SendableRecordBatchStream, Statistics,
 };
 use futures::stream;
 
@@ -127,6 +128,29 @@ impl ExecutionPlan for ProtocolScanExec {
             self.projected_schema.clone(),
             stream::iter(iter),
         )))
+    }
+
+    fn partition_statistics(&self, partition: Option<usize>) -> DFResult<Statistics> {
+        // Batches are already materialized: row counts are exact and free,
+        // which lets the optimizer order joins sensibly.
+        let rows: usize = match partition {
+            Some(i) => self
+                .partitions
+                .get(i)
+                .map(|p| p.iter().map(|b| b.num_rows()).sum())
+                .unwrap_or(0),
+            None => self
+                .partitions
+                .iter()
+                .flat_map(|p| p.iter())
+                .map(|b| b.num_rows())
+                .sum(),
+        };
+        Ok(Statistics {
+            num_rows: Precision::Exact(rows),
+            total_byte_size: Precision::Absent,
+            column_statistics: Statistics::unknown_column(&self.projected_schema),
+        })
     }
 }
 

@@ -22,6 +22,9 @@ mod protocol_provider;
 mod scan_exec;
 mod shared;
 
-pub use protocol_provider::ProtocolTableProvider;
+pub use protocol_provider::{EngineTables, ProtocolTableProvider};
 pub use scan_exec::ProtocolScanExec;
-pub use shared::{run_shared_parse, ProgressFn, SharedParseState};
+pub use shared::{
+    run_shared_parse, ParseStats, ParseSubscription, ProgressFn, SharedParseState, TableData,
+    TableSubscription,
+};

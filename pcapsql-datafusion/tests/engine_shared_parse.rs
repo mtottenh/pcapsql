@@ -2,7 +2,7 @@
 //! 1-vs-N partition equivalence at the SQL layer (#9).
 
 use arrow::util::pretty::pretty_format_batches;
-use pcapsql_datafusion::query::{EngineOptions, QueryEngine, SourceSpec};
+use pcapsql_datafusion::query::{EngineOptions, QueryEngine, RetentionPolicy, SourceSpec};
 use pcapsql_testgen::{legacy_pcap, GenPacket, GeneratedCapture, LegacyVariant};
 use tempfile::TempDir;
 
@@ -80,16 +80,8 @@ async fn shared_parse_one_pass_and_partition_equivalence() {
     let e1 = engine(&path, 1).await;
     let e4 = engine(&path, 4).await;
 
-    // Real partition counts are reported.
-    assert_eq!(e1.partition_count(), 1);
-    assert!(
-        e4.partition_count() >= 2,
-        "mmap (SeekCost::Free) should split into multiple partitions, got {}",
-        e4.partition_count()
-    );
-
-    // A view query touching multiple protocol tables performs exactly ONE parse
-    // pass over the file, not one per table (#6).
+    // A query touching multiple protocol tables performs exactly ONE parse
+    // pass over the file, not one per table — the shared-parse invariant.
     let _ = run(
         &e4,
         "SELECT f.frame_number, u.dst_port \
@@ -97,10 +89,29 @@ async fn shared_parse_one_pass_and_partition_equivalence() {
          JOIN ipv4 v USING (frame_number)",
     )
     .await;
+    let stats = e4.last_parse_stats();
     assert_eq!(
-        e4.parse_pass_count(),
-        1,
+        stats.parse_passes, 1,
         "shared parse must perform exactly one pass regardless of tables touched"
+    );
+    assert!(
+        stats.partitions >= 2,
+        "mmap (SeekCost::Free) should split into multiple partitions, got {}",
+        stats.partitions
+    );
+    assert_eq!(stats.rows_built.get("frames"), Some(&60));
+    assert_eq!(stats.rows_built.get("udp"), Some(&60));
+
+    let _ = run(&e1, "SELECT count(*) AS c FROM frames").await;
+    assert_eq!(e1.last_parse_stats().partitions, 1);
+
+    // The default retention (CacheOnTouch) serves repeat queries with no
+    // further parsing.
+    let _ = run(&e4, "SELECT count(*) AS c FROM udp").await;
+    assert_eq!(
+        e4.last_parse_stats().parse_passes,
+        0,
+        "cached tables must not re-parse"
     );
 
     // 1-vs-N partition equivalence at the SQL layer: identical rows, identical
@@ -128,13 +139,65 @@ async fn shared_parse_one_pass_and_partition_equivalence() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn empty_capture_is_rejected() {
-    // A header-only legacy capture with no packets.
+async fn scoped_parse_builds_only_referenced_tables() {
+    // RetentionPolicy::None scopes the parse to the query's tables: a query
+    // over `udp` must materialize only `udp` (its L2/L3 dependencies are
+    // parsed for routing but not built as tables, and unrelated app
+    // protocols like `tls` are never even parsed).
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("cap.pcap");
+    std::fs::write(&path, make_capture(40).bytes).unwrap();
+
+    let engine = QueryEngine::open(
+        SourceSpec::Path(path.clone()),
+        EngineOptions {
+            batch_size: 1000,
+            target_partitions: Some(4),
+            index_stride: Some(4),
+            retention: RetentionPolicy::None,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("build engine");
+
+    let out = run(
+        &engine,
+        "SELECT dst_port FROM udp ORDER BY dst_port LIMIT 1",
+    )
+    .await;
+    assert!(out.contains("53"), "expected udp rows:\n{out}");
+
+    let stats = engine.last_parse_stats();
+    assert_eq!(stats.parse_passes, 1);
+    // Only the referenced table is materialized.
+    let built: Vec<&String> = stats
+        .rows_built
+        .iter()
+        .filter(|(_, n)| **n > 0)
+        .map(|(t, _)| t)
+        .collect();
+    assert_eq!(built, vec![&"udp".to_string()], "scoped to udp only");
+    assert!(
+        !stats.rows_built.contains_key("tcp") && !stats.rows_built.contains_key("tls"),
+        "unreferenced protocols must not be materialized: {:?}",
+        stats.rows_built.keys().collect::<Vec<_>>()
+    );
+
+    // RetentionPolicy::None retains nothing: the next query re-parses.
+    let _ = run(&engine, "SELECT count(*) AS c FROM frames").await;
+    assert_eq!(engine.last_parse_stats().parse_passes, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn empty_capture_yields_zero_rows() {
+    // A header-only legacy capture with no packets is a valid (empty)
+    // capture: open succeeds and queries see zero rows.
     let gc = legacy_pcap(LegacyVariant::LeMicro, 1, 65535, &[]);
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("empty.pcap");
     std::fs::write(&path, gc.bytes).unwrap();
-    let result = QueryEngine::open(
+    let engine = QueryEngine::open(
         SourceSpec::Path(path.clone()),
         EngineOptions {
             batch_size: 1000,
@@ -142,6 +205,8 @@ async fn empty_capture_is_rejected() {
             ..Default::default()
         },
     )
-    .await;
-    assert!(result.is_err(), "empty capture should be rejected");
+    .await
+    .expect("empty capture opens");
+    let out = run(&engine, "SELECT count(*) AS c FROM frames").await;
+    assert!(out.contains("0"), "expected zero frames:\n{out}");
 }

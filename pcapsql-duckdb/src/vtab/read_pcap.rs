@@ -27,7 +27,7 @@ use parking_lot::Mutex;
 
 use pcapsql_core::{
     default_registry, parse_packet, schema::DataKind, FilePacketReader, FilePacketSource,
-    PacketReader, PacketSource, ParseResult, Protocol, ProtocolRegistry,
+    PacketReader, PacketSource, ParseResult, ParseScope, Protocol, ProtocolRegistry,
 };
 
 use crate::duckdb_schema::to_duckdb_type;
@@ -225,7 +225,12 @@ impl VTab for ReadPcapVTab {
                 row_count += 1;
             } else {
                 // Parse and check if this packet contains our protocol
-                let results = parse_packet(&init_data.registry, packet.link_type, packet.data);
+                let results = parse_packet(
+                    &init_data.registry,
+                    packet.link_type,
+                    packet.data,
+                    &ParseScope::full(),
+                );
 
                 // Add ALL occurrences of the protocol (supports tunneled traffic)
                 for (proto_name, parsed) in &results {

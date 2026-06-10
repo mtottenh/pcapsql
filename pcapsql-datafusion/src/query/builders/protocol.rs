@@ -8,7 +8,7 @@ use std::sync::Arc;
 use arrow::array::*;
 use arrow::datatypes::{DataType, Schema, TimeUnit};
 use arrow::error::ArrowError;
-use arrow::record_batch::RecordBatch;
+use arrow::record_batch::{RecordBatch, RecordBatchOptions};
 
 use crate::error::{Error, QueryError};
 use crate::query::tables;
@@ -553,8 +553,16 @@ impl ProtocolBatchBuilder {
     fn build_batch(&mut self) -> Result<RecordBatch, Error> {
         let arrays: Vec<Arc<dyn Array>> = self.builders.iter_mut().map(|b| b.finish()).collect();
 
-        let batch = RecordBatch::try_new(self.schema.clone(), arrays)
-            .map_err(|e: ArrowError| Error::Query(QueryError::Arrow(e.to_string())))?;
+        // A fully projected-away schema (e.g. `SELECT count(*)`) still needs
+        // its row count carried.
+        let batch = if arrays.is_empty() {
+            let options = RecordBatchOptions::new().with_row_count(Some(self.rows));
+            RecordBatch::try_new_with_options(self.schema.clone(), arrays, &options)
+                .map_err(|e: ArrowError| Error::Query(QueryError::Arrow(e.to_string())))?
+        } else {
+            RecordBatch::try_new(self.schema.clone(), arrays)
+                .map_err(|e: ArrowError| Error::Query(QueryError::Arrow(e.to_string())))?
+        };
 
         // Reset builders for next batch
         self.rows = 0;

@@ -34,8 +34,9 @@
 //! reader.process_packets(1000, |packet| {
 //!     let results = pcapsql_core::parse_packet(
 //!         &registry,
-//!         packet.link_type as u16,
-//!         &packet.data,
+//!         packet.link_type,
+//!         packet.data,
+//!         &pcapsql_core::ParseScope::full(),
 //!     );
 //!
 //!     for (protocol_name, result) in results {
@@ -101,10 +102,9 @@ pub use io::{MmapPacketReader, MmapPacketSource};
 pub use protocol::OwnedFieldValue;
 pub use protocol::{
     chain_fields_for_protocol, compute_required_protocols, default_registry,
-    merge_with_chain_fields, parse_packet, parse_packet_projected, parse_packet_pruned,
-    parse_packet_pruned_projected, should_continue_parsing, should_run_parser, BuiltinProtocol,
-    FieldValue, ParseContext, ParseResult, PayloadMode, ProjectionConfig, Protocol,
-    ProtocolRegistry, TunnelLayer, TunnelType,
+    merge_with_chain_fields, parse_packet, should_continue_parsing, should_run_parser,
+    BuiltinProtocol, FieldValue, ParseContext, ParseResult, ParseScope, PayloadMode,
+    ProjectionConfig, Protocol, ProtocolRegistry, TunnelLayer, TunnelType,
 };
 pub use schema::{DataKind, FieldDescriptor, ProtocolSchema};
 pub use stream::{

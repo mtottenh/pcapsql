@@ -20,7 +20,7 @@ pub use crate::schema::{DataKind, FieldDescriptor, ProtocolSchema};
 // Protocol types
 pub use crate::protocol::{
     default_registry, parse_packet, BuiltinProtocol, FieldValue, ParseContext, ParseResult,
-    PayloadMode, Protocol, ProtocolRegistry,
+    ParseScope, PayloadMode, Protocol, ProtocolRegistry,
 };
 
 // I/O types
