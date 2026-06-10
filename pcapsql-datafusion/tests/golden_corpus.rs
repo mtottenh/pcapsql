@@ -15,7 +15,7 @@
 use std::path::{Path, PathBuf};
 
 use arrow::util::pretty::pretty_format_batches;
-use pcapsql_datafusion::query::{EngineOptions, QueryEngine, SourceSpec};
+use pcapsql_datafusion::query::{EngineOptions, QueryEngine, RetentionPolicy, SourceSpec};
 use pcapsql_testgen::{legacy_pcap, GenPacket, LegacyVariant};
 use tempfile::TempDir;
 
@@ -359,6 +359,20 @@ async fn golden_corpus_matches_snapshots() {
 
     let e2 = engine(&path, 2).await;
     let e1 = engine(&path, 1).await;
+    // One-shot CLI path: RetentionPolicy::None streams rather than
+    // materializes. Its results must be identical.
+    let streamed = QueryEngine::open(
+        SourceSpec::Path(path.clone()),
+        EngineOptions {
+            batch_size: 1000,
+            target_partitions: Some(2),
+            index_stride: Some(4),
+            retention: RetentionPolicy::None,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("build streaming engine");
 
     let mut failures = Vec::new();
     for (name, sql) in CORPUS {
@@ -369,6 +383,12 @@ async fn golden_corpus_matches_snapshots() {
         assert_eq!(
             got, got_p1,
             "{name}: results differ between 1 and 2 partitions"
+        );
+        // Streaming (one-shot) vs materialized (REPL) must agree.
+        let got_stream = run(&streamed, sql).await;
+        assert_eq!(
+            got, got_stream,
+            "{name}: streaming result differs from materialized"
         );
 
         let snap_path = golden_dir().join(format!("{name}.snap"));
