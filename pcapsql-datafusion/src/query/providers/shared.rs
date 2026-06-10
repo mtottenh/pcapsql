@@ -17,6 +17,7 @@
 //! the partition-equivalence tests assert.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use arrow::record_batch::RecordBatch;
@@ -32,6 +33,9 @@ const CHEAP_MIN_BYTES: u64 = 4 * 1024 * 1024;
 /// Minimum object size before a `RangeRequest`-seek source is partitioned
 /// (network round trips must be amortized).
 const RANGE_MIN_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Progress callback: invoked with the cumulative packet count during parse.
+pub type ProgressFn = Arc<dyn Fn(u64) + Send + Sync>;
 
 /// Result of the shared parse pass: per-table batches grouped by partition.
 pub struct SharedParseState {
@@ -115,6 +119,7 @@ fn parse_partition<S: SeekablePacketSource>(
     batch_size: usize,
     range: &PacketRange,
     single: bool,
+    progress: Option<(&AtomicU64, &ProgressFn)>,
 ) -> Result<(ProtocolBatches, i64, i64), Error> {
     let mut reader = if single {
         source.sequential_reader()?
@@ -143,6 +148,10 @@ fn parse_partition<S: SeekablePacketSource>(
         if processed == 0 {
             break;
         }
+        if let Some((counter, cb)) = progress {
+            let total = counter.fetch_add(processed as u64, Ordering::Relaxed) + processed as u64;
+            cb(total);
+        }
     }
 
     Ok((batch_set.finish()?, min_us, max_us))
@@ -155,9 +164,11 @@ pub fn run_shared_parse<S: SeekablePacketSource>(
     registry: &Arc<ProtocolRegistry>,
     batch_size: usize,
     target_partitions: usize,
+    progress: Option<ProgressFn>,
 ) -> Result<SharedParseState, Error> {
     let ranges = decide_ranges(source.as_ref(), target_partitions)?;
     let single = ranges.len() == 1;
+    let progress_count = AtomicU64::new(0);
 
     // Parse each partition in its own worker. Each worker owns its reader and
     // builders — no shared mutable state, so nothing to lock.
@@ -168,6 +179,7 @@ pub fn run_shared_parse<S: SeekablePacketSource>(
             batch_size,
             &ranges[0],
             true,
+            progress.as_ref().map(|cb| (&progress_count, cb)),
         )]
     } else {
         std::thread::scope(|scope| {
@@ -177,8 +189,16 @@ pub fn run_shared_parse<S: SeekablePacketSource>(
                     let source = source.clone();
                     let registry = registry.clone();
                     let range = range.clone();
+                    let progress = progress.as_ref().map(|cb| (&progress_count, cb));
                     scope.spawn(move || {
-                        parse_partition(source.as_ref(), &registry, batch_size, &range, false)
+                        parse_partition(
+                            source.as_ref(),
+                            &registry,
+                            batch_size,
+                            &range,
+                            false,
+                            progress,
+                        )
                     })
                 })
                 .collect();

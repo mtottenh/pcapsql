@@ -13,11 +13,9 @@
 //! and review the diff like any other code change.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use arrow::util::pretty::pretty_format_batches;
-use pcapsql_core::io::MmapPacketSource;
-use pcapsql_datafusion::query::QueryEngine;
+use pcapsql_datafusion::query::{EngineOptions, QueryEngine, SourceSpec};
 use pcapsql_testgen::{legacy_pcap, GenPacket, LegacyVariant};
 use tempfile::TempDir;
 
@@ -328,14 +326,17 @@ fn golden_dir() -> PathBuf {
 }
 
 async fn engine(path: &Path, partitions: usize) -> QueryEngine {
-    let source = Arc::new(
-        MmapPacketSource::open(path)
-            .expect("open mmap")
-            .with_index_stride(4),
-    );
-    QueryEngine::with_streaming_source_partitions(source, 1000, partitions)
-        .await
-        .expect("build engine")
+    QueryEngine::open(
+        SourceSpec::Path(path.to_path_buf()),
+        EngineOptions {
+            batch_size: 1000,
+            target_partitions: Some(partitions),
+            index_stride: Some(4),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("build engine")
 }
 
 async fn run(engine: &QueryEngine, sql: &str) -> String {

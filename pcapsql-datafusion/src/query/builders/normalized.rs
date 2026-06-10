@@ -13,7 +13,7 @@ use super::protocol::ProtocolBatchBuilder;
 use crate::error::Error;
 use crate::query::tables;
 use pcapsql_core::io::PacketRef;
-use pcapsql_core::{ParseResult, RawPacket};
+use pcapsql_core::ParseResult;
 
 /// A set of batches for all protocol tables.
 pub type ProtocolBatches = HashMap<String, Vec<RecordBatch>>;
@@ -24,8 +24,8 @@ pub type ProtocolBatches = HashMap<String, Vec<RecordBatch>>;
 /// ```ignore
 /// let mut batch_set = NormalizedBatchSet::new(1000);
 ///
-/// // For each packet:
-/// batch_set.add_packet(&raw_packet, &parsed_results)?;
+/// // For each packet (borrowed, zero-copy):
+/// batch_set.add_packet_from_ref(packet_ref, &parsed_results)?;
 ///
 /// // Get all batches when done:
 /// let batches = batch_set.finish()?;
@@ -71,49 +71,9 @@ impl NormalizedBatchSet {
         }
     }
 
-    /// Add a packet to all relevant protocol tables (legacy API).
+    /// Add a packet to all relevant protocol tables.
     ///
-    /// `raw` is the raw packet data.
-    /// `parsed` is the chain of parsed protocol layers from parse_packet().
-    ///
-    /// **Note**: Prefer `add_packet_from_ref()` for zero-copy processing.
-    pub fn add_packet(
-        &mut self,
-        raw: &RawPacket,
-        parsed: &[(&'static str, ParseResult<'_>)],
-    ) -> Result<(), Error> {
-        let frame_number = raw.frame_number;
-
-        // Always add to frames table
-        self.frames_builder.add_frame(raw);
-        if let Some(batch) = self.frames_builder.try_build()? {
-            self.batches
-                .get_mut("frames")
-                .expect("frames batches should exist")
-                .push(batch);
-        }
-
-        // Route each parsed protocol to its table
-        for (proto_name, result) in parsed {
-            // Find the table name for this protocol
-            if let Some(builder) = self.protocol_builders.get_mut(*proto_name) {
-                builder.add_parsed_row(frame_number, result);
-
-                if let Some(batch) = builder.try_build()? {
-                    self.batches
-                        .get_mut(*proto_name)
-                        .expect("protocol batches should exist")
-                        .push(batch);
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Add a packet to all relevant protocol tables (zero-copy API).
-    ///
-    /// `packet` is a borrowed reference to the packet data.
+    /// `packet` is a borrowed (zero-copy) reference to the packet data.
     /// `parsed` is the chain of parsed protocol layers from parse_packet().
     pub fn add_packet_from_ref(
         &mut self,
@@ -220,14 +180,16 @@ mod tests {
     use pcapsql_core::{FieldValue, TunnelType};
     use smallvec::SmallVec;
 
-    fn create_test_packet(frame_number: u64) -> RawPacket {
-        RawPacket {
+    const TEST_DATA: [u8; 100] = [0u8; 100];
+
+    fn create_test_packet(frame_number: u64) -> PacketRef<'static> {
+        PacketRef {
             frame_number,
             timestamp_ns: 1_000_000_000 * frame_number as i64,
-            captured_length: 100,
-            original_length: 100,
+            captured_len: 100,
+            original_len: 100,
             link_type: 1,
-            data: vec![0u8; 100].into(),
+            data: &TEST_DATA,
         }
     }
 
@@ -316,7 +278,7 @@ mod tests {
         let raw = create_test_packet(1);
         let parsed: Vec<(&'static str, ParseResult)> = vec![];
 
-        batch_set.add_packet(&raw, &parsed).unwrap();
+        batch_set.add_packet_from_ref(raw, &parsed).unwrap();
 
         // Frames should have 1 row (pending)
         assert_eq!(batch_set.frames_builder.row_count(), 1);
@@ -334,7 +296,7 @@ mod tests {
         let parsed: Vec<(&'static str, ParseResult)> =
             vec![("ethernet", eth), ("ipv4", ipv4), ("tcp", tcp)];
 
-        batch_set.add_packet(&raw, &parsed).unwrap();
+        batch_set.add_packet_from_ref(raw, &parsed).unwrap();
 
         // Check that rows were added
         assert_eq!(batch_set.frames_builder.row_count(), 1);
@@ -369,7 +331,7 @@ mod tests {
             let parsed: Vec<(&'static str, ParseResult)> =
                 vec![("ethernet", eth), ("ipv4", ipv4), ("tcp", tcp)];
 
-            batch_set.add_packet(&raw, &parsed).unwrap();
+            batch_set.add_packet_from_ref(raw, &parsed).unwrap();
         }
 
         let batches = batch_set.finish().unwrap();
@@ -403,7 +365,7 @@ mod tests {
 
             let parsed: Vec<(&'static str, ParseResult)> = vec![("ethernet", eth)];
 
-            batch_set.add_packet(&raw, &parsed).unwrap();
+            batch_set.add_packet_from_ref(raw, &parsed).unwrap();
         }
 
         // Should have built one batch of 5 for frames and ethernet
@@ -433,7 +395,7 @@ mod tests {
         let tcp1 = create_tcp_result();
         let parsed1: Vec<(&'static str, ParseResult)> =
             vec![("ethernet", eth1), ("ipv4", ipv4_1), ("tcp", tcp1)];
-        batch_set.add_packet(&raw1, &parsed1).unwrap();
+        batch_set.add_packet_from_ref(raw1, &parsed1).unwrap();
 
         // Add one DNS packet (UDP)
         let raw2 = create_test_packet(2);
@@ -476,7 +438,7 @@ mod tests {
             ("udp", udp),
             ("dns", dns),
         ];
-        batch_set.add_packet(&raw2, &parsed2).unwrap();
+        batch_set.add_packet_from_ref(raw2, &parsed2).unwrap();
 
         let batches = batch_set.finish().unwrap();
 

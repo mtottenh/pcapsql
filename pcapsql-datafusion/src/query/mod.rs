@@ -4,19 +4,18 @@
 //!
 //! ## Architecture
 //!
-//! The query module uses a normalized multi-table architecture:
+//! Normalized multi-table schema: per-protocol tables (`frames`, `ethernet`,
+//! `ipv4`, `tcp`, `dns`, …) with `frame_number` as the linking key, plus
+//! cross-layer views (e.g. `tcp_packets`) and the backward-compatible
+//! `packets` view.
 //!
-//! ### Normalized Schema (Phase 1)
-//! Per-protocol tables (`frames`, `ethernet`, `ipv4`, `tcp`, `dns`, etc.)
-//! with `frame_number` as the linking key. Cross-layer views provide
-//! convenient access patterns (e.g., `tcp_packets` joins frames + ipv4 + tcp).
+//! [`QueryEngine::open`] is the single entry point: local files (mmap by
+//! default) and cloud URLs funnel into one shared parse pass, parallel across
+//! partitions for seekable sources, fanned out to every protocol table. JOINs
+//! use sort-merge since all tables emit rows sorted by `frame_number`.
 //!
-//! The `packets` view provides backward compatibility with the old flat schema.
-//!
-//! ### Streaming Mode (Phase 2)
-//! Streaming mode now uses the same normalized tables. Each protocol table
-//! has its own streaming provider that reads the PCAP file independently.
-//! JOINs work via sort-merge since all tables emit rows sorted by `frame_number`.
+//! The migration plan in `docs/query-scoped-parse-migration.md` moves this
+//! parse from engine construction to query time, scoped to each query.
 //!
 //! See the `tables`, `views`, and `providers` submodules for details.
 
@@ -24,7 +23,6 @@ pub mod arrow_schema;
 pub mod bpf;
 pub mod builders;
 mod filter;
-mod provider;
 pub mod providers;
 pub mod stream_tables;
 pub mod tables;
@@ -34,22 +32,19 @@ pub mod views;
 pub use arrow_schema::{descriptors_to_arrow_schema, protocol_to_arrow_schema, to_arrow_field};
 pub use builders::NormalizedBatchSet;
 pub use filter::FilterEvaluator;
-pub use provider::PcapTableProvider;
-pub use providers::{ProtocolScanExec, ProtocolTableProvider, SharedParseState};
+pub use providers::{ProgressFn, ProtocolScanExec, ProtocolTableProvider, SharedParseState};
 
-use std::collections::HashMap;
-use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use arrow::array::{Array, RecordBatch, TimestampMicrosecondArray};
+use arrow::array::RecordBatch;
 use datafusion::config::ConfigOptions;
 use datafusion::prelude::*;
-use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::error::{Error, QueryError};
 use crate::query::providers::run_shared_parse;
 use pcapsql_core::{
-    default_registry, parse_packet, FilePacketSource, KeyLog, PcapReader, ProtocolRegistry,
+    default_registry, FilePacketSource, KeyLog, MmapPacketSource, ProtocolRegistry,
     SeekablePacketSource,
 };
 
@@ -80,208 +75,149 @@ fn create_session_context() -> SessionContext {
     SessionContext::new_with_config(config.into())
 }
 
+/// Where to read a capture from.
+#[derive(Clone, Debug)]
+pub enum SourceSpec {
+    /// Local file path (pcap/pcapng, optionally compressed).
+    Path(PathBuf),
+    /// Cloud object URL (`s3://…`, `gs://…`, `az://…`); needs the `cloud` feature.
+    Url(String),
+}
+
+/// Options for cloud sources (ignored for local paths).
+#[derive(Clone, Debug, Default)]
+pub struct CloudSourceOptions {
+    /// Custom endpoint (S3-compatible stores such as MinIO/SeaweedFS/R2).
+    pub endpoint: Option<String>,
+    /// Use anonymous (unsigned) requests for public buckets.
+    pub anonymous: bool,
+    /// Byte-range request chunk size in bytes (`None` = backend default).
+    pub chunk_size: Option<usize>,
+}
+
+/// Construction options for [`QueryEngine::open`].
+#[derive(Clone)]
+pub struct EngineOptions {
+    /// Packets per RecordBatch.
+    pub batch_size: usize,
+    /// Partition count for the parallel parse pass
+    /// (`None` = available parallelism, clamped to 1..=16).
+    pub target_partitions: Option<usize>,
+    /// TLS keylog enabling the decrypted `http2` table.
+    pub keylog: Option<Arc<KeyLog>>,
+    /// Memory-map local files; falls back to buffered file I/O when mmap
+    /// fails (e.g. compressed captures).
+    pub mmap: bool,
+    /// Boundary-index checkpoint stride override (mainly tests/benchmarks).
+    pub index_stride: Option<u64>,
+    /// Invoked with the cumulative packet count as the parse progresses.
+    pub progress: Option<ProgressFn>,
+    /// Cloud-source options (ignored for local paths).
+    pub cloud: CloudSourceOptions,
+}
+
+impl Default for EngineOptions {
+    fn default() -> Self {
+        Self {
+            batch_size: 10_000,
+            target_partitions: None,
+            keylog: None,
+            mmap: true,
+            index_stride: None,
+            progress: None,
+            cloud: CloudSourceOptions::default(),
+        }
+    }
+}
+
 /// Query engine for PCAP files.
 pub struct QueryEngine {
     ctx: SessionContext,
     registry: ProtocolRegistry,
-    /// Shared parse state for the streaming/parallel path (None for in-memory).
-    shared: Option<Arc<SharedParseState>>,
+    /// Result of the single shared parse pass every table serves from.
+    shared: Arc<SharedParseState>,
 }
 
 impl QueryEngine {
-    /// Create a new query engine for a PCAP file.
-    pub async fn new<P: AsRef<Path>>(path: P, batch_size: usize) -> Result<Self, Error> {
-        Self::with_progress(path, batch_size, false).await
-    }
-
-    /// Create a new query engine for a PCAP file with optional progress bar.
+    /// Open a capture and build the engine.
     ///
-    /// Uses the normalized schema with per-protocol tables.
-    pub async fn with_progress<P: AsRef<Path>>(
-        path: P,
-        batch_size: usize,
-        show_progress: bool,
-    ) -> Result<Self, Error> {
-        let registry = default_registry();
-        let ctx = create_session_context();
-
-        // Register all UDFs (network addresses, protocol names, utilities)
-        udf::register_all_udfs(&ctx)?;
-
-        // Load all packets into normalized per-protocol tables
-        let protocol_batches =
-            Self::load_normalized_packets(&path, &registry, batch_size, show_progress)?;
-
-        // Check if we got any frames
-        let frames_batches = protocol_batches
-            .get("frames")
-            .ok_or_else(|| Error::Query(QueryError::Execution("No frames table".to_string())))?;
-
-        if frames_batches.is_empty() {
-            return Err(Error::Query(QueryError::Execution(
-                "No packets found in PCAP file".to_string(),
-            )));
-        }
-
-        // Extract timestamp range and register time UDFs
-        let (start_us, end_us) = Self::extract_timestamp_range(&protocol_batches)?;
-        udf::register_time_udfs_eager(&ctx, start_us, end_us)?;
-
-        // Register all protocol tables
-        for (table_name, batches) in &protocol_batches {
-            if batches.is_empty() {
-                // Register an empty table with the correct schema
-                if let Some(schema) = tables::get_table_schema(table_name) {
-                    let empty_provider = provider::PcapTableProvider::new(Arc::new(schema), vec![]);
-                    ctx.register_table(table_name.as_str(), Arc::new(empty_provider))
-                        .map_err(|e| Error::Query(QueryError::Execution(e.to_string())))?;
+    /// The single constructor: local files (memory-mapped by default, with a
+    /// buffered-file fallback) and cloud URLs funnel into the same shared
+    /// parse pass, parallel across partitions for seekable sources. With a
+    /// [`EngineOptions::keylog`], an additional sequential stream pass
+    /// populates the decrypted `http2` table (folded into the main pass by
+    /// migration phase P4).
+    pub async fn open(spec: SourceSpec, opts: EngineOptions) -> Result<Self, Error> {
+        match spec {
+            SourceSpec::Path(path) => {
+                if opts.mmap {
+                    if let Ok(source) = MmapPacketSource::open(&path) {
+                        let source = match opts.index_stride {
+                            Some(stride) => source.with_index_stride(stride),
+                            None => source,
+                        };
+                        return Self::build(Arc::new(source), opts).await;
+                    }
+                    // mmap rejected the file (e.g. compressed): fall back to
+                    // buffered file I/O below.
                 }
-            } else {
-                let schema = batches[0].schema();
-                let table_provider = provider::PcapTableProvider::new(schema, batches.clone());
-                ctx.register_table(table_name.as_str(), Arc::new(table_provider))
-                    .map_err(|e| Error::Query(QueryError::Execution(e.to_string())))?;
+                let source = FilePacketSource::open(&path)?;
+                let source = match opts.index_stride {
+                    Some(stride) => source.with_index_stride(stride),
+                    None => source,
+                };
+                Self::build(Arc::new(source), opts).await
             }
-        }
-
-        // Register cross-layer views (including backward-compatible packets view)
-        Self::register_cross_layer_views(&ctx).await?;
-
-        Ok(Self {
-            ctx,
-            registry,
-            shared: None,
-        })
-    }
-
-    /// Create a query engine with TLS decryption support.
-    ///
-    /// This enables decryption of TLS traffic using the provided SSLKEYLOGFILE,
-    /// allowing queries on decrypted protocols like HTTP/2.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - Path to the PCAP file
-    /// * `keylog` - TLS keylog for decryption (from SSLKEYLOGFILE)
-    /// * `batch_size` - Number of packets per RecordBatch
-    pub async fn with_keylog<P: AsRef<Path>>(
-        path: P,
-        keylog: Arc<KeyLog>,
-        batch_size: usize,
-    ) -> Result<Self, Error> {
-        let registry = default_registry();
-        let ctx = create_session_context();
-
-        // Register all UDFs
-        udf::register_all_udfs(&ctx)?;
-
-        // Load all packets into normalized per-protocol tables
-        let protocol_batches = Self::load_normalized_packets(&path, &registry, batch_size, false)?;
-
-        // Check if we got any frames
-        let frames_batches = protocol_batches
-            .get("frames")
-            .ok_or_else(|| Error::Query(QueryError::Execution("No frames table".to_string())))?;
-
-        if frames_batches.is_empty() {
-            return Err(Error::Query(QueryError::Execution(
-                "No packets found in PCAP file".to_string(),
-            )));
-        }
-
-        // Extract timestamp range and register time UDFs
-        let (start_us, end_us) = Self::extract_timestamp_range(&protocol_batches)?;
-        udf::register_time_udfs_eager(&ctx, start_us, end_us)?;
-
-        // Register all protocol tables
-        for (table_name, batches) in &protocol_batches {
-            if batches.is_empty() {
-                if let Some(schema) = tables::get_table_schema(table_name) {
-                    let empty_provider = provider::PcapTableProvider::new(Arc::new(schema), vec![]);
-                    ctx.register_table(table_name.as_str(), Arc::new(empty_provider))
-                        .map_err(|e| Error::Query(QueryError::Execution(e.to_string())))?;
+            #[cfg(feature = "cloud")]
+            SourceSpec::Url(url) => {
+                let mut location = CloudLocation::parse(&url).map_err(|e| {
+                    Error::Query(QueryError::Execution(format!("Invalid cloud URL: {e}")))
+                })?;
+                if let Some(endpoint) = &opts.cloud.endpoint {
+                    location = location.with_endpoint(endpoint);
                 }
-            } else {
-                let schema = batches[0].schema();
-                let table_provider = provider::PcapTableProvider::new(schema, batches.clone());
-                ctx.register_table(table_name.as_str(), Arc::new(table_provider))
-                    .map_err(|e| Error::Query(QueryError::Execution(e.to_string())))?;
+                if opts.cloud.anonymous {
+                    location = location.with_anonymous(true);
+                }
+                if let Some(chunk_size) = opts.cloud.chunk_size {
+                    location = location.with_chunk_size(chunk_size);
+                }
+                let source = CloudPacketSource::open(location).map_err(|e| {
+                    Error::Query(QueryError::Execution(format!("Cloud source error: {e}")))
+                })?;
+                let source = match opts.index_stride {
+                    Some(stride) => source.with_index_stride(stride),
+                    None => source,
+                };
+                Self::build(Arc::new(source), opts).await
             }
+            #[cfg(not(feature = "cloud"))]
+            SourceSpec::Url(url) => Err(Error::Query(QueryError::Execution(format!(
+                "Cannot open '{url}': built without cloud support (enable the `cloud` feature)"
+            )))),
         }
-
-        // Process streams with TLS decryption to populate HTTP/2 table
-        let path_str = path.as_ref().to_string_lossy().to_string();
-        let mut stream_builder = stream_tables::StreamTableBuilder::new(Some(keylog));
-        stream_builder.process_pcap(&path_str)?;
-
-        // Get HTTP/2 batches from stream processing
-        let http2_batches = stream_builder.http2_batches(batch_size)?;
-
-        // Replace the http2 table with stream-parsed data
-        if !http2_batches.is_empty() {
-            let schema = http2_batches[0].schema();
-            let http2_provider = provider::PcapTableProvider::new(schema, http2_batches);
-            // Deregister the empty http2 table and register with data
-            ctx.deregister_table("http2")
-                .map_err(|e| Error::Query(QueryError::Execution(e.to_string())))?;
-            ctx.register_table("http2", Arc::new(http2_provider))
-                .map_err(|e| Error::Query(QueryError::Execution(e.to_string())))?;
-        }
-
-        // Register cross-layer views
-        Self::register_cross_layer_views(&ctx).await?;
-
-        Ok(Self {
-            ctx,
-            registry,
-            shared: None,
-        })
     }
 
-    /// Create a QueryEngine over a [`FilePacketSource`] via the shared parse.
-    ///
-    /// The capture is parsed exactly once — in parallel across partitions for
-    /// seekable sources — into in-memory Arrow tables, then every query runs
-    /// over the shared result. Memory use is proportional to the parsed
-    /// capture; see `docs/query-scoped-parse-migration.md` for the plan to
-    /// make this query-scoped and bounded.
-    pub async fn with_streaming<P: AsRef<Path>>(path: P, batch_size: usize) -> Result<Self, Error> {
-        let source = FilePacketSource::open(path)?;
-        Self::with_streaming_source(Arc::new(source), batch_size).await
-    }
-
-    /// Create a QueryEngine with a custom seekable packet source.
-    ///
-    /// Performs a single shared parse pass over the source (fanning out to all
-    /// protocol tables), parallelized across partitions for seekable sources,
-    /// then serves every table from the shared result — so a query joining N
-    /// tables parses the capture once, not N times.
-    pub async fn with_streaming_source<S: SeekablePacketSource>(
+    /// Build the engine over an opened source: ONE parse pass, fanned out to
+    /// all protocol tables, parallel across partitions.
+    async fn build<S: SeekablePacketSource>(
         source: Arc<S>,
-        batch_size: usize,
-    ) -> Result<Self, Error> {
-        Self::with_streaming_source_partitions(source, batch_size, default_target_partitions())
-            .await
-    }
-
-    /// Like [`with_streaming_source`](Self::with_streaming_source) but with an
-    /// explicit target partition count for the shared parse pass (mainly for
-    /// tests and benchmarks).
-    pub async fn with_streaming_source_partitions<S: SeekablePacketSource>(
-        source: Arc<S>,
-        batch_size: usize,
-        target_partitions: usize,
+        opts: EngineOptions,
     ) -> Result<Self, Error> {
         let registry = Arc::new(default_registry());
         let ctx = create_session_context();
         udf::register_all_udfs(&ctx)?;
 
-        // ONE parse pass, fanned out to all tables, parallel across partitions.
+        let target_partitions = opts
+            .target_partitions
+            .unwrap_or_else(default_target_partitions);
+
         let shared = Arc::new(run_shared_parse(
             &source,
             &registry,
-            batch_size,
+            opts.batch_size,
             target_partitions,
+            opts.progress.clone(),
         )?);
 
         if shared.total_frames() == 0 {
@@ -310,173 +246,35 @@ impl QueryEngine {
                 .map_err(|e| Error::Query(QueryError::Execution(e.to_string())))?;
         }
 
+        // With a keylog, a sequential stream pass (TCP reassembly + TLS
+        // decryption + HTTP/2) replaces the empty http2 table. Migration
+        // phase P4 folds this second pass into the shared one.
+        if let Some(keylog) = opts.keylog.clone() {
+            let mut stream_builder = stream_tables::StreamTableBuilder::new(Some(keylog));
+            let mut reader = source.sequential_reader()?;
+            stream_builder.process_reader(&mut reader)?;
+            let http2_batches = stream_builder.http2_batches(opts.batch_size)?;
+            if !http2_batches.is_empty() {
+                let schema = http2_batches[0].schema();
+                let provider = providers::ProtocolTableProvider::in_memory(
+                    "http2".to_string(),
+                    schema,
+                    vec![http2_batches],
+                );
+                ctx.deregister_table("http2")
+                    .map_err(|e| Error::Query(QueryError::Execution(e.to_string())))?;
+                ctx.register_table("http2", Arc::new(provider))
+                    .map_err(|e| Error::Query(QueryError::Execution(e.to_string())))?;
+            }
+        }
+
         Self::register_cross_layer_views(&ctx).await?;
 
         Ok(Self {
             ctx,
             registry: (*registry).clone(),
-            shared: Some(shared),
+            shared,
         })
-    }
-
-    /// Create a QueryEngine for a cloud storage URL.
-    ///
-    /// Supports S3, GCS, and Azure Blob Storage URLs:
-    /// - `s3://bucket/path/to/file.pcap`
-    /// - `gs://bucket/path/to/file.pcap`
-    /// - `az://container/path/to/blob.pcap`
-    ///
-    /// Cloud sources always use streaming mode since the data must be fetched
-    /// over the network.
-    ///
-    /// # Arguments
-    ///
-    /// * `url` - Cloud storage URL
-    /// * `batch_size` - Number of packets per RecordBatch
-    /// * `endpoint` - Custom endpoint URL (for S3-compatible services like MinIO)
-    /// * `anonymous` - Use anonymous (unsigned) requests for public buckets
-    /// * `chunk_size` - Buffer size for byte-range requests (default 8MB)
-    #[cfg(feature = "cloud")]
-    pub async fn with_cloud_source(
-        url: &str,
-        batch_size: usize,
-        endpoint: Option<&str>,
-        anonymous: bool,
-        chunk_size: usize,
-    ) -> Result<Self, Error> {
-        // Parse cloud URL
-        let location = CloudLocation::parse(url)
-            .map_err(|e| Error::Query(QueryError::Execution(format!("Invalid cloud URL: {e}"))))?;
-
-        // Apply options
-        let location = if let Some(ep) = endpoint {
-            location.with_endpoint(ep)
-        } else {
-            location
-        };
-
-        let location = if anonymous {
-            location.with_anonymous(true)
-        } else {
-            location
-        };
-
-        let location = location.with_chunk_size(chunk_size);
-
-        // Create cloud packet source
-        // CloudPacketSource::open handles runtime nesting via run_async
-        let source = CloudPacketSource::open(location)
-            .map_err(|e| Error::Query(QueryError::Execution(format!("Cloud source error: {e}"))))?;
-
-        // Cloud sources use the shared (parallel) parse path.
-        Self::with_streaming_source(Arc::new(source), batch_size).await
-    }
-
-    /// Load packets from a PCAP file into normalized per-protocol Arrow batches.
-    ///
-    /// Returns a HashMap mapping table names to vectors of RecordBatches.
-    /// Uses zero-copy processing via `process_packets()` callback API.
-    fn load_normalized_packets<P: AsRef<Path>>(
-        path: P,
-        registry: &ProtocolRegistry,
-        batch_size: usize,
-        show_progress: bool,
-    ) -> Result<builders::ProtocolBatches, Error> {
-        let mut reader = PcapReader::open(path)?;
-        let link_type = reader.link_type();
-
-        let mut batch_set = builders::NormalizedBatchSet::new(batch_size);
-
-        // Create progress bar if requested
-        let progress = if show_progress {
-            let pb = ProgressBar::new_spinner();
-            pb.set_style(
-                ProgressStyle::with_template(
-                    "{spinner:.green} [{elapsed_precise}] {msg} ({per_sec})",
-                )
-                .unwrap()
-                .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈ "),
-            );
-            pb.set_message("Loading packets...");
-            Some(pb)
-        } else {
-            None
-        };
-
-        let mut packet_count = 0u64;
-
-        // Process packets in batches using zero-copy callback API
-        loop {
-            let processed = reader.process_packets(1000, |packet| {
-                // Parse the packet through all protocol layers
-                let parsed = parse_packet(registry, link_type, packet.data);
-
-                // Add to normalized batch set (routes to appropriate protocol tables)
-                batch_set.add_packet_from_ref(packet, &parsed)?;
-
-                packet_count += 1;
-                Ok(())
-            })?;
-
-            // Update progress bar
-            if let Some(ref pb) = progress {
-                pb.set_message(format!("{packet_count} packets loaded"));
-                pb.tick();
-            }
-
-            // Check for EOF
-            if processed == 0 {
-                break;
-            }
-        }
-
-        // Finish progress bar
-        if let Some(pb) = progress {
-            pb.finish_with_message(format!("{packet_count} packets loaded"));
-        }
-
-        // Finish and return all batches
-        batch_set.finish()
-    }
-
-    /// Extract the timestamp range (min, max) from loaded frame batches.
-    ///
-    /// Returns (start_timestamp_us, end_timestamp_us) for the capture.
-    fn extract_timestamp_range(
-        batches: &HashMap<String, Vec<RecordBatch>>,
-    ) -> Result<(i64, i64), Error> {
-        let frames = batches.get("frames").ok_or_else(|| {
-            Error::Query(QueryError::Execution(
-                "No frames table for timestamp extraction".to_string(),
-            ))
-        })?;
-
-        let mut min_ts = i64::MAX;
-        let mut max_ts = i64::MIN;
-
-        for batch in frames {
-            if let Some(ts_col) = batch.column_by_name("timestamp") {
-                let ts_array = ts_col
-                    .as_any()
-                    .downcast_ref::<TimestampMicrosecondArray>()
-                    .expect("timestamp column should be TimestampMicrosecondArray");
-
-                for i in 0..ts_array.len() {
-                    if !ts_array.is_null(i) {
-                        let ts = ts_array.value(i);
-                        min_ts = min_ts.min(ts);
-                        max_ts = max_ts.max(ts);
-                    }
-                }
-            }
-        }
-
-        // Handle empty capture
-        if min_ts == i64::MAX {
-            Ok((0, 0))
-        } else {
-            Ok((min_ts, max_ts))
-        }
     }
 
     /// Execute a SQL query and return results.
@@ -507,21 +305,16 @@ impl QueryEngine {
 
     /// Number of parse passes performed over the source.
     ///
-    /// For the shared (streaming/parallel) path this is `1` regardless of how
-    /// many protocol tables a query touches — the instrumentation behind #6.
-    /// Returns `0` for the in-memory path (which also parses once, via a
-    /// separate code path).
+    /// Always `1` regardless of how many protocol tables a query touches —
+    /// the instrumentation behind the shared-parse invariant.
     pub fn parse_pass_count(&self) -> usize {
-        self.shared.as_ref().map(|s| s.parse_passes()).unwrap_or(0)
+        self.shared.parse_passes()
     }
 
     /// Number of partitions the shared parse pass used (1 if non-partitioned or
     /// in-memory mode).
     pub fn partition_count(&self) -> usize {
-        self.shared
-            .as_ref()
-            .map(|s| s.num_partitions())
-            .unwrap_or(1)
+        self.shared.num_partitions()
     }
 
     /// Register cross-layer views that JOIN normalized protocol tables.

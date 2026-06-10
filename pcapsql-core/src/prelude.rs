@@ -25,8 +25,7 @@ pub use crate::protocol::{
 
 // I/O types
 pub use crate::io::{
-    FilePacketReader, FilePacketSource, PacketReader, PacketSource, RawPacket, SeekCost,
-    SeekablePacketSource,
+    FilePacketReader, FilePacketSource, PacketReader, PacketSource, SeekCost, SeekablePacketSource,
 };
 
 // Error types

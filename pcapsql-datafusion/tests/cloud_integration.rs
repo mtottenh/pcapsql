@@ -18,13 +18,11 @@
 //! same order as parsing it at 1 partition.
 #![cfg(feature = "s3")]
 
-use std::sync::Arc;
-
 use object_store::{ObjectStore, PutPayload};
 use pcapsql_core::io::{
     CloudLocation, CloudPacketSource, PacketReader, PacketSource, SeekablePacketSource,
 };
-use pcapsql_datafusion::query::QueryEngine;
+use pcapsql_datafusion::query::{CloudSourceOptions, EngineOptions, QueryEngine, SourceSpec};
 use pcapsql_testgen::{legacy_pcap, GenPacket, LegacyVariant};
 
 /// Endpoint of the test object store, or `None` to skip (store unavailable).
@@ -178,18 +176,24 @@ async fn s3_partition_equivalence_engine_level() {
     let key = "equiv/engine_level.pcap";
     upload(&ep, key, big_capture(20_000, 1000)).await;
 
-    let mk = || {
-        CloudPacketSource::open(location(&ep, key))
-            .expect("open cloud source")
-            .with_index_stride(2048)
+    let mk = |partitions: usize| {
+        QueryEngine::open(
+            SourceSpec::Url(format!("s3://{}/{}", bucket(), key)),
+            EngineOptions {
+                batch_size: 4096,
+                target_partitions: Some(partitions),
+                index_stride: Some(2048),
+                cloud: CloudSourceOptions {
+                    endpoint: Some(ep.clone()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
     };
 
-    let e1 = QueryEngine::with_streaming_source_partitions(Arc::new(mk()), 4096, 1)
-        .await
-        .expect("engine n=1");
-    let e4 = QueryEngine::with_streaming_source_partitions(Arc::new(mk()), 4096, 4)
-        .await
-        .expect("engine n=4");
+    let e1 = mk(1).await.expect("engine n=1");
+    let e4 = mk(4).await.expect("engine n=4");
 
     assert_eq!(e1.partition_count(), 1);
     assert!(
@@ -231,10 +235,17 @@ async fn s3_small_object_single_partition() {
     let key = "small/tiny.pcap";
     upload(&ep, key, big_capture(50, 20)).await;
 
-    let engine = QueryEngine::with_streaming_source_partitions(
-        Arc::new(CloudPacketSource::open(location(&ep, key)).expect("open")),
-        1000,
-        4,
+    let engine = QueryEngine::open(
+        SourceSpec::Url(format!("s3://{}/{}", bucket(), key)),
+        EngineOptions {
+            batch_size: 1000,
+            target_partitions: Some(4),
+            cloud: CloudSourceOptions {
+                endpoint: Some(ep.clone()),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
     )
     .await
     .expect("engine");

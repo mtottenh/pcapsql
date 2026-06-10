@@ -1,11 +1,8 @@
 //! End-to-end tests for the shared single-parse-pass engine path (#6) and
 //! 1-vs-N partition equivalence at the SQL layer (#9).
 
-use std::sync::Arc;
-
 use arrow::util::pretty::pretty_format_batches;
-use pcapsql_core::io::MmapPacketSource;
-use pcapsql_datafusion::query::QueryEngine;
+use pcapsql_datafusion::query::{EngineOptions, QueryEngine, SourceSpec};
 use pcapsql_testgen::{legacy_pcap, GenPacket, GeneratedCapture, LegacyVariant};
 use tempfile::TempDir;
 
@@ -56,14 +53,17 @@ fn make_capture(n: usize) -> GeneratedCapture {
 }
 
 async fn engine(path: &std::path::Path, partitions: usize) -> QueryEngine {
-    let source = Arc::new(
-        MmapPacketSource::open(path)
-            .expect("open mmap")
-            .with_index_stride(4),
-    );
-    QueryEngine::with_streaming_source_partitions(source, 1000, partitions)
-        .await
-        .expect("build engine")
+    QueryEngine::open(
+        SourceSpec::Path(path.to_path_buf()),
+        EngineOptions {
+            batch_size: 1000,
+            target_partitions: Some(partitions),
+            index_stride: Some(4),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("build engine")
 }
 
 async fn run(engine: &QueryEngine, sql: &str) -> String {
@@ -134,7 +134,14 @@ async fn empty_capture_is_rejected() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("empty.pcap");
     std::fs::write(&path, gc.bytes).unwrap();
-    let source = Arc::new(MmapPacketSource::open(&path).unwrap());
-    let result = QueryEngine::with_streaming_source_partitions(source, 1000, 4).await;
+    let result = QueryEngine::open(
+        SourceSpec::Path(path.clone()),
+        EngineOptions {
+            batch_size: 1000,
+            target_partitions: Some(4),
+            ..Default::default()
+        },
+    )
+    .await;
     assert!(result.is_err(), "empty capture should be rejected");
 }
