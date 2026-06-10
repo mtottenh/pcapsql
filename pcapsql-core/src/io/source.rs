@@ -19,8 +19,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
-use bytes::Bytes;
-
 use crate::error::{Error, PcapError};
 use crate::io::decompress::{decompress_header, Compression, DecompressReader};
 use crate::io::index::{self, BoundaryIndex};
@@ -110,68 +108,6 @@ pub struct PacketSourceMetadata {
     pub size_bytes: Option<u64>,
     /// Total packet count (if known, e.g., from an index)
     pub packet_count: Option<u64>,
-}
-
-/// Raw packet data from a reader (owning / copying variant).
-#[derive(Clone, Debug)]
-pub struct RawPacket {
-    /// Frame number (1-indexed)
-    pub frame_number: u64,
-    /// Timestamp in nanoseconds since Unix epoch
-    pub timestamp_ns: i64,
-    /// Captured length (may be less than original)
-    pub captured_length: u32,
-    /// Original packet length on the wire
-    pub original_length: u32,
-    /// Link layer type (e.g., 1 = Ethernet)
-    pub link_type: u16,
-    /// Packet data (potentially zero-copy with Bytes)
-    pub data: Bytes,
-}
-
-impl RawPacket {
-    /// Create a new raw packet from owned data.
-    pub fn new(
-        frame_number: u64,
-        timestamp_ns: i64,
-        captured_length: u32,
-        original_length: u32,
-        link_type: u16,
-        data: Vec<u8>,
-    ) -> Self {
-        Self {
-            frame_number,
-            timestamp_ns,
-            captured_length,
-            original_length,
-            link_type,
-            data: Bytes::from(data),
-        }
-    }
-
-    /// Create a new raw packet from Bytes (zero-copy if already Bytes).
-    pub fn from_bytes(
-        frame_number: u64,
-        timestamp_ns: i64,
-        captured_length: u32,
-        original_length: u32,
-        link_type: u16,
-        data: Bytes,
-    ) -> Self {
-        Self {
-            frame_number,
-            timestamp_ns,
-            captured_length,
-            original_length,
-            link_type,
-            data,
-        }
-    }
-
-    /// Check if the packet was truncated during capture.
-    pub fn is_truncated(&self) -> bool {
-        self.captured_length < self.original_length
-    }
 }
 
 /// A source that can be read sequentially from the beginning.

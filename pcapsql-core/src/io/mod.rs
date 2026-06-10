@@ -37,7 +37,7 @@ pub use mmap::{MmapPacketReader, MmapPacketSource};
 pub use pcap_stream::{GenericPcapReader, InterfaceInfo, InterfaceState, PcapFormat};
 pub use source::{
     FilePacketReader, FilePacketSource, PacketPosition, PacketRange, PacketReader, PacketRef,
-    PacketSource, PacketSourceMetadata, RawPacket, SeekCost, SeekablePacketSource,
+    PacketSource, PacketSourceMetadata, SeekCost, SeekablePacketSource,
 };
 
 #[cfg(feature = "cloud")]

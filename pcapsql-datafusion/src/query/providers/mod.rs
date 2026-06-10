@@ -24,7 +24,7 @@ mod shared;
 
 pub use protocol_provider::ProtocolTableProvider;
 pub use scan_exec::ProtocolScanExec;
-pub use shared::{auto_target_partitions, run_shared_parse, SharedParseState};
+pub use shared::{auto_target_partitions, run_shared_parse, ProgressFn, SharedParseState};
 
 use std::sync::Arc;
 

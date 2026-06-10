@@ -140,20 +140,12 @@ pub struct Args {
     #[arg(long = "progress")]
     pub progress: bool,
 
-    /// Parse via the seekable-source path (parallel parse across partitions).
+    /// Disable memory-mapped I/O and use buffered file reads instead.
     ///
-    /// The capture is parsed once, in parallel across partitions, into
-    /// in-memory Arrow tables before queries run. Memory use is proportional
-    /// to the parsed capture, the same as the default path.
-    #[arg(long = "streaming")]
-    pub streaming: bool,
-
-    /// Use memory-mapped I/O for reading PCAP files.
-    ///
-    /// Can improve performance for large files by letting the OS handle
-    /// caching and paging. Not supported for compressed files.
-    #[arg(long = "mmap")]
-    pub mmap: bool,
+    /// Local files are memory-mapped by default (with automatic fallback to
+    /// buffered reads when mmap is unavailable, e.g. compressed captures).
+    #[arg(long = "no-mmap")]
+    pub no_mmap: bool,
 
     /// Path to SSLKEYLOGFILE for TLS decryption.
     ///
@@ -252,8 +244,7 @@ mod tests {
         let args = Args::try_parse_from(["pcapsql", "test.pcap"]).unwrap();
 
         assert!(args.keylog.is_none());
-        assert!(!args.streaming);
-        assert!(!args.mmap);
+        assert!(!args.no_mmap);
         assert!(!args.show_stats);
     }
 
