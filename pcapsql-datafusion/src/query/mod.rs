@@ -24,7 +24,6 @@ pub mod arrow_schema;
 pub mod bpf;
 pub mod builders;
 mod filter;
-mod frames;
 mod provider;
 pub mod providers;
 pub mod stream_tables;
@@ -35,7 +34,6 @@ pub mod views;
 pub use arrow_schema::{descriptors_to_arrow_schema, protocol_to_arrow_schema, to_arrow_field};
 pub use builders::NormalizedBatchSet;
 pub use filter::FilterEvaluator;
-pub use frames::{frames_schema, FramesBatchBuilder};
 pub use provider::PcapTableProvider;
 pub use providers::{ProtocolScanExec, ProtocolTableProvider, SharedParseState};
 
@@ -51,8 +49,8 @@ use indicatif::{ProgressBar, ProgressStyle};
 use crate::error::{Error, QueryError};
 use crate::query::providers::run_shared_parse;
 use pcapsql_core::{
-    default_registry, parse_packet, FilePacketSource, KeyLog, MmapPacketSource, PcapReader,
-    ProtocolRegistry, SeekablePacketSource,
+    default_registry, parse_packet, FilePacketSource, KeyLog, PcapReader, ProtocolRegistry,
+    SeekablePacketSource,
 };
 
 #[cfg(feature = "cloud")]
@@ -66,10 +64,6 @@ fn default_target_partitions() -> usize {
         .unwrap_or(4)
         .clamp(1, 16)
 }
-
-/// File size threshold for automatic streaming mode selection.
-/// Files >= 100MB use streaming mode.
-const STREAMING_THRESHOLD_BYTES: u64 = 100 * 1024 * 1024;
 
 /// Configure DataFusion for SortMergeJoin on frame_number-sorted streams.
 fn create_session_context() -> SessionContext {
@@ -244,21 +238,13 @@ impl QueryEngine {
         })
     }
 
-    /// Create a QueryEngine in streaming mode for large files.
+    /// Create a QueryEngine over a [`FilePacketSource`] via the shared parse.
     ///
-    /// In streaming mode, packets are read on-demand as DataFusion pulls batches,
-    /// rather than loading the entire file into memory upfront. This allows
-    /// querying very large PCAP files (10GB+) with bounded memory usage.
-    ///
-    /// Each protocol table gets its own streaming provider that reads
-    /// the PCAP file independently. JOINs work via sort-merge since
-    /// all tables emit rows sorted by frame_number.
-    ///
-    /// # Type Parameters
-    ///
-    /// This method is generic over the packet source, but defaults to
-    /// `FilePacketSource`. Future backends (mmap, S3) can use
-    /// `with_streaming_source()` directly.
+    /// The capture is parsed exactly once — in parallel across partitions for
+    /// seekable sources — into in-memory Arrow tables, then every query runs
+    /// over the shared result. Memory use is proportional to the parsed
+    /// capture; see `docs/query-scoped-parse-migration.md` for the plan to
+    /// make this query-scoped and bounded.
     pub async fn with_streaming<P: AsRef<Path>>(path: P, batch_size: usize) -> Result<Self, Error> {
         let source = FilePacketSource::open(path)?;
         Self::with_streaming_source(Arc::new(source), batch_size).await
@@ -384,44 +370,6 @@ impl QueryEngine {
 
         // Cloud sources use the shared (parallel) parse path.
         Self::with_streaming_source(Arc::new(source), batch_size).await
-    }
-
-    /// Create a QueryEngine with automatic mode selection.
-    ///
-    /// Mode is selected based on file size:
-    /// - Files < 100MB: In-memory mode (fastest for small files)
-    /// - Files >= 100MB: Shared parallel parse over a seekable source
-    ///
-    /// Use `new()` or `with_streaming()` to force a specific mode.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - Path to the PCAP file
-    /// * `batch_size` - Number of packets per RecordBatch
-    /// * `use_mmap` - Use memory-mapped I/O for large files
-    pub async fn auto<P: AsRef<Path>>(
-        path: P,
-        batch_size: usize,
-        use_mmap: bool,
-    ) -> Result<Self, Error> {
-        let file_size = std::fs::metadata(path.as_ref())
-            .map(|m| m.len())
-            .unwrap_or(0);
-
-        if file_size >= STREAMING_THRESHOLD_BYTES {
-            // Large file: shared parallel parse.
-            if use_mmap {
-                if let Ok(source) = MmapPacketSource::open(&path) {
-                    return Self::with_streaming_source(Arc::new(source), batch_size).await;
-                }
-                // Fall back to file source if mmap fails.
-            }
-            let source = Arc::new(FilePacketSource::open(&path)?);
-            Self::with_streaming_source(source, batch_size).await
-        } else {
-            // Small file: use in-memory mode.
-            Self::with_progress(path, batch_size, false).await
-        }
     }
 
     /// Load packets from a PCAP file into normalized per-protocol Arrow batches.
