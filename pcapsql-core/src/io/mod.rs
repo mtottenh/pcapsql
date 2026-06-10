@@ -39,7 +39,7 @@ pub use decompress::{decompress_header, Compression, DecompressReader, FileDecod
 pub use decompress::{AnyDecoder, MmapSlice};
 #[cfg(feature = "mmap")]
 pub use mmap::{MmapPacketReader, MmapPacketSource};
-pub use pcap_stream::{GenericPcapReader, PcapFormat};
+pub use pcap_stream::{GenericPcapReader, InterfaceInfo, InterfaceState, PcapFormat};
 pub use source::{
     FilePacketReader, FilePacketSource, PacketPosition, PacketRange, PacketReader, PacketRef,
     PacketSource, PacketSourceMetadata, RawPacket,

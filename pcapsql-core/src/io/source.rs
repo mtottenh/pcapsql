@@ -26,8 +26,8 @@ use crate::pcap::PcapReader;
 pub struct PacketRef<'a> {
     /// Frame number (1-indexed, matching Wireshark)
     pub frame_number: u64,
-    /// Timestamp in microseconds since Unix epoch
-    pub timestamp_us: i64,
+    /// Timestamp in nanoseconds since Unix epoch
+    pub timestamp_ns: i64,
     /// Captured length (may be less than original)
     pub captured_len: u32,
     /// Original packet length on the wire
@@ -111,8 +111,8 @@ pub struct PacketSourceMetadata {
 pub struct RawPacket {
     /// Frame number (1-indexed)
     pub frame_number: u64,
-    /// Timestamp in microseconds since Unix epoch
-    pub timestamp_us: i64,
+    /// Timestamp in nanoseconds since Unix epoch
+    pub timestamp_ns: i64,
     /// Captured length (may be less than original)
     pub captured_length: u32,
     /// Original packet length on the wire
@@ -127,7 +127,7 @@ impl RawPacket {
     /// Create a new raw packet from owned data.
     pub fn new(
         frame_number: u64,
-        timestamp_us: i64,
+        timestamp_ns: i64,
         captured_length: u32,
         original_length: u32,
         link_type: u16,
@@ -135,7 +135,7 @@ impl RawPacket {
     ) -> Self {
         Self {
             frame_number,
-            timestamp_us,
+            timestamp_ns,
             captured_length,
             original_length,
             link_type,
@@ -146,7 +146,7 @@ impl RawPacket {
     /// Create a new raw packet from Bytes (zero-copy if already Bytes).
     pub fn from_bytes(
         frame_number: u64,
-        timestamp_us: i64,
+        timestamp_ns: i64,
         captured_length: u32,
         original_length: u32,
         link_type: u16,
@@ -154,7 +154,7 @@ impl RawPacket {
     ) -> Self {
         Self {
             frame_number,
-            timestamp_us,
+            timestamp_ns,
             captured_length,
             original_length,
             link_type,

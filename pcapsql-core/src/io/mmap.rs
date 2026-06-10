@@ -510,7 +510,7 @@ mod tests {
                 assert_eq!(packet.frame_number, 1);
 
                 // Timestamp should be positive (after Unix epoch)
-                assert!(packet.timestamp_us > 0);
+                assert!(packet.timestamp_ns > 0);
                 Ok(())
             })
             .unwrap();
@@ -568,19 +568,19 @@ mod tests {
             let processed = reader
                 .process_packets(100, |packet| {
                     // Timestamps should be non-negative
-                    assert!(packet.timestamp_us >= 0);
+                    assert!(packet.timestamp_ns >= 0);
 
                     // Timestamps should generally not go backwards (within reason)
                     // Allow small backward jumps for clock drift
                     if prev_timestamp > 0 {
-                        let diff = packet.timestamp_us - prev_timestamp;
+                        let diff = packet.timestamp_ns - prev_timestamp;
                         assert!(
-                            diff >= -1_000_000, // Allow up to 1 second backward
-                            "Timestamp went backwards by {} us",
+                            diff >= -1_000_000_000, // Allow up to 1 second backward
+                            "Timestamp went backwards by {} ns",
                             diff.abs()
                         );
                     }
-                    prev_timestamp = packet.timestamp_us;
+                    prev_timestamp = packet.timestamp_ns;
                     Ok(())
                 })
                 .unwrap();

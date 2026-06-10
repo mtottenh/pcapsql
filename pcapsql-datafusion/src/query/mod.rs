@@ -328,7 +328,7 @@ impl QueryEngine {
             let mut reader = source.reader(None)?;
             let mut first_ts = 0i64;
             reader.process_packets(1, |packet| {
-                first_ts = packet.timestamp_us;
+                first_ts = packet.timestamp_ns / 1_000;
                 Ok(())
             })?;
             first_ts
@@ -345,7 +345,7 @@ impl QueryEngine {
             loop {
                 let count = reader
                     .process_packets(1000, |packet| {
-                        last_ts = packet.timestamp_us;
+                        last_ts = packet.timestamp_ns / 1_000;
                         Ok(())
                     })
                     .unwrap_or(0);
