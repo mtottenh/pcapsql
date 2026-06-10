@@ -802,6 +802,13 @@ impl SeekablePacketSource for CloudPacketSource {
         let idx = self.ensure_index()?;
         Ok(idx.partition_ranges(max))
     }
+
+    fn frame_count(&self) -> Option<u64> {
+        if self.compression.is_compressed() {
+            return None;
+        }
+        self.ensure_index().ok().map(|idx| idx.packet_count)
+    }
 }
 
 /// The concrete `Read` stack for cloud readers: an optional synthesized header

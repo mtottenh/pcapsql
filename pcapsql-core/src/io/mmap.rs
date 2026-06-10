@@ -287,6 +287,10 @@ impl SeekablePacketSource for MmapPacketSource {
         let idx = self.ensure_index()?;
         Ok(idx.partition_ranges(max))
     }
+
+    fn frame_count(&self) -> Option<u64> {
+        self.ensure_index().ok().map(|idx| idx.packet_count)
+    }
 }
 
 /// Memory-mapped packet reader.

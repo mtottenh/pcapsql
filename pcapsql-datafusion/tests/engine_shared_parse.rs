@@ -185,7 +185,13 @@ async fn scoped_parse_builds_only_referenced_tables() {
     );
 
     // RetentionPolicy::None retains nothing: the next query re-parses.
-    let _ = run(&engine, "SELECT count(*) AS c FROM frames").await;
+    // (Use a udp query, not a bare frames count — the latter is answered from
+    // the index without parsing.)
+    let _ = run(
+        &engine,
+        "SELECT src_port FROM udp ORDER BY src_port LIMIT 1",
+    )
+    .await;
     assert_eq!(engine.last_parse_stats().parse_passes, 1);
 }
 
@@ -209,6 +215,35 @@ async fn empty_capture_yields_zero_rows() {
     .expect("empty capture opens");
     let out = run(&engine, "SELECT count(*) AS c FROM frames").await;
     assert!(out.contains("0"), "expected zero frames:\n{out}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn count_frames_uses_index_fast_path() {
+    // A pure `count(*) FROM frames` is answered from the boundary index
+    // (header-only scan) without parsing packet payloads.
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("cap.pcap");
+    std::fs::write(&path, make_capture(123).bytes).unwrap();
+
+    let engine = engine(&path, 2).await;
+    let out = run(&engine, "SELECT count(*) AS c FROM frames").await;
+    assert!(out.contains("123"), "expected 123 frames:\n{out}");
+
+    let stats = engine.last_parse_stats();
+    assert_eq!(
+        stats.packets_scanned, 0,
+        "count(*) FROM frames must not parse packets (index fast path)"
+    );
+    assert_eq!(stats.rows_built.get("frames"), Some(&123));
+
+    // A count WITH a filter needs real data -> not the fast path.
+    let out = run(&engine, "SELECT count(*) AS c FROM frames WHERE length > 0").await;
+    assert!(out.contains("123"), "filtered count:\n{out}");
+    assert!(
+        engine.last_parse_stats().packets_scanned > 0
+            || engine.last_parse_stats().parse_passes == 0,
+        "a filtered count parses (or hits cache), not the bare-count fast path"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -1,6 +1,6 @@
 # Migration plan: query-scoped parsing
 
-**Status:** proposed
+**Status:** P0–P6 implemented (PRs #99–#105). P5/P6 scoped as noted in their sections.
 **Baseline:** stack tip `21c2834` (stage 9, PR #97); all `file:line` references are anchors into that commit and will drift — symbols are authoritative.
 **Relates to:** #88 (epic), closes #83 and #86, preserves the invariants behind #84/#85/#87.
 
@@ -460,10 +460,33 @@ Gate: standard + golden; `payload_heavy` `engine_build`/`query_no_payload`
 peak memory drops by ~capture size; `query_with_payload` regression bounded
 and documented.
 
-### P6 — Zone maps: skip chunks, not just columns
+### P6 — Index-derived statistics (zone-map analysis)
 
-*Goal: selective queries skip whole regions of the capture. The boundary
-index becomes the pcap analogue of Parquet row-group statistics.*
+*Goal: use the boundary index to avoid work selective queries don't need.*
+
+**Delivered:** a pure `count(*) FROM frames` (frames only, no columns, no
+filter, no limit) is answered from the boundary index's `packet_count` — a
+header-only scan, persisted in the sidecar — with **zero packet parsing**.
+`SeekablePacketSource::frame_count()` exposes it (mmap/file/cloud; `None`
+for compressed/non-seekable, which fall back to a parse).
+
+**Analyzed and deferred, with rationale (not shipped, to avoid speculative
+or half-built code):**
+
+- *Timestamp-range chunk skipping* — the index already records per-checkpoint
+  `min_ts`/`max_ts`, so it is viable, but it needs (a) extracting timestamp
+  bounds from the optimized plan and (b) a source/index API to map those to
+  skippable partitions. A scoped follow-up.
+- *Protocol-presence zone maps* — would let `FROM dns` skip regions with no
+  DNS, but the index is a **header-only** scan; recording protocol presence
+  requires partially parsing every packet at index-build time, making index
+  builds materially heavier. Whether that pays off is workload-dependent;
+  per the performance audit's own discipline (don't optimize speculatively)
+  this is deferred until measured.
+- *Sidecar reuse* — already implemented (the sources read/write the sidecar
+  with a length/mtime/header-hash validity guard); no work needed.
+
+Original plan (superseded by the above):
 
 Changes:
 - `Checkpoint` (`index.rs:41-52`) gains a protocol-presence set for its
