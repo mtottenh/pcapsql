@@ -133,8 +133,7 @@ pub use datetime::{
 
 // Re-export time UDFs
 pub use time::{
-    create_end_time_udf_eager, create_end_time_udf_lazy, create_relative_time_udf,
-    create_start_time_udf,
+    create_end_time_udf, create_relative_time_udf, create_start_time_udf, CaptureTimeRange,
 };
 
 // Re-export histogram UDAFs and UDFs
@@ -269,7 +268,7 @@ pub fn register_histogram_udfs(ctx: &SessionContext) -> Result<(), Error> {
 /// datetime, and histogram UDFs.
 ///
 /// Note: Time UDFs are NOT included here because they require capture metadata.
-/// Use `register_time_udfs_eager()` or `register_time_udfs_lazy()` separately.
+/// Use `register_time_udfs()` separately (it needs the capture time range).
 pub fn register_all_udfs(ctx: &SessionContext) -> Result<(), Error> {
     register_network_udfs(ctx)?;
     register_protocol_udfs(ctx)?;
@@ -279,49 +278,18 @@ pub fn register_all_udfs(ctx: &SessionContext) -> Result<(), Error> {
     Ok(())
 }
 
-/// Register time UDFs with known timestamps (eager mode).
+/// Register the time UDFs bound to a shared [`CaptureTimeRange`].
 ///
-/// Used in in-memory mode where all packets have been loaded and
-/// timestamps are already extracted from the frames table.
-///
-/// # Arguments
-///
-/// * `ctx` - DataFusion session context
-/// * `start_us` - Capture start timestamp (microseconds since epoch)
-/// * `end_us` - Capture end timestamp (microseconds since epoch)
-pub fn register_time_udfs_eager(
+/// The engine widens the range as parse passes observe packets; the UDFs
+/// read it at invocation time, so values are correct for any query whose
+/// execution follows a parse.
+pub fn register_time_udfs(
     ctx: &SessionContext,
-    start_us: i64,
-    end_us: i64,
+    range: std::sync::Arc<CaptureTimeRange>,
 ) -> Result<(), Error> {
-    ctx.register_udf(create_start_time_udf(start_us));
-    ctx.register_udf(create_end_time_udf_eager(end_us));
-    ctx.register_udf(create_relative_time_udf(start_us));
-    Ok(())
-}
-
-/// Register time UDFs with lazy end_time evaluation (streaming mode).
-///
-/// Used in streaming mode where we don't want to scan the entire file
-/// upfront. The `end_time()` function will scan the file on first call
-/// and cache the result.
-///
-/// # Arguments
-///
-/// * `ctx` - DataFusion session context
-/// * `start_us` - Capture start timestamp (microseconds since epoch)
-/// * `end_scan_fn` - Closure that scans for the last packet timestamp
-pub fn register_time_udfs_lazy<F>(
-    ctx: &SessionContext,
-    start_us: i64,
-    end_scan_fn: F,
-) -> Result<(), Error>
-where
-    F: Fn() -> i64 + Send + Sync + 'static,
-{
-    ctx.register_udf(create_start_time_udf(start_us));
-    ctx.register_udf(create_end_time_udf_lazy(end_scan_fn));
-    ctx.register_udf(create_relative_time_udf(start_us));
+    ctx.register_udf(create_start_time_udf(range.clone()));
+    ctx.register_udf(create_end_time_udf(range.clone()));
+    ctx.register_udf(create_relative_time_udf(range));
     Ok(())
 }
 
@@ -360,18 +328,10 @@ mod tests {
     }
 
     #[test]
-    fn test_register_time_udfs_eager() {
+    fn test_register_time_udfs() {
         let ctx = SessionContext::new();
-        let start_us: i64 = 1_704_067_200_000_000;
-        let end_us: i64 = 1_704_153_600_000_000;
-        register_time_udfs_eager(&ctx, start_us, end_us).unwrap();
-    }
-
-    #[test]
-    fn test_register_time_udfs_lazy() {
-        let ctx = SessionContext::new();
-        let start_us: i64 = 1_704_067_200_000_000;
-        let end_us: i64 = 1_704_153_600_000_000;
-        register_time_udfs_lazy(&ctx, start_us, move || end_us).unwrap();
+        let range = std::sync::Arc::new(CaptureTimeRange::new());
+        range.record(1_000_000, 2_000_000);
+        register_time_udfs(&ctx, range).unwrap();
     }
 }

@@ -195,20 +195,22 @@ async fn s3_partition_equivalence_engine_level() {
     let e1 = mk(1).await.expect("engine n=1");
     let e4 = mk(4).await.expect("engine n=4");
 
-    assert_eq!(e1.partition_count(), 1);
-    assert!(
-        e4.partition_count() > 1,
-        "cloud object should be parsed in multiple partitions, got {}",
-        e4.partition_count()
-    );
-
-    // One parse pass for a multi-table query.
+    // One parse pass for a multi-table query, split across partitions.
     let _ = run(
         &e4,
         "SELECT f.frame_number, u.dst_port FROM frames f JOIN udp u USING (frame_number)",
     )
     .await;
-    assert_eq!(e4.parse_pass_count(), 1);
+    let stats = e4.last_parse_stats();
+    assert_eq!(stats.parse_passes, 1);
+    assert!(
+        stats.partitions > 1,
+        "cloud object should be parsed in multiple partitions, got {}",
+        stats.partitions
+    );
+
+    let _ = run(&e1, "SELECT count(*) AS c FROM frames").await;
+    assert_eq!(e1.last_parse_stats().partitions, 1);
 
     for sql in [
         "SELECT count(*) AS c FROM frames",
@@ -251,7 +253,7 @@ async fn s3_small_object_single_partition() {
     .expect("engine");
 
     // Below the RangeRequest size gate -> single partition.
-    assert_eq!(engine.partition_count(), 1);
     let frames = run(&engine, "SELECT count(*) AS c FROM frames").await;
     assert!(frames.contains("50"), "expected 50 frames:\n{frames}");
+    assert_eq!(engine.last_parse_stats().partitions, 1);
 }

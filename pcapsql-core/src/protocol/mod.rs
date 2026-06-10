@@ -19,7 +19,7 @@
 //! ## Example
 //!
 //! ```rust
-//! use pcapsql_core::protocol::{default_registry, parse_packet};
+//! use pcapsql_core::protocol::{default_registry, parse_packet, ParseScope};
 //!
 //! let registry = default_registry();
 //! // Ethernet frame with IP/TCP
@@ -31,7 +31,7 @@
 //!     // Minimal IPv4 header would follow...
 //! ];
 //!
-//! let results = parse_packet(&registry, 1, packet_data); // 1 = Ethernet
+//! let results = parse_packet(&registry, 1, packet_data, &ParseScope::full());
 //! for (name, result) in results {
 //!     let field_names: Vec<_> = result.fields.iter().map(|(k, _)| *k).collect();
 //!     println!("Parsed {}: {:?}", name, field_names);
@@ -178,332 +178,119 @@ pub fn default_registry() -> ProtocolRegistry {
 
 use std::collections::{HashMap, HashSet};
 
-/// Parse a packet through all protocol layers.
+/// What a parse pass should extract: which protocols to run and which
+/// fields to materialize per protocol.
 ///
-/// For tunneled traffic, this function tracks encapsulation depth and tunnel context.
-/// Each ParseResult includes encap_depth, tunnel_type, and tunnel_id fields that indicate
-/// whether the protocol was parsed inside a tunnel and which tunnel it was in.
+/// Built once per query (or [`ParseScope::full`] for unscoped parsing) and
+/// passed to [`parse_packet`] for every packet. Pruning stops the protocol
+/// walk as soon as everything required has been seen; projection limits the
+/// fields individual parsers extract.
+#[derive(Clone, Debug, Default)]
+pub struct ParseScope {
+    /// Protocols to parse, including their dependency closure. `None` parses
+    /// every matching protocol.
+    required: Option<HashSet<String>>,
+    /// Per-protocol field projections. Protocols absent from the map are
+    /// parsed with all fields.
+    projections: HashMap<String, HashSet<String>>,
+}
+
+impl ParseScope {
+    /// Parse every protocol with every field (the unscoped default).
+    pub fn full() -> Self {
+        Self::default()
+    }
+
+    /// Parse only the given tables' protocols plus their dependency closure
+    /// (via [`compute_required_protocols`]). Unknown table names (pseudo
+    /// tables such as `frames`) are tolerated: they require no parsing.
+    pub fn for_tables(queried_tables: &[&str], registry: &ProtocolRegistry) -> Self {
+        Self {
+            required: Some(compute_required_protocols(queried_tables, registry)),
+            projections: HashMap::new(),
+        }
+    }
+
+    /// Restrict the fields extracted for one protocol.
+    pub fn with_projection(mut self, protocol: impl Into<String>, fields: HashSet<String>) -> Self {
+        self.projections.insert(protocol.into(), fields);
+        self
+    }
+
+    /// True when nothing is pruned or projected.
+    pub fn is_full(&self) -> bool {
+        self.required.is_none() && self.projections.is_empty()
+    }
+}
+
+/// Parse a packet through its protocol layers, scoped by `scope`.
+///
+/// With [`ParseScope::full`] every matching protocol is parsed with all
+/// fields. A scoped parse prunes the protocol walk (stopping once all
+/// required protocols have been seen, and never descending into branches
+/// that cannot reach one) and projects fields within parsers that support
+/// it. Intermediate layers on the path to a required protocol are still
+/// returned — they may be needed for joins.
+///
+/// For tunneled traffic, encapsulation depth and tunnel context are tracked;
+/// each ParseResult carries encap_depth, tunnel_type, and tunnel_id.
 pub fn parse_packet<'a>(
     registry: &ProtocolRegistry,
     link_type: u16,
     data: &'a [u8],
+    scope: &ParseScope,
 ) -> Vec<(&'static str, ParseResult<'a>)> {
-    // Typical packet has 3-4 protocol layers (Eth/IP/TCP/App)
-    // Tunneled packets may have more (up to 8 layers for complex encapsulation)
+    // Typical packet has 3-4 protocol layers (Eth/IP/TCP/App);
+    // tunneled packets may have more (up to ~8 for deep encapsulation).
     let mut results = Vec::with_capacity(8);
+    let mut parsed_protocols: Vec<&str> = Vec::new();
     let mut context = ParseContext::new(link_type);
     let mut remaining = data;
 
     while !remaining.is_empty() {
-        if let Some(parser) = registry.find_parser(&context) {
-            let mut result = parser.parse(remaining, &context);
-
-            // Set encapsulation context on the result BEFORE updating context
-            // This captures the encap state when this protocol was parsed
-            result.set_encap_context(&context);
-
-            // Check if this protocol's child hints indicate a tunnel boundary
-            // If so, update context for the next layer (inner protocols)
-            if let Some(tunnel_type_val) = result.hint("tunnel_type") {
-                let tunnel_id = result.hint("tunnel_id");
-                context.push_tunnel(TunnelType::from_u64(tunnel_type_val), tunnel_id);
-            }
-
-            // Update context for next layer
-            context.parent_protocol = Some(parser.name());
-            context.hints = result.child_hints.clone();
-            context.offset += remaining.len() - result.remaining.len();
-
-            let should_stop = result.error.is_some();
-            remaining = result.remaining;
-
-            results.push((parser.name(), result));
-
-            if should_stop {
+        if let Some(required) = &scope.required {
+            // Stop once every required protocol has been parsed.
+            if !should_continue_parsing(&parsed_protocols, required) {
                 break;
             }
-        } else {
-            break;
-        }
-    }
-
-    results
-}
-
-/// Parse a packet with protocol pruning.
-///
-/// Only parses protocols in the `required` set and their dependencies.
-/// This can significantly reduce CPU usage for selective queries.
-///
-/// # Arguments
-///
-/// * `registry` - Protocol registry containing parser definitions
-/// * `link_type` - Link layer type (e.g., 1 for Ethernet)
-/// * `data` - Raw packet bytes
-/// * `required` - Set of protocol names needed for the query
-///
-/// # Returns
-///
-/// Vector of (protocol_name, parse_result) pairs for protocols in the required set.
-/// Protocols parsed but not in the required set (i.e., intermediate layers) are
-/// still included as they may be needed for correct result interpretation.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// use std::collections::HashSet;
-/// use pcapsql_core::protocol::{default_registry, parse_packet_pruned};
-///
-/// let registry = default_registry();
-/// let required: HashSet<String> = ["tcp"].iter().map(|s| s.to_string()).collect();
-///
-/// let results = parse_packet_pruned(&registry, 1, &packet_data, &required);
-/// // Will parse Ethernet, IPv4/IPv6, TCP but skip DNS, HTTP, TLS, etc.
-/// ```
-pub fn parse_packet_pruned<'a>(
-    registry: &ProtocolRegistry,
-    link_type: u16,
-    data: &'a [u8],
-    required: &HashSet<String>,
-) -> Vec<(&'static str, ParseResult<'a>)> {
-    // If no required set or empty, fall back to full parsing
-    if required.is_empty() {
-        return parse_packet(registry, link_type, data);
-    }
-
-    // Typical packet has 3-4 protocol layers
-    let mut results = Vec::with_capacity(4);
-    let mut parsed_protocols: Vec<&str> = Vec::with_capacity(4);
-    let mut context = ParseContext::new(link_type);
-    let mut remaining = data;
-
-    while !remaining.is_empty() {
-        // Check if we have everything we need
-        if !should_continue_parsing(&parsed_protocols, required) {
-            break;
         }
 
-        // Find next parser
-        let parser = match registry.find_parser(&context) {
-            Some(p) => p,
-            None => break,
+        let Some(parser) = registry.find_parser(&context) else {
+            break;
         };
-
         let name = parser.name();
 
-        // Check if we should run this parser
-        if !should_run_parser(name, required, registry) {
-            // Skip this parser - we don't need it or anything it produces
-            break;
+        if let Some(required) = &scope.required {
+            // Never descend into a branch that cannot reach a required
+            // protocol.
+            if !should_run_parser(name, required, registry) {
+                break;
+            }
+            parsed_protocols.push(name);
         }
 
-        // Parse
-        let mut result = parser.parse(remaining, &context);
-        parsed_protocols.push(name);
+        let mut result = if scope.projections.is_empty() {
+            parser.parse(remaining, &context)
+        } else {
+            parser.parse_projected(remaining, &context, scope.projections.get(name))
+        };
 
-        // Set encapsulation context on the result BEFORE updating context
+        // Set encapsulation context on the result BEFORE updating context;
+        // this captures the encap state when this protocol was parsed.
         result.set_encap_context(&context);
 
-        // Check if this protocol's child hints indicate a tunnel boundary
+        // A tunnel boundary updates context for the inner layers.
         if let Some(tunnel_type_val) = result.hint("tunnel_type") {
             let tunnel_id = result.hint("tunnel_id");
             context.push_tunnel(TunnelType::from_u64(tunnel_type_val), tunnel_id);
         }
 
-        // Update context for next layer
+        // Update context for the next layer.
         context.parent_protocol = Some(name);
         context.hints = result.child_hints.clone();
         context.offset += remaining.len() - result.remaining.len();
 
-        let should_stop = result.error.is_some() || result.remaining.is_empty();
-        remaining = result.remaining;
-
-        // Always add to results - we may need intermediate layers for joins
-        results.push((name, result));
-
-        if should_stop {
-            break;
-        }
-    }
-
-    results
-}
-
-/// Parse a packet with field projection.
-///
-/// Uses `parse_projected()` for each protocol, only extracting the fields
-/// in the projection config. This can significantly reduce CPU usage when
-/// queries only need a subset of fields.
-///
-/// # Arguments
-///
-/// * `registry` - Protocol registry containing parser definitions
-/// * `link_type` - Link layer type (e.g., 1 for Ethernet)
-/// * `data` - Raw packet bytes
-/// * `projections` - Per-protocol field projections (protocol name -> field names)
-///
-/// # Returns
-///
-/// Vector of (protocol_name, parse_result) pairs. Parse results only contain
-/// the fields that were requested in the projection config.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// use std::collections::{HashMap, HashSet};
-/// use pcapsql_core::protocol::{default_registry, parse_packet_projected};
-///
-/// let registry = default_registry();
-///
-/// // Only extract ports from TCP
-/// let mut projections = HashMap::new();
-/// projections.insert("tcp", ["src_port", "dst_port"].iter().map(|s| s.to_string()).collect());
-///
-/// let results = parse_packet_projected(&registry, 1, &packet_data, &projections);
-/// ```
-pub fn parse_packet_projected<'a>(
-    registry: &ProtocolRegistry,
-    link_type: u16,
-    data: &'a [u8],
-    projections: &HashMap<String, HashSet<String>>,
-) -> Vec<(&'static str, ParseResult<'a>)> {
-    // If no projections, fall back to full parsing
-    if projections.is_empty() {
-        return parse_packet(registry, link_type, data);
-    }
-
-    // Typical packet has 3-4 protocol layers
-    let mut results = Vec::with_capacity(4);
-    let mut context = ParseContext::new(link_type);
-    let mut remaining = data;
-
-    while !remaining.is_empty() {
-        if let Some(parser) = registry.find_parser(&context) {
-            let name = parser.name();
-
-            // Get projection for this protocol, if any
-            let projection = projections.get(name);
-
-            // Use projected parsing if projection is configured
-            let mut result = parser.parse_projected(remaining, &context, projection);
-
-            // Set encapsulation context on the result BEFORE updating context
-            result.set_encap_context(&context);
-
-            // Check if this protocol's child hints indicate a tunnel boundary
-            if let Some(tunnel_type_val) = result.hint("tunnel_type") {
-                let tunnel_id = result.hint("tunnel_id");
-                context.push_tunnel(TunnelType::from_u64(tunnel_type_val), tunnel_id);
-            }
-
-            // Update context for next layer
-            context.parent_protocol = Some(name);
-            context.hints = result.child_hints.clone();
-            context.offset += remaining.len() - result.remaining.len();
-
-            let should_stop = result.error.is_some();
-            remaining = result.remaining;
-
-            results.push((name, result));
-
-            if should_stop {
-                break;
-            }
-        } else {
-            break;
-        }
-    }
-
-    results
-}
-
-/// Parse a packet with both protocol pruning and field projection.
-///
-/// This combines the benefits of both optimizations:
-/// - Protocol pruning skips parsing protocols not needed for the query
-/// - Field projection only extracts needed fields within parsed protocols
-///
-/// # Arguments
-///
-/// * `registry` - Protocol registry containing parser definitions
-/// * `link_type` - Link layer type (e.g., 1 for Ethernet)
-/// * `data` - Raw packet bytes
-/// * `required` - Set of protocol names needed for the query (for pruning)
-/// * `projections` - Per-protocol field projections
-///
-/// # Returns
-///
-/// Vector of (protocol_name, parse_result) pairs.
-pub fn parse_packet_pruned_projected<'a>(
-    registry: &ProtocolRegistry,
-    link_type: u16,
-    data: &'a [u8],
-    required: &HashSet<String>,
-    projections: &HashMap<String, HashSet<String>>,
-) -> Vec<(&'static str, ParseResult<'a>)> {
-    // If no pruning or projection, fall back to full parsing
-    if required.is_empty() && projections.is_empty() {
-        return parse_packet(registry, link_type, data);
-    }
-
-    // If only pruning, use pruned parsing
-    if projections.is_empty() {
-        return parse_packet_pruned(registry, link_type, data, required);
-    }
-
-    // If only projection, use projected parsing
-    if required.is_empty() {
-        return parse_packet_projected(registry, link_type, data, projections);
-    }
-
-    // Combined pruning and projection
-    // Typical packet has 3-4 protocol layers
-    let mut results = Vec::with_capacity(4);
-    let mut parsed_protocols: Vec<&str> = Vec::with_capacity(4);
-    let mut context = ParseContext::new(link_type);
-    let mut remaining = data;
-
-    while !remaining.is_empty() {
-        // Check if we have everything we need (pruning)
-        if !should_continue_parsing(&parsed_protocols, required) {
-            break;
-        }
-
-        // Find next parser
-        let parser = match registry.find_parser(&context) {
-            Some(p) => p,
-            None => break,
-        };
-
-        let name = parser.name();
-
-        // Check if we should run this parser (pruning)
-        if !should_run_parser(name, required, registry) {
-            break;
-        }
-
-        // Get projection for this protocol, if any
-        let projection = projections.get(name);
-
-        // Parse with projection
-        let mut result = parser.parse_projected(remaining, &context, projection);
-        parsed_protocols.push(name);
-
-        // Set encapsulation context on the result BEFORE updating context
-        result.set_encap_context(&context);
-
-        // Check if this protocol's child hints indicate a tunnel boundary
-        if let Some(tunnel_type_val) = result.hint("tunnel_type") {
-            let tunnel_id = result.hint("tunnel_id");
-            context.push_tunnel(TunnelType::from_u64(tunnel_type_val), tunnel_id);
-        }
-
-        // Update context for next layer
-        context.parent_protocol = Some(name);
-        context.hints = result.child_hints.clone();
-        context.offset += remaining.len() - result.remaining.len();
-
-        let should_stop = result.error.is_some() || result.remaining.is_empty();
+        let should_stop = result.error.is_some();
         remaining = result.remaining;
 
         results.push((name, result));

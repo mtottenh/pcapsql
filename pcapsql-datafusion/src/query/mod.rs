@@ -32,17 +32,24 @@ pub mod views;
 pub use arrow_schema::{descriptors_to_arrow_schema, protocol_to_arrow_schema, to_arrow_field};
 pub use builders::NormalizedBatchSet;
 pub use filter::FilterEvaluator;
-pub use providers::{ProgressFn, ProtocolScanExec, ProtocolTableProvider, SharedParseState};
+pub use providers::{
+    ParseStats, ParseSubscription, ProgressFn, ProtocolScanExec, ProtocolTableProvider,
+    TableSubscription,
+};
+pub use udf::CaptureTimeRange;
 
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use arrow::array::RecordBatch;
+use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::config::ConfigOptions;
+use datafusion::logical_expr::{Expr, LogicalPlan};
 use datafusion::prelude::*;
 
 use crate::error::{Error, QueryError};
-use crate::query::providers::run_shared_parse;
+use crate::query::providers::{run_shared_parse, EngineTables, SharedParseState, TableData};
 use pcapsql_core::{
     default_registry, FilePacketSource, KeyLog, MmapPacketSource, ProtocolRegistry,
     SeekablePacketSource,
@@ -61,11 +68,12 @@ fn default_target_partitions() -> usize {
 }
 
 /// Configure DataFusion for SortMergeJoin on frame_number-sorted streams.
-fn create_session_context() -> SessionContext {
+fn create_session_context(target_partitions: usize) -> SessionContext {
     let mut config = ConfigOptions::default();
 
-    // SortMergeJoin requires target_partitions > 1
-    config.execution.target_partitions = 2;
+    // SortMergeJoin requires target_partitions > 1; otherwise scale with the
+    // parse parallelism so execution is not throttled below it.
+    config.execution.target_partitions = target_partitions.max(2);
     // Use our declared sort order (by frame_number)
     config.optimizer.prefer_existing_sort = true;
     // Prefer SortMergeJoin - works better with our sorted streams
@@ -95,11 +103,27 @@ pub struct CloudSourceOptions {
     pub chunk_size: Option<usize>,
 }
 
+/// What the engine retains between queries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RetentionPolicy {
+    /// Retain nothing: each query parses exactly what it needs (columns,
+    /// parse-time predicates, row caps) and the result is dropped after
+    /// execution. The right policy for one-shot queries.
+    None,
+    /// Cache each touched table (full columns, unfiltered) on first use, so
+    /// later queries over the same tables parse nothing. The right policy
+    /// for the REPL. Caching full columns keeps reuse sound for any later
+    /// query shape.
+    CacheOnTouch,
+}
+
 /// Construction options for [`QueryEngine::open`].
 #[derive(Clone)]
 pub struct EngineOptions {
     /// Packets per RecordBatch.
     pub batch_size: usize,
+    /// What to retain between queries (see [`RetentionPolicy`]).
+    pub retention: RetentionPolicy,
     /// Partition count for the parallel parse pass
     /// (`None` = available parallelism, clamped to 1..=16).
     pub target_partitions: Option<usize>,
@@ -120,6 +144,7 @@ impl Default for EngineOptions {
     fn default() -> Self {
         Self {
             batch_size: 10_000,
+            retention: RetentionPolicy::CacheOnTouch,
             target_partitions: None,
             keylog: None,
             mmap: true,
@@ -133,20 +158,89 @@ impl Default for EngineOptions {
 /// Query engine for PCAP files.
 pub struct QueryEngine {
     ctx: SessionContext,
-    registry: ProtocolRegistry,
-    /// Result of the single shared parse pass every table serves from.
-    shared: Arc<SharedParseState>,
+    registry: Arc<ProtocolRegistry>,
+    /// Tables materialized for the current query (or cached, per retention).
+    tables: Arc<EngineTables>,
+    /// Capture time range, widened by every parse pass (drives time UDFs).
+    time_range: Arc<CaptureTimeRange>,
+    retention: RetentionPolicy,
+    /// Runs one scoped parse pass over the engine's source.
+    parse_fn: ParseFn,
+    /// Instrumentation for the most recent query.
+    last_stats: RwLock<ParseStats>,
+    /// Table names this engine registered (the harvest universe).
+    known_tables: HashSet<String>,
+}
+
+/// Type-erased scoped parse over the engine's source.
+type ParseFn = Box<dyn Fn(&ParseSubscription) -> Result<SharedParseState, Error> + Send + Sync>;
+
+/// What one query needs from one table, harvested from its optimized plan.
+#[derive(Debug, Default)]
+struct TableNeeds {
+    /// Referenced columns (`None` = all, e.g. `SELECT *`).
+    columns: Option<HashSet<String>>,
+    /// Filters pushed into the scan (`Inexact`; DataFusion re-checks).
+    filters: Vec<Expr>,
+    /// Pushed-down LIMIT.
+    fetch: Option<usize>,
+    /// Number of scans of this table in the plan (self-joins disable
+    /// per-scan scoping so one materialization can serve every scan).
+    scan_count: usize,
+}
+
+/// Walk an optimized plan and collect per-table needs for our tables.
+fn harvest_table_needs(
+    plan: &LogicalPlan,
+    known_tables: &HashSet<String>,
+) -> Result<HashMap<String, TableNeeds>, Error> {
+    let mut needs: HashMap<String, TableNeeds> = HashMap::new();
+    plan.apply_with_subqueries(|node| {
+        if let LogicalPlan::TableScan(scan) = node {
+            let name = scan.table_name.table();
+            if known_tables.contains(name) {
+                let columns: Option<HashSet<String>> = scan.projection.as_ref().map(|indices| {
+                    let schema = scan.source.schema();
+                    indices
+                        .iter()
+                        .map(|&i| schema.field(i).name().clone())
+                        .collect()
+                });
+                let entry = needs.entry(name.to_string()).or_default();
+                entry.scan_count += 1;
+                if entry.scan_count == 1 {
+                    entry.columns = columns;
+                    entry.filters = scan.filters.clone();
+                    entry.fetch = scan.fetch;
+                } else {
+                    // Multiple scans of one table: one materialization must
+                    // serve them all — union columns, drop predicates/caps.
+                    entry.columns = match (entry.columns.take(), columns) {
+                        (Some(mut a), Some(b)) => {
+                            a.extend(b);
+                            Some(a)
+                        }
+                        _ => None,
+                    };
+                    entry.filters.clear();
+                    entry.fetch = None;
+                }
+            }
+        }
+        Ok(TreeNodeRecursion::Continue)
+    })
+    .map_err(|e| Error::Query(QueryError::Execution(e.to_string())))?;
+    Ok(needs)
 }
 
 impl QueryEngine {
     /// Open a capture and build the engine.
     ///
     /// The single constructor: local files (memory-mapped by default, with a
-    /// buffered-file fallback) and cloud URLs funnel into the same shared
-    /// parse pass, parallel across partitions for seekable sources. With a
-    /// [`EngineOptions::keylog`], an additional sequential stream pass
-    /// populates the decrypted `http2` table (folded into the main pass by
-    /// migration phase P4).
+    /// buffered-file fallback) and cloud URLs are served by the same scoped
+    /// parse machinery. **No parsing happens here** — each query parses
+    /// exactly the tables (and columns/predicates/limits) it references, per
+    /// the engine's [`RetentionPolicy`].
     pub async fn open(spec: SourceSpec, opts: EngineOptions) -> Result<Self, Error> {
         match spec {
             SourceSpec::Path(path) => {
@@ -198,57 +292,45 @@ impl QueryEngine {
         }
     }
 
-    /// Build the engine over an opened source: ONE parse pass, fanned out to
-    /// all protocol tables, parallel across partitions.
+    /// Build the engine over an opened source: register providers, UDFs and
+    /// views, and capture the scoped-parse closure queries will drive.
     async fn build<S: SeekablePacketSource>(
         source: Arc<S>,
         opts: EngineOptions,
     ) -> Result<Self, Error> {
         let registry = Arc::new(default_registry());
-        let ctx = create_session_context();
-        udf::register_all_udfs(&ctx)?;
-
-        let target_partitions = opts
+        let parallelism = opts
             .target_partitions
             .unwrap_or_else(default_target_partitions);
+        let ctx = create_session_context(parallelism);
+        udf::register_all_udfs(&ctx)?;
 
-        let shared = Arc::new(run_shared_parse(
-            &source,
-            &registry,
-            opts.batch_size,
-            target_partitions,
-            opts.progress.clone(),
-        )?);
+        // Time UDFs read a shared range that parse passes widen.
+        let time_range = Arc::new(CaptureTimeRange::new());
+        udf::register_time_udfs(&ctx, time_range.clone())?;
 
-        if shared.total_frames() == 0 {
-            return Err(Error::Query(QueryError::Execution(
-                "No packets found in PCAP source".to_string(),
-            )));
-        }
-
-        // Timestamp range comes from the shared pass (no extra scan).
-        let (start_us, end_us) = shared.timestamp_range_us();
-        udf::register_time_udfs_eager(&ctx, start_us, end_us)?;
-
-        // One provider per table, all sharing the single parse result.
+        // One provider per table, all serving from the same engine state.
+        let engine_tables = Arc::new(EngineTables::new());
+        let mut known_tables = HashSet::new();
         for table_name in tables::all_table_names() {
             let schema = Arc::new(tables::get_table_schema(table_name).ok_or_else(|| {
                 Error::Query(QueryError::Execution(format!(
                     "Unknown table: {table_name}"
                 )))
             })?);
-            let provider = providers::ProtocolTableProvider::shared(
+            let provider = providers::ProtocolTableProvider::new(
                 table_name.to_string(),
                 schema,
-                shared.clone(),
+                engine_tables.clone(),
             );
             ctx.register_table(table_name, Arc::new(provider))
                 .map_err(|e| Error::Query(QueryError::Execution(e.to_string())))?;
+            known_tables.insert(table_name.to_string());
         }
 
         // With a keylog, a sequential stream pass (TCP reassembly + TLS
-        // decryption + HTTP/2) replaces the empty http2 table. Migration
-        // phase P4 folds this second pass into the shared one.
+        // decryption + HTTP/2) pins the decrypted http2 table. Migration
+        // phase P4 folds this second pass into the scoped parse.
         if let Some(keylog) = opts.keylog.clone() {
             let mut stream_builder = stream_tables::StreamTableBuilder::new(Some(keylog));
             let mut reader = source.sequential_reader()?;
@@ -256,65 +338,158 @@ impl QueryEngine {
             let http2_batches = stream_builder.http2_batches(opts.batch_size)?;
             if !http2_batches.is_empty() {
                 let schema = http2_batches[0].schema();
-                let provider = providers::ProtocolTableProvider::in_memory(
+                engine_tables.pin(
                     "http2".to_string(),
-                    schema,
-                    vec![http2_batches],
+                    Arc::new(TableData {
+                        schema,
+                        partitions: vec![http2_batches],
+                    }),
                 );
-                ctx.deregister_table("http2")
-                    .map_err(|e| Error::Query(QueryError::Execution(e.to_string())))?;
-                ctx.register_table("http2", Arc::new(provider))
-                    .map_err(|e| Error::Query(QueryError::Execution(e.to_string())))?;
             }
         }
 
         Self::register_cross_layer_views(&ctx).await?;
 
+        let parse_fn: ParseFn = {
+            let registry = registry.clone();
+            let batch_size = opts.batch_size;
+            let progress = opts.progress.clone();
+            Box::new(move |subscription: &ParseSubscription| {
+                run_shared_parse(
+                    &source,
+                    &registry,
+                    batch_size,
+                    parallelism,
+                    progress.clone(),
+                    subscription,
+                )
+            })
+        };
+
         Ok(Self {
             ctx,
-            registry: (*registry).clone(),
-            shared,
+            registry,
+            tables: engine_tables,
+            time_range,
+            retention: opts.retention,
+            parse_fn,
+            last_stats: RwLock::new(ParseStats::default()),
+            known_tables,
         })
     }
 
     /// Execute a SQL query and return results.
+    ///
+    /// Plans first, harvests the optimized plan's table needs, runs one
+    /// scoped parse pass covering them (subject to the retention policy's
+    /// cache), then executes. This is THE query path: queries issued
+    /// directly against [`Self::context`] bypass the parse and will fail
+    /// with "table was not prepared".
     pub async fn query(&self, sql: &str) -> Result<Vec<RecordBatch>, Error> {
-        let df = self
-            .ctx
-            .sql(sql)
+        let state = self.ctx.state();
+        let plan = state
+            .create_logical_plan(sql)
             .await
             .map_err(|e| Error::Query(QueryError::from(e)))?;
-
-        let batches = df
-            .collect()
-            .await
+        let optimized = state
+            .optimize(&plan)
             .map_err(|e| Error::Query(QueryError::from(e)))?;
 
-        Ok(batches)
+        let needs = harvest_table_needs(&optimized, &self.known_tables)?;
+        let stats = self.prepare_tables(needs)?;
+        *self.last_stats.write().expect("stats lock poisoned") = stats;
+
+        let result = async {
+            let df = self
+                .ctx
+                .execute_logical_plan(optimized)
+                .await
+                .map_err(|e| Error::Query(QueryError::from(e)))?;
+            df.collect()
+                .await
+                .map_err(|e| Error::Query(QueryError::from(e)))
+        }
+        .await;
+
+        if self.retention == RetentionPolicy::None {
+            self.tables.clear();
+        }
+
+        result
+    }
+
+    /// Run the scoped parse pass covering `needs`, honoring the retention
+    /// policy. Returns the pass statistics (zeroed when fully cache-served).
+    fn prepare_tables(&self, needs: HashMap<String, TableNeeds>) -> Result<ParseStats, Error> {
+        let mut subscription = ParseSubscription::default();
+
+        match self.retention {
+            RetentionPolicy::CacheOnTouch => {
+                // Cache entries are full-column and unfiltered, so they can
+                // serve any later query; only parse what's missing.
+                for name in needs.into_keys() {
+                    if !self.tables.contains(&name) {
+                        subscription
+                            .tables
+                            .insert(name, TableSubscription::default());
+                    }
+                }
+            }
+            RetentionPolicy::None => {
+                for (name, table_needs) in needs {
+                    if self.tables.contains(&name) {
+                        continue; // pinned (e.g. keylog http2)
+                    }
+                    let multi_scan = table_needs.scan_count > 1;
+                    let predicate = if multi_scan || name == "frames" {
+                        None
+                    } else {
+                        FilterEvaluator::try_from_exprs(&table_needs.filters)
+                    };
+                    subscription.tables.insert(
+                        name,
+                        TableSubscription {
+                            columns: if multi_scan {
+                                None
+                            } else {
+                                table_needs.columns
+                            },
+                            predicate,
+                            fetch: if multi_scan { None } else { table_needs.fetch },
+                        },
+                    );
+                }
+            }
+        }
+
+        if subscription.tables.is_empty() {
+            return Ok(ParseStats::default());
+        }
+
+        let parsed = (self.parse_fn)(&subscription)?;
+        let (tables, stats) = parsed.into_tables();
+        if stats.packets_scanned > 0 {
+            self.time_range.record(stats.start_ts_us, stats.end_ts_us);
+        }
+        self.tables.install(tables);
+        Ok(stats)
+    }
+
+    /// Instrumentation for the most recent query: parse passes (0 when fully
+    /// served from cache, 1 otherwise — the shared-parse invariant), packets
+    /// scanned, partitions, and rows built per table.
+    pub fn last_parse_stats(&self) -> ParseStats {
+        self.last_stats.read().expect("stats lock poisoned").clone()
     }
 
     /// Get the protocol registry.
     pub fn registry(&self) -> &ProtocolRegistry {
-        &self.registry
+        self.registry.as_ref()
     }
 
     /// Get the session context for advanced usage.
     pub fn context(&self) -> &SessionContext {
         &self.ctx
-    }
-
-    /// Number of parse passes performed over the source.
-    ///
-    /// Always `1` regardless of how many protocol tables a query touches —
-    /// the instrumentation behind the shared-parse invariant.
-    pub fn parse_pass_count(&self) -> usize {
-        self.shared.parse_passes()
-    }
-
-    /// Number of partitions the shared parse pass used (1 if non-partitioned or
-    /// in-memory mode).
-    pub fn partition_count(&self) -> usize {
-        self.shared.num_partitions()
     }
 
     /// Register cross-layer views that JOIN normalized protocol tables.
