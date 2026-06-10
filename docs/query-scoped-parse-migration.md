@@ -411,10 +411,29 @@ entries.
 Gate: standard + golden; keylog end-to-end wall-clock should drop ~2× on
 IO-bound captures (one read, one parse).
 
-### P5 — `raw_data` late materialization
+### P5 — `raw_data` / heavy-column materialization is projection-gated
 
-*Goal: the capture's bytes are never duplicated into Arrow at parse time;
-they are fetched from the source only when a query projects them.*
+*Goal: the capture's bytes are never duplicated into Arrow unless a query
+projects them.*
+
+**Delivered:** the parse-time copy elimination landed in **P2** as a side
+effect of column-scoped building — the frames builder only has a `raw_data`
+builder when `raw_data` is in the subscribed columns, so an unprojected
+`raw_data` is never copied. P5 closes the remaining gap on the
+`CacheOnTouch` (REPL) path: the cache was holding **full** columns on first
+touch (including the huge `raw_data` and unused wide-table columns). P5
+makes the cache **column-aware** — it caches exactly the columns a query
+touches, treats a later subset query as a hit, and re-parses + widens on a
+column miss. So `raw_data` (and any heavy/unused column) stays out of the
+cache until actually selected.
+
+*Deferred (optional):* byte-offset / `BinaryView` zero-copy so that even a
+query that **does** project `raw_data` references the mmap buffer instead of
+copying. This needs reader byte-offset plumbing + per-source range reads +
+a compressed-source fallback; the memory contract above does not depend on
+it, so it is left as a follow-up rather than shipped half-built.
+
+Original plan (superseded by the above):
 
 Changes:
 - `PacketRef` gains `byte_offset: u64` (`io/source.rs:34-48`; the readers

@@ -119,6 +119,18 @@ impl EngineTables {
     pub fn contains(&self, name: &str) -> bool {
         self.get(name).is_some()
     }
+
+    /// The column names of a prepared table (`None` if not prepared).
+    pub fn cached_columns(&self, name: &str) -> Option<std::collections::HashSet<String>> {
+        self.get(name).map(|prepared| {
+            prepared
+                .schema()
+                .fields()
+                .iter()
+                .map(|f| f.name().clone())
+                .collect()
+        })
+    }
 }
 
 /// Table provider for a single protocol table, serving from [`EngineTables`].

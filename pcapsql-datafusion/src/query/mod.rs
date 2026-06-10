@@ -307,6 +307,43 @@ fn harvest_table_needs(
     Ok(needs)
 }
 
+/// Does a cached column set cover what a query needs?
+///
+/// `cached` is the cached entry's column names (`None` = not cached).
+/// `needed` is the query's projected columns (`None` = all columns).
+fn cache_covers(
+    cached: Option<&std::collections::HashSet<String>>,
+    needed: &Option<HashSet<String>>,
+    table: &str,
+) -> bool {
+    let Some(cached) = cached else {
+        return false; // not cached
+    };
+    match needed {
+        // Needs every column: covered only if the cache is the full table.
+        None => tables::get_table_schema(table)
+            .map(|schema| cached.len() == schema.fields().len())
+            .unwrap_or(false),
+        Some(cols) => cols.iter().all(|c| cached.contains(c)),
+    }
+}
+
+/// Union of a cached column set and a query's needed columns; `None`
+/// (all columns) on either side widens to all.
+fn column_union(
+    cached: Option<std::collections::HashSet<String>>,
+    needed: &Option<HashSet<String>>,
+) -> Option<HashSet<String>> {
+    match (cached, needed) {
+        (_, None) => None,
+        (None, Some(n)) => Some(n.clone()),
+        (Some(mut c), Some(n)) => {
+            c.extend(n.iter().cloned());
+            Some(c)
+        }
+    }
+}
+
 impl QueryEngine {
     /// Open a capture and build the engine.
     ///
@@ -581,14 +618,29 @@ impl QueryEngine {
         let mut subscription = ParseSubscription::default();
         match self.retention {
             RetentionPolicy::CacheOnTouch => {
-                // Cache entries are full-column and unfiltered, so they can
-                // serve any later query; only parse what's missing.
-                for name in needs.into_keys() {
-                    if !self.tables.contains(&name) {
-                        subscription
-                            .tables
-                            .insert(name, TableSubscription::default());
+                // Column-aware cache: cache exactly the columns a query touches
+                // (unfiltered, so reuse stays sound). A later query whose
+                // columns are a subset is a cache hit; one needing more
+                // columns re-parses the UNION and widens the entry. This keeps
+                // heavy/rarely-queried columns (notably frames.raw_data) and
+                // unused wide-table columns out of the cache until selected.
+                for (name, table_needs) in needs {
+                    let cached = self.tables.cached_columns(&name);
+                    let needed = &table_needs.columns;
+                    if cache_covers(cached.as_ref(), needed, &name) {
+                        continue; // subset already cached
                     }
+                    // Subscribe the union of cached and needed columns so the
+                    // rebuilt entry is a superset (no churn / loss).
+                    let columns = column_union(cached, needed);
+                    subscription.tables.insert(
+                        name,
+                        TableSubscription {
+                            columns,
+                            predicate: None,
+                            fetch: None,
+                        },
+                    );
                 }
             }
             RetentionPolicy::None => {

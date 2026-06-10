@@ -212,6 +212,52 @@ async fn empty_capture_yields_zero_rows() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cache_is_column_aware() {
+    // CacheOnTouch caches exactly the columns a query touches. A later query
+    // whose columns are a subset is a cache hit (no re-parse); one needing a
+    // new column (notably the heavy frames.raw_data) re-parses and widens the
+    // cache. Keeps raw_data out of the cache until actually selected.
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("cap.pcap");
+    std::fs::write(&path, make_capture(100).bytes).unwrap();
+
+    let engine = engine(&path, 2).await; // CacheOnTouch
+
+    // First touch: caches frames{length}.
+    let _ = run(&engine, "SELECT length FROM frames ORDER BY length").await;
+    assert_eq!(engine.last_parse_stats().parse_passes, 1);
+
+    // Subset (same column) -> cache hit, no parse.
+    let _ = run(&engine, "SELECT length FROM frames").await;
+    assert_eq!(
+        engine.last_parse_stats().parse_passes,
+        0,
+        "subset of cached columns must be a cache hit"
+    );
+
+    // Needs raw_data, which was NOT cached -> re-parse (widen).
+    let out = run(
+        &engine,
+        "SELECT length(hex(raw_data)) AS n FROM frames ORDER BY n DESC LIMIT 1",
+    )
+    .await;
+    assert!(!out.is_empty());
+    assert_eq!(
+        engine.last_parse_stats().parse_passes,
+        1,
+        "a column not in the cache must trigger a re-parse"
+    );
+
+    // Now raw_data is cached too: the same query is a hit.
+    let _ = run(
+        &engine,
+        "SELECT length(hex(raw_data)) AS n FROM frames ORDER BY n DESC LIMIT 1",
+    )
+    .await;
+    assert_eq!(engine.last_parse_stats().parse_passes, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn http2_stream_table_is_on_demand() {
     // `http2` is produced by the stream-analysis pass, not the packet parse,
     // and only when a query references it. This capture has no HTTP/2, so the
