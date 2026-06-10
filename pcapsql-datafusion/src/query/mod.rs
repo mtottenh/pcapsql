@@ -70,6 +70,11 @@ fn default_target_partitions() -> usize {
         .clamp(1, 16)
 }
 
+/// Tables produced by the stream-analysis pass (TCP reassembly / TLS
+/// decryption / HTTP-2) rather than the per-packet parse. They are built
+/// on demand by a single sequential read when a query references them.
+const STREAM_TABLES: &[&str] = &["http2"];
+
 /// Configure DataFusion for SortMergeJoin on frame_number-sorted streams.
 fn create_session_context(target_partitions: usize) -> SessionContext {
     let mut config = ConfigOptions::default();
@@ -181,6 +186,9 @@ pub struct QueryEngine {
 trait ParseSource: Send + Sync {
     fn materialize(&self, sub: &ParseSubscription) -> Result<SharedParseState, Error>;
     fn stream(&self, sub: &ParseSubscription) -> Result<StreamingHandle, Error>;
+    /// Run the stream-analysis pass (one sequential read, single partition):
+    /// TCP reassembly + TLS decryption + HTTP/2, producing the [`STREAM_TABLES`].
+    fn stream_pass(&self) -> Result<HashMap<String, TableData>, Error>;
 }
 
 /// Binds a concrete seekable source to the parse parameters.
@@ -190,6 +198,8 @@ struct SourceParser<S: SeekablePacketSource> {
     batch_size: usize,
     partitions: usize,
     progress: Option<providers::ProgressFn>,
+    /// TLS keylog enabling decrypted HTTP/2 in the stream pass.
+    keylog: Option<Arc<KeyLog>>,
 }
 
 impl<S: SeekablePacketSource> ParseSource for SourceParser<S> {
@@ -213,6 +223,29 @@ impl<S: SeekablePacketSource> ParseSource for SourceParser<S> {
             self.progress.clone(),
             sub,
         )
+    }
+
+    fn stream_pass(&self) -> Result<HashMap<String, TableData>, Error> {
+        // Stream reassembly needs whole-capture sequential order, so this is
+        // always a single sequential read (single partition).
+        let mut builder = stream_tables::StreamTableBuilder::new(self.keylog.clone());
+        let mut reader = self.source.sequential_reader()?;
+        builder.process_reader(&mut reader)?;
+
+        let mut out = HashMap::new();
+        let http2 = builder.http2_batches(self.batch_size)?;
+        let schema = http2
+            .first()
+            .map(|b| b.schema())
+            .unwrap_or_else(|| Arc::new(tables::get_table_schema("http2").expect("http2 schema")));
+        out.insert(
+            "http2".to_string(),
+            TableData {
+                schema,
+                partitions: vec![http2],
+            },
+        );
+        Ok(out)
     }
 }
 
@@ -369,26 +402,6 @@ impl QueryEngine {
             known_tables.insert(table_name.to_string());
         }
 
-        // With a keylog, a sequential stream pass (TCP reassembly + TLS
-        // decryption + HTTP/2) pins the decrypted http2 table. Migration
-        // phase P4 folds this second pass into the scoped parse.
-        if let Some(keylog) = opts.keylog.clone() {
-            let mut stream_builder = stream_tables::StreamTableBuilder::new(Some(keylog));
-            let mut reader = source.sequential_reader()?;
-            stream_builder.process_reader(&mut reader)?;
-            let http2_batches = stream_builder.http2_batches(opts.batch_size)?;
-            if !http2_batches.is_empty() {
-                let schema = http2_batches[0].schema();
-                engine_tables.pin(
-                    "http2".to_string(),
-                    Arc::new(TableData {
-                        schema,
-                        partitions: vec![http2_batches],
-                    }),
-                );
-            }
-        }
-
         Self::register_cross_layer_views(&ctx).await?;
 
         let parse_source: Arc<dyn ParseSource> = Arc::new(SourceParser {
@@ -397,6 +410,7 @@ impl QueryEngine {
             batch_size: opts.batch_size,
             partitions: parallelism,
             progress: opts.progress.clone(),
+            keylog: opts.keylog.clone(),
         });
 
         Ok(Self {
@@ -428,7 +442,35 @@ impl QueryEngine {
             .optimize(&plan)
             .map_err(|e| Error::Query(QueryError::from(e)))?;
 
-        let needs = harvest_table_needs(&optimized, &self.known_tables)?;
+        let mut needs = harvest_table_needs(&optimized, &self.known_tables)?;
+
+        // Stream-analysis tables are produced by the on-demand stream pass,
+        // not the per-packet parse. Split them out and run the pass once if a
+        // referenced stream table isn't already prepared (cached). A query
+        // mixing stream and packet tables runs both passes.
+        let stream_needed: Vec<String> = needs
+            .keys()
+            .filter(|t| STREAM_TABLES.contains(&t.as_str()))
+            .cloned()
+            .collect();
+        for t in &stream_needed {
+            needs.remove(t);
+        }
+        let mut stream_rows: HashMap<String, usize> = HashMap::new();
+        let mut stream_passes = 0usize;
+        if stream_needed.iter().any(|t| !self.tables.contains(t)) {
+            let produced = self.parse_source.stream_pass()?;
+            let installed: HashMap<String, Arc<TableData>> = produced
+                .into_iter()
+                .map(|(name, data)| {
+                    stream_rows.insert(name.clone(), data.total_rows());
+                    (name, Arc::new(data))
+                })
+                .collect();
+            self.tables.install(installed);
+            stream_passes = 1;
+        }
+
         let subscription = self.build_subscription(needs);
 
         // CacheOnTouch materializes (so the cache can serve any later query);
@@ -512,6 +554,15 @@ impl QueryEngine {
                 self.time_range.record(start, end);
             }
             *self.last_stats.write().expect("stats lock poisoned") = stats;
+        }
+
+        // Fold the stream pass into the reported statistics.
+        if stream_passes > 0 {
+            let mut stats = self.last_stats.write().expect("stats lock poisoned");
+            stats.parse_passes += stream_passes;
+            for (t, n) in stream_rows {
+                stats.rows_built.insert(t, n);
+            }
         }
 
         if self.retention == RetentionPolicy::None {

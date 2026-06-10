@@ -211,6 +211,33 @@ async fn empty_capture_yields_zero_rows() {
     assert!(out.contains("0"), "expected zero frames:\n{out}");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn http2_stream_table_is_on_demand() {
+    // `http2` is produced by the stream-analysis pass, not the packet parse,
+    // and only when a query references it. This capture has no HTTP/2, so the
+    // pass runs and yields an empty table (no error).
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("cap.pcap");
+    std::fs::write(&path, make_capture(50).bytes).unwrap();
+
+    // A query that does NOT reference http2 must not run the stream pass.
+    let e1 = engine(&path, 2).await;
+    let _ = run(&e1, "SELECT count(*) AS c FROM udp").await;
+    assert!(
+        !e1.last_parse_stats().rows_built.contains_key("http2"),
+        "stream pass must not run for a non-stream query"
+    );
+
+    // Referencing http2 runs the stream pass on demand and returns empty.
+    let e2 = engine(&path, 2).await;
+    let out = run(&e2, "SELECT count(*) AS c FROM http2").await;
+    assert!(out.contains('0'), "expected empty http2:\n{out}");
+    assert!(
+        e2.last_parse_stats().rows_built.contains_key("http2"),
+        "querying http2 must run the stream pass"
+    );
+}
+
 /// Build a streaming (RetentionPolicy::None) engine.
 async fn streaming_engine(path: &std::path::Path, partitions: usize) -> QueryEngine {
     QueryEngine::open(
