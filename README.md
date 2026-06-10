@@ -213,14 +213,8 @@ TLS Decryption:
   --keylog <FILE>           SSLKEYLOGFILE for TLS decryption
 
 Performance:
-  --streaming               Low-memory streaming mode
-  --mmap                    Memory-mapped file access
+  --no-mmap                 Disable memory-mapped file access
   --batch-size <N>          Packets per batch (default: 10000)
-
-Stream Reassembly:
-  --track-streams           Enable TCP stream tracking
-  --max-stream-memory <N>   Buffer limit (default: 1G)
-  --stream-timeout <SECS>   Connection timeout (default: 300)
 
 Cloud Storage:
   --cloud-endpoint <URL>    Custom S3-compatible endpoint

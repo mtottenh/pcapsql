@@ -9,12 +9,9 @@
 //! Captures are generated deterministically; sizes are kept modest so a full
 //! run completes in minutes while still dominating constant overheads.
 
-use std::sync::Arc;
-
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion, Throughput};
-use pcapsql_core::io::MmapPacketSource;
 use pcapsql_core::{default_registry, parse_packet};
-use pcapsql_datafusion::query::QueryEngine;
+use pcapsql_datafusion::query::{EngineOptions, QueryEngine, SourceSpec};
 use pcapsql_testgen::{legacy_pcap, GenPacket, LegacyVariant};
 use tempfile::TempDir;
 
@@ -78,9 +75,13 @@ fn rt() -> tokio::runtime::Runtime {
 }
 
 fn build_engine(rt: &tokio::runtime::Runtime, path: &std::path::Path) -> QueryEngine {
-    let source = Arc::new(MmapPacketSource::open(path).expect("open mmap"));
-    rt.block_on(QueryEngine::with_streaming_source_partitions(
-        source, 4096, 4,
+    rt.block_on(QueryEngine::open(
+        SourceSpec::Path(path.to_path_buf()),
+        EngineOptions {
+            batch_size: 4096,
+            target_partitions: Some(4),
+            ..Default::default()
+        },
     ))
     .expect("build engine")
 }

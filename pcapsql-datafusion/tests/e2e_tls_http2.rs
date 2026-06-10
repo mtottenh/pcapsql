@@ -19,7 +19,7 @@ use arrow::array::{Array, Int64Array, StringArray, UInt16Array};
 use arrow::record_batch::RecordBatch;
 
 use pcapsql_core::KeyLog;
-use pcapsql_datafusion::query::QueryEngine;
+use pcapsql_datafusion::query::{EngineOptions, QueryEngine, SourceSpec};
 
 // ============================================================================
 // Test Helpers
@@ -45,7 +45,15 @@ async fn create_engine(pcap_name: &str) -> Option<QueryEngine> {
     if !Path::new(&pcap_path).exists() {
         return None;
     }
-    QueryEngine::new(&pcap_path, 10000).await.ok()
+    QueryEngine::open(
+        SourceSpec::Path(pcap_path.into()),
+        EngineOptions {
+            batch_size: 10_000,
+            ..Default::default()
+        },
+    )
+    .await
+    .ok()
 }
 
 /// Run a SQL query and return results

@@ -22,13 +22,12 @@
 
 use std::io::{BufReader, Read};
 
-use bytes::Bytes;
 use pcap_parser::pcapng::{build_ts_resolution, Block};
 use pcap_parser::traits::{PcapNGPacketBlock, PcapReaderIterator};
 use pcap_parser::{LegacyPcapReader, PcapBlockOwned, PcapError as PcapParserError, PcapNGReader};
 
 use crate::error::{Error, PcapError};
-use crate::io::{PacketRef, RawPacket};
+use crate::io::PacketRef;
 
 /// Initial buffer size for pcap_parser readers (256 KiB).
 ///
@@ -281,23 +280,6 @@ impl<R: Read> GenericPcapReader<R> {
                 }
             }
         }
-    }
-
-    /// Read the next packet (copying API).
-    pub fn next_packet(&mut self) -> Result<Option<RawPacket>, Error> {
-        let mut out = None;
-        self.process_packets(1, |p| {
-            out = Some(RawPacket::from_bytes(
-                p.frame_number,
-                p.timestamp_ns,
-                p.captured_len,
-                p.original_len,
-                p.link_type,
-                Bytes::copy_from_slice(p.data),
-            ));
-            Ok(())
-        })?;
-        Ok(out)
     }
 
     /// Get the link type (e.g., 1 = Ethernet). For PCAPNG this reflects the most
@@ -635,16 +617,25 @@ mod tests {
         let cursor = Cursor::new(pcap_data);
         let mut reader = GenericPcapReader::with_format(cursor, format).expect("reader");
 
-        let packet = reader.next_packet().expect("read").expect("some");
-        assert_eq!(packet.frame_number, 1);
-        assert_eq!(packet.captured_length, 14);
-        assert_eq!(packet.link_type, 1);
+        let mut seen = Vec::new();
+        loop {
+            let n = reader
+                .process_packets(16, |p| {
+                    seen.push((p.frame_number, p.captured_len, p.link_type, p.timestamp_ns));
+                    Ok(())
+                })
+                .expect("read");
+            if n == 0 {
+                break;
+            }
+        }
+        assert_eq!(seen.len(), 1);
+        let (frame, caplen, link, ts) = seen[0];
+        assert_eq!(frame, 1);
+        assert_eq!(caplen, 14);
+        assert_eq!(link, 1);
         // 1_000_000_000 s + 500_000 us = 1e18 + 5e11 ns
-        assert_eq!(
-            packet.timestamp_ns,
-            1_000_000_000i64 * 1_000_000_000 + 500_000_000
-        );
-        assert!(reader.next_packet().expect("read").is_none());
+        assert_eq!(ts, 1_000_000_000i64 * 1_000_000_000 + 500_000_000);
     }
 
     #[test]
@@ -654,7 +645,13 @@ mod tests {
         let cursor = Cursor::new(pcap_data);
         let mut reader =
             GenericPcapReader::with_format_starting_at(cursor, format, 100).expect("reader");
-        let packet = reader.next_packet().expect("read").expect("some");
-        assert_eq!(packet.frame_number, 100);
+        let mut first_frame = None;
+        reader
+            .process_packets(1, |p| {
+                first_frame = Some(p.frame_number);
+                Ok(())
+            })
+            .expect("read");
+        assert_eq!(first_frame, Some(100));
     }
 }

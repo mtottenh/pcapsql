@@ -83,7 +83,6 @@
 pub mod error;
 pub mod format;
 pub mod io;
-pub mod pcap;
 pub mod prelude;
 pub mod protocol;
 pub mod schema;
@@ -94,12 +93,11 @@ pub mod tls;
 pub use error::{Error, PcapError, ProtocolError, Result};
 pub use format::{detect_address_column, format_ipv4, format_ipv6, format_mac, AddressKind};
 pub use io::{
-    BoundaryIndex, FilePacketReader, FilePacketSource, PacketReader, PacketSource, RawPacket,
-    SeekCost, SeekablePacketSource,
+    BoundaryIndex, FilePacketReader, FilePacketSource, PacketReader, PacketSource, SeekCost,
+    SeekablePacketSource,
 };
 #[cfg(feature = "mmap")]
 pub use io::{MmapPacketReader, MmapPacketSource};
-pub use pcap::PcapReader;
 pub use protocol::OwnedFieldValue;
 pub use protocol::{
     chain_fields_for_protocol, compute_required_protocols, default_registry,

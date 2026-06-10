@@ -24,4 +24,4 @@ mod shared;
 
 pub use protocol_provider::ProtocolTableProvider;
 pub use scan_exec::ProtocolScanExec;
-pub use shared::{run_shared_parse, SharedParseState};
+pub use shared::{run_shared_parse, ProgressFn, SharedParseState};
