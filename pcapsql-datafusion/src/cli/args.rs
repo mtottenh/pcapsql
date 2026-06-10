@@ -15,6 +15,11 @@ pub enum OutputFormat {
 }
 
 /// Parse size string like "512M" or "1G" into bytes.
+///
+/// Only consumed by the `--cloud-chunk-size` value parser; gated with it so
+/// the build-script `include!` of this file (which sees no crate features)
+/// doesn't carry dead code.
+#[cfg(any(feature = "cloud", test))]
 pub fn parse_size(s: &str) -> Result<usize, String> {
     let s = s.trim();
     if s.is_empty() {
@@ -135,31 +140,20 @@ pub struct Args {
     #[arg(long = "progress")]
     pub progress: bool,
 
-    /// Use streaming mode for large files (lower memory, supports filter/limit pushdown)
+    /// Parse via the seekable-source path (parallel parse across partitions).
     ///
-    /// In streaming mode, packets are read on-demand during query execution
-    /// rather than loading the entire file into memory. This allows querying
-    /// very large PCAP files (10GB+) with bounded memory usage.
+    /// The capture is parsed once, in parallel across partitions, into
+    /// in-memory Arrow tables before queries run. Memory use is proportional
+    /// to the parsed capture, the same as the default path.
     #[arg(long = "streaming")]
     pub streaming: bool,
 
     /// Use memory-mapped I/O for reading PCAP files.
     ///
     /// Can improve performance for large files by letting the OS handle
-    /// caching and paging. Not supported for PCAPNG or compressed files.
+    /// caching and paging. Not supported for compressed files.
     #[arg(long = "mmap")]
     pub mmap: bool,
-
-    // --- Stream Tracking Options ---
-    /// Enable TCP stream tracking and reassembly.
-    ///
-    /// When enabled, provides additional tables:
-    /// - tcp_connections: Connection metadata and statistics
-    /// - tcp_streams: Raw reassembled stream data
-    /// - http_messages: Parsed HTTP request/response messages
-    /// - tls_sessions: TLS handshake metadata (SNI, cipher suites)
-    #[arg(long = "track-streams")]
-    pub track_streams: bool,
 
     /// Path to SSLKEYLOGFILE for TLS decryption.
     ///
@@ -177,23 +171,10 @@ pub struct Args {
     #[arg(long = "keylog", value_name = "FILE")]
     pub keylog: Option<PathBuf>,
 
-    /// Maximum memory for stream reassembly buffers.
+    /// Show parse statistics after query execution.
     ///
-    /// Accepts suffixes: K, M, G (e.g., "512M", "1G").
-    /// When this limit is reached, oldest connections are evicted.
-    #[arg(long = "max-stream-memory", default_value = "1G", value_name = "SIZE", value_parser = parse_size_arg)]
-    pub max_stream_memory: usize,
-
-    /// Connection timeout in seconds.
-    ///
-    /// Connections with no activity for this duration are cleaned up.
-    #[arg(long = "stream-timeout", default_value = "300", value_name = "SECONDS")]
-    pub stream_timeout_secs: u64,
-
-    /// Show cache statistics after query execution.
-    ///
-    /// Displays hit rate, eviction counts, memory usage, and other
-    /// cache performance metrics. Useful for tuning --cache-size.
+    /// Displays the number of parse passes performed over the capture and
+    /// the partition count used by the parallel parse.
     #[arg(long = "stats")]
     pub show_stats: bool,
 
@@ -227,6 +208,7 @@ pub struct Args {
 }
 
 /// Value parser for size arguments (e.g., "512M", "1G").
+#[cfg(feature = "cloud")]
 fn parse_size_arg(s: &str) -> Result<usize, String> {
     parse_size(s)
 }
@@ -252,34 +234,27 @@ mod tests {
         assert!(parse_size("-1G").is_err());
     }
 
-    // Test 3: CLI argument parsing with stream options
+    // Test 3: CLI argument parsing with the keylog option
     #[test]
-    fn test_cli_stream_args() {
-        let args = Args::try_parse_from([
-            "pcapsql",
-            "test.pcap",
-            "--track-streams",
-            "--max-stream-memory",
-            "256M",
-            "--stream-timeout",
-            "60",
-        ])
-        .unwrap();
+    fn test_cli_keylog_arg() {
+        let args =
+            Args::try_parse_from(["pcapsql", "test.pcap", "--keylog", "/tmp/keys.log"]).unwrap();
 
-        assert!(args.track_streams);
-        assert_eq!(args.max_stream_memory, 256 * 1024 * 1024);
-        assert_eq!(args.stream_timeout_secs, 60);
+        assert_eq!(
+            args.keylog.as_deref(),
+            Some(std::path::Path::new("/tmp/keys.log"))
+        );
     }
 
-    // Test 4: Default stream args
+    // Test 4: Defaults
     #[test]
-    fn test_default_stream_args() {
+    fn test_default_args() {
         let args = Args::try_parse_from(["pcapsql", "test.pcap"]).unwrap();
 
-        assert!(!args.track_streams);
         assert!(args.keylog.is_none());
-        assert_eq!(args.max_stream_memory, 1024 * 1024 * 1024); // 1G default
-        assert_eq!(args.stream_timeout_secs, 300); // 5 min default
+        assert!(!args.streaming);
+        assert!(!args.mmap);
+        assert!(!args.show_stats);
     }
 
     // Test 5: Keylog argument parsing
