@@ -158,7 +158,7 @@ impl VTab for ReadPcapVTab {
 
         // Create reader
         let reader = source
-            .reader(None)
+            .sequential_reader()
             .map_err(|e| DuckDbError::Extension(format!("Failed to create reader: {e}")))?;
 
         Ok(ReadPcapInitData {
