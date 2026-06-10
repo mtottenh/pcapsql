@@ -50,18 +50,15 @@ impl PreparedTable {
     }
 }
 
-/// The tables currently materialized for query execution.
+/// The tables prepared for query execution.
 ///
-/// - `current` holds the per-query scoped parse result
-///   (`RetentionPolicy::None`, cleared after each query) or the accumulated
-///   cache (`RetentionPolicy::CacheOnTouch`).
-/// - `pinned` holds tables installed once at engine open and never cleared
-///   (the keylog-decrypted `http2` table, until migration phase P4 folds the
-///   stream pass into the shared parse).
+/// `current` holds the per-query scoped parse result
+/// (`RetentionPolicy::None`, cleared after each query) or the accumulated
+/// cache (`RetentionPolicy::CacheOnTouch`). Stream-analysis tables (`http2`)
+/// are installed here on demand by the stream pass.
 #[derive(Default)]
 pub struct EngineTables {
     current: RwLock<HashMap<String, Arc<PreparedTable>>>,
-    pinned: RwLock<HashMap<String, Arc<TableData>>>,
 }
 
 impl EngineTables {
@@ -101,15 +98,7 @@ impl EngineTables {
         }
     }
 
-    /// Pin a table for the lifetime of the engine (survives `clear`).
-    pub fn pin(&self, name: String, data: Arc<TableData>) {
-        self.pinned
-            .write()
-            .expect("EngineTables lock poisoned")
-            .insert(name, data);
-    }
-
-    /// Drop all non-pinned entries (`RetentionPolicy::None`, post-query).
+    /// Drop all entries (`RetentionPolicy::None`, post-query).
     pub fn clear(&self) {
         self.current
             .write()
@@ -117,16 +106,8 @@ impl EngineTables {
             .clear();
     }
 
-    /// Fetch a table's prepared data (pinned entries win).
+    /// Fetch a table's prepared data.
     pub fn get(&self, name: &str) -> Option<Arc<PreparedTable>> {
-        if let Some(data) = self
-            .pinned
-            .read()
-            .expect("EngineTables lock poisoned")
-            .get(name)
-        {
-            return Some(Arc::new(PreparedTable::Batches(data.clone())));
-        }
         self.current
             .read()
             .expect("EngineTables lock poisoned")
@@ -134,7 +115,7 @@ impl EngineTables {
             .cloned()
     }
 
-    /// Whether the table is already materialized (pinned or current).
+    /// Whether the table is already prepared.
     pub fn contains(&self, name: &str) -> bool {
         self.get(name).is_some()
     }
