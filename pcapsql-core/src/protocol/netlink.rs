@@ -460,13 +460,13 @@ mod tests {
     // ==========================================================================
     #[test]
     fn test_parse_packet_selects_netlink() {
-        use crate::protocol::{default_registry, parse_packet};
+        use crate::protocol::{default_registry, parse_packet, ParseScope};
 
         let registry = default_registry();
         let header = create_netlink_header(32, 16, NLM_F_REQUEST, 1, 1234);
 
         // Parse with link_type 253 (LINKTYPE_NETLINK)
-        let results = parse_packet(&registry, LINKTYPE_NETLINK, &header);
+        let results = parse_packet(&registry, LINKTYPE_NETLINK, &header, &ParseScope::full());
 
         // Should find netlink protocol
         assert!(

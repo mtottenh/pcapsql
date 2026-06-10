@@ -97,8 +97,16 @@ async fn main() -> Result<()> {
         InputSource::LocalFile(path) => SourceSpec::Path(path.clone()),
     };
 
+    // One-shot invocations retain nothing; the REPL caches touched tables.
+    let retention = if args.query.is_some() || args.query_file.is_some() {
+        pcapsql_datafusion::query::RetentionPolicy::None
+    } else {
+        pcapsql_datafusion::query::RetentionPolicy::CacheOnTouch
+    };
+
     let opts = EngineOptions {
         batch_size: args.batch_size,
+        retention,
         keylog,
         mmap: !args.no_mmap,
         progress: progress_cb,
@@ -195,14 +203,28 @@ async fn main() -> Result<()> {
 }
 
 fn print_parse_stats(engine: &QueryEngine) {
-    // The parse cache was removed in favor of a single shared parse pass; report
-    // the parse-pass / partition instrumentation instead.
+    let stats = engine.last_parse_stats();
     eprintln!();
+    if stats.parse_passes == 0 {
+        eprintln!("Parse passes: 0 (served from cache)");
+        return;
+    }
     eprintln!(
-        "Parse passes: {}  (partitions: {})",
-        engine.parse_pass_count(),
-        engine.partition_count()
+        "Parse passes: {}  (partitions: {}, packets scanned: {}{})",
+        stats.parse_passes,
+        stats.partitions,
+        stats.packets_scanned,
+        if stats.complete_scan {
+            ""
+        } else {
+            ", stopped early by LIMIT"
+        }
     );
+    let mut rows: Vec<_> = stats.rows_built.iter().filter(|(_, n)| **n > 0).collect();
+    rows.sort();
+    for (table, n) in rows {
+        eprintln!("  {table}: {n} rows");
+    }
 }
 
 fn list_protocols() {
@@ -346,10 +368,10 @@ async fn run_repl(
                     ReplCommand::Protocols => list_protocols(),
                     ReplCommand::Udfs => list_udfs(),
                     ReplCommand::CacheStats => {
+                        let stats = engine.last_parse_stats();
                         println!(
-                            "Parse passes: {}  (partitions: {})",
-                            engine.parse_pass_count(),
-                            engine.partition_count()
+                            "Last query: {} parse pass(es), {} partition(s), {} packets scanned",
+                            stats.parse_passes, stats.partitions, stats.packets_scanned
                         );
                     }
                     ReplCommand::CacheStatsReset => {
