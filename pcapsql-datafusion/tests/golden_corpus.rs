@@ -18,7 +18,7 @@
 use std::path::{Path, PathBuf};
 
 use arrow::util::pretty::pretty_format_batches;
-use pcapsql_datafusion::query::{EngineOptions, QueryEngine, SourceSpec};
+use pcapsql_datafusion::query::{EngineOptions, QueryEngine, RetentionPolicy, SourceSpec};
 use pcapsql_testgen::{legacy_pcap, GenPacket, LegacyVariant};
 use tempfile::TempDir;
 
@@ -607,6 +607,22 @@ async fn golden_corpus_matches_snapshots() {
 
     let eth = (engine(&eth_path, 2).await, engine(&eth_path, 1).await);
     let sll = (engine(&sll_path, 2).await, engine(&sll_path, 1).await);
+    // One-shot CLI path: RetentionPolicy::None streams rather than
+    // materializes. Its results must be identical.
+    let streaming = |path: &Path| {
+        QueryEngine::open(
+            SourceSpec::Path(path.to_path_buf()),
+            EngineOptions {
+                batch_size: 1000,
+                target_partitions: Some(2),
+                index_stride: Some(4),
+                retention: RetentionPolicy::None,
+                ..Default::default()
+            },
+        )
+    };
+    let eth_streamed = streaming(&eth_path).await.expect("build streaming engine");
+    let sll_streamed = streaming(&sll_path).await.expect("build streaming engine");
 
     let mut failures = Vec::new();
     for (capture, name, sql) in CORPUS {
@@ -614,16 +630,21 @@ async fn golden_corpus_matches_snapshots() {
             Capture::Eth => &eth_path,
             Capture::Sll => &sll_path,
         };
-        let fresh = FRESH_ENGINE_QUERIES.contains(name);
-        let fresh_engines = if fresh {
-            Some((engine(path, 2).await, engine(path, 1).await))
+        // Fresh engines (materialized and streaming) for queries whose result
+        // depends on engine-wide state no earlier query may have established.
+        let fresh_engines = if FRESH_ENGINE_QUERIES.contains(name) {
+            Some((
+                engine(path, 2).await,
+                engine(path, 1).await,
+                streaming(path).await.expect("build streaming engine"),
+            ))
         } else {
             None
         };
-        let (e2, e1) = match (&fresh_engines, capture) {
-            (Some(f), _) => (&f.0, &f.1),
-            (None, Capture::Eth) => (&eth.0, &eth.1),
-            (None, Capture::Sll) => (&sll.0, &sll.1),
+        let (e2, e1, streamed) = match (&fresh_engines, capture) {
+            (Some(f), _) => (&f.0, &f.1, &f.2),
+            (None, Capture::Eth) => (&eth.0, &eth.1, &eth_streamed),
+            (None, Capture::Sll) => (&sll.0, &sll.1, &sll_streamed),
         };
         let got = run(e2, sql).await;
 
@@ -632,6 +653,12 @@ async fn golden_corpus_matches_snapshots() {
         assert_eq!(
             got, got_p1,
             "{name}: results differ between 1 and 2 partitions"
+        );
+        // Streaming (one-shot) vs materialized (REPL) must agree.
+        let got_stream = run(streamed, sql).await;
+        assert_eq!(
+            got, got_stream,
+            "{name}: streaming result differs from materialized"
         );
 
         let snap_path = golden_dir().join(format!("{name}.snap"));

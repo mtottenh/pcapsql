@@ -8,9 +8,10 @@
 
 use std::any::Any;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use arrow::datatypes::SchemaRef;
+use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
 use datafusion::catalog::Session;
 use datafusion::common::DataFusionError;
@@ -18,10 +19,36 @@ use datafusion::datasource::{TableProvider, TableType};
 use datafusion::error::Result as DFResult;
 use datafusion::logical_expr::{Expr, TableProviderFilterPushDown};
 use datafusion::physical_plan::ExecutionPlan;
+use tokio::sync::mpsc::UnboundedReceiver;
 
-use super::shared::TableData;
+use super::shared::{StreamingHandle, TableData};
 use super::ProtocolScanExec;
 use crate::query::filter::FilterEvaluator;
+
+/// Per-partition batch receivers for a streamed table (taken once at
+/// `execute`).
+pub type PartitionReceivers = Arc<Vec<Mutex<Option<UnboundedReceiver<DFResult<RecordBatch>>>>>>;
+
+/// A table prepared for the current query: either materialized batches
+/// (cached / pinned / `CacheOnTouch`) or per-partition streaming receivers
+/// (`RetentionPolicy::None`).
+pub enum PreparedTable {
+    Batches(Arc<TableData>),
+    Stream {
+        schema: SchemaRef,
+        /// One batch receiver per partition, taken once at `execute`.
+        receivers: PartitionReceivers,
+    },
+}
+
+impl PreparedTable {
+    fn schema(&self) -> SchemaRef {
+        match self {
+            PreparedTable::Batches(d) => d.schema.clone(),
+            PreparedTable::Stream { schema, .. } => schema.clone(),
+        }
+    }
+}
 
 /// The tables currently materialized for query execution.
 ///
@@ -31,9 +58,9 @@ use crate::query::filter::FilterEvaluator;
 /// - `pinned` holds tables installed once at engine open and never cleared
 ///   (the keylog-decrypted `http2` table, until migration phase P4 folds the
 ///   stream pass into the shared parse).
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct EngineTables {
-    current: RwLock<HashMap<String, Arc<TableData>>>,
+    current: RwLock<HashMap<String, Arc<PreparedTable>>>,
     pinned: RwLock<HashMap<String, Arc<TableData>>>,
 }
 
@@ -42,12 +69,36 @@ impl EngineTables {
         Self::default()
     }
 
-    /// Install (or replace) table entries for the current query / cache.
+    /// Install (or replace) materialized table entries for the current query
+    /// or cache.
     pub fn install(&self, tables: HashMap<String, Arc<TableData>>) {
-        self.current
-            .write()
-            .expect("EngineTables lock poisoned")
-            .extend(tables);
+        let mut current = self.current.write().expect("EngineTables lock poisoned");
+        for (name, data) in tables {
+            current.insert(name, Arc::new(PreparedTable::Batches(data)));
+        }
+    }
+
+    /// Install per-partition streaming receivers from an in-flight parse.
+    pub fn install_streams(&self, handle: &mut StreamingHandle) {
+        let mut current = self.current.write().expect("EngineTables lock poisoned");
+        for (name, receivers) in handle.receivers.drain() {
+            let schema = handle
+                .schemas
+                .get(&name)
+                .expect("streaming table schema")
+                .clone();
+            let slots: Vec<Mutex<Option<UnboundedReceiver<DFResult<RecordBatch>>>>> = receivers
+                .into_iter()
+                .map(|rx| Mutex::new(Some(rx)))
+                .collect();
+            current.insert(
+                name,
+                Arc::new(PreparedTable::Stream {
+                    schema,
+                    receivers: Arc::new(slots),
+                }),
+            );
+        }
     }
 
     /// Pin a table for the lifetime of the engine (survives `clear`).
@@ -66,15 +117,15 @@ impl EngineTables {
             .clear();
     }
 
-    /// Fetch a table's data (pinned entries win).
-    pub fn get(&self, name: &str) -> Option<Arc<TableData>> {
+    /// Fetch a table's prepared data (pinned entries win).
+    pub fn get(&self, name: &str) -> Option<Arc<PreparedTable>> {
         if let Some(data) = self
             .pinned
             .read()
             .expect("EngineTables lock poisoned")
             .get(name)
         {
-            return Some(data.clone());
+            return Some(Arc::new(PreparedTable::Batches(data.clone())));
         }
         self.current
             .read()
@@ -148,23 +199,24 @@ impl TableProvider for ProtocolTableProvider {
         _filters: &[Expr],
         _limit: Option<usize>,
     ) -> DFResult<Arc<dyn ExecutionPlan>> {
-        let data = self.tables.get(&self.table_name).ok_or_else(|| {
+        let prepared = self.tables.get(&self.table_name).ok_or_else(|| {
             DataFusionError::Execution(format!(
                 "table '{}' was not prepared for this query; \
                  run queries through QueryEngine::query",
                 self.table_name
             ))
         })?;
+        let data_schema = prepared.schema();
 
-        // `projection` indexes the FULL table schema; the materialized data
-        // may be a column subset. Remap by field name into the data's schema.
+        // `projection` indexes the FULL table schema; the materialized/streamed
+        // data may be a column subset. Remap by field name into that schema.
         let remapped: Option<Vec<usize>> = match projection {
             Some(indices) => Some(
                 indices
                     .iter()
                     .map(|&i| {
                         let name = self.schema.field(i).name();
-                        data.schema.index_of(name).map_err(|_| {
+                        data_schema.index_of(name).map_err(|_| {
                             DataFusionError::Execution(format!(
                                 "column '{}' of table '{}' was not materialized for this query",
                                 name, self.table_name
@@ -175,7 +227,7 @@ impl TableProvider for ProtocolTableProvider {
             ),
             None => {
                 // Full-schema scan: only valid when the data is full-width.
-                if data.schema.fields().len() != self.schema.fields().len() {
+                if data_schema.fields().len() != self.schema.fields().len() {
                     return Err(DataFusionError::Execution(format!(
                         "table '{}' was materialized with a column subset but \
                          scanned without a projection",
@@ -186,12 +238,21 @@ impl TableProvider for ProtocolTableProvider {
             }
         };
 
-        Ok(Arc::new(ProtocolScanExec::new(
-            self.table_name.clone(),
-            data.schema.clone(),
-            Arc::new(data.partitions.clone()),
-            remapped,
-        )))
+        let exec = match prepared.as_ref() {
+            PreparedTable::Batches(data) => ProtocolScanExec::batches(
+                self.table_name.clone(),
+                data.schema.clone(),
+                Arc::new(data.partitions.clone()),
+                remapped,
+            ),
+            PreparedTable::Stream { schema, receivers } => ProtocolScanExec::streaming(
+                self.table_name.clone(),
+                schema.clone(),
+                receivers.clone(),
+                remapped,
+            ),
+        };
+        Ok(Arc::new(exec))
     }
 }
 

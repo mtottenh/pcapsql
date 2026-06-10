@@ -7,6 +7,8 @@
 use std::collections::HashMap;
 
 use arrow::record_batch::RecordBatch;
+use datafusion::error::Result as DFResult;
+use tokio::sync::mpsc::UnboundedSender;
 
 use super::protocol::ProtocolBatchBuilder;
 use crate::error::{Error, QueryError};
@@ -15,10 +17,31 @@ use crate::query::providers::ParseSubscription;
 use pcapsql_core::io::PacketRef;
 use pcapsql_core::ParseResult;
 
+/// Where a table's completed batches go.
+enum BatchSink {
+    /// Accumulate in memory (materialize / cache-fill path).
+    Accumulate(Vec<RecordBatch>),
+    /// Stream to a consumer as batches complete (bounded-memory path).
+    Stream(UnboundedSender<DFResult<RecordBatch>>),
+}
+
+impl BatchSink {
+    fn emit(&mut self, batch: RecordBatch) {
+        match self {
+            BatchSink::Accumulate(v) => v.push(batch),
+            // A closed receiver (query cancelled / completed) just drops the
+            // batch; the producer keeps going and exits when the parse ends.
+            BatchSink::Stream(tx) => {
+                let _ = tx.send(Ok(batch));
+            }
+        }
+    }
+}
+
 /// Per-table build state within one parse pass.
 struct TableSlot {
     builder: ProtocolBatchBuilder,
-    batches: Vec<RecordBatch>,
+    sink: BatchSink,
     predicate: Option<FilterEvaluator>,
     fetch: Option<usize>,
     rows_added: usize,
@@ -47,9 +70,33 @@ pub struct NormalizedBatchSet {
 }
 
 impl NormalizedBatchSet {
-    /// Create builders for exactly the subscribed tables, each over its
-    /// (possibly column-subset) schema.
+    /// Create builders for exactly the subscribed tables (materialize mode:
+    /// completed batches accumulate in memory).
     pub fn new(batch_size: usize, subscription: &ParseSubscription) -> Result<Self, Error> {
+        Self::build(batch_size, subscription, |_| {
+            BatchSink::Accumulate(Vec::new())
+        })
+    }
+
+    /// Create builders that stream each table's completed batches to the
+    /// matching sender (bounded-memory mode). A table without a sender
+    /// accumulates (and is dropped on finish).
+    pub fn new_streaming(
+        batch_size: usize,
+        subscription: &ParseSubscription,
+        senders: &HashMap<String, UnboundedSender<DFResult<RecordBatch>>>,
+    ) -> Result<Self, Error> {
+        Self::build(batch_size, subscription, |name| match senders.get(name) {
+            Some(tx) => BatchSink::Stream(tx.clone()),
+            None => BatchSink::Accumulate(Vec::new()),
+        })
+    }
+
+    fn build(
+        batch_size: usize,
+        subscription: &ParseSubscription,
+        mut sink_for: impl FnMut(&str) -> BatchSink,
+    ) -> Result<Self, Error> {
         let mut slots = HashMap::with_capacity(subscription.tables.len());
         for (name, sub) in &subscription.tables {
             let schema = subscription.table_schema(name).ok_or_else(|| {
@@ -59,7 +106,7 @@ impl NormalizedBatchSet {
                 name.clone(),
                 TableSlot {
                     builder: ProtocolBatchBuilder::with_schema(name.clone(), schema, batch_size),
-                    batches: Vec::new(),
+                    sink: sink_for(name),
                     predicate: sub.predicate.clone(),
                     fetch: sub.fetch,
                     rows_added: 0,
@@ -95,7 +142,7 @@ impl NormalizedBatchSet {
                 );
                 slot.rows_added += 1;
                 if let Some(batch) = slot.builder.try_build()? {
-                    slot.batches.push(batch);
+                    slot.sink.emit(batch);
                 }
             }
         }
@@ -116,7 +163,7 @@ impl NormalizedBatchSet {
                 slot.builder.add_parsed_row(frame_number, result);
                 slot.rows_added += 1;
                 if let Some(batch) = slot.builder.try_build()? {
-                    slot.batches.push(batch);
+                    slot.sink.emit(batch);
                 }
             }
         }
@@ -130,14 +177,21 @@ impl NormalizedBatchSet {
         !self.slots.is_empty() && self.slots.values().all(TableSlot::capped)
     }
 
-    /// Finish building and return the per-table batches.
+    /// Finish building. Flushes each table's final partial batch into its
+    /// sink and returns the accumulated batches per table (empty for tables
+    /// in streaming mode — those went to their channels; the sender is
+    /// dropped here, closing the stream).
     pub fn finish(self) -> Result<HashMap<String, Vec<RecordBatch>>, Error> {
         let mut out = HashMap::with_capacity(self.slots.len());
         for (name, mut slot) in self.slots {
             if let Some(batch) = slot.builder.finish()? {
-                slot.batches.push(batch);
+                slot.sink.emit(batch);
             }
-            out.insert(name, slot.batches);
+            let batches = match slot.sink {
+                BatchSink::Accumulate(v) => v,
+                BatchSink::Stream(_) => Vec::new(),
+            };
+            out.insert(name, batches);
         }
         Ok(out)
     }

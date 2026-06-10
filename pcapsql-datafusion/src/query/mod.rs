@@ -47,9 +47,12 @@ use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion::config::ConfigOptions;
 use datafusion::logical_expr::{Expr, LogicalPlan};
 use datafusion::prelude::*;
+use tokio::task::JoinHandle;
 
 use crate::error::{Error, QueryError};
-use crate::query::providers::{run_shared_parse, EngineTables, SharedParseState, TableData};
+use crate::query::providers::{
+    run_shared_parse, EngineTables, PartitionStat, SharedParseState, StreamingHandle, TableData,
+};
 use pcapsql_core::{
     default_registry, FilePacketSource, KeyLog, MmapPacketSource, ProtocolRegistry,
     SeekablePacketSource,
@@ -165,21 +168,63 @@ pub struct QueryEngine {
     /// Capture time range, widened by every parse pass (drives time UDFs).
     time_range: Arc<CaptureTimeRange>,
     retention: RetentionPolicy,
-    /// Runs one scoped parse pass over the engine's source.
-    parse_fn: ParseFn,
-    /// The source's own answer for the capture time range (from its boundary
-    /// index), in microseconds; `None` when it has to be scanned for.
-    time_range_fn: TimeRangeFn,
+    /// Runs one scoped parse pass over the engine's source (materialize or
+    /// stream).
+    parse_source: Arc<dyn ParseSource>,
     /// Instrumentation for the most recent query.
     last_stats: RwLock<ParseStats>,
     /// Table names this engine registered (the harvest universe).
     known_tables: HashSet<String>,
 }
 
-/// Type-erased scoped parse over the engine's source.
-type ParseFn = Box<dyn Fn(&ParseSubscription) -> Result<SharedParseState, Error> + Send + Sync>;
-/// Type-erased `SeekablePacketSource::time_range_ns`, converted to microseconds.
-type TimeRangeFn = Box<dyn Fn() -> Option<(i64, i64)> + Send + Sync>;
+/// Type-erased scoped parse over the engine's source: either materialize the
+/// subscribed tables (cache-fill) or stream them (bounded memory).
+trait ParseSource: Send + Sync {
+    fn materialize(&self, sub: &ParseSubscription) -> Result<SharedParseState, Error>;
+    fn stream(&self, sub: &ParseSubscription) -> Result<StreamingHandle, Error>;
+    /// The source's own answer for the capture time range (microseconds, from
+    /// its boundary index); `None` when it has to be scanned for.
+    fn time_range_us(&self) -> Option<(i64, i64)>;
+}
+
+/// Binds a concrete seekable source to the parse parameters.
+struct SourceParser<S: SeekablePacketSource> {
+    source: Arc<S>,
+    registry: Arc<ProtocolRegistry>,
+    batch_size: usize,
+    partitions: usize,
+    progress: Option<providers::ProgressFn>,
+}
+
+impl<S: SeekablePacketSource> ParseSource for SourceParser<S> {
+    fn materialize(&self, sub: &ParseSubscription) -> Result<SharedParseState, Error> {
+        run_shared_parse(
+            &self.source,
+            &self.registry,
+            self.batch_size,
+            self.partitions,
+            self.progress.clone(),
+            sub,
+        )
+    }
+
+    fn time_range_us(&self) -> Option<(i64, i64)> {
+        self.source
+            .time_range_ns()
+            .map(|(start, end)| (start / 1_000, end / 1_000))
+    }
+
+    fn stream(&self, sub: &ParseSubscription) -> Result<StreamingHandle, Error> {
+        providers::run_streaming_parse(
+            &self.source,
+            &self.registry,
+            self.batch_size,
+            self.partitions,
+            self.progress.clone(),
+            sub,
+        )
+    }
+}
 
 /// Names of the UDFs whose result depends on the capture's full time range.
 const TIME_RANGE_UDFS: &[&str] = &["start_time", "end_time", "relative_time"];
@@ -390,30 +435,13 @@ impl QueryEngine {
 
         Self::register_cross_layer_views(&ctx).await?;
 
-        let time_range_fn: TimeRangeFn = {
-            let source = source.clone();
-            Box::new(move || {
-                source
-                    .time_range_ns()
-                    .map(|(start, end)| (start / 1_000, end / 1_000))
-            })
-        };
-
-        let parse_fn: ParseFn = {
-            let registry = registry.clone();
-            let batch_size = opts.batch_size;
-            let progress = opts.progress.clone();
-            Box::new(move |subscription: &ParseSubscription| {
-                run_shared_parse(
-                    &source,
-                    &registry,
-                    batch_size,
-                    parallelism,
-                    progress.clone(),
-                    subscription,
-                )
-            })
-        };
+        let parse_source: Arc<dyn ParseSource> = Arc::new(SourceParser {
+            source,
+            registry: registry.clone(),
+            batch_size: opts.batch_size,
+            partitions: parallelism,
+            progress: opts.progress.clone(),
+        });
 
         Ok(Self {
             ctx,
@@ -421,8 +449,7 @@ impl QueryEngine {
             tables: engine_tables,
             time_range,
             retention: opts.retention,
-            parse_fn,
-            time_range_fn,
+            parse_source,
             last_stats: RwLock::new(ParseStats::default()),
             known_tables,
         })
@@ -442,7 +469,7 @@ impl QueryEngine {
         if self.time_range.is_complete() {
             return Ok(());
         }
-        if let Some((start_us, end_us)) = (self.time_range_fn)() {
+        if let Some((start_us, end_us)) = self.parse_source.time_range_us() {
             self.time_range.record(start_us, end_us);
             self.time_range.mark_complete();
             return Ok(());
@@ -456,7 +483,7 @@ impl QueryEngine {
                 fetch: None,
             },
         );
-        let (_, stats) = (self.parse_fn)(&subscription)?.into_tables();
+        let (_, stats) = self.parse_source.materialize(&subscription)?.into_tables();
         if stats.packets_scanned > 0 {
             self.time_range.record(stats.start_ts_us, stats.end_ts_us);
         }
@@ -488,8 +515,39 @@ impl QueryEngine {
             .map_err(|e| Error::Query(QueryError::from(e)))?;
 
         let needs = harvest_table_needs(&optimized, &self.known_tables)?;
-        let stats = self.prepare_tables(needs)?;
-        *self.last_stats.write().expect("stats lock poisoned") = stats;
+        let subscription = self.build_subscription(needs);
+
+        // CacheOnTouch materializes (so the cache can serve any later query);
+        // RetentionPolicy::None streams (bounded memory) and we fold the
+        // producer stats after execution. An empty subscription means every
+        // referenced table is already cached/pinned — nothing to parse.
+        let streaming = self.retention == RetentionPolicy::None && !subscription.tables.is_empty();
+
+        let mut producers: Vec<JoinHandle<Result<PartitionStat, Error>>> = Vec::new();
+        if subscription.tables.is_empty() {
+            *self.last_stats.write().expect("stats lock poisoned") = ParseStats::default();
+        } else if streaming {
+            let mut handle = self.parse_source.stream(&subscription)?;
+            self.tables.install_streams(&mut handle);
+            producers = std::mem::take(&mut handle.producers);
+            *self.last_stats.write().expect("stats lock poisoned") = ParseStats {
+                parse_passes: 1,
+                partitions: handle.num_partitions,
+                ..Default::default()
+            };
+        } else {
+            let (tables, stats) = self.parse_source.materialize(&subscription)?.into_tables();
+            if stats.packets_scanned > 0 {
+                self.time_range.record(stats.start_ts_us, stats.end_ts_us);
+                // Timestamps are observed for every scanned packet, before
+                // any predicate, so a complete scan fixes the whole range.
+                if stats.complete_scan {
+                    self.time_range.mark_complete();
+                }
+            }
+            self.tables.install(tables);
+            *self.last_stats.write().expect("stats lock poisoned") = stats;
+        }
 
         let result = async {
             let df = self
@@ -509,18 +567,67 @@ impl QueryEngine {
         }
         .await;
 
+        // Streaming: collect() drove the producers to completion. Await them
+        // to fold statistics and surface any parse error (fail closed).
+        let mut producer_error = None;
+        if !producers.is_empty() {
+            let outcomes = futures::future::join_all(producers).await;
+            let mut stats = ParseStats {
+                parse_passes: 1,
+                partitions: outcomes.len(),
+                complete_scan: true,
+                ..Default::default()
+            };
+            let mut start = i64::MAX;
+            let mut end = i64::MIN;
+            for outcome in outcomes {
+                match outcome {
+                    Ok(Ok(p)) => {
+                        stats.packets_scanned += p.packets;
+                        stats.complete_scan &= !p.capped;
+                        if p.min_us != i64::MAX {
+                            start = start.min(p.min_us);
+                        }
+                        if p.max_us != i64::MIN {
+                            end = end.max(p.max_us);
+                        }
+                        for (t, n) in p.rows_built {
+                            *stats.rows_built.entry(t).or_insert(0) += n;
+                        }
+                    }
+                    Ok(Err(e)) => producer_error = producer_error.or(Some(e)),
+                    Err(join_err) => {
+                        producer_error = producer_error.or(Some(Error::Query(
+                            QueryError::Execution(format!("parse producer panicked: {join_err}")),
+                        )))
+                    }
+                }
+            }
+            if start != i64::MAX {
+                stats.start_ts_us = start;
+                stats.end_ts_us = end;
+                self.time_range.record(start, end);
+                if stats.complete_scan {
+                    self.time_range.mark_complete();
+                }
+            }
+            *self.last_stats.write().expect("stats lock poisoned") = stats;
+        }
+
         if self.retention == RetentionPolicy::None {
             self.tables.clear();
         }
 
-        result
+        match producer_error {
+            Some(e) => Err(e),
+            None => result,
+        }
     }
 
-    /// Run the scoped parse pass covering `needs`, honoring the retention
-    /// policy. Returns the pass statistics (zeroed when fully cache-served).
-    fn prepare_tables(&self, needs: HashMap<String, TableNeeds>) -> Result<ParseStats, Error> {
+    /// Build the parse subscription for a query, honoring the retention policy
+    /// and the pushdown/retention matrix (`docs/query-scoped-parse-migration.md`).
+    fn build_subscription(&self, needs: HashMap<String, TableNeeds>) -> ParseSubscription {
         let mut subscription = ParseSubscription::default();
-
         match self.retention {
             RetentionPolicy::CacheOnTouch => {
                 // Cache entries are full-column and unfiltered, so they can
@@ -559,23 +666,7 @@ impl QueryEngine {
                 }
             }
         }
-
-        if subscription.tables.is_empty() {
-            return Ok(ParseStats::default());
-        }
-
-        let parsed = (self.parse_fn)(&subscription)?;
-        let (tables, stats) = parsed.into_tables();
-        if stats.packets_scanned > 0 {
-            self.time_range.record(stats.start_ts_us, stats.end_ts_us);
-            // Timestamps are observed for every scanned packet, before any
-            // predicate, so a complete scan fixes the whole range.
-            if stats.complete_scan {
-                self.time_range.mark_complete();
-            }
-        }
-        self.tables.install(tables);
-        Ok(stats)
+        subscription
     }
 
     /// Instrumentation for the most recent query: parse passes (0 when fully
