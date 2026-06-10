@@ -210,3 +210,98 @@ async fn empty_capture_yields_zero_rows() {
     let out = run(&engine, "SELECT count(*) AS c FROM frames").await;
     assert!(out.contains("0"), "expected zero frames:\n{out}");
 }
+
+/// Build a streaming (RetentionPolicy::None) engine.
+async fn streaming_engine(path: &std::path::Path, partitions: usize) -> QueryEngine {
+    QueryEngine::open(
+        SourceSpec::Path(path.to_path_buf()),
+        EngineOptions {
+            batch_size: 64,
+            target_partitions: Some(partitions),
+            index_stride: Some(8),
+            retention: RetentionPolicy::None,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("build engine")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn streaming_results_match_materialized() {
+    // The streaming path (None) must produce identical results to the
+    // materialized path (CacheOnTouch), across scans, filters and joins.
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("cap.pcap");
+    std::fs::write(&path, make_capture(200).bytes).unwrap();
+
+    let streamed = streaming_engine(&path, 4).await;
+    let materialized = engine(&path, 4).await; // default CacheOnTouch
+
+    for sql in [
+        "SELECT count(*) AS c FROM frames",
+        "SELECT count(*) AS c FROM udp",
+        "SELECT frame_number, length FROM frames ORDER BY frame_number",
+        "SELECT frame_number, src_port, dst_port FROM udp WHERE dst_port = 53 \
+         ORDER BY frame_number",
+        "SELECT f.frame_number, u.src_port FROM frames f \
+         JOIN udp u USING (frame_number) ORDER BY f.frame_number",
+    ] {
+        let s = run(&streamed, sql).await;
+        let m = run(&materialized, sql).await;
+        assert_eq!(s, m, "streaming vs materialized mismatch for: {sql}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn streaming_limit_stops_scan_early() {
+    // A LIMIT pushed to the scan caps each partition and stops the parse
+    // before consuming the whole capture.
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("cap.pcap");
+    std::fs::write(&path, make_capture(5000).bytes).unwrap();
+
+    let engine = streaming_engine(&path, 1).await;
+    let out = run(&engine, "SELECT frame_number FROM udp LIMIT 5").await;
+    assert!(out.contains('1'), "expected rows:\n{out}");
+
+    let stats = engine.last_parse_stats();
+    assert!(
+        !stats.complete_scan,
+        "LIMIT should stop the scan early (packets_scanned = {})",
+        stats.packets_scanned
+    );
+    assert!(
+        stats.packets_scanned < 5000,
+        "LIMIT should read far fewer than all packets, read {}",
+        stats.packets_scanned
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn streaming_hash_join_completes_without_deadlock() {
+    // A hash join drains one side fully before the other — the unbounded
+    // exchange must not deadlock (it degrades to buffering). The result must
+    // still match the materialized engine.
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("cap.pcap");
+    std::fs::write(&path, make_capture(300).bytes).unwrap();
+
+    let streamed = streaming_engine(&path, 4).await;
+    streamed
+        .context()
+        .state_ref()
+        .write()
+        .config_mut()
+        .options_mut()
+        .optimizer
+        .prefer_hash_join = true;
+
+    let sql = "SELECT f.frame_number, u.dst_port FROM frames f \
+               JOIN udp u USING (frame_number) ORDER BY f.frame_number";
+    let s = run(&streamed, sql).await;
+
+    let materialized = engine(&path, 4).await;
+    let m = run(&materialized, sql).await;
+    assert_eq!(s, m, "hash-join streaming result must match materialized");
+}
