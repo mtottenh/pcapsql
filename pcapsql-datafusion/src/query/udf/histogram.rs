@@ -51,7 +51,10 @@
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef, BinaryArray, Float64Array, Int64Array, UInt64Array};
+use arrow::array::{
+    Array, ArrayRef, BinaryArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array,
+    Int8Array, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
+};
 use arrow::datatypes::{DataType, Field};
 use datafusion::common::{Result as DFResult, ScalarValue};
 use datafusion::logical_expr::{
@@ -175,36 +178,50 @@ impl Accumulator for HdrHistogramAccumulator {
 
         let values_array = &values[0];
 
-        // Handle different numeric types
-        if let Some(float_array) = values_array.as_any().downcast_ref::<Float64Array>() {
-            for i in 0..float_array.len() {
-                if !float_array.is_null(i) {
-                    let value = float_array.value(i);
-                    if value >= 0.0 {
-                        // HdrHistogram uses u64, so we scale floats
-                        // For sub-millisecond precision, multiply by 1000 (microseconds)
-                        // The caller should use appropriate scaling
-                        let _ = self.histogram.record(value as u64);
+        // Handle every numeric array type; anything else is ignored.
+        // Note: floats are truncated (`as u64`), so callers wanting
+        // sub-unit precision should scale values before recording.
+
+        // Signed and float inputs: skip negative values.
+        macro_rules! record_signed {
+            ($array_ty:ty) => {
+                if let Some(a) = values_array.as_any().downcast_ref::<$array_ty>() {
+                    for i in 0..a.len() {
+                        let v = a.value(i);
+                        if !a.is_null(i) && v >= 0 as _ {
+                            let _ = self.histogram.record(v as u64);
+                        }
                     }
+                    return Ok(());
                 }
-            }
-        } else if let Some(int_array) = values_array.as_any().downcast_ref::<Int64Array>() {
-            for i in 0..int_array.len() {
-                if !int_array.is_null(i) {
-                    let value = int_array.value(i);
-                    if value >= 0 {
-                        let _ = self.histogram.record(value as u64);
-                    }
-                }
-            }
-        } else if let Some(uint_array) = values_array.as_any().downcast_ref::<UInt64Array>() {
-            for i in 0..uint_array.len() {
-                if !uint_array.is_null(i) {
-                    let _ = self.histogram.record(uint_array.value(i));
-                }
-            }
+            };
         }
-        // Silently ignore other types
+
+        // Unsigned inputs: every value is recordable.
+        macro_rules! record_unsigned {
+            ($array_ty:ty) => {
+                if let Some(a) = values_array.as_any().downcast_ref::<$array_ty>() {
+                    for i in 0..a.len() {
+                        if !a.is_null(i) {
+                            let _ = self.histogram.record(a.value(i) as u64);
+                        }
+                    }
+                    return Ok(());
+                }
+            };
+        }
+
+        record_signed!(Float64Array);
+        record_signed!(Float32Array);
+        record_signed!(Int64Array);
+        record_signed!(Int32Array);
+        record_signed!(Int16Array);
+        record_signed!(Int8Array);
+        record_unsigned!(UInt64Array);
+        record_unsigned!(UInt32Array);
+        record_unsigned!(UInt16Array);
+        record_unsigned!(UInt8Array);
+        // Silently ignore non-numeric types
 
         Ok(())
     }
@@ -686,5 +703,19 @@ mod tests {
         assert_eq!(acc1.histogram.len(), 6);
         assert_eq!(acc1.histogram.min(), 1);
         assert_eq!(acc1.histogram.max(), 6);
+    }
+
+    #[test]
+    fn test_uint32_values_are_recorded() {
+        // frames.length is UInt32; it used to be silently dropped
+        let mut acc = HdrHistogramAccumulator::new(2);
+        let batch = Arc::new(UInt32Array::from(vec![136_u32, 583, 65080])) as ArrayRef;
+        acc.update_batch(&[batch]).unwrap();
+
+        assert_eq!(acc.histogram.len(), 3);
+        assert_eq!(acc.histogram.min(), 136);
+        // max() is the highest *equivalent* value at the histogram's
+        // significant-figure precision, so 65080 may quantize upward.
+        assert!(acc.histogram.max() >= 65080);
     }
 }
