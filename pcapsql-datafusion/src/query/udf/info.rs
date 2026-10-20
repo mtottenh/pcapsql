@@ -354,6 +354,22 @@ pub fn all_udfs() -> Vec<UdfInfo> {
             example: "hdr_stdev(hist)",
             category: UdfCategory::Histogram,
         },
+        UdfInfo {
+            name: "hdr_buckets",
+            description: "Distribution as log-scale bucket rows (explode with UNNEST)",
+            signature: "hdr_buckets(binary)",
+            return_type: "List<Struct<lo,hi,count>>",
+            example: "SELECT * FROM (SELECT hdr_buckets(hist) b FROM t) x, UNNEST(x.b)",
+            category: UdfCategory::Histogram,
+        },
+        UdfInfo {
+            name: "hdr_ascii",
+            description: "Render ASCII histogram with cumulative % (CDF)",
+            signature: "hdr_ascii(binary)",
+            return_type: "String",
+            example: "SELECT hdr_ascii(hdr_histogram(length)) FROM frames",
+            category: UdfCategory::Histogram,
+        },
         // === Utility Functions ===
         UdfInfo {
             name: "hex",
