@@ -30,7 +30,7 @@ use crate::query::filter::FilterEvaluator;
 pub type PartitionReceivers = Arc<Vec<Mutex<Option<UnboundedReceiver<DFResult<RecordBatch>>>>>>;
 
 /// A table prepared for the current query: either materialized batches
-/// (cached / pinned / `CacheOnTouch`) or per-partition streaming receivers
+/// (`CacheOnTouch` cache, or the on-demand stream pass) or per-partition streaming receivers
 /// (`RetentionPolicy::None`).
 pub enum PreparedTable {
     Batches(Arc<TableData>),

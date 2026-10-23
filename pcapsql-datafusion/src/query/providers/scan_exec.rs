@@ -1,7 +1,7 @@
 //! Partition-aware scan execution plan for a protocol table.
 //!
 //! Serves a table either from pre-materialized per-partition batches
-//! (`CacheOnTouch` / cached / pinned tables) or from per-partition streaming
+//! (`CacheOnTouch` cache, stream-pass tables) or from per-partition streaming
 //! receivers fed by a concurrent parse (`RetentionPolicy::None`). Either way
 //! it reports the real partition count and declares `frame_number` output
 //! ordering so cross-partition sort-merge joins reassemble global order

@@ -9,10 +9,10 @@ use std::net::IpAddr;
 use std::sync::Arc;
 
 use arrow::array::{
-    ArrayRef, BooleanBuilder, StringBuilder, UInt16Builder, UInt32Builder, UInt64Builder,
-    UInt8Builder,
+    new_null_array, ArrayRef, BooleanBuilder, StringBuilder, UInt16Builder, UInt32Builder,
+    UInt64Builder, UInt8Array, UInt8Builder,
 };
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::datatypes::{DataType, Schema};
 use arrow::record_batch::RecordBatch;
 
 use pcapsql_core::stream::{Http2StreamParser, ParsedMessage, StreamManager};
@@ -234,51 +234,11 @@ impl StreamTableBuilder {
     }
 }
 
-/// Arrow schema for HTTP/2 table.
+/// Arrow schema for the HTTP/2 table: the registered `http2` table schema
+/// (`tables::get_table_schema`), encapsulation columns included, so the
+/// batches this pass builds are exactly what the table provider advertises.
 fn http2_arrow_schema() -> Arc<Schema> {
-    Arc::new(Schema::new(vec![
-        Field::new("frame_number", DataType::UInt64, false),
-        Field::new("connection_id", DataType::UInt64, true),
-        Field::new("frame_type", DataType::Utf8, true),
-        Field::new("stream_id", DataType::UInt32, true),
-        Field::new("flags", DataType::UInt8, true),
-        Field::new("length", DataType::UInt32, true),
-        // Request fields
-        Field::new("method", DataType::Utf8, true),
-        Field::new("path", DataType::Utf8, true),
-        Field::new("authority", DataType::Utf8, true),
-        Field::new("scheme", DataType::Utf8, true),
-        // Response fields
-        Field::new("status", DataType::UInt16, true),
-        // Headers
-        Field::new("content_type", DataType::Utf8, true),
-        Field::new("content_length", DataType::UInt64, true),
-        Field::new("user_agent", DataType::Utf8, true),
-        // DATA frame
-        Field::new("data_length", DataType::UInt64, true),
-        Field::new("end_stream", DataType::Boolean, true),
-        Field::new("end_headers", DataType::Boolean, true),
-        Field::new("padding_length", DataType::UInt8, true),
-        // SETTINGS
-        Field::new("ack", DataType::Boolean, true),
-        Field::new("header_table_size", DataType::UInt32, true),
-        Field::new("max_concurrent_streams", DataType::UInt32, true),
-        Field::new("initial_window_size", DataType::UInt32, true),
-        Field::new("max_frame_size", DataType::UInt32, true),
-        // Error
-        Field::new("error_code", DataType::UInt32, true),
-        Field::new("error_name", DataType::Utf8, true),
-        // GOAWAY
-        Field::new("last_stream_id", DataType::UInt32, true),
-        // WINDOW_UPDATE
-        Field::new("window_increment", DataType::UInt32, true),
-        // PRIORITY
-        Field::new("priority_exclusive", DataType::Boolean, true),
-        Field::new("priority_dependency", DataType::UInt32, true),
-        Field::new("priority_weight", DataType::UInt8, true),
-        // PUSH_PROMISE
-        Field::new("promised_stream_id", DataType::UInt32, true),
-    ]))
+    Arc::new(crate::query::tables::get_table_schema("http2").expect("http2 table schema"))
 }
 
 /// Build an Arrow RecordBatch from HTTP/2 messages.
@@ -385,6 +345,13 @@ fn build_http2_batch(
         Arc::new(priority_weight.finish()),
         Arc::new(promised_stream_id.finish()),
     ];
+    // Encapsulation columns (every table carries them): reassembled streams
+    // are not attributed to a tunnel, so depth 0 / no tunnel.
+    let rows = messages.len();
+    let mut columns = columns;
+    columns.push(Arc::new(UInt8Array::from(vec![0u8; rows])));
+    columns.push(new_null_array(&DataType::Utf8, rows));
+    columns.push(new_null_array(&DataType::UInt64, rows));
 
     RecordBatch::try_new(schema.clone(), columns)
         .map_err(|e| Error::Query(QueryError::Execution(format!("Failed to build batch: {e}"))))
@@ -451,5 +418,22 @@ mod tests {
         assert!(schema.field_with_name("frame_type").is_ok());
         assert!(schema.field_with_name("method").is_ok());
         assert!(schema.field_with_name("path").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::*;
+
+    /// The batches the stream pass builds must carry the registered `http2`
+    /// schema, or a query that selects a column the data lacks (or `SELECT *`)
+    /// fails as soon as a capture actually contains decrypted HTTP/2 frames.
+    #[test]
+    fn http2_batches_match_registered_table_schema() {
+        let schema = http2_arrow_schema();
+        let batch = build_http2_batch(&schema, &[]).expect("empty batch builds");
+        let registered = crate::query::tables::get_table_schema("http2").expect("registered");
+        assert_eq!(batch.schema().as_ref(), &registered);
+        assert_eq!(batch.num_columns(), registered.fields().len());
     }
 }

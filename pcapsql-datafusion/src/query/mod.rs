@@ -244,10 +244,9 @@ impl<S: SeekablePacketSource> ParseSource for SourceParser<S> {
 
         let mut out = HashMap::new();
         let http2 = builder.http2_batches(self.batch_size)?;
-        let schema = http2
-            .first()
-            .map(|b| b.schema())
-            .unwrap_or_else(|| Arc::new(tables::get_table_schema("http2").expect("http2 schema")));
+        // The batches are built against the registered table schema, so the
+        // empty and populated cases advertise the same columns.
+        let schema = Arc::new(tables::get_table_schema("http2").expect("http2 schema"));
         out.insert(
             "http2".to_string(),
             TableData {
@@ -577,7 +576,7 @@ impl QueryEngine {
         // RetentionPolicy::None streams — producers hand batches to DataFusion
         // as they form, so memory stays flat while consumers keep pace — and
         // the producer stats are folded after execution. An empty
-        // subscription means every referenced table is already cached/pinned —
+        // subscription means every referenced table is already cached/prepared —
         // nothing to parse.
         let streaming = self.retention == RetentionPolicy::None
             && !subscription.tables.is_empty()
@@ -712,7 +711,7 @@ impl QueryEngine {
             RetentionPolicy::None => {
                 for (name, table_needs) in needs {
                     if self.tables.contains(&name) {
-                        continue; // pinned (e.g. keylog http2)
+                        continue; // already prepared (stream pass above) or cached
                     }
                     let multi_scan = table_needs.scan_count > 1;
                     let predicate = if multi_scan || name == "frames" {
