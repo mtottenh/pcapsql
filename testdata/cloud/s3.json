@@ -1,0 +1,11 @@
+{
+  "identities": [
+    {
+      "name": "pcapsql",
+      "credentials": [
+        { "accessKey": "pcapsqlkey", "secretKey": "pcapsqlsecret" }
+      ],
+      "actions": ["Admin", "Read", "Write", "List", "Tagging"]
+    }
+  ]
+}
