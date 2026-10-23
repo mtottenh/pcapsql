@@ -40,6 +40,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   join input), which is inherent to that plan. That queueing is reported per
   table in `--stats` and `ParseStats`
   ([#107](https://github.com/mtottenh/pcapsql/issues/107)).
+- A query's prepared tables are now scoped to that query: `QueryEngine::query`
+  plans each query on its own copy of the session state carrying a
+  `QueryTables` extension that the table providers read, instead of
+  engine-global `EngineTables`. `EngineTables` is replaced by `TableCache`
+  (the `CacheOnTouch` cache) and `QueryTables`; `ProtocolTableProvider::new`
+  takes the nominal partition count instead of a tables handle. A cancelled
+  query releases its stream producers by ownership of its receivers.
+  **Behaviour change:** a data query issued directly on `engine.context()`
+  used to succeed on a `CacheOnTouch` engine once an earlier `query()` had
+  cached the table (and to fail at planning otherwise); it now always fails at
+  execution with "table … was not prepared for this query" — run queries
+  through `QueryEngine::query` / `execute`. A time-UDF query on a source
+  without a boundary index reports its header-only time-range pass in the
+  stats (groundwork for
+  [#123](https://github.com/mtottenh/pcapsql/issues/123)).
 
 ### Added
 

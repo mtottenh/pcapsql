@@ -11,7 +11,7 @@
 //!              ▼              ▼        ▼              ▼
 //!        frames table    ipv4 table  tcp table   dns table   ...
 //!              └──────────────┴───────┴──────────────┘
-//!                     shared by every ProtocolTableProvider
+//!          one QueryTables per query, read by its ProtocolTableProviders
 //! ```
 //!
 //! A query joining N protocol tables therefore parses the capture once, not N
@@ -24,7 +24,9 @@ mod scan_exec;
 mod shared;
 
 pub use exchange::{BatchReceiver, BatchSender, OverflowStats, Pacer, STREAM_CHANNEL_CAPACITY};
-pub use protocol_provider::{EngineTables, PreparedTable, ProtocolTableProvider};
+pub use protocol_provider::{
+    column_names, PreparedTable, ProtocolTableProvider, QueryTables, TableCache,
+};
 pub use scan_exec::ProtocolScanExec;
 pub use shared::{
     auto_target_partitions, run_shared_parse, run_streaming_parse, ParseStats, ParseSubscription,
