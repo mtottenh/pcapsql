@@ -23,7 +23,7 @@
 use std::io::{BufReader, Read};
 
 use bytes::Bytes;
-use pcap_parser::pcapng::{build_ts_resolution, Block};
+use pcap_parser::pcapng::Block;
 use pcap_parser::traits::{PcapNGPacketBlock, PcapReaderIterator};
 use pcap_parser::{LegacyPcapReader, PcapBlockOwned, PcapError as PcapParserError, PcapNGReader};
 
@@ -36,8 +36,33 @@ use crate::io::{PacketRef, RawPacket};
 /// `BufferTooSmall` handling in the read loops).
 const BUFFER_SIZE: usize = 262144;
 
+/// Hard ceiling for the read buffer (64 MiB).
+///
+/// `BufferTooSmall` is raised from the *declared* record length, so without a
+/// ceiling a single corrupt caplen would keep doubling the buffer until the
+/// allocation failed. No real link layer produces frames this large.
+const MAX_BUFFER_SIZE: usize = 64 * 1024 * 1024;
+
 /// Default timestamp resolution (units per second) when none is known: microseconds.
 const DEFAULT_RESOLUTION: u64 = 1_000_000;
+
+/// Decode a PCAPNG `if_tsresol` byte into units per second.
+///
+/// Bit 7 clear: the low 7 bits are a power of ten (`6` ⇒ 10⁶ = microseconds).
+/// Bit 7 set: the low 7 bits are a power of two (`0x8A` ⇒ 2¹⁰ units per second).
+/// Returns `None` for exponents that do not fit in a `u64` (decimal > 19,
+/// binary > 63). Decoded locally rather than via `pcap_parser` because its
+/// `build_ts_resolution` rejects every binary resolution (it range-checks the
+/// raw byte, which always has bit 7 set in that branch).
+#[inline]
+pub fn tsresol_units(if_tsresol: u8) -> Option<u64> {
+    let exp = u32::from(if_tsresol & 0x7F);
+    if if_tsresol & 0x80 == 0 {
+        (exp <= 19).then(|| 10u64.pow(exp))
+    } else {
+        (exp <= 63).then(|| 1u64 << exp)
+    }
+}
 
 /// Per-interface state required to interpret packets (PCAPNG).
 ///
@@ -57,7 +82,7 @@ impl InterfaceInfo {
     /// Timestamp resolution in units per second (e.g. 1_000_000 for microseconds).
     #[inline]
     pub fn resolution(&self) -> u64 {
-        build_ts_resolution(self.if_tsresol).unwrap_or(DEFAULT_RESOLUTION)
+        tsresol_units(self.if_tsresol).unwrap_or(DEFAULT_RESOLUTION)
     }
 }
 
@@ -357,6 +382,16 @@ impl<R: Read> GenericPcapReader<R> {
     }
 }
 
+/// Log that a capture ended inside a record (truncated file or stalled stream).
+fn warn_truncated(what: &str, consumed: usize, frames: u64) {
+    tracing::warn!(
+        byte_offset = consumed,
+        frames_read = frames,
+        "{what}: capture is truncated (record header declares more bytes than remain); \
+         returning the complete prefix"
+    );
+}
+
 /// Grow the buffer to fit a frame larger than the current capacity.
 fn grow_buffer<I: PcapReaderIterator>(
     reader: &mut I,
@@ -364,9 +399,12 @@ fn grow_buffer<I: PcapReaderIterator>(
     what: &str,
 ) -> Result<(), Error> {
     let new_cap = capacity.saturating_mul(2);
-    if new_cap == *capacity || !reader.grow(new_cap) {
+    if new_cap == *capacity || new_cap > MAX_BUFFER_SIZE || !reader.grow(new_cap) {
         return Err(Error::Pcap(PcapError::InvalidFormat {
-            reason: format!("{what}: frame exceeds maximum buffer size"),
+            reason: format!(
+                "{what}: frame exceeds maximum buffer size ({} MiB); the record length is probably corrupt",
+                MAX_BUFFER_SIZE / (1024 * 1024)
+            ),
         }));
     }
     *capacity = new_cap;
@@ -418,9 +456,13 @@ where
                     reader.consume(offset);
                 }
             },
-            // Graceful stop on clean EOF and on truncated captures (declared
-            // length exceeds bytes present).
-            Err(PcapParserError::Eof) | Err(PcapParserError::UnexpectedEof) => break,
+            Err(PcapParserError::Eof) => break,
+            // Truncated capture: the last record declares more bytes than are
+            // present. Stop cleanly with the complete prefix, but say so.
+            Err(PcapParserError::UnexpectedEof) => {
+                warn_truncated("Legacy PCAP", reader.consumed(), *frame_number);
+                break;
+            }
             Err(PcapParserError::Incomplete(_)) => {
                 reader.refill().map_err(|e| {
                     Error::Pcap(PcapError::InvalidFormat {
@@ -473,6 +515,13 @@ where
                                 if_tsresol: idb.if_tsresol,
                                 snaplen: idb.snaplen,
                             };
+                            if tsresol_units(info.if_tsresol).is_none() {
+                                tracing::warn!(
+                                    if_tsresol = info.if_tsresol,
+                                    interface = interfaces.len(),
+                                    "PCAPNG: invalid if_tsresol; assuming microseconds"
+                                );
+                            }
                             *link_type = info.link_type;
                             interfaces.push(info);
                             reader.consume(offset);
@@ -526,7 +575,11 @@ where
                     }
                 }
             }
-            Err(PcapParserError::Eof) | Err(PcapParserError::UnexpectedEof) => break,
+            Err(PcapParserError::Eof) => break,
+            Err(PcapParserError::UnexpectedEof) => {
+                warn_truncated("PCAPNG", reader.consumed(), *frame_number);
+                break;
+            }
             Err(PcapParserError::Incomplete(_)) => {
                 reader.refill().map_err(|e| {
                     Error::Pcap(PcapError::InvalidFormat {
@@ -572,11 +625,44 @@ mod tests {
             PcapFormat::LegacyBeMicro
         );
 
+        let le_nano = [0x4d, 0x3c, 0xb2, 0xa1];
+        assert_eq!(
+            PcapFormat::detect(&le_nano).unwrap(),
+            PcapFormat::LegacyLeNano
+        );
+
+        let be_nano = [0xa1, 0xb2, 0x3c, 0x4d];
+        assert_eq!(
+            PcapFormat::detect(&be_nano).unwrap(),
+            PcapFormat::LegacyBeNano
+        );
+
         let pcapng = [0x0a, 0x0d, 0x0d, 0x0a];
         assert_eq!(PcapFormat::detect(&pcapng).unwrap(), PcapFormat::PcapNg);
 
         let unknown = [0xDE, 0xAD, 0xBE, 0xEF];
         assert!(PcapFormat::detect(&unknown).is_err());
+    }
+
+    #[test]
+    fn test_tsresol_units_decimal_and_binary() {
+        assert_eq!(tsresol_units(6), Some(1_000_000));
+        assert_eq!(tsresol_units(9), Some(1_000_000_000));
+        assert_eq!(tsresol_units(0), Some(1));
+        assert_eq!(tsresol_units(19), Some(10u64.pow(19)));
+        assert_eq!(tsresol_units(20), None);
+        // Binary exponents: bit 7 set, low 7 bits = power of two.
+        assert_eq!(tsresol_units(0x80), Some(1));
+        assert_eq!(tsresol_units(0x8A), Some(1024));
+        assert_eq!(tsresol_units(0x80 | 63), Some(1u64 << 63));
+        assert_eq!(tsresol_units(0x80 | 64), None);
+        // The reader falls back to microseconds for invalid bytes.
+        let info = InterfaceInfo {
+            link_type: 1,
+            if_tsresol: 0x80 | 64,
+            snaplen: 0,
+        };
+        assert_eq!(info.resolution(), DEFAULT_RESOLUTION);
     }
 
     #[test]

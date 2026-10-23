@@ -616,15 +616,16 @@ impl CloudPacketSource {
         // - Options (variable)
         // - Block Total Length (4)
 
-        // Detect endianness from Byte-Order Magic at offset 8
-        let bom = u32::from_ne_bytes([header[8], header[9], header[10], header[11]]);
-        let is_le = bom == 0x1A2B3C4D;
-        let is_be = bom == 0x4D3C2B1A;
+        // Detect endianness from the Byte-Order Magic at offset 8 by matching
+        // the raw on-disk byte pattern (host byte order must not matter).
+        let bom = [header[8], header[9], header[10], header[11]];
+        let is_le = bom == [0x4D, 0x3C, 0x2B, 0x1A];
+        let is_be = bom == [0x1A, 0x2B, 0x3C, 0x4D];
 
         if !is_le && !is_be {
             return Err(Error::Io(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("Invalid PCAPNG byte-order magic: 0x{bom:08x}"),
+                format!("Invalid PCAPNG byte-order magic: {bom:02x?}"),
             )));
         }
 

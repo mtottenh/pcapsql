@@ -182,6 +182,59 @@ fn pcapng_multi_interface_differing_tsresol() {
 }
 
 #[test]
+fn pcapng_binary_tsresol_power_of_two() {
+    // `if_tsresol` with bit 7 set is a power-of-two resolution (here 2^-10 s per
+    // tick, as some hardware timestampers write). pcap_parser's own decoder
+    // rejects every binary exponent, so the reader must decode it itself; a
+    // reader that silently fell back to microseconds would be off by ~1000x.
+    let gc = pcapng(&[PcapngSection {
+        interfaces: vec![
+            PcapngInterface {
+                link_type: 1,
+                tsresol: 0x8A, // 2^10 = 1024 units per second
+                snaplen: 65535,
+            },
+            PcapngInterface {
+                link_type: 1,
+                tsresol: 6,
+                snaplen: 65535,
+            },
+        ],
+        packets: (0..24)
+            .map(|i| PcapngPacket {
+                interface_id: (i % 2) as u32,
+                ts_sec: 1_700_000_000 + i,
+                ts_frac_units: if i % 2 == 0 {
+                    (i * 37) % 1024
+                } else {
+                    (i * 11) % 1_000_000
+                },
+                data: vec![(i % 256) as u8; 40],
+                origlen: 40,
+            })
+            .collect(),
+    }]);
+    // Sanity-check the ground truth itself: tick 512 at 1024/s is exactly 0.5 s.
+    let probe = pcapng(&[PcapngSection {
+        interfaces: vec![PcapngInterface {
+            link_type: 1,
+            tsresol: 0x8A,
+            snaplen: 65535,
+        }],
+        packets: vec![PcapngPacket {
+            interface_id: 0,
+            ts_sec: 10,
+            ts_frac_units: 512,
+            data: vec![0; 20],
+            origlen: 20,
+        }],
+    }]);
+    assert_eq!(probe.expected[0].timestamp_ns, 10_500_000_000);
+    assert_equivalent(&probe);
+    assert_equivalent(&gc);
+}
+
+#[test]
 fn pcapng_multi_section() {
     let mk_section = |tsresol: u8, base: u64| PcapngSection {
         interfaces: vec![PcapngInterface {
@@ -262,11 +315,19 @@ fn generated_capture_sweep() {
     ];
     for seed in [1u64, 42, 0xDEAD_BEEF] {
         for format in formats {
-            for (interfaces, sections, midstream) in [
-                (vec![6u8], 1usize, false),
-                (vec![6, 9], 1, false),
-                (vec![9], 2, true),
-            ] {
+            // The three pcapng-only shapes only differ for `Format::Pcapng`;
+            // legacy formats ignore `interfaces`/`sections`/`midstream`.
+            let shapes: &[(Vec<u8>, usize, bool)] = if format == Format::Pcapng {
+                &[
+                    (vec![6u8], 1usize, false),
+                    (vec![6, 9], 1, false),
+                    (vec![0x8A, 3], 1, false),
+                    (vec![9], 2, true),
+                ]
+            } else {
+                &[(vec![6u8], 1usize, false)]
+            };
+            for (interfaces, sections, midstream) in shapes.iter().cloned() {
                 let spec = CaptureSpec {
                     format,
                     seed,

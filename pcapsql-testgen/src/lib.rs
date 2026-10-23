@@ -282,8 +282,10 @@ const OPT_ENDOFOPT: u16 = 0;
 #[derive(Clone, Debug)]
 pub struct PcapngInterface {
     pub link_type: u16,
-    /// Decimal timestamp resolution exponent; only {3,6,9} are used so the
-    /// nanosecond conversion is exact.
+    /// Raw `if_tsresol` byte. Bit 7 clear: decimal exponent (3/6/9 give an
+    /// exact nanosecond conversion). Bit 7 set: binary exponent, e.g. `0x8A`
+    /// = 2^-10 s per tick, which exercises the power-of-two branch readers
+    /// must implement.
     pub tsresol: u8,
     pub snaplen: u32,
 }
@@ -291,7 +293,7 @@ pub struct PcapngInterface {
 /// One packet (Enhanced Packet Block) within a section.
 ///
 /// The on-disk 64-bit tick count is `ts_sec*resolution + ts_frac_units`, where
-/// `resolution = 10^tsresol` of the referenced interface. `interface_id` is the
+/// `resolution = tsresol_units(tsresol)` of the referenced interface. `interface_id` is the
 /// index into the section's `interfaces` list.
 #[derive(Clone, Debug)]
 pub struct PcapngPacket {
@@ -333,8 +335,17 @@ pub struct PcapngOrderedSection {
 
 /// `10^exp` as a u64 (exp expected to be one of {3,6,9}).
 #[inline]
-fn pow10(exp: u8) -> u64 {
-    10u64.pow(exp as u32)
+/// Decode a PCAPNG `if_tsresol` byte into units per second (decimal or binary).
+///
+/// Mirrors the pcapng specification: bit 7 clear ⇒ `10^low7`, bit 7 set ⇒
+/// `2^low7`. This is the ground-truth definition the reader is checked against.
+pub fn tsresol_units(tsresol: u8) -> u64 {
+    let exp = u32::from(tsresol & 0x7F);
+    if tsresol & 0x80 == 0 {
+        10u64.pow(exp)
+    } else {
+        1u64 << exp
+    }
 }
 
 /// PCAPNG nanosecond formula for a decimal resolution.
@@ -488,7 +499,7 @@ pub fn pcapng_ordered(sections: &[PcapngOrderedSection]) -> GeneratedCapture {
                 }
                 PcapngBlock::Packet(p) => {
                     let iface = &interfaces[p.interface_id as usize];
-                    let resolution = pow10(iface.tsresol);
+                    let resolution = tsresol_units(iface.tsresol);
                     let ticks = p.ts_sec * resolution + p.ts_frac_units;
                     let ts_high = (ticks >> 32) as u32;
                     let ts_low = (ticks & 0xFFFF_FFFF) as u32;
@@ -725,14 +736,17 @@ fn generate_pcapng(spec: &CaptureSpec) -> GeneratedCapture {
                 (j % base_len) as u32
             };
 
-            let resolution = pow10(tsresol_by_id[interface_id as usize]);
+            let resolution = tsresol_units(tsresol_by_id[interface_id as usize]);
 
             // Monotonic timestamps across the whole file: one frame per ~ms.
             let idx = global_frame - 1;
             let ts_sec = BASE_SEC + idx / 1000;
             let within_ms = idx % 1000;
             // fractional units = within_ms milliseconds expressed in this
-            // interface's resolution: ms * (resolution / 1000).
+            // interface's resolution: ms * (resolution / 1000). For coarse or
+            // binary resolutions this is only approximately a millisecond; the
+            // ground truth is computed from the ticks actually written, so it
+            // stays exact regardless.
             let ts_frac_units = within_ms * (resolution / 1000);
 
             let origlen = data.len() as u32;
@@ -1017,7 +1031,9 @@ mod tests {
                                 ifaces.clear();
                             }
                             Block::InterfaceDescription(idb) => {
-                                let res = idb.ts_resolution().expect("valid tsresol");
+                                // Decoded locally: pcap_parser's `ts_resolution()`
+                                // rejects every binary (bit-7) exponent.
+                                let res = tsresol_units(idb.if_tsresol);
                                 ifaces.push((idb.linktype.0 as u32, res));
                             }
                             Block::EnhancedPacket(epb) => {
@@ -1305,6 +1321,18 @@ mod tests {
                 max_size: 180,
                 link_type: 1,
                 interfaces: vec![6, 9],
+                sections: 1,
+                add_interface_midstream: false,
+            });
+            // binary (power-of-two) tsresol next to a decimal one
+            v.push(CaptureSpec {
+                format: Format::Pcapng,
+                seed,
+                packet_count: 12,
+                min_size: 20,
+                max_size: 180,
+                link_type: 1,
+                interfaces: vec![0x8A, 6],
                 sections: 1,
                 add_interface_midstream: false,
             });
