@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc f498ed89766d398a35284b4135f51d81c961ef5b05d2cc2808434e4e8dd1a0d5 # shrinks to spec = CaptureSpec { format: LegacyLeMicro, seed: 0, packet_count: 3, min_size: 14, max_size: 14, link_type: 1, interfaces: [3], sections: 1, add_interface_midstream: false }
+cc c67ddaaa25257653e16b00a97e1d4a8c61a367c71878d2f1d2a0f22846f458d2 # shrinks to spec = CaptureSpec { format: LegacyLeMicro, seed: 0, packet_count: 3, min_size: 14, max_size: 14, link_type: 1, interfaces: [3], sections: 1, add_interface_midstream: false }

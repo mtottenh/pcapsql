@@ -94,6 +94,11 @@ impl InterfaceInfo {
 pub struct InterfaceState {
     /// Interfaces in declaration order; index == PCAPNG interface id within the section.
     pub interfaces: Vec<InterfaceInfo>,
+    /// Byte order of the current section (from the SHB byte-order magic).
+    ///
+    /// A synthesized header for a mid-file partition must use the same byte
+    /// order as the blocks that follow it, or every block length is misread.
+    pub big_endian: bool,
 }
 
 /// Convert a legacy timestamp (seconds + sub-second field) to nanoseconds.
@@ -205,6 +210,8 @@ pub struct GenericPcapReader<R: Read> {
     link_type: u32,
     /// PCAPNG interface table for the current section (empty for legacy).
     interfaces: Vec<InterfaceInfo>,
+    /// Byte order of the current PCAPNG section (false for legacy).
+    big_endian: bool,
     /// Current buffer capacity, grown on demand for oversized frames.
     capacity: usize,
 }
@@ -264,6 +271,7 @@ impl<R: Read> GenericPcapReader<R> {
             frame_number: initial_frame,
             link_type,
             interfaces: Vec::new(),
+            big_endian: false,
             capacity: BUFFER_SIZE,
         })
     }
@@ -349,6 +357,7 @@ impl<R: Read> GenericPcapReader<R> {
     pub fn interface_state(&self) -> InterfaceState {
         InterfaceState {
             interfaces: self.interfaces.clone(),
+            big_endian: self.big_endian,
         }
     }
 
@@ -375,6 +384,7 @@ impl<R: Read> GenericPcapReader<R> {
                 &mut self.frame_number,
                 &mut self.link_type,
                 &mut self.interfaces,
+                &mut self.big_endian,
                 &mut self.capacity,
                 f,
             ),
@@ -492,6 +502,7 @@ fn process_pcapng_packets<S: Read, F>(
     frame_number: &mut u64,
     link_type: &mut u32,
     interfaces: &mut Vec<InterfaceInfo>,
+    big_endian: &mut bool,
     capacity: &mut usize,
     mut f: F,
 ) -> Result<usize, Error>
@@ -504,9 +515,11 @@ where
             Ok((offset, block)) => {
                 match block {
                     PcapBlockOwned::NG(ng_block) => match ng_block {
-                        Block::SectionHeader(_) => {
-                            // New section: interface namespace resets.
+                        Block::SectionHeader(shb) => {
+                            // New section: interface namespace resets; byte
+                            // order may change.
                             interfaces.clear();
+                            *big_endian = shb.big_endian();
                             reader.consume(offset);
                         }
                         Block::InterfaceDescription(idb) => {

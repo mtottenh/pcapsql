@@ -121,7 +121,7 @@ fn init_protocol(init: &InitInfo) -> DuckResult<ProtocolInitData, Box<dyn std::e
 
     // Create reader
     let reader = source
-        .reader(None)
+        .sequential_reader()
         .map_err(|e| DuckDbError::Extension(format!("Failed to create reader: {e}")))?;
 
     Ok(ProtocolInitData {

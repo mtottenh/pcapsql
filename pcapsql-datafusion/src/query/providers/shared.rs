@@ -64,7 +64,7 @@ fn parse_source<S: PacketSource>(
     registry: &ProtocolRegistry,
     batch_size: usize,
 ) -> Result<(ProtocolBatches, i64, i64), Error> {
-    let mut reader = source.reader(None)?;
+    let mut reader = source.sequential_reader()?;
 
     let mut batch_set = NormalizedBatchSet::new(batch_size);
     let mut min_us = i64::MAX;
