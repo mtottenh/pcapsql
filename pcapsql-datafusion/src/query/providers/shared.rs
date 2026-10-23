@@ -421,7 +421,7 @@ pub fn run_shared_parse<S: SeekablePacketSource>(
 }
 
 // ============================================================================
-// Streaming parse (RetentionPolicy::None) — bounded-memory pipeline.
+// Streaming parse (RetentionPolicy::None) — batches flow to the plan as they form.
 // ============================================================================
 
 /// One partition producer's contribution to the pass statistics.
@@ -453,8 +453,12 @@ pub struct StreamingHandle {
 /// and runs the parse to completion, sending completed batches as they form.
 /// Channels are unbounded, so a producer never blocks on a consumer — the
 /// pass is deadlock-free regardless of how DataFusion drains the tables.
-/// Memory stays bounded when consumers keep pace (the sort-merge-join,
-/// frame-ordered common case) and degrades to buffering a table otherwise.
+/// Memory is therefore *not* bounded by construction: it stays flat while
+/// consumers keep pace (the sort-merge-join, frame-ordered common case) and
+/// grows to hold a table's batches when a consumer lags (a hash-join build
+/// side, a sort) — the same footprint as materializing that table. A
+/// producer stops early once every subscribed table is capped or every
+/// consumer has dropped its receiver (query finished or cancelled).
 pub fn run_streaming_parse<S: SeekablePacketSource>(
     source: &Arc<S>,
     registry: &Arc<ProtocolRegistry>,

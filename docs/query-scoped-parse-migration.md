@@ -327,51 +327,61 @@ Gate: standard + golden + benches: `query_selective` and `engine_build` must
 improve materially (`engine_build` becomes ~source-open); `query_full_scan`
 within noise; REPL second-query latency within noise of P1.
 
-### P3 — Streaming execution: bounded memory for one-shot
+### P3 — Streaming execution for one-shot queries
 
-*Goal: `RetentionPolicy::None` never materializes a table; the
-bounded-memory promise deleted from the docs in P0 becomes true. LIMIT stops
-reading the file early.*
+*Goal: `RetentionPolicy::None` never materializes a table before executing;
+batches flow to DataFusion as they form, and LIMIT stops reading the file
+early.*
+
+**As shipped (#102).** The section below is the design as implemented; the
+original proposal (bounded channels with an overflow buffer, an overflow
+metric and a memory-ceiling test) is recorded under *Deferred* so the gap is
+explicit rather than implied.
 
 Changes:
-- `run_shared_parse`'s internals (`shared.rs:153-246`) are replaced by
-  `run_parse_drivers`: per-partition `std::thread` drivers push completed
-  `RecordBatch`es into bounded per-(table × partition) channels
-  (`tokio::sync::mpsc` bridged by DataFusion's `RecordBatchReceiverStream`).
-  `ProtocolScanExec::execute(i)` returns the receiver stream; pre-built-batch
-  serving (`scan_exec.rs:113-130`) is rewritten.
-- **Overflow policy (the deadlock answer):** `try_send`; on a full channel the
-  driver moves the batch into a tracked per-table overflow buffer and
-  continues. Divergent consumption (e.g., a hash-join build side draining one
-  table first — `prefer_hash_join = false` is a preference, not a guarantee)
-  degrades to P2's memory behavior for that table instead of deadlocking.
-  Overflowed bytes are reported in `ParseStats`. Frame-ordered co-consumption
-  under SMJ keeps buffers small in the common case.
-- LIMIT early-stop: each driver checks an `AtomicBool` set when every
-  subscribed table has satisfied its `fetch`; drivers stop reading the source.
-- `CacheOnTouch` uses the same drivers, draining streams to completion and
-  teeing into the cache — one execution path for both policies.
-- Self-join note: two scans of one table become two receivers on one parse
-  stream (broadcast with per-receiver overflow), or — simpler and chosen
-  here — the planner-walk detects duplicate table refs and pins that table to
-  buffered mode. Add a regression test either way.
+- `run_streaming_parse`: one `spawn_blocking` producer per partition owns its
+  reader and builders and runs the scoped parse to completion, sending each
+  completed `RecordBatch` to a per-(table × partition) **unbounded**
+  `tokio::sync::mpsc` channel. `ProtocolScanExec::execute(i)` serves the
+  receiver as a stream. Unbounded channels make the pass deadlock-free by
+  construction regardless of how DataFusion drains the tables; the price is
+  that memory is bounded only while consumers keep pace (the frame-ordered
+  sort-merge-join case). A lagging consumer (hash-join build side, sort)
+  buffers that table's batches in the channel — the same footprint as
+  materializing it.
+- Early stop: a producer stops reading the source once every subscribed table
+  has reached its row cap **or every consumer has dropped its receiver** (the
+  query finished — e.g. a `LIMIT` above a filter DataFusion kept — or was
+  cancelled).
+- The engine awaits the producers after execution to fold `ParseStats` and
+  surface parse errors (fail closed: a producer error fails the query even if
+  the plan already returned rows).
+- `RetentionPolicy::None` clears the engine's table entries *before*
+  preparing each query as well as after executing it, so a cancelled query's
+  stream entries are never mistaken for prepared tables by the next one.
+- **Duplicate table references** (self-join, `IN (SELECT … FROM same_table)`,
+  a view joined with one of its member tables) need two consumers of one
+  table, but a stream can be consumed once. Such a query takes the materialize
+  path for that one query — still a single parse pass, dropped afterwards.
+  Guarded by the golden corpus (q26–q28) under the streaming policy.
+- `CacheOnTouch` keeps the materialize path: the cache must hold full-column
+  tables to serve later queries, so `SharedParseState` is retained as its
+  result type (the deletion proposed below did not happen).
 
-Deletions:
+Deferred (tracked follow-ups, not in this phase):
+- Bounded channels with a tracked overflow buffer and an `overflowed_bytes`
+  entry in `ParseStats`, so a lagging consumer degrades observably instead of
+  silently.
+- A memory-ceiling test (allocator counter on a large synthetic capture).
+- Deleting `SharedParseState` / the materialize-then-serve internals (still
+  needed by `CacheOnTouch`).
 
-| Item | Location |
-|---|---|
-| Materialize-then-serve internals of the shared pass: partition result collection, `tables: HashMap<String, Vec<Vec<RecordBatch>>>` reorganization | `shared.rs:153-246` |
-| `SharedParseState` + accessors (`table_partitions`, `num_partitions`, `parse_passes`, `timestamp_range_us`, `total_frames`) — replaced by the per-query exchange + `ParseStats` + cache | `shared.rs:37-76` |
-| `TableSource::Shared` enum arm (providers hold the exchange/cache handle) | `protocol_provider.rs:29-34` |
-
-Tests: memory ceiling test (synthetic 1 GB-scale capture; assert peak
-`bytes_allocated` via an allocator-counter feature stays `O(channels ×
-batch_size)`, not `O(capture)`); LIMIT early-stop test (assert
-`packets_scanned < total` via `ParseStats`); hash-join-forced overflow test
-(flip `prefer_hash_join`, assert completion + overflow metric > 0); golden
-corpus + 1-vs-N equivalence unchanged.
-Gate: standard + golden + benches: `query_limit` order-of-magnitude better;
-peak RSS on `payload_heavy` bounded; throughput benches within noise of P2.
+Tests: golden corpus runs under `RetentionPolicy::None` as well and asserts
+streaming ≡ materialized for every query (including the duplicate-reference
+and fresh-engine time-UDF queries); `streaming_results_match_materialized`;
+`streaming_limit_stops_scan_early` (`packets_scanned < total`,
+`complete_scan = false`); `streaming_hash_join_completes_without_deadlock`.
+Gate: standard + golden; `query_limit` improves for unfiltered LIMIT.
 
 ### P4 — Stream analysis joins the single pass
 
@@ -477,7 +487,7 @@ Everything removed by this migration, by phase:
 | P0 | `QueryEngine::auto`, `STREAMING_THRESHOLD_BYTES`, `query/frames.rs`, `query/tables/{tcp_connections,tls_sessions,http_messages}.rs` (as dead exports), `current_batches` | ~700 |
 | P1 | 7 `QueryEngine` constructors, `load_normalized_packets`, `extract_timestamp_range`, `query/provider.rs` (`PcapTableProvider`), `pcapsql-core/src/pcap/reader.rs` (`PcapReader`), `RawPacket` builder APIs (+ `RawPacket` if orphaned), `--streaming` flag, `indicatif` (likely) | ~900 |
 | P2 | `parse_packet_pruned`/`_projected`/`_pruned_projected` as separate functions, construction-time parse, `parse_pass_count`/`partition_count`, post-hoc `batch.project()` | ~350 |
-| P3 | `SharedParseState` + materialize-then-serve internals of `shared.rs`, `TableSource::Shared` | ~250 |
+| P3 | `TableSource::Shared`; `SharedParseState` and the materialize path are **retained** for `CacheOnTouch` (see §4-P3 *Deferred*) | ~60 |
 | P4 | `StreamTableBuilder::process_pcap` + embedded mini-parser, keylog interim wiring, `ProtocolTableProvider::in_memory`/`TableSource` | ~300 |
 | P5 | Unconditional `raw_data` copy path, `append_binary` | ~30 |
 
@@ -490,7 +500,7 @@ entry points 4 → 1; `TableProvider` impls 2 → 1; CLI mode flags
 | What | Before | After (phase) |
 |---|---|---|
 | `pcapsql query f.pcap "…"` first-result latency | full parse of capture up front | scoped parse of only what the query needs (P2), streaming + LIMIT early-stop (P3) |
-| Memory, one-shot | O(parsed capture) + raw_data copy | O(batch × channels) (P3), no payload copy (P5) |
+| Memory, one-shot | O(parsed capture) + raw_data copy | flat while consumers keep pace, up to O(table) for a lagging consumer (P3); `raw_data` built only when projected (P2) |
 | REPL first query per table | instant after slow startup | startup ~instant; first query touching a table pays its scoped parse; later queries on cached tables instant (P2) |
 | `--streaming`, `--mmap` | mode flags | removed / `--no-mmap` (P1) |
 | `--stats` | stale cache text | `ParseStats`: packets scanned/skipped, rows built, partitions, overflow (P2+) |
@@ -542,8 +552,8 @@ Criterion suite added in P0, run per phase; numbers recorded in each PR:
 |---|---|---|
 | SMJ correctness once `target_partitions` is unpinned | P2 | golden corpus + equivalence suites; if a plan regression appears, pin per-query when stream tables/joins demand it rather than re-pinning globally |
 | Plan-walk misses a table ref (subquery, view expansion, UDTF) | P2 | harvest from the *optimized* plan (views inlined); fallback: any unrecognized scan ⇒ `ParseScope::full()` for that query — correctness never depends on the harvest |
-| Exchange deadlock under non-SMJ plans | P3 | overflow-to-buffer policy (never blocks); metric + test that forces a hash join |
-| Self-join double-consumption | P3 | duplicate-ref detection ⇒ buffered mode for that table; regression test |
+| Exchange deadlock under non-SMJ plans | P3 | unbounded channels (never block); test that forces a hash join; overflow metric deferred |
+| Self-join double-consumption | P3 | duplicate-ref detection ⇒ materialize path for that query; golden corpus q26–q28 |
 | Time-UDF bootstrap (`register_time_udfs_eager` needs capture time range before first query) | P2 | derive lazily: index `min_ts`/`max_ts` when present (free), else first parse populates; document one-query staleness window or resolve in P6 via index |
 | Cloud `raw_data` projection cost | P5 | per-batch coalesced range GETs; documented; only paid when projected |
 | REPL cache growth (no eviction) | P2 | accepted initially (matches today's ceiling — today caches *everything* up front); `EngineOptions` memory ceiling is future work |

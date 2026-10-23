@@ -178,7 +178,7 @@ pub struct QueryEngine {
 }
 
 /// Type-erased scoped parse over the engine's source: either materialize the
-/// subscribed tables (cache-fill) or stream them (bounded memory).
+/// subscribed tables (cache-fill) or stream them to the executing plan.
 trait ParseSource: Send + Sync {
     fn materialize(&self, sub: &ParseSubscription) -> Result<SharedParseState, Error>;
     fn stream(&self, sub: &ParseSubscription) -> Result<StreamingHandle, Error>;
@@ -514,14 +514,32 @@ impl QueryEngine {
             .optimize(&plan)
             .map_err(|e| Error::Query(QueryError::from(e)))?;
 
+        // One-shot engines keep nothing between queries. Clearing *before*
+        // preparing (not only after executing) also disposes of entries a
+        // cancelled query left behind: a dropped `query()` future never reaches
+        // the post-execution clear, and a stale stream entry would otherwise
+        // be treated as "already prepared" by the next query.
+        if self.retention == RetentionPolicy::None {
+            self.tables.clear();
+        }
+
         let needs = harvest_table_needs(&optimized, &self.known_tables)?;
+        // A table scanned twice in one plan (self-join, IN-subquery on the same
+        // table, a view joined with one of its members) needs two consumers,
+        // but a stream can be consumed once. Such queries take the materialize
+        // path for this one query — still a single parse pass.
+        let any_multi_scan = needs.values().any(|n| n.scan_count > 1);
         let subscription = self.build_subscription(needs);
 
         // CacheOnTouch materializes (so the cache can serve any later query);
-        // RetentionPolicy::None streams (bounded memory) and we fold the
-        // producer stats after execution. An empty subscription means every
-        // referenced table is already cached/pinned — nothing to parse.
-        let streaming = self.retention == RetentionPolicy::None && !subscription.tables.is_empty();
+        // RetentionPolicy::None streams — producers hand batches to DataFusion
+        // as they form, so memory stays flat while consumers keep pace — and
+        // the producer stats are folded after execution. An empty
+        // subscription means every referenced table is already cached/pinned —
+        // nothing to parse.
+        let streaming = self.retention == RetentionPolicy::None
+            && !subscription.tables.is_empty()
+            && !any_multi_scan;
 
         let mut producers: Vec<JoinHandle<Result<PartitionStat, Error>>> = Vec::new();
         if subscription.tables.is_empty() {

@@ -21,19 +21,20 @@ use pcapsql_core::ParseResult;
 enum BatchSink {
     /// Accumulate in memory (materialize / cache-fill path).
     Accumulate(Vec<RecordBatch>),
-    /// Stream to a consumer as batches complete (bounded-memory path).
+    /// Stream to a consumer as batches complete (streaming path).
     Stream(UnboundedSender<DFResult<RecordBatch>>),
 }
 
 impl BatchSink {
-    fn emit(&mut self, batch: RecordBatch) {
+    /// Deliver a batch. Returns `true` when the consumer is gone (the
+    /// receiver was dropped: the query finished early or was cancelled).
+    fn emit(&mut self, batch: RecordBatch) -> bool {
         match self {
-            BatchSink::Accumulate(v) => v.push(batch),
-            // A closed receiver (query cancelled / completed) just drops the
-            // batch; the producer keeps going and exits when the parse ends.
-            BatchSink::Stream(tx) => {
-                let _ = tx.send(Ok(batch));
+            BatchSink::Accumulate(v) => {
+                v.push(batch);
+                false
             }
+            BatchSink::Stream(tx) => tx.send(Ok(batch)).is_err(),
         }
     }
 }
@@ -45,11 +46,24 @@ struct TableSlot {
     predicate: Option<FilterEvaluator>,
     fetch: Option<usize>,
     rows_added: usize,
+    /// The streaming consumer dropped its receiver; nothing more is wanted.
+    consumer_gone: bool,
 }
 
 impl TableSlot {
     fn capped(&self) -> bool {
         self.fetch.is_some_and(|f| self.rows_added >= f)
+    }
+
+    /// Nothing further this slot produces can be observed.
+    fn done(&self) -> bool {
+        self.capped() || self.consumer_gone
+    }
+
+    fn emit(&mut self, batch: RecordBatch) {
+        if self.sink.emit(batch) {
+            self.consumer_gone = true;
+        }
     }
 }
 
@@ -79,7 +93,7 @@ impl NormalizedBatchSet {
     }
 
     /// Create builders that stream each table's completed batches to the
-    /// matching sender (bounded-memory mode). A table without a sender
+    /// matching sender (streaming mode). A table without a sender
     /// accumulates (and is dropped on finish).
     pub fn new_streaming(
         batch_size: usize,
@@ -110,6 +124,7 @@ impl NormalizedBatchSet {
                     predicate: sub.predicate.clone(),
                     fetch: sub.fetch,
                     rows_added: 0,
+                    consumer_gone: false,
                 },
             );
         }
@@ -131,7 +146,7 @@ impl NormalizedBatchSet {
         if let Some(slot) = self.slots.get_mut("frames") {
             // Predicates on frames are never pushed down (metadata fields are
             // not parse fields); only the row cap applies.
-            if !slot.capped() {
+            if !slot.done() {
                 slot.builder.add_frame_from_raw(
                     packet.frame_number,
                     packet.timestamp_ns,
@@ -142,7 +157,7 @@ impl NormalizedBatchSet {
                 );
                 slot.rows_added += 1;
                 if let Some(batch) = slot.builder.try_build()? {
-                    slot.sink.emit(batch);
+                    slot.emit(batch);
                 }
             }
         }
@@ -150,7 +165,7 @@ impl NormalizedBatchSet {
         // Route each parsed protocol layer to its table, if subscribed.
         for (proto_name, result) in parsed {
             if let Some(slot) = self.slots.get_mut(*proto_name) {
-                if slot.capped() {
+                if slot.done() {
                     continue;
                 }
                 if let Some(predicate) = &slot.predicate {
@@ -163,7 +178,7 @@ impl NormalizedBatchSet {
                 slot.builder.add_parsed_row(frame_number, result);
                 slot.rows_added += 1;
                 if let Some(batch) = slot.builder.try_build()? {
-                    slot.sink.emit(batch);
+                    slot.emit(batch);
                 }
             }
         }
@@ -171,10 +186,13 @@ impl NormalizedBatchSet {
         Ok(())
     }
 
-    /// True when every subscribed table has reached its row cap — the parse
-    /// loop can stop reading the source.
+    /// True when nothing this pass produces can still be observed: every
+    /// subscribed table has reached its row cap, or (streaming) every consumer
+    /// has dropped its receiver because the query finished — e.g. a `LIMIT`
+    /// above a filter that could not be pushed to the scan — or was cancelled.
+    /// The parse loop can stop reading the source.
     pub fn all_capped(&self) -> bool {
-        !self.slots.is_empty() && self.slots.values().all(TableSlot::capped)
+        !self.slots.is_empty() && self.slots.values().all(TableSlot::done)
     }
 
     /// Finish building. Flushes each table's final partial batch into its
@@ -185,7 +203,7 @@ impl NormalizedBatchSet {
         let mut out = HashMap::with_capacity(self.slots.len());
         for (name, mut slot) in self.slots {
             if let Some(batch) = slot.builder.finish()? {
-                slot.sink.emit(batch);
+                slot.emit(batch);
             }
             let batches = match slot.sink {
                 BatchSink::Accumulate(v) => v,
