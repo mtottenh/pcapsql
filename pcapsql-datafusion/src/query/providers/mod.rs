@@ -25,7 +25,7 @@ mod shared;
 
 pub use exchange::{BatchReceiver, BatchSender, OverflowStats, Pacer, STREAM_CHANNEL_CAPACITY};
 pub use protocol_provider::{
-    column_names, PreparedTable, ProtocolTableProvider, QueryTables, TableCache,
+    column_names, CachedTable, PreparedTable, ProtocolTableProvider, QueryTables, TableCache,
 };
 pub use scan_exec::ProtocolScanExec;
 pub use shared::{

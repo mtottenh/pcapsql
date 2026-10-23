@@ -8,8 +8,9 @@
 //!
 //! ## Features
 //!
-//! - **Protocol Parsing**: 17 built-in protocol parsers (Ethernet, IP, TCP, UDP,
-//!   DNS, HTTP, TLS, DHCP, NTP, and more)
+//! - **Protocol Parsing**: 26 built-in protocol parsers (Ethernet, IP, TCP, UDP,
+//!   DNS, TLS, DHCP, NTP, tunnels, routing protocols, and more; HTTP is parsed
+//!   from reassembled TCP streams)
 //! - **PCAP Reading**: Support for PCAP and PCAPNG formats, including gzip/zstd
 //!   compression
 //! - **Memory-Mapped I/O**: Efficient reading of large capture files
@@ -53,10 +54,12 @@
 //! |                        pcapsql-core                                 |
 //! +---------------------------------------------------------------------+
 //! |  schema/     - FieldDescriptor, DataKind (engine-agnostic)          |
-//! |  protocol/   - Protocol trait, 17 parsers, FieldValue               |
-//! |  io/         - PacketSource, PacketReader, mmap support             |
-//! |  pcap/       - PCAP/PCAPNG reading, compression                     |
+//! |  protocol/   - Protocol trait, 26 parsers, FieldValue, ParseScope   |
+//! |  io/         - PacketSource / SeekablePacketSource, readers (file,  |
+//! |                mmap, cloud), PCAP/PCAPNG decoding, compression,     |
+//! |                boundary index + sidecar                             |
 //! |  stream/     - TCP reassembly, HTTP/TLS stream parsing              |
+//! |  tls/        - TLS key derivation and decryption                    |
 //! |  format/     - Address formatting utilities                         |
 //! |  error/      - Error types                                          |
 //! +---------------------------------------------------------------------+
@@ -76,10 +79,12 @@
 //!
 //! | Layer | Protocols |
 //! |-------|-----------|
-//! | Link | Ethernet, VLAN (802.1Q) |
+//! | Link | Ethernet, VLAN (802.1Q), Linux SLL, Linux SLL2, Netlink, rtnetlink |
 //! | Network | IPv4, IPv6, ARP, ICMP, ICMPv6 |
 //! | Transport | TCP, UDP |
 //! | Application | DNS, DHCP, NTP, HTTP, TLS, SSH, QUIC |
+//! | Tunneling | VXLAN, GRE, MPLS, GTP, IPsec |
+//! | Routing | BGP, OSPF |
 
 pub mod error;
 pub mod format;

@@ -213,6 +213,32 @@ async fn main() -> Result<()> {
     run_repl(&engine, &formatter, &source_name).await
 }
 
+/// `.cachestats`: what the engine's table cache holds, then the parse
+/// statistics of the last query (`--stats` format).
+fn print_cache_stats(engine: &QueryEngine) {
+    use pcapsql_datafusion::query::RetentionPolicy;
+    match engine.retention() {
+        RetentionPolicy::None => {
+            println!("Retention: none (one-shot mode; nothing is cached between queries)");
+        }
+        RetentionPolicy::CacheOnTouch => {
+            let cached = engine.cached_tables();
+            if cached.is_empty() {
+                println!("Table cache: empty (tables are cached on first touch)");
+            } else {
+                println!("Table cache ({} table(s), column-aware):", cached.len());
+                for t in &cached {
+                    println!(
+                        "  {:<16} {:>10} rows  {:>3} columns",
+                        t.name, t.rows, t.columns
+                    );
+                }
+            }
+        }
+    }
+    print_parse_stats(&engine.last_parse_stats());
+}
+
 fn print_parse_stats(stats: &ParseStats) {
     eprintln!();
     match stats.served_from {
@@ -427,14 +453,12 @@ async fn run_repl(
                     ReplCommand::Protocols => list_protocols(),
                     ReplCommand::Udfs => list_udfs(),
                     ReplCommand::CacheStats => {
-                        let stats = engine.last_parse_stats();
-                        println!(
-                            "Last query: {} parse pass(es), {} partition(s), {} packets scanned",
-                            stats.parse_passes, stats.partitions, stats.packets_scanned
-                        );
+                        print_cache_stats(engine);
                     }
                     ReplCommand::CacheStatsReset => {
-                        println!("Caching has been removed; nothing to reset.");
+                        let n = engine.cached_tables().len();
+                        engine.clear_cache();
+                        println!("Cleared {n} cached table(s); the next query re-parses them.");
                     }
                     ReplCommand::TimeInfo => {
                         use arrow::array::{Array, Int64Array, TimestampMicrosecondArray};
@@ -903,8 +927,8 @@ fn print_help() {
     println!("  .stats           Show capture statistics");
     println!("  .top <col> [N]   Show top N values for column (default: 10)");
     println!("  .histogram <col> Show value distribution (alias: .hist)");
-    println!("  .cachestats      Show cache statistics (alias: .cs)");
-    println!("  .cachestats reset Reset cache statistics counters");
+    println!("  .cachestats      Show cached tables and last query's parse stats (alias: .cs)");
+    println!("  .cachestats reset Clear the table cache");
     println!("  .quit            Exit");
     println!();
     println!("Export formats: .parquet, .json/.jsonl, .csv, .sqlite/.db");
