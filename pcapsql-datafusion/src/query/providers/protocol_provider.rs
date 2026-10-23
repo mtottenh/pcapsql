@@ -135,11 +135,21 @@ impl TableCache {
         Self::default()
     }
 
-    /// Install (or replace) materialized tables.
+    /// Install materialized tables, widening only: an entry is replaced only
+    /// when the new column set is a superset of the current one, so a
+    /// concurrent narrower query cannot shrink what a wider one cached (the
+    /// installing query runs on its own data regardless). With `{a, b}`
+    /// cached and `{a, c}` arriving, the latter is discarded and a later
+    /// `{c}` query re-parses the union `{a, b, c}`.
     pub fn install(&self, tables: HashMap<String, Arc<TableData>>) {
         let mut entries = self.entries.write().expect("TableCache lock poisoned");
         for (name, data) in tables {
-            entries.insert(name, data);
+            let widens = entries
+                .get(&name)
+                .is_none_or(|current| column_names(current).is_subset(&column_names(&data)));
+            if widens {
+                entries.insert(name, data);
+            }
         }
     }
 

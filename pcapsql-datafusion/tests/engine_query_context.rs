@@ -248,6 +248,16 @@ async fn overlap_case(retention: RetentionPolicy) {
                 })
                 .collect();
             assert!(lengths.iter().all(|l| (42..49).contains(l)), "{lengths:?}");
+            // The cache only widens: B's narrower install must not have
+            // replaced A's entry, so A's columns are still served from cache.
+            let again = engine
+                .execute("SELECT max(length(hex(raw_data))) AS r FROM frames")
+                .await
+                .expect("cached query");
+            assert_eq!(
+                again.stats.parse_passes, 0,
+                "the wider cache entry must survive a concurrent narrower query"
+            );
         }
     }
 }
@@ -609,4 +619,78 @@ fn cancelled_query_releases_producer_mid_stream() {
 #[test]
 fn cancelled_query_releases_producer_before_first_batch() {
     cancel_case(5000);
+}
+
+// ---------------------------------------------------------------------------
+// #123: many concurrent queries of different shapes on one engine.
+// ---------------------------------------------------------------------------
+
+async fn open_partitioned(path: &std::path::Path, retention: RetentionPolicy) -> QueryEngine {
+    QueryEngine::open(
+        SourceSpec::Path(path.to_path_buf()),
+        EngineOptions {
+            batch_size: 1000,
+            target_partitions: Some(2),
+            index_stride: Some(8),
+            retention,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("open engine")
+}
+
+/// Fast path, LIMIT, pushed filter, join, self-join (materialize rule), a
+/// stream table (single-partition pass), the time UDFs and `raw_data`.
+const MIXED: &[&str] = &[
+    "SELECT count(*) AS c FROM frames",
+    "SELECT frame_number, length FROM frames ORDER BY frame_number LIMIT 5",
+    "SELECT frame_number, src_port FROM udp WHERE dst_port = 53 ORDER BY frame_number LIMIT 7",
+    "SELECT f.frame_number, u.src_port FROM frames f JOIN udp u USING (frame_number) \
+     ORDER BY f.frame_number LIMIT 9",
+    "SELECT a.frame_number, b.frame_number AS next FROM frames a \
+     JOIN frames b ON b.frame_number = a.frame_number + 1 ORDER BY a.frame_number LIMIT 3",
+    "SELECT count(*) AS c FROM http2",
+    "SELECT start_time() AS t0, end_time() AS t1",
+    "SELECT max(length(hex(raw_data))) AS r FROM frames",
+];
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_mixed_queries_match_sequential() {
+    let dir = TempDir::new().unwrap();
+    let path = write_capture(&dir, 2000);
+    for retention in [RetentionPolicy::None, RetentionPolicy::CacheOnTouch] {
+        let baseline = open_partitioned(&path, retention).await;
+        let mut expected = Vec::with_capacity(MIXED.len());
+        for sql in MIXED {
+            expected.push(pretty(&baseline.query(sql).await.expect("baseline")));
+        }
+
+        let engine = Arc::new(open_partitioned(&path, retention).await);
+        let mut tasks = tokio::task::JoinSet::new();
+        for task in 0..8usize {
+            let engine = engine.clone();
+            let expected = expected.clone();
+            tasks.spawn(async move {
+                for round in 0..8usize {
+                    for k in 0..MIXED.len() {
+                        let i = (k + task + round) % MIXED.len();
+                        let out = engine.execute(MIXED[i]).await.unwrap_or_else(|e| {
+                            panic!("{retention:?} task {task}: {}: {e}", MIXED[i])
+                        });
+                        assert_eq!(
+                            pretty(&out.batches),
+                            expected[i],
+                            "{retention:?} task {task} round {round}: {}",
+                            MIXED[i]
+                        );
+                        assert!(out.stats.parse_passes <= 1, "{:?}", out.stats);
+                    }
+                }
+            });
+        }
+        while let Some(joined) = tasks.join_next().await {
+            joined.expect("query task");
+        }
+    }
 }
