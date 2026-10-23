@@ -672,7 +672,7 @@ mod tests {
         assert_eq!(pkt.captured_length, 14);
         assert_eq!(pkt.original_length, 14);
         assert_eq!(pkt.link_type, 1); // Ethernet
-        assert_eq!(pkt.timestamp_us, 1000000000_500000i64);
+        assert_eq!(pkt.timestamp_us, 1_000_000_000_500_000_i64);
         assert_eq!(pkt.data.len(), 14);
 
         // No more packets
