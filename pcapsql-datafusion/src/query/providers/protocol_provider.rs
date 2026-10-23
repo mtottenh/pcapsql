@@ -117,6 +117,24 @@ impl QueryTables {
     pub fn contains(&self, name: &str) -> bool {
         self.tables.contains_key(name)
     }
+
+    /// The partition count the query's plan is built for: the largest
+    /// partition count among its prepared tables (1 when nothing is
+    /// prepared). The tables of one parse pass share a count; a cache entry
+    /// or a one-partition table (the `count(*)` fast path, a stream table)
+    /// may differ, and a scan with fewer partitions than this is repartitioned
+    /// from one, which keeps its order.
+    pub fn partitions(&self) -> usize {
+        self.tables
+            .values()
+            .map(|table| match table.as_ref() {
+                PreparedTable::Batches(data) => data.partitions.len(),
+                PreparedTable::Stream { receivers, .. } => receivers.len(),
+            })
+            .max()
+            .unwrap_or(1)
+            .max(1)
+    }
 }
 
 /// The engine-global, column-aware table cache of

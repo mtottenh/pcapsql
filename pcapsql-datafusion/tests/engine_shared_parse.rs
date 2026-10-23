@@ -451,3 +451,197 @@ async fn streaming_hash_join_completes_without_deadlock() {
     let m = run(&materialized, sql).await;
     assert_eq!(s, m, "hash-join streaming result must match materialized");
 }
+
+/// Frame numbers of column 0 across the result batches.
+fn frame_numbers(batches: &[arrow::record_batch::RecordBatch]) -> Vec<u64> {
+    use arrow::array::{Array, UInt64Array};
+    batches
+        .iter()
+        .flat_map(|b| {
+            let col = b
+                .column(0)
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .expect("frame_number is UInt64");
+            (0..col.len()).map(move |i| col.value(i))
+        })
+        .collect()
+}
+
+/// Open the capture with a parse parallelism of `target` and a boundary index
+/// of one checkpoint every `stride` frames, under `retention`.
+async fn engine_with_stride(
+    path: &std::path::Path,
+    target: usize,
+    stride: u64,
+    retention: RetentionPolicy,
+) -> QueryEngine {
+    QueryEngine::open(
+        SourceSpec::Path(path.to_path_buf()),
+        EngineOptions {
+            batch_size: 256,
+            target_partitions: Some(target),
+            index_stride: Some(stride),
+            retention,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("build engine")
+}
+
+/// `EXPLAIN ANALYZE` of `sql`: the physical plan the engine actually executed.
+async fn executed_plan(engine: &QueryEngine, sql: &str) -> String {
+    run(engine, &format!("EXPLAIN ANALYZE {sql}")).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn capture_order_survives_fewer_parse_partitions_than_target() {
+    // #122: the boundary index yields fewer partitions than the session's
+    // `target_partitions` (a 300k-frame capture at the default 65536-frame
+    // stride parses in 5 partitions on an 8-core machine). Here: 10k frames,
+    // one checkpoint every 2000 → 5 parse partitions, target 8. DataFusion
+    // would then round-robin repartition the 5-partition scan up to 8 above a
+    // filter, dropping the scan's frame_number ordering, and an un-ORDERed
+    // query would come out interleaved across partitions. The capture is
+    // larger than DataFusion's batch size (8192), as a materialized scan with
+    // fewer exact rows than that is never repartitioned.
+    const FRAMES: usize = 10_000;
+    const TARGET: usize = 8;
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("cap.pcap");
+    std::fs::write(&path, make_capture(FRAMES).bytes).unwrap();
+
+    let queries = [
+        // filter above the scan (the shape in the issue)
+        "SELECT frame_number, dst_port FROM udp WHERE dst_port = 53",
+        // filter + LIMIT: a coalesce under the limit, inside the plan
+        "SELECT frame_number, dst_port FROM udp WHERE dst_port = 53 LIMIT 700",
+        // projection through a UDF above the scan
+        "SELECT frame_number, length(cast(src_port AS VARCHAR)) FROM udp",
+        // plain scan, and LIMIT without a filter
+        "SELECT frame_number FROM frames",
+        "SELECT frame_number FROM frames LIMIT 700",
+    ];
+
+    for retention in [RetentionPolicy::CacheOnTouch, RetentionPolicy::None] {
+        let engine = engine_with_stride(&path, TARGET, 2000, retention).await;
+        for sql in queries {
+            let batches = engine.query(sql).await.expect("query ok");
+            let stats = engine.last_parse_stats();
+            // A CacheOnTouch hit reports no partitions; the parses must all
+            // have used strictly fewer than the target.
+            if stats.parse_passes > 0 {
+                assert!(
+                    stats.partitions > 1 && stats.partitions < TARGET,
+                    "{retention:?}: the parse must use strictly fewer partitions than the \
+                     target ({TARGET}) to exercise #122, used {} for: {sql}",
+                    stats.partitions
+                );
+            }
+            let got = frame_numbers(&batches);
+            let want: Vec<u64> = (1..=got.len() as u64).collect();
+            assert_eq!(
+                got, want,
+                "{retention:?}: rows not in capture order for: {sql}\n\
+                 (target_partitions = {TARGET}, parse: {stats:?})"
+            );
+        }
+
+        // The contract is pinned in the executed plan, not left to arrival
+        // order: no round-robin repartition sits above the partitioned scan
+        // and partitions are merged on frame order.
+        for sql in queries {
+            let plan = executed_plan(&engine, sql).await;
+            assert!(
+                plan.contains("partitions=5"),
+                "{retention:?}: expected a 5-partition scan in the executed plan of: {sql}\n{plan}"
+            );
+            assert!(
+                !plan.contains("RoundRobinBatch"),
+                "{retention:?}: a round-robin repartition above the ordered scan loses \
+                 capture order for: {sql}\n{plan}"
+            );
+            assert!(
+                !plan.contains("CoalescePartitionsExec"),
+                "{retention:?}: partitions must be merged on frame order, not coalesced \
+                 in arrival order, for: {sql}\n{plan}"
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn single_partition_parse_keeps_sort_merge_join_and_capture_order() {
+    // A one-partition parse (compressed or unindexed source, a pass pinned by
+    // a stream table) keeps the engine's parallelism as the session target,
+    // so filters and projections above the scan are not throttled and joins
+    // are still planned as sort-merge joins (which need target_partitions >
+    // 1). That larger target must not itself reintroduce #122: the round-robin
+    // repartition DataFusion adds above a one-partition scan keeps its order.
+    // The capture exceeds DataFusion's batch size (8192) so that the
+    // materialized scan is repartitioned too.
+    const FRAMES: usize = 9000;
+    const PARALLELISM: usize = 8;
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("cap.pcap");
+    std::fs::write(&path, make_capture(FRAMES).bytes).unwrap();
+
+    for retention in [RetentionPolicy::CacheOnTouch, RetentionPolicy::None] {
+        // Stride larger than the capture: one checkpoint, one partition.
+        let engine = engine_with_stride(&path, PARALLELISM, 100_000, retention).await;
+
+        let join = "SELECT f.frame_number, u.dst_port FROM frames f \
+                    JOIN udp u USING (frame_number) WHERE u.dst_port = 53";
+        let batches = engine.query(join).await.expect("join ok");
+        assert_eq!(engine.last_parse_stats().partitions, 1, "{retention:?}");
+        let got = frame_numbers(&batches);
+        assert_eq!(
+            got,
+            (1..=FRAMES as u64).collect::<Vec<u64>>(),
+            "{retention:?}: {join}"
+        );
+        let plan = executed_plan(&engine, join).await;
+        assert!(
+            plan.contains("SortMergeJoin"),
+            "{retention:?}: a one-partition parse must still plan a sort-merge join:\n{plan}"
+        );
+
+        for sql in [
+            "SELECT frame_number, dst_port FROM udp WHERE dst_port = 53",
+            "SELECT frame_number, dst_port FROM udp WHERE dst_port = 53 LIMIT 100",
+        ] {
+            let batches = engine.query(sql).await.expect("query ok");
+            let got = frame_numbers(&batches);
+            assert_eq!(
+                got,
+                (1..=got.len() as u64).collect::<Vec<u64>>(),
+                "{retention:?}: rows not in capture order for: {sql}"
+            );
+            // The claim under test: the scan *is* repartitioned up to the
+            // engine's parallelism, and the order survives it into a merge.
+            // (The final merge of an un-LIMITed query sits above the plan
+            // `EXPLAIN ANALYZE` displays; the LIMIT's merge is inside it.)
+            let plan = executed_plan(&engine, sql).await;
+            assert!(
+                plan.contains(&format!(
+                    "RoundRobinBatch({PARALLELISM}), input_partitions=1"
+                )),
+                "{retention:?}: expected a round-robin repartition of the one-partition \
+                 scan up to the parallelism for: {sql}\n{plan}"
+            );
+            assert!(
+                !plan.contains("CoalescePartitionsExec"),
+                "{retention:?}: partitions must not be coalesced in arrival order for: \
+                 {sql}\n{plan}"
+            );
+            if sql.contains("LIMIT") {
+                assert!(
+                    plan.contains("SortPreservingMergeExec"),
+                    "{retention:?}: the limit's coalesce must be a frame-order merge for: \
+                     {sql}\n{plan}"
+                );
+            }
+        }
+    }
+}

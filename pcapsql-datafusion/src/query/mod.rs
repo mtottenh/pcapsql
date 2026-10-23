@@ -72,16 +72,40 @@ fn default_target_partitions() -> usize {
         .clamp(1, 16)
 }
 
-/// Tables produced by the stream-analysis pass (TCP reassembly / TLS
-/// decryption / HTTP-2) rather than the per-packet parse. They are built
-/// on demand by a single sequential read when a query references them.
+/// DataFusion's `target_partitions` for a plan whose scans have `partitions`
+/// partitions, on an engine with parse parallelism `parallelism`.
+///
+/// A partitioned scan is planned for exactly its own partition count, so no
+/// scan with more than one partition is repartitioned: DataFusion round-robin
+/// repartitions a scan with fewer partitions than the target up to it and,
+/// when the query has no `ORDER BY`, strips the order-preserving variant of
+/// that repartition, which loses the `frame_number` ordering
+/// [`merge_ordered_partitions`] merges on and leaves the output in arrival
+/// order (#122). A one-partition scan (compressed, unindexed or small cloud
+/// source; a pass pinned by a stream table; a table cached from such a pass)
+/// keeps the engine's parallelism instead, so filters and projections above
+/// it are not throttled: a repartition from one ordered partition keeps the
+/// order by construction, each output being a subsequence of one sorted
+/// stream. At least 2 either way, since the physical planner plans joins as
+/// SortMergeJoin only when `target_partitions > 1` (otherwise a collect-left
+/// hash join that buffers one side).
+fn session_target_partitions(partitions: usize, parallelism: usize) -> usize {
+    if partitions <= 1 {
+        parallelism.max(2)
+    } else {
+        partitions
+    }
+}
+
 /// Configure DataFusion for SortMergeJoin on frame_number-sorted streams.
-fn create_session_context(target_partitions: usize) -> SessionContext {
+///
+/// `parallelism` is the engine's parse parallelism; each query re-targets its
+/// own session state to the partition count it actually has (see
+/// [`session_target_partitions`]).
+fn create_session_context(parallelism: usize) -> SessionContext {
     let mut config = ConfigOptions::default();
 
-    // SortMergeJoin requires target_partitions > 1; otherwise scale with the
-    // parse parallelism so execution is not throttled below it.
-    config.execution.target_partitions = target_partitions.max(2);
+    config.execution.target_partitions = session_target_partitions(1, parallelism);
     // Use our declared sort order (by frame_number)
     config.optimizer.prefer_existing_sort = true;
     // Prefer SortMergeJoin - works better with our sorted streams
@@ -210,6 +234,9 @@ pub struct QueryEngine {
     last_stats: RwLock<ParseStats>,
     /// Table names this engine registered (the harvest universe).
     known_tables: HashSet<String>,
+    /// Parse parallelism (the partition count asked of a seekable source);
+    /// also the execution width of a query over one-partition tables.
+    parallelism: usize,
     /// Serializes the one-time capture time-range bootstrap
     /// ([`Self::ensure_time_range`]) between concurrent first queries.
     time_range_lock: tokio::sync::Mutex<()>,
@@ -577,6 +604,7 @@ impl QueryEngine {
             parse_source,
             last_stats: RwLock::new(ParseStats::default()),
             known_tables,
+            parallelism,
             time_range_lock: tokio::sync::Mutex::new(()),
         })
     }
@@ -713,6 +741,13 @@ impl QueryEngine {
             mut stats,
         } = self.prepare(needs)?;
 
+        // Plan for the partition count this query actually has: the boundary
+        // index may yield fewer partitions than the engine's parallelism, and a
+        // scan with fewer partitions than `target_partitions` would be
+        // round-robin repartitioned in a way that loses capture order (#122;
+        // see `session_target_partitions`).
+        state.config_mut().options_mut().execution.target_partitions =
+            session_target_partitions(prepared.partitions(), self.parallelism);
         // Hand this query's tables to its providers and execute. The result
         // is captured, not returned early: the producers below must always be
         // joined (fail closed on a parse error).
