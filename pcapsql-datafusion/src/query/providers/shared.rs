@@ -6,11 +6,13 @@
 //! exactly as the in-memory path does, and memoizes the per-table batches so all
 //! table providers share them.
 //!
-//! For a [`SeekablePacketSource`] the single pass is split into partitions and
-//! parsed in parallel — one worker per partition, each owning its own reader and
-//! builders, with no shared mutable state to lock (mmap is the zero-cost case).
-//! The cost hint gates whether partitioning is worthwhile. Non-seekable sources
-//! degrade honestly to a single partition.
+//! The single pass is split into partitions and parsed in parallel — one worker
+//! per partition, each owning its own reader and builders, with no shared
+//! mutable state to lock (mmap is the zero-cost case). The source's
+//! [`SeekCost`](pcapsql_core::SeekCost) and size gate whether partitioning is
+//! worthwhile; sources that cannot be split (compressed streams, small files)
+//! report a single whole-file partition and are parsed sequentially. The engine
+//! requires a [`SeekablePacketSource`]; every shipped source implements it.
 //!
 //! Partitions are range-partitioned by frame number and reassembled in frame
 //! order, so the result is identical to a single-partition parse — the property
@@ -27,6 +29,13 @@ use pcapsql_core::{parse_packet, PacketReader, ProtocolRegistry, SeekablePacketS
 use crate::error::Error;
 use crate::query::builders::{NormalizedBatchSet, ProtocolBatches};
 
+/// Minimum file size before a `Free`-seek (mmap) source is partitioned when
+/// the caller did not ask for a specific partition count.
+///
+/// Partitioning costs a header-only index scan plus a sidecar write and one
+/// thread per partition; below this size a single sequential parse is faster.
+/// An explicit partition count (tests, benchmarks) is always honoured.
+const FREE_MIN_BYTES: u64 = 1024 * 1024;
 /// Minimum object size before a `Cheap`-seek source is partitioned.
 const CHEAP_MIN_BYTES: u64 = 4 * 1024 * 1024;
 /// Minimum object size before a `RangeRequest`-seek source is partitioned
@@ -39,7 +48,9 @@ pub struct SharedParseState {
     tables: HashMap<String, Vec<Vec<RecordBatch>>>,
     /// Number of partitions the pass used.
     num_partitions: usize,
-    /// Number of parse passes performed (always 1; exposed for instrumentation).
+    /// Number of parse passes performed. Structurally always 1 in this design
+    /// (the capture is parsed once at construction and every provider serves
+    /// the resulting batches); kept so callers can assert it.
     parse_passes: usize,
     /// Earliest / latest packet timestamp seen (microseconds), for time UDFs.
     start_ts_us: i64,
@@ -104,6 +115,19 @@ fn decide_ranges<S: SeekablePacketSource>(
         Ok(vec![PacketRange::whole()])
     } else {
         Ok(source.partitions(want)?)
+    }
+}
+
+/// The partition count to use when the caller leaves it to the engine: the
+/// available parallelism, except that small `Free`-seek (mmap) files are not
+/// worth an index build, a sidecar and a thread per partition.
+pub fn auto_target_partitions<S: SeekablePacketSource>(source: &S, default: usize) -> usize {
+    use pcapsql_core::SeekCost;
+    let size = source.metadata().size_bytes.unwrap_or(0);
+    if source.seek_cost() == SeekCost::Free && size < FREE_MIN_BYTES {
+        1
+    } else {
+        default.max(1)
     }
 }
 

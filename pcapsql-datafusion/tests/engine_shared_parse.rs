@@ -120,6 +120,44 @@ async fn shared_parse_one_pass_and_partition_equivalence() {
         assert_eq!(r1, r4, "1-vs-N partition mismatch for: {sql}");
     }
 
+    // Un-ORDERed queries keep capture order even when the parse is partitioned:
+    // the engine merges partitions on the scan's declared frame_number ordering
+    // instead of coalescing them in arrival order.
+    let unordered = [
+        "SELECT frame_number FROM frames",
+        "SELECT frame_number, src_port FROM udp WHERE src_port >= 10000",
+        "SELECT frame_number FROM frames LIMIT 5",
+    ];
+    for sql in unordered {
+        let r1 = run(&e1, sql).await;
+        let r4 = run(&e4, sql).await;
+        assert_eq!(r1, r4, "partitioned result not in capture order for: {sql}");
+    }
+    let first5 = run(&e4, "SELECT frame_number FROM frames LIMIT 5").await;
+    for n in 1..=5 {
+        assert!(
+            first5.contains(&format!("| {n} ")),
+            "LIMIT 5 without ORDER BY must return frames 1..=5:\n{first5}"
+        );
+    }
+    // Deterministically, not by luck of arrival order: the plan DataFusion
+    // builds for LIMIT puts a CoalescePartitionsExec under the limit; the
+    // engine must have replaced it with a sort-preserving merge.
+    let df = e4
+        .context()
+        .sql("SELECT frame_number FROM frames LIMIT 5")
+        .await
+        .expect("plan");
+    let plan = df.create_physical_plan().await.expect("physical plan");
+    let plan = pcapsql_datafusion::query::merge_ordered_partitions(plan);
+    let shown = datafusion::physical_plan::displayable(plan.as_ref())
+        .indent(true)
+        .to_string();
+    assert!(
+        shown.contains("SortPreservingMergeExec") && !shown.contains("CoalescePartitionsExec"),
+        "partitions must be merged on frame order, not coalesced in arrival order:\n{shown}"
+    );
+
     // Sanity: the data actually populated the protocol tables.
     let frames = run(&e1, "SELECT count(*) AS c FROM frames").await;
     assert!(frames.contains("60"), "expected 60 frames:\n{frames}");

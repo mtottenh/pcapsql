@@ -37,7 +37,10 @@ pub use builders::NormalizedBatchSet;
 pub use filter::FilterEvaluator;
 pub use frames::{frames_schema, FramesBatchBuilder};
 pub use provider::PcapTableProvider;
-pub use providers::{ProtocolScanExec, ProtocolTableProvider, SharedParseState};
+pub use providers::{
+    auto_target_partitions, merge_ordered_partitions, ProtocolScanExec, ProtocolTableProvider,
+    SharedParseState,
+};
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -274,8 +277,8 @@ impl QueryEngine {
         source: Arc<S>,
         batch_size: usize,
     ) -> Result<Self, Error> {
-        Self::with_streaming_source_partitions(source, batch_size, default_target_partitions())
-            .await
+        let partitions = auto_target_partitions(source.as_ref(), default_target_partitions());
+        Self::with_streaming_source_partitions(source, batch_size, partitions).await
     }
 
     /// Like [`with_streaming_source`](Self::with_streaming_source) but with an
@@ -539,8 +542,13 @@ impl QueryEngine {
             .await
             .map_err(|e| Error::Query(QueryError::from(e)))?;
 
-        let batches = df
-            .collect()
+        let plan = df
+            .create_physical_plan()
+            .await
+            .map_err(|e| Error::Query(QueryError::from(e)))?;
+        // Keep capture order for un-ORDERed queries over a partitioned parse.
+        let plan = merge_ordered_partitions(plan);
+        let batches = datafusion::physical_plan::collect(plan, self.ctx.task_ctx())
             .await
             .map_err(|e| Error::Query(QueryError::from(e)))?;
 
