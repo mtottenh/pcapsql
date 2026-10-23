@@ -158,7 +158,9 @@ pub trait SeekablePacketSource: PacketSource {
     fn seek_cost(&self) -> SeekCost;
 
     /// Create a reader restricted to a packet range. `range.start.byte_offset`
-    /// MUST land exactly on a record boundary (guaranteed by the boundary index).
+    /// MUST land exactly on a record boundary (guaranteed by the boundary
+    /// index), or be 0: a range starting at byte 0 ([`PacketRange::whole`]) is
+    /// read from the source's own header, honouring `range.end`.
     fn reader_at(&self, range: &PacketRange) -> Result<Self::Reader, Error>;
 
     /// Compute up to `max` non-overlapping ranges that cover the source.
@@ -303,8 +305,15 @@ impl FilePacketSource {
             self.source_mtime,
             self.header_hash,
         )?;
-        // Best-effort sidecar persistence.
-        let _ = idx.write_sidecar(&sidecar);
+        // Best-effort sidecar persistence (skipped for small files, whose
+        // index is cheaper to rebuild than to read back; a stale or
+        // unreadable sidecar next to such a file is removed rather than
+        // re-read and rejected on every open).
+        if idx.worth_persisting() {
+            let _ = idx.write_sidecar(&sidecar);
+        } else {
+            let _ = std::fs::remove_file(&sidecar);
+        }
         let idx = Arc::new(idx);
         *guard = Some(idx.clone());
         Ok(idx)
@@ -344,14 +353,18 @@ impl SeekablePacketSource for FilePacketSource {
     }
 
     fn reader_at(&self, range: &PacketRange) -> Result<Self::Reader, Error> {
+        let end_frame = range.end.as_ref().map(|e| e.frame_number);
         // Compressed sources are not splittable; only the whole-file range is
-        // meaningful, which is exactly a sequential read.
-        if self.compression.is_compressed() {
-            return self.sequential_reader();
+        // meaningful, which is exactly a sequential read. A range that starts
+        // at byte 0 begins with the file's own header, so it is read
+        // sequentially too (never a synthesized header on top of the real one).
+        if self.compression.is_compressed() || starts_at_header(range) {
+            let mut reader = self.sequential_reader()?;
+            reader.end_frame = end_frame;
+            return Ok(reader);
         }
         let idx = self.ensure_index()?;
         let header = synth_header_for(&idx, range.start.frame_number, self.pcap_format)?;
-        let end_frame = range.end.as_ref().map(|e| e.frame_number);
         FilePacketReader::at(
             &self.path,
             self.pcap_format,
@@ -471,6 +484,14 @@ impl PacketReader for FilePacketReader {
     fn link_type(&self) -> u32 {
         self.link_type
     }
+}
+
+/// Does this range begin at the source's own header (byte 0)? Such a range —
+/// [`PacketRange::whole`], or a caller-built range from byte 0 — must be read
+/// with the real header, not a synthesized one; the boundary index never
+/// produces a checkpoint at byte 0 (its first checkpoint is the first record).
+pub(crate) fn starts_at_header(range: &PacketRange) -> bool {
+    range.start.byte_offset == 0
 }
 
 /// Synthesize the header bytes a mid-file partition needs for `start_frame`.

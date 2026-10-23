@@ -437,6 +437,86 @@ fn truncated_capture_reads_complete_prefix() {
     assert_eq!(seq, expected, "truncated capture: complete prefix only");
 }
 
+/// `reader_at(&PacketRange::whole())` on an uncompressed seekable source reads
+/// from the file's own header: the same frames as the sequential reader, for
+/// both backends, and an `end` on a byte-0 range is honoured.
+#[test]
+fn reader_at_whole_range_equals_sequential() {
+    use pcapsql_core::io::{PacketPosition, PacketRange};
+    for format in [Format::LegacyLeMicro, Format::Pcapng] {
+        let gc = generate(&CaptureSpec {
+            format,
+            packet_count: 12,
+            ..CaptureSpec::default()
+        });
+        let dir = TempDir::new().unwrap();
+        let path = write_capture(dir.path(), "whole", &gc.bytes);
+        let expected = expected_frames(&gc);
+
+        let mmap = MmapPacketSource::open(&path).unwrap().with_index_stride(4);
+        let mut r = mmap.reader_at(&PacketRange::whole()).unwrap();
+        assert_eq!(drain(&mut r), expected, "mmap whole range ({format:?})");
+
+        let file = FilePacketSource::open(&path).unwrap().with_index_stride(4);
+        let mut r = file.reader_at(&PacketRange::whole()).unwrap();
+        assert_eq!(drain(&mut r), expected, "file whole range ({format:?})");
+
+        // A byte-0 range with an end: frames 1..5 only.
+        let head = PacketRange {
+            start: PacketPosition::START,
+            end: Some(PacketPosition {
+                byte_offset: 0,
+                frame_number: 6,
+            }),
+        };
+        let mut r = mmap.reader_at(&head).unwrap();
+        assert_eq!(
+            drain(&mut r),
+            expected[..5].to_vec(),
+            "mmap capped ({format:?})"
+        );
+        let mut r = file.reader_at(&head).unwrap();
+        assert_eq!(
+            drain(&mut r),
+            expected[..5].to_vec(),
+            "file capped ({format:?})"
+        );
+    }
+}
+
+/// Small captures are indexed in memory but no `.idx` sidecar is written
+/// next to them; a capture past the threshold gets one.
+#[test]
+fn sidecar_is_only_persisted_for_large_captures() {
+    use pcapsql_core::io::{sidecar_path, SIDECAR_MIN_SOURCE_BYTES};
+    let dir = TempDir::new().unwrap();
+
+    let small = generate(&CaptureSpec {
+        packet_count: 20,
+        ..CaptureSpec::default()
+    });
+    let path = write_capture(dir.path(), "small.pcap", &small.bytes);
+    let source = MmapPacketSource::open(&path).unwrap().with_index_stride(4);
+    assert_eq!(source.frame_count(), Some(20));
+    assert!(source.partitions(3).unwrap().len() > 1);
+    assert!(
+        !sidecar_path(&path).exists(),
+        "no sidecar for a small capture"
+    );
+
+    let large = generate(&CaptureSpec {
+        packet_count: 4_200,
+        min_size: 256,
+        max_size: 256,
+        ..CaptureSpec::default()
+    });
+    assert!(large.bytes.len() as u64 >= SIDECAR_MIN_SOURCE_BYTES);
+    let path = write_capture(dir.path(), "large.pcap", &large.bytes);
+    let source = FilePacketSource::open(&path).unwrap().with_index_stride(64);
+    assert_eq!(source.frame_count(), Some(4_200));
+    assert!(sidecar_path(&path).exists(), "sidecar for a large capture");
+}
+
 // ----------------------------------------------------------------------------
 // Property: partition equivalence across the generated edge-case space
 // ----------------------------------------------------------------------------
