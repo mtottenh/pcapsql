@@ -928,6 +928,10 @@ impl PacketSource for CloudPacketSource {
 }
 
 impl SeekablePacketSource for CloudPacketSource {
+    fn time_range_ns(&self) -> Option<(i64, i64)> {
+        self.ensure_index().ok().and_then(|idx| idx.time_range_ns())
+    }
+
     fn seek_cost(&self) -> SeekCost {
         SeekCost::RangeRequest
     }

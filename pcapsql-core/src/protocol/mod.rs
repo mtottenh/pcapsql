@@ -78,7 +78,7 @@ pub mod test_utils;
 pub use context::{FieldEntry, HintEntry, ParseContext, ParseResult, TunnelLayer, TunnelType};
 pub use field::{FieldValue, OwnedFieldValue};
 pub use projection::{chain_fields_for_protocol, merge_with_chain_fields, ProjectionConfig};
-pub use pruning::{compute_required_protocols, should_continue_parsing, should_run_parser};
+pub use pruning::{compute_required_protocols, should_run_parser};
 pub use registry::{BuiltinProtocol, PayloadMode, Protocol, ProtocolRegistry};
 
 // Re-export protocol implementations
@@ -246,30 +246,35 @@ pub fn parse_packet<'a>(
     // Typical packet has 3-4 protocol layers (Eth/IP/TCP/App);
     // tunneled packets may have more (up to ~8 for deep encapsulation).
     let mut results = Vec::with_capacity(8);
-    let mut parsed_protocols: Vec<&str> = Vec::new();
     let mut context = ParseContext::new(link_type);
     let mut remaining = data;
 
-    while !remaining.is_empty() {
-        if let Some(required) = &scope.required {
-            // Stop once every required protocol has been parsed.
-            if !should_continue_parsing(&parsed_protocols, required) {
-                break;
-            }
+    // A scope that needs no protocol table at all (`frames` only) parses
+    // nothing: the frame columns come from the record header.
+    if let Some(required) = &scope.required {
+        if !required.iter().any(|r| r != "frames") {
+            return results;
         }
+    }
 
+    while !remaining.is_empty() {
         let Some(parser) = registry.find_parser(&context) else {
             break;
         };
         let name = parser.name();
 
         if let Some(required) = &scope.required {
-            // Never descend into a branch that cannot reach a required
-            // protocol.
-            if !should_run_parser(name, required, registry) {
+            // Protocol pruning: stop at the first parser that cannot lead to a
+            // required protocol. The link-layer root (Ethernet, Linux SLL,
+            // netlink, ...) always runs: it is the only way into the frame,
+            // whatever the query asks for. There is deliberately no "stop once
+            // every required protocol has been seen" shortcut: a tunnel further
+            // down the chain (VXLAN, GRE, IP-in-IP) can carry another instance
+            // of an already-seen protocol, and those inner rows belong in the
+            // result.
+            if !context.is_root() && !should_run_parser(name, required, registry) {
                 break;
             }
-            parsed_protocols.push(name);
         }
 
         let mut result = if scope.projections.is_empty() {

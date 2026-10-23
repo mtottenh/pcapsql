@@ -145,8 +145,21 @@ impl Protocol for Ipv6Protocol {
         &["tcp", "udp", "icmpv6"]
     }
 
+    /// Everything that can carry this layer: Ethernet/VLAN/MPLS at the link
+    /// layer, the Linux cooked-capture header (`tcpdump -i any`), the tunnel
+    /// protocols, and IPv4/IPv6 themselves (IP-in-IP, 6in4/4in6).
     fn dependencies(&self) -> &'static [&'static str] {
-        &["ethernet", "vlan", "mpls", "gre", "vxlan", "gtp"]
+        &[
+            "ethernet",
+            "vlan",
+            "mpls",
+            "linux_sll",
+            "gre",
+            "vxlan",
+            "gtp",
+            "ipv4",
+            "ipv6",
+        ]
     }
 }
 

@@ -164,6 +164,13 @@ pub trait SeekablePacketSource: PacketSource {
     /// Compute up to `max` non-overlapping ranges that cover the source.
     /// Builds (or loads) the boundary index as needed.
     fn partitions(&self, max: usize) -> Result<Vec<PacketRange>, Error>;
+
+    /// The capture's `[earliest, latest]` packet timestamp in nanoseconds,
+    /// when the source can answer without parsing packets (from its boundary
+    /// index). `None` means "unknown; scan to find out".
+    fn time_range_ns(&self) -> Option<(i64, i64)> {
+        None
+    }
 }
 
 /// Sequential reader of packets from a source (the hot path).
@@ -318,6 +325,10 @@ impl PacketSource for FilePacketSource {
 }
 
 impl SeekablePacketSource for FilePacketSource {
+    fn time_range_ns(&self) -> Option<(i64, i64)> {
+        self.ensure_index().ok().and_then(|idx| idx.time_range_ns())
+    }
+
     fn seek_cost(&self) -> SeekCost {
         SeekCost::Cheap
     }

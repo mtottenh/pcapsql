@@ -12,7 +12,7 @@
 
 use std::any::Any;
 use std::fmt::Debug;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 
 use arrow::array::{Array, Float64Array, TimestampMicrosecondArray};
@@ -31,6 +31,9 @@ pub struct CaptureTimeRange {
     start_us: AtomicI64,
     /// `i64::MIN` sentinel = no packet observed yet.
     end_us: AtomicI64,
+    /// Set once the range is known to cover the whole capture (a complete
+    /// scan, or the boundary index), so time UDFs can be trusted.
+    complete: AtomicBool,
 }
 
 impl Default for CaptureTimeRange {
@@ -44,7 +47,18 @@ impl CaptureTimeRange {
         Self {
             start_us: AtomicI64::new(i64::MAX),
             end_us: AtomicI64::new(i64::MIN),
+            complete: AtomicBool::new(false),
         }
+    }
+
+    /// Whether the range is known to cover the entire capture.
+    pub fn is_complete(&self) -> bool {
+        self.complete.load(Ordering::Acquire)
+    }
+
+    /// Mark the range as covering the entire capture.
+    pub fn mark_complete(&self) {
+        self.complete.store(true, Ordering::Release);
     }
 
     /// Widen the range with an observed `[start, end]` (microseconds).

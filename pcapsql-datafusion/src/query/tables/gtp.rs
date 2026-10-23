@@ -22,7 +22,7 @@ pub fn gtp_table_schema() -> Schema {
         Field::new("message_type", DataType::UInt8, true),
         Field::new("length", DataType::UInt16, true),
         Field::new("teid", DataType::UInt32, true),
-        Field::new("sequence", DataType::UInt16, true),
+        Field::new("sequence", DataType::UInt32, true),
     ])
 }
 

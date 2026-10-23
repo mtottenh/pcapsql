@@ -43,7 +43,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use arrow::array::RecordBatch;
-use datafusion::common::tree_node::TreeNodeRecursion;
+use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion::config::ConfigOptions;
 use datafusion::logical_expr::{Expr, LogicalPlan};
 use datafusion::prelude::*;
@@ -167,6 +167,9 @@ pub struct QueryEngine {
     retention: RetentionPolicy,
     /// Runs one scoped parse pass over the engine's source.
     parse_fn: ParseFn,
+    /// The source's own answer for the capture time range (from its boundary
+    /// index), in microseconds; `None` when it has to be scanned for.
+    time_range_fn: TimeRangeFn,
     /// Instrumentation for the most recent query.
     last_stats: RwLock<ParseStats>,
     /// Table names this engine registered (the harvest universe).
@@ -175,6 +178,40 @@ pub struct QueryEngine {
 
 /// Type-erased scoped parse over the engine's source.
 type ParseFn = Box<dyn Fn(&ParseSubscription) -> Result<SharedParseState, Error> + Send + Sync>;
+/// Type-erased `SeekablePacketSource::time_range_ns`, converted to microseconds.
+type TimeRangeFn = Box<dyn Fn() -> Option<(i64, i64)> + Send + Sync>;
+
+/// Names of the UDFs whose result depends on the capture's full time range.
+const TIME_RANGE_UDFS: &[&str] = &["start_time", "end_time", "relative_time"];
+
+/// Does any expression in the (optimized) plan call a time-range UDF?
+fn uses_time_range_udfs(plan: &LogicalPlan) -> bool {
+    let mut found = false;
+    let _ = plan.apply_with_subqueries(|node| {
+        let _ = node.apply_expressions(|expr| {
+            let _ = expr.apply(|e| {
+                if let Expr::ScalarFunction(f) = e {
+                    if TIME_RANGE_UDFS.contains(&f.name()) {
+                        found = true;
+                        return Ok(TreeNodeRecursion::Stop);
+                    }
+                }
+                Ok(TreeNodeRecursion::Continue)
+            });
+            Ok(if found {
+                TreeNodeRecursion::Stop
+            } else {
+                TreeNodeRecursion::Continue
+            })
+        });
+        Ok(if found {
+            TreeNodeRecursion::Stop
+        } else {
+            TreeNodeRecursion::Continue
+        })
+    });
+    found
+}
 
 /// What one query needs from one table, harvested from its optimized plan.
 #[derive(Debug, Default)]
@@ -353,6 +390,15 @@ impl QueryEngine {
 
         Self::register_cross_layer_views(&ctx).await?;
 
+        let time_range_fn: TimeRangeFn = {
+            let source = source.clone();
+            Box::new(move || {
+                source
+                    .time_range_ns()
+                    .map(|(start, end)| (start / 1_000, end / 1_000))
+            })
+        };
+
         let parse_fn: ParseFn = {
             let registry = registry.clone();
             let batch_size = opts.batch_size;
@@ -376,9 +422,46 @@ impl QueryEngine {
             time_range,
             retention: opts.retention,
             parse_fn,
+            time_range_fn,
             last_stats: RwLock::new(ParseStats::default()),
             known_tables,
         })
+    }
+
+    /// Make sure the capture time range behind `start_time()` / `end_time()` /
+    /// `relative_time()` covers the whole capture before a query that calls
+    /// them runs.
+    ///
+    /// Parsing is scoped per query, so a query's own parse may see only some
+    /// packets (a pushed-down LIMIT), or none at all (`SELECT start_time()`).
+    /// The range therefore comes from the boundary index when the source has
+    /// one (no packet parsing), else from one header-only pass over the
+    /// capture (a `frames`-only scope runs no protocol parser). Either way it
+    /// is established once per engine.
+    fn ensure_time_range(&self) -> Result<(), Error> {
+        if self.time_range.is_complete() {
+            return Ok(());
+        }
+        if let Some((start_us, end_us)) = (self.time_range_fn)() {
+            self.time_range.record(start_us, end_us);
+            self.time_range.mark_complete();
+            return Ok(());
+        }
+        let mut subscription = ParseSubscription::default();
+        subscription.tables.insert(
+            "frames".to_string(),
+            TableSubscription {
+                columns: Some(["timestamp".to_string()].into_iter().collect()),
+                predicate: None,
+                fetch: None,
+            },
+        );
+        let (_, stats) = (self.parse_fn)(&subscription)?.into_tables();
+        if stats.packets_scanned > 0 {
+            self.time_range.record(stats.start_ts_us, stats.end_ts_us);
+        }
+        self.time_range.mark_complete();
+        Ok(())
     }
 
     /// Execute a SQL query and return results.
@@ -394,6 +477,12 @@ impl QueryEngine {
             .create_logical_plan(sql)
             .await
             .map_err(|e| Error::Query(QueryError::from(e)))?;
+        // The time UDFs are `Stable`, so the optimizer constant-folds
+        // `start_time()` / `end_time()` *during* `optimize`: the range must be
+        // complete before that, hence the check on the unoptimized plan.
+        if uses_time_range_udfs(&plan) {
+            self.ensure_time_range()?;
+        }
         let optimized = state
             .optimize(&plan)
             .map_err(|e| Error::Query(QueryError::from(e)))?;
@@ -479,6 +568,11 @@ impl QueryEngine {
         let (tables, stats) = parsed.into_tables();
         if stats.packets_scanned > 0 {
             self.time_range.record(stats.start_ts_us, stats.end_ts_us);
+            // Timestamps are observed for every scanned packet, before any
+            // predicate, so a complete scan fixes the whole range.
+            if stats.complete_scan {
+                self.time_range.mark_complete();
+            }
         }
         self.tables.install(tables);
         Ok(stats)

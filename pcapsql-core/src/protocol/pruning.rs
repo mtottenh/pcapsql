@@ -83,33 +83,6 @@ fn add_with_dependencies(
     }
 }
 
-/// Check if parsing should continue given the current parse results and required set.
-///
-/// Returns `true` if there are required protocols that haven't been parsed yet,
-/// meaning parsing should continue.
-///
-/// # Arguments
-///
-/// * `parsed_so_far` - Names of protocols already parsed from the current packet
-/// * `required` - Set of protocols needed for the query
-///
-/// # Returns
-///
-/// `true` if parsing should continue, `false` if all required protocols have been found.
-pub fn should_continue_parsing(parsed_so_far: &[&str], required: &HashSet<String>) -> bool {
-    // Continue if there are required protocols we haven't parsed yet
-    for req in required {
-        // Skip "frames" as it's always available without parsing
-        if req == "frames" {
-            continue;
-        }
-        if !parsed_so_far.contains(&req.as_str()) {
-            return true;
-        }
-    }
-    false
-}
-
 /// Check if a specific parser should be run.
 ///
 /// Returns `true` if:
@@ -192,16 +165,32 @@ mod tests {
     fn test_compute_required_protocols_ethernet_only() {
         let registry = default_registry();
 
-        // Ethernet only needs ethernet layer
         let required = compute_required_protocols(&["ethernet"], &registry);
 
         assert!(required.contains("frames"));
         assert!(required.contains("ethernet"));
+        // Ethernet frames also appear *inside* VXLAN and GRE (TEB) tunnels, so
+        // the layers that carry those tunnels are required to reach them.
+        assert!(required.contains("vxlan"));
+        assert!(required.contains("gre"));
+        assert!(required.contains("udp"));
+        assert!(required.contains("ipv4"));
 
-        // Should NOT include any L3+ protocols
-        assert!(!required.contains("ipv4"));
+        // Application layers never carry Ethernet.
         assert!(!required.contains("tcp"));
         assert!(!required.contains("dns"));
+        assert!(!required.contains("tls"));
+    }
+
+    #[test]
+    fn test_required_protocols_reach_through_linux_sll() {
+        let registry = default_registry();
+
+        // IPv4 can sit directly under a Linux cooked-capture header.
+        let required = compute_required_protocols(&["udp"], &registry);
+        assert!(required.contains("linux_sll"));
+        assert!(required.contains("ipv4"));
+        assert!(required.contains("ipv6"));
     }
 
     #[test]
@@ -216,29 +205,6 @@ mod tests {
         assert!(required.contains("udp")); // For DNS
         assert!(required.contains("ipv4"));
         assert!(required.contains("ethernet"));
-    }
-
-    #[test]
-    fn test_should_continue_parsing() {
-        let required: HashSet<String> = ["frames", "ethernet", "ipv4", "tcp"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-
-        // Nothing parsed yet - should continue
-        assert!(should_continue_parsing(&[], &required));
-
-        // Ethernet parsed - should continue
-        assert!(should_continue_parsing(&["ethernet"], &required));
-
-        // Ethernet + IPv4 parsed - should continue (need TCP)
-        assert!(should_continue_parsing(&["ethernet", "ipv4"], &required));
-
-        // All required parsed - should stop
-        assert!(!should_continue_parsing(
-            &["ethernet", "ipv4", "tcp"],
-            &required
-        ));
     }
 
     #[test]
