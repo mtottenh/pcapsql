@@ -66,27 +66,27 @@ async fn main() -> Result<()> {
     let source_name = input_source.display_name();
 
     // Optional progress spinner driven by the parse callback. Parsing happens
-    // at query time, so the spinner is only meaningful for a one-shot query
-    // (`-e` / `-f`); in the REPL it would interleave with query output.
-    let one_shot = args.query.is_some() || args.query_file.is_some();
-    let progress_bar = if args.progress && one_shot {
+    // at query time, so the spinner runs during each query: once for a
+    // one-shot query (`-e` / `-f`), and per statement in the REPL, where it
+    // is reset before the query and cleared before the result is printed.
+    // The packet count is the bar's position, which is what `{per_sec}` is
+    // computed from.
+    let progress_bar = if args.progress {
         let pb = indicatif::ProgressBar::new_spinner();
         pb.set_style(
             indicatif::ProgressStyle::with_template(
-                "{spinner:.green} [{elapsed_precise}] {msg} ({per_sec})",
+                "{spinner:.green} [{elapsed_precise}] {pos} packets parsed ({per_sec})",
             )
             .expect("valid template")
             .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈ "),
         );
-        pb.set_message("Loading packets...");
         Some(pb)
     } else {
         None
     };
     let progress_cb: Option<ProgressFn> = progress_bar.clone().map(|pb| {
         Arc::new(move |count: u64| {
-            pb.set_message(format!("{count} packets loaded"));
-            pb.tick();
+            pb.set_position(count);
         }) as ProgressFn
     });
 
@@ -210,7 +210,41 @@ async fn main() -> Result<()> {
     }
 
     // Interactive REPL
-    run_repl(&engine, &formatter, &source_name).await
+    run_repl(
+        &engine,
+        &formatter,
+        &source_name,
+        ReplOptions {
+            show_stats: args.show_stats,
+            progress_bar,
+        },
+    )
+    .await
+}
+
+/// Run one REPL statement with the spinner live (when `--progress`), cleared
+/// before anything is printed.
+async fn run_statement(
+    engine: &QueryEngine,
+    progress_bar: Option<&indicatif::ProgressBar>,
+    sql: &str,
+) -> pcapsql_datafusion::Result<QueryOutput> {
+    if let Some(pb) = progress_bar {
+        pb.reset();
+    }
+    let output = engine.execute(sql).await;
+    if let Some(pb) = progress_bar {
+        pb.finish_and_clear();
+    }
+    output
+}
+
+/// CLI flags that apply to every statement the REPL runs.
+struct ReplOptions {
+    /// `--stats`: print the parse statistics after each query.
+    show_stats: bool,
+    /// `--progress`: the spinner, ticked by the engine's parse callback.
+    progress_bar: Option<indicatif::ProgressBar>,
 }
 
 /// `.cachestats`: what the engine's table cache holds, then the parse
@@ -412,8 +446,11 @@ async fn run_repl(
     engine: &QueryEngine,
     formatter: &OutputFormatter,
     source_name: &str,
+    options: ReplOptions,
 ) -> Result<()> {
     use arrow::array::RecordBatch;
+
+    let pb = options.progress_bar.as_ref();
 
     let history_path = dirs::data_local_dir()
         .map(|d| d.join("pcapsql").join("history.txt"))
@@ -862,11 +899,14 @@ async fn run_repl(
                         eprintln!("Unknown command: {s}");
                         eprintln!("Type .help for available commands");
                     }
-                    ReplCommand::Sql(query) => match engine.query(&query).await {
-                        Ok(batches) => {
+                    ReplCommand::Sql(query) => match run_statement(engine, pb, &query).await {
+                        Ok(QueryOutput { batches, stats }) => {
                             let mut stdout = io::stdout();
                             if let Err(e) = formatter.write_batches(&batches, &mut stdout) {
                                 eprintln!("Error writing output: {e}");
+                            }
+                            if options.show_stats {
+                                print_parse_stats(&stats);
                             }
                             last_result = Some(batches);
                         }
@@ -883,7 +923,9 @@ async fn run_repl(
                         // Get batches to export
                         let batches_result = if let Some(query) = query_opt {
                             // Run the provided query
-                            engine.query(&query).await
+                            run_statement(engine, pb, &query)
+                                .await
+                                .map(|out| out.batches)
                         } else if let Some(ref batches) = last_result {
                             // Use last result
                             Ok(batches.clone())

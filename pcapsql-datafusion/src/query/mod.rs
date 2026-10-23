@@ -308,10 +308,26 @@ impl<S: SeekablePacketSource> ParseSource for SourceParser<S> {
 /// Names of the UDFs whose result depends on the capture's full time range.
 const TIME_RANGE_UDFS: &[&str] = &["start_time", "end_time", "relative_time"];
 
-/// Does any expression in the (optimized) plan call a time-range UDF?
+/// Does any expression in the plan call a time-range UDF?
+///
+/// Runs on the *unoptimized* plan (see [`QueryEngine::execute`]). A user view
+/// is normally already inlined there: DataFusion's `LogicalPlanBuilder::scan`
+/// expands a view's plan at SQL planning, so `CREATE VIEW v AS SELECT
+/// relative_time(…) …` followed by `SELECT * FROM v` is detected like a
+/// direct call. A `TableScan` that still carries a view plan
+/// (`TableSource::get_logical_plan`) is searched too, so the detection does
+/// not depend on that planner detail.
 fn uses_time_range_udfs(plan: &LogicalPlan) -> bool {
     let mut found = false;
     let _ = plan.apply_with_subqueries(|node| {
+        if let LogicalPlan::TableScan(scan) = node {
+            if let Some(view_plan) = scan.source.get_logical_plan() {
+                if uses_time_range_udfs(&view_plan) {
+                    found = true;
+                    return Ok(TreeNodeRecursion::Stop);
+                }
+            }
+        }
         let _ = node.apply_expressions(|expr| {
             let _ = expr.apply(|e| {
                 if let Expr::ScalarFunction(f) = e {

@@ -60,7 +60,7 @@ pub fn rtnetlink_table_schema() -> Schema {
         Field::new("link_flags", DataType::UInt32, true),
         Field::new("if_name", DataType::Utf8, true),
         Field::new("mtu", DataType::UInt32, true),
-        Field::new("hw_addr", DataType::Binary, true),
+        Field::new("hw_addr", DataType::FixedSizeBinary(6), true),
         // Address message fields
         Field::new("addr_family", DataType::UInt8, true),
         Field::new("addr_family_name", DataType::Utf8, true),

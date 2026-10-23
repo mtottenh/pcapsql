@@ -179,8 +179,9 @@ impl Protocol for GtpProtocol {
 
             // Bytes 8-9: Sequence Number
             if sequence_flag {
-                let sequence = u16::from_be_bytes([data[offset], data[offset + 1]]);
-                fields.push(("sequence", FieldValue::UInt16(sequence)));
+                // 16 bits in GTPv1, 24 in GTPv2: one 32-bit column serves both.
+                let sequence = u32::from(u16::from_be_bytes([data[offset], data[offset + 1]]));
+                fields.push(("sequence", FieldValue::UInt32(sequence)));
             }
             offset += 2;
 
@@ -284,7 +285,7 @@ impl Protocol for GtpProtocol {
             FieldDescriptor::new("gtp.teid", DataKind::UInt32).set_nullable(true),
             // GTPv1 fields
             FieldDescriptor::new("gtp.protocol_type", DataKind::UInt8).set_nullable(true),
-            FieldDescriptor::new("gtp.sequence", DataKind::UInt16).set_nullable(true),
+            FieldDescriptor::new("gtp.sequence", DataKind::UInt32).set_nullable(true),
             FieldDescriptor::new("gtp.npdu", DataKind::UInt8).set_nullable(true),
             FieldDescriptor::new("gtp.extension_headers", DataKind::String).set_nullable(true),
             FieldDescriptor::new("gtp.extension_header_count", DataKind::UInt8).set_nullable(true),
@@ -535,7 +536,7 @@ mod tests {
         let result = parser.parse(&header, &context);
 
         assert!(result.is_ok());
-        assert_eq!(result.get("sequence"), Some(&FieldValue::UInt16(0xABCD)));
+        assert_eq!(result.get("sequence"), Some(&FieldValue::UInt32(0xABCD)));
     }
 
     // Test 7: G-PDU child protocol detection
@@ -1018,7 +1019,7 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(result.get("teid"), Some(&FieldValue::UInt32(0x12345678)));
-        assert_eq!(result.get("sequence"), Some(&FieldValue::UInt16(0xABCD)));
+        assert_eq!(result.get("sequence"), Some(&FieldValue::UInt32(0xABCD)));
         assert_eq!(result.get("npdu"), Some(&FieldValue::UInt8(0x42)));
         assert_eq!(
             result.get("extension_header_count"),
