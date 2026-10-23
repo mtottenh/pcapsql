@@ -5,6 +5,11 @@
 //! executing the physical plan, and the provider serves its table from that
 //! state — so a query touching N tables still parses the capture exactly
 //! once, scoped to what the query needs.
+//!
+//! A table that is not prepared when `scan` runs (EXPLAIN, DDL, or a query
+//! issued directly on the session context) yields a plan-only scan over the
+//! table's full schema, so the plan can be built and displayed without a
+//! parse; executing it fails with a clear message.
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -137,14 +142,23 @@ pub struct ProtocolTableProvider {
     /// The table's full schema (planning surface; data may be a subset).
     schema: SchemaRef,
     tables: Arc<EngineTables>,
+    /// Nominal partition count reported by a plan-only scan (the engine's
+    /// parse parallelism).
+    default_partitions: usize,
 }
 
 impl ProtocolTableProvider {
-    pub fn new(table_name: String, schema: SchemaRef, tables: Arc<EngineTables>) -> Self {
+    pub fn new(
+        table_name: String,
+        schema: SchemaRef,
+        tables: Arc<EngineTables>,
+        default_partitions: usize,
+    ) -> Self {
         Self {
             table_name,
             schema,
             tables,
+            default_partitions,
         }
     }
 }
@@ -190,13 +204,16 @@ impl TableProvider for ProtocolTableProvider {
         _filters: &[Expr],
         _limit: Option<usize>,
     ) -> DFResult<Arc<dyn ExecutionPlan>> {
-        let prepared = self.tables.get(&self.table_name).ok_or_else(|| {
-            DataFusionError::Execution(format!(
-                "table '{}' was not prepared for this query; \
-                 run queries through QueryEngine::query",
-                self.table_name
-            ))
-        })?;
+        let Some(prepared) = self.tables.get(&self.table_name) else {
+            // Not prepared: the statement is plan-only (EXPLAIN) or bypassed
+            // `QueryEngine::query`. Plan over the full schema; fail at execute.
+            return Ok(Arc::new(ProtocolScanExec::plan_only(
+                self.table_name.clone(),
+                self.schema.clone(),
+                projection.cloned(),
+                self.default_partitions,
+            )));
+        };
         let data_schema = prepared.schema();
 
         // `projection` indexes the FULL table schema; the materialized/streamed

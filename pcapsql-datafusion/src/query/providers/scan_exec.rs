@@ -6,6 +6,11 @@
 //! it reports the real partition count and declares `frame_number` output
 //! ordering so cross-partition sort-merge joins reassemble global order
 //! without extra sorting.
+//!
+//! A table that was not prepared for the query being planned (EXPLAIN, a
+//! query issued directly on the session context) gets a *plan-only* scan: it
+//! has the table's schema and a nominal partition count so the plan can be
+//! built and displayed, and fails if executed.
 
 use std::any::Any;
 use std::fmt;
@@ -38,6 +43,8 @@ enum ScanSource {
     Batches(Arc<Vec<Vec<RecordBatch>>>),
     /// Streamed: one batch receiver per partition, taken once each.
     Streams(Arc<Vec<ReceiverSlot>>),
+    /// Not prepared for this query: plannable, not executable.
+    Unprepared { partitions: usize },
 }
 
 impl ScanSource {
@@ -45,6 +52,7 @@ impl ScanSource {
         match self {
             ScanSource::Batches(p) => p.len(),
             ScanSource::Streams(r) => r.len(),
+            ScanSource::Unprepared { partitions } => *partitions,
         }
     }
 }
@@ -89,6 +97,23 @@ impl ProtocolScanExec {
             table_name,
             data_schema,
             ScanSource::Streams(receivers),
+            projection,
+        )
+    }
+
+    /// Plan-only scan over the table's full schema for a table that was not
+    /// prepared for the query being planned. `partitions` is the nominal
+    /// partition count to display; `execute` fails.
+    pub fn plan_only(
+        table_name: String,
+        schema: SchemaRef,
+        projection: Option<Vec<usize>>,
+        partitions: usize,
+    ) -> Self {
+        Self::new(
+            table_name,
+            schema,
+            ScanSource::Unprepared { partitions },
             projection,
         )
     }
@@ -215,6 +240,11 @@ impl ExecutionPlan for ProtocolScanExec {
                     s,
                 )))
             }
+            ScanSource::Unprepared { .. } => Err(DataFusionError::Execution(format!(
+                "table '{}' was not prepared for this query; \
+                 run queries through QueryEngine::query",
+                self.table_name
+            ))),
         }
     }
 
@@ -236,7 +266,7 @@ impl ExecutionPlan for ProtocolScanExec {
                 };
                 Precision::Exact(rows)
             }
-            ScanSource::Streams(_) => Precision::Absent,
+            ScanSource::Streams(_) | ScanSource::Unprepared { .. } => Precision::Absent,
         };
         Ok(Statistics {
             num_rows,
@@ -255,6 +285,7 @@ impl DisplayAs for ProtocolScanExec {
                 let mode = match self.source {
                     ScanSource::Batches(_) => "batches",
                     ScanSource::Streams(_) => "stream",
+                    ScanSource::Unprepared { .. } => "plan-only",
                 };
                 write!(
                     f,

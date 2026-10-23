@@ -9,7 +9,7 @@ use std::sync::Arc;
 use arrow::array::{Array, Int64Array, UInt32Array};
 use arrow::record_batch::RecordBatch;
 use pcapsql_datafusion::query::{
-    EngineOptions, ProgressFn, QueryEngine, RetentionPolicy, SourceSpec,
+    EngineOptions, ProgressFn, QueryEngine, RetentionPolicy, ServedFrom, SourceSpec,
 };
 use pcapsql_testgen::{legacy_pcap, GenPacket, LegacyVariant};
 use tempfile::TempDir;
@@ -260,4 +260,231 @@ async fn concurrent_query_in_planning_window_streaming() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_query_in_planning_window_cached() {
     overlap_case(RetentionPolicy::CacheOnTouch).await;
+}
+
+// ---------------------------------------------------------------------------
+// #124: statements that never poll a scan (EXPLAIN, DDL) must not parse.
+// ---------------------------------------------------------------------------
+
+fn pretty(batches: &[RecordBatch]) -> String {
+    arrow::util::pretty::pretty_format_batches(batches)
+        .expect("format")
+        .to_string()
+}
+
+/// A fresh engine per case: under `CacheOnTouch` an earlier query would have
+/// cached the table, and EXPLAIN would then show it as prepared.
+async fn fresh(path: &std::path::Path, retention: RetentionPolicy) -> QueryEngine {
+    open(path, retention, 1000, None).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn explain_does_not_parse() {
+    let dir = TempDir::new().unwrap();
+    let path = write_capture(&dir, 300);
+    for retention in [RetentionPolicy::None, RetentionPolicy::CacheOnTouch] {
+        for sql in [
+            "EXPLAIN SELECT * FROM frames",
+            "EXPLAIN SELECT f.frame_number, u.dst_port FROM frames f \
+             JOIN udp u USING (frame_number) ORDER BY f.frame_number",
+            // A view: its member tables are inlined at logical planning.
+            "EXPLAIN SELECT frame_number, dst_port FROM udp_packets WHERE dst_port = 53",
+            // Time UDFs are folded at planning from the boundary index.
+            "EXPLAIN SELECT relative_time(timestamp) FROM frames",
+        ] {
+            let engine = fresh(&path, retention).await;
+            let out = pretty(
+                &engine
+                    .query(sql)
+                    .await
+                    .unwrap_or_else(|e| panic!("{sql}: {e}")),
+            );
+            assert!(
+                out.contains("ProtocolScanExec") && out.contains("plan-only"),
+                "{retention:?} {sql}: expected plan-only scans in\n{out}"
+            );
+            let stats = engine.last_parse_stats();
+            assert_eq!(
+                stats.served_from,
+                ServedFrom::PlanOnly,
+                "{retention:?} {sql}"
+            );
+            assert_eq!(stats.parse_passes, 0, "{retention:?} {sql}");
+            assert_eq!(stats.packets_scanned, 0, "{retention:?} {sql}");
+            assert!(
+                stats.rows_built.is_empty(),
+                "{retention:?} {sql}: {stats:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn explain_analyze_executes_and_parses() {
+    let dir = TempDir::new().unwrap();
+    let path = write_capture(&dir, 300);
+    for retention in [RetentionPolicy::None, RetentionPolicy::CacheOnTouch] {
+        let engine = fresh(&path, retention).await;
+        let out = pretty(
+            &engine
+                .query("EXPLAIN ANALYZE SELECT count(*) AS c FROM udp")
+                .await
+                .expect("explain analyze"),
+        );
+        // (Over exactly-sized materialized batches DataFusion folds the
+        // count into a constant, so the scan itself may not be displayed.)
+        assert!(out.contains("Plan with Metrics"), "{out}");
+        let stats = engine.last_parse_stats();
+        assert_eq!(
+            stats.served_from,
+            ServedFrom::Parse,
+            "{retention:?}: {stats:?}"
+        );
+        assert_eq!(stats.parse_passes, 1, "{retention:?}: {stats:?}");
+        assert_eq!(stats.packets_scanned, 300, "{retention:?}: {stats:?}");
+    }
+}
+
+/// A gzip-compressed copy of the capture: not seekable, so no boundary index.
+fn gzip_copy(dir: &TempDir, raw: &std::path::Path) -> std::path::PathBuf {
+    use std::io::Write;
+    let path = dir.path().join("cap.pcap.gz");
+    let mut enc = flate2::write::GzEncoder::new(
+        std::fs::File::create(&path).unwrap(),
+        flate2::Compression::fast(),
+    );
+    enc.write_all(&std::fs::read(raw).unwrap()).unwrap();
+    enc.finish().unwrap();
+    path
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn explain_time_udf_without_index_reports_the_bootstrap_pass() {
+    // Accepted behaviour: `start_time()` / `end_time()` / `relative_time()`
+    // are folded at planning, so even EXPLAIN needs the capture time range.
+    // A source with a boundary index answers it for free; a compressed one
+    // has none and pays one header-only pass (frames only, no protocol
+    // parser), once per engine. The pass is reported, not hidden.
+    let dir = TempDir::new().unwrap();
+    let raw = write_capture(&dir, 300);
+    let gz = gzip_copy(&dir, &raw);
+    for retention in [RetentionPolicy::None, RetentionPolicy::CacheOnTouch] {
+        let engine = fresh(&gz, retention).await;
+        let out = pretty(
+            &engine
+                .query("EXPLAIN SELECT start_time() AS t0, relative_time(timestamp) AS rel FROM frames")
+                .await
+                .expect("explain"),
+        );
+        assert!(out.contains("plan-only"), "{out}");
+        let stats = engine.last_parse_stats();
+        assert_eq!(stats.served_from, ServedFrom::PlanOnly, "{stats:?}");
+        assert_eq!(stats.parse_passes, 1, "the bootstrap pass: {stats:?}");
+        assert_eq!(stats.packets_scanned, 300, "{stats:?}");
+        assert!(stats.rows_built.is_empty(), "{stats:?}");
+
+        // Established once: the next statement pays nothing.
+        engine
+            .query("EXPLAIN SELECT end_time()")
+            .await
+            .expect("explain");
+        let stats = engine.last_parse_stats();
+        assert_eq!(stats.served_from, ServedFrom::PlanOnly);
+        assert_eq!(
+            (stats.parse_passes, stats.packets_scanned),
+            (0, 0),
+            "{stats:?}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ddl_and_statements_do_not_parse() {
+    let dir = TempDir::new().unwrap();
+    let path = write_capture(&dir, 300);
+    let engine = fresh(&path, RetentionPolicy::CacheOnTouch).await;
+
+    // DDL on the shared context: no parse, and the view is usable afterwards.
+    engine
+        .query("CREATE VIEW udp_ports AS SELECT frame_number, dst_port FROM udp")
+        .await
+        .expect("create view");
+    let stats = engine.last_parse_stats();
+    assert_eq!(stats.served_from, ServedFrom::PlanOnly, "{stats:?}");
+    assert_eq!(stats.parse_passes, 0, "{stats:?}");
+    let out = engine
+        .query("SELECT count(*) AS c FROM udp_ports")
+        .await
+        .expect("select from view");
+    assert_eq!(first_i64(&out), 300);
+    assert_eq!(engine.last_parse_stats().parse_passes, 1);
+
+    // DESCRIBE answers from the static schema.
+    let out = engine.query("DESCRIBE frames").await.expect("describe");
+    assert!(total_rows(&out) > 0);
+    assert_eq!(engine.last_parse_stats().served_from, ServedFrom::PlanOnly);
+
+    // Session statements too.
+    engine
+        .query("SET datafusion.execution.batch_size = 4096")
+        .await
+        .expect("set");
+    assert_eq!(engine.last_parse_stats().served_from, ServedFrom::PlanOnly);
+
+    // CTAS over a capture table cannot be prepared: a clear error, no parse.
+    let err = engine
+        .query("CREATE TABLE t AS SELECT frame_number FROM frames")
+        .await
+        .expect_err("ctas over a capture table is rejected");
+    assert!(err.to_string().contains("not supported"), "{err}");
+
+    // INSERT INTO a memory table from a capture table is a query: it is
+    // planned with the prepared tables and parses once.
+    engine
+        .query("CREATE TABLE sink (frame_number BIGINT UNSIGNED)")
+        .await
+        .expect("create table");
+    engine
+        .query("INSERT INTO sink SELECT frame_number FROM frames WHERE frame_number <= 10")
+        .await
+        .expect("insert from capture table");
+    let stats = engine.last_parse_stats();
+    assert_eq!(stats.served_from, ServedFrom::Parse, "{stats:?}");
+    assert_eq!(stats.parse_passes, 1, "{stats:?}");
+    let out = engine
+        .query("SELECT count(*) AS c FROM sink")
+        .await
+        .expect("count sink");
+    assert_eq!(first_i64(&out), 10);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn context_queries_plan_but_fail_at_execution() {
+    // Direct use of the session context bypasses QueryEngine::query: EXPLAIN
+    // works (plan-only scans), a data query fails when executed.
+    let dir = TempDir::new().unwrap();
+    let path = write_capture(&dir, 50);
+    let engine = fresh(&path, RetentionPolicy::None).await;
+    let ctx = engine.context();
+
+    let out = ctx
+        .sql("EXPLAIN SELECT count(*) FROM udp")
+        .await
+        .expect("plan")
+        .collect()
+        .await
+        .expect("explain via context");
+    assert!(pretty(&out).contains("plan-only"));
+
+    let err = ctx
+        .sql("SELECT count(*) FROM udp")
+        .await
+        .expect("plan")
+        .collect()
+        .await
+        .expect_err("execution must fail");
+    assert!(
+        err.to_string().contains("was not prepared for this query"),
+        "{err}"
+    );
 }
