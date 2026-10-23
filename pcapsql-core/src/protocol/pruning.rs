@@ -189,6 +189,7 @@ mod tests {
         // IPv4 can sit directly under a Linux cooked-capture header.
         let required = compute_required_protocols(&["udp"], &registry);
         assert!(required.contains("linux_sll"));
+        assert!(required.contains("sll2"));
         assert!(required.contains("ipv4"));
         assert!(required.contains("ipv6"));
     }

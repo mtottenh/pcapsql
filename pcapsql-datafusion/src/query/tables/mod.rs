@@ -30,6 +30,7 @@ mod ntp;
 mod ospf;
 mod quic;
 mod rtnetlink;
+mod sll2;
 mod ssh;
 mod tcp;
 mod tls;
@@ -59,6 +60,7 @@ pub use ntp::ntp_table_schema;
 pub use ospf::ospf_table_schema;
 pub use quic::quic_table_schema;
 pub use rtnetlink::rtnetlink_table_schema;
+pub use sll2::sll2_table_schema;
 pub use ssh::ssh_table_schema;
 pub use tcp::tcp_table_schema;
 pub use tls::tls_table_schema;
@@ -102,6 +104,7 @@ pub fn all_table_names() -> Vec<&'static str> {
         "frames",
         "ethernet",
         "linux_sll",
+        "sll2",
         "arp",
         "vlan",
         "mpls",
@@ -141,6 +144,7 @@ pub fn get_table_schema(name: &str) -> Option<Schema> {
         // All protocol tables include encap fields for tunnel support
         "ethernet" => Some(with_encap_fields(ethernet_table_schema())),
         "linux_sll" => Some(with_encap_fields(linux_sll_table_schema())),
+        "sll2" => Some(with_encap_fields(sll2_table_schema())),
         "arp" => Some(with_encap_fields(arp_table_schema())),
         "vlan" => Some(with_encap_fields(vlan_table_schema())),
         "mpls" => Some(with_encap_fields(mpls_table_schema())),

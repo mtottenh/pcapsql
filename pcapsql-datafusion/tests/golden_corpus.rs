@@ -190,8 +190,26 @@ fn sll(pkttype: u16, src: [u8; 6], protocol: u16, payload: &[u8]) -> Vec<u8> {
     p
 }
 
+/// Linux cooked capture v2 (SLL2, LINKTYPE 276) header in front of an L3
+/// payload: protocol, reserved, interface index, ARPHRD_ETHER, packet type,
+/// address length 6, 8-byte address.
+fn sll2(pkttype: u8, ifindex: u32, src: [u8; 6], protocol: u16, payload: &[u8]) -> Vec<u8> {
+    let mut p = Vec::with_capacity(20 + payload.len());
+    p.extend_from_slice(&protocol.to_be_bytes());
+    p.extend_from_slice(&[0, 0]); // reserved (MBZ)
+    p.extend_from_slice(&ifindex.to_be_bytes());
+    p.extend_from_slice(&1u16.to_be_bytes()); // ARPHRD_ETHER
+    p.push(pkttype);
+    p.push(6);
+    p.extend_from_slice(&src);
+    p.extend_from_slice(&[0, 0]); // address padding to 8 bytes
+    p.extend_from_slice(payload);
+    p
+}
+
 const LINKTYPE_ETHERNET: u16 = 1;
 const LINKTYPE_LINUX_SLL: u16 = 113;
+const LINKTYPE_LINUX_SLL2: u16 = 276;
 
 fn to_capture(frames: Vec<Vec<u8>>, link_type: u16) -> Vec<u8> {
     let packets: Vec<GenPacket> = frames
@@ -234,6 +252,43 @@ fn sll_capture() -> Vec<u8> {
         sll(0, MAC_B, ETH_IP4, &ipv4(b, a, 1, 3, &icmp_echo())),
     ];
     to_capture(frames, LINKTYPE_LINUX_SLL)
+}
+
+/// The Linux SLL2 corpus capture: 4 frames (DNS query, TCP SYN, ICMP echo,
+/// IPv6 TCP SYN) under the v2 cooked-capture header, spread over two
+/// interface indexes the way `tcpdump -i any` records them.
+fn sll2_capture() -> Vec<u8> {
+    let a = [10, 0, 0, 1];
+    let b = [10, 0, 0, 2];
+    let frames: Vec<Vec<u8>> = vec![
+        // 1: DNS query a -> 8.8.8.8, outgoing on interface 2
+        sll2(
+            4,
+            2,
+            MAC_A,
+            ETH_IP4,
+            &ipv4(a, [8, 8, 8, 8], 17, 1, &udp(40000, 53, &dns_query())),
+        ),
+        // 2: TCP SYN a:40001 -> b:443, outgoing on interface 2
+        sll2(
+            4,
+            2,
+            MAC_A,
+            ETH_IP4,
+            &ipv4(a, b, 6, 2, &tcp(40001, 443, 5000, 0, 0x02, &[])),
+        ),
+        // 3: ICMP echo request, received on interface 3
+        sll2(0, 3, MAC_B, ETH_IP4, &ipv4(b, a, 1, 3, &icmp_echo())),
+        // 4: IPv6 TCP SYN, received on interface 3
+        sll2(
+            0,
+            3,
+            MAC_B,
+            ETH_IP6,
+            &ipv6(IP6_B, IP6_A, 6, &tcp(50000, 22, 7000, 0, 0x02, &[])),
+        ),
+    ];
+    to_capture(frames, LINKTYPE_LINUX_SLL2)
 }
 
 /// The fixed Ethernet corpus capture: 11 frames covering
@@ -357,6 +412,8 @@ enum Capture {
     Eth,
     /// `sll_capture()`: Linux cooked (SLL) link type.
     Sll,
+    /// `sll2_capture()`: Linux cooked v2 (SLL2) link type.
+    Sll2,
 }
 
 /// (capture, snapshot name, SQL). Every query is fully ordered so output is
@@ -556,6 +613,38 @@ const CORPUS: &[(Capture, &str, &str)] = &[
         "s05_sll_tcp_only",
         "SELECT frame_number, dst_port FROM tcp ORDER BY frame_number",
     ),
+    // --- Linux cooked capture v2 (tcpdump -i any on libpcap >= 1.10) ---
+    (
+        Capture::Sll2,
+        "t01_sll2",
+        "SELECT frame_number, protocol, interface_index, arphrd_name, packet_type, \
+         packet_type_name, addr_len, addr FROM sll2 ORDER BY frame_number",
+    ),
+    (
+        Capture::Sll2,
+        "t02_sll2_ipv4_ipv6",
+        "SELECT frame_number, ip4_to_string(src_ip) AS src, ip4_to_string(dst_ip) AS dst FROM ipv4 \
+         UNION ALL SELECT frame_number, ip6_to_string(src_ip), ip6_to_string(dst_ip) FROM ipv6 \
+         ORDER BY frame_number",
+    ),
+    (
+        Capture::Sll2,
+        "t03_sll2_per_interface",
+        "SELECT s.interface_index, count(*) AS frames, count(t.frame_number) AS tcp \
+         FROM sll2 s LEFT JOIN tcp t USING (frame_number) \
+         GROUP BY s.interface_index ORDER BY s.interface_index",
+    ),
+    (
+        Capture::Sll2,
+        "t04_sll2_dns_icmp",
+        "SELECT (SELECT count(*) FROM dns) AS dns, (SELECT count(*) FROM icmp) AS icmp, \
+         (SELECT count(*) FROM udp) AS udp",
+    ),
+    (
+        Capture::Sll2,
+        "t05_sll2_tcp_only",
+        "SELECT frame_number, src_port, dst_port, flag_syn FROM tcp ORDER BY frame_number",
+    ),
 ];
 
 /// Queries that must be the *first* query a fresh engine runs: their result
@@ -599,6 +688,8 @@ async fn golden_corpus_matches_snapshots() {
     std::fs::write(&eth_path, corpus_capture()).unwrap();
     let sll_path = dir.path().join("corpus_sll.pcap");
     std::fs::write(&sll_path, sll_capture()).unwrap();
+    let sll2_path = dir.path().join("corpus_sll2.pcap");
+    std::fs::write(&sll2_path, sll2_capture()).unwrap();
 
     let update = std::env::var("PCAPSQL_GOLDEN_UPDATE").is_ok();
     if update {
@@ -607,6 +698,7 @@ async fn golden_corpus_matches_snapshots() {
 
     let eth = (engine(&eth_path, 2).await, engine(&eth_path, 1).await);
     let sll = (engine(&sll_path, 2).await, engine(&sll_path, 1).await);
+    let sll2 = (engine(&sll2_path, 2).await, engine(&sll2_path, 1).await);
     // One-shot CLI path: RetentionPolicy::None streams rather than
     // materializes. Its results must be identical.
     let streaming = |path: &Path| {
@@ -623,12 +715,14 @@ async fn golden_corpus_matches_snapshots() {
     };
     let eth_streamed = streaming(&eth_path).await.expect("build streaming engine");
     let sll_streamed = streaming(&sll_path).await.expect("build streaming engine");
+    let sll2_streamed = streaming(&sll2_path).await.expect("build streaming engine");
 
     let mut failures = Vec::new();
     for (capture, name, sql) in CORPUS {
         let path = match capture {
             Capture::Eth => &eth_path,
             Capture::Sll => &sll_path,
+            Capture::Sll2 => &sll2_path,
         };
         // Fresh engines (materialized and streaming) for queries whose result
         // depends on engine-wide state no earlier query may have established.
@@ -645,6 +739,7 @@ async fn golden_corpus_matches_snapshots() {
             (Some(f), _) => (&f.0, &f.1, &f.2),
             (None, Capture::Eth) => (&eth.0, &eth.1, &eth_streamed),
             (None, Capture::Sll) => (&sll.0, &sll.1, &sll_streamed),
+            (None, Capture::Sll2) => (&sll2.0, &sll2.1, &sll2_streamed),
         };
         let got = run(e2, sql).await;
 

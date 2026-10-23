@@ -36,7 +36,7 @@ pub mod packet_type {
 }
 
 /// Get the name of a packet type.
-fn packet_type_name(pkt_type: u16) -> &'static str {
+pub(super) fn packet_type_name(pkt_type: u16) -> &'static str {
     match pkt_type {
         packet_type::HOST => "HOST",
         packet_type::BROADCAST => "BROADCAST",
@@ -48,7 +48,7 @@ fn packet_type_name(pkt_type: u16) -> &'static str {
 }
 
 /// Get the name of an ARPHRD type.
-fn arphrd_name(arphrd: u16) -> &'static str {
+pub(super) fn arphrd_name(arphrd: u16) -> &'static str {
     match arphrd {
         arphrd::ETHER => "ETHER",
         arphrd::LOOPBACK => "LOOPBACK",
@@ -124,24 +124,23 @@ impl Protocol for LinuxSllProtocol {
         // Calculate remaining payload
         let remaining = &data[LINUX_SLL_HEADER_LEN..];
 
-        // Set child hints based on ARPHRD type
+        // Set child hints based on ARPHRD type. Per the LINKTYPE_LINUX_SLL
+        // spec the protocol field is an ethertype for every ARPHRD type except
+        // NETLINK (netlink family), IPGRE (GRE protocol type),
+        // IEEE80211_RADIOTAP and FRAD, so tun/ppp/sit interfaces route to IP.
         let mut child_hints = SmallVec::new();
+        child_hints.push(("sll_arphrd", arphrd_type as u64));
 
         match arphrd_type {
             arphrd::NETLINK => {
-                // For netlink, protocol field is the netlink family
-                child_hints.push(("sll_arphrd", arphrd::NETLINK as u64));
                 child_hints.push(("netlink_family", protocol as u64));
                 child_hints.push(("is_netlink", 1u64));
             }
-            arphrd::ETHER | arphrd::LOOPBACK => {
-                // For ethernet-like, protocol is the ethertype
-                child_hints.push(("sll_arphrd", arphrd_type as u64));
-                child_hints.push(("ethertype", protocol as u64));
+            arphrd::IPGRE | arphrd::IEEE80211_RADIOTAP | arphrd::FRAD => {
+                child_hints.push(("sll_protocol", protocol as u64));
             }
             _ => {
-                child_hints.push(("sll_arphrd", arphrd_type as u64));
-                child_hints.push(("sll_protocol", protocol as u64));
+                child_hints.push(("ethertype", protocol as u64));
             }
         }
 
@@ -161,7 +160,9 @@ impl Protocol for LinuxSllProtocol {
     }
 
     fn child_protocols(&self) -> &[&'static str] {
-        &["netlink", "ethernet", "ipv4", "ipv6"]
+        // Ethernet is never a child here: the cooked header replaces it and
+        // the protocol field carries the ethertype directly.
+        &["netlink", "ipv4", "ipv6", "arp"]
     }
 
     fn dependencies(&self) -> &'static [&'static str] {
@@ -358,7 +359,22 @@ mod tests {
         let children = parser.child_protocols();
 
         assert!(children.contains(&"netlink"));
-        assert!(children.contains(&"ethernet"));
+        assert!(children.contains(&"ipv4"));
+        assert!(!children.contains(&"ethernet"));
+    }
+
+    // ==========================================================================
+    // Test 10b: unknown ARPHRD types (tun, ppp, sit) still carry an ethertype
+    // ==========================================================================
+    #[test]
+    fn test_unknown_arphrd_routes_by_ethertype() {
+        let header = create_sll_header(packet_type::OUTGOING, 0xFFFE, 0, [0; 8], 0x86DD);
+        let result = LinuxSllProtocol.parse(&header, &ParseContext::new(LINKTYPE_LINUX_SLL));
+        assert!(result.is_ok());
+        assert_eq!(result.hint("ethertype"), Some(0x86DD));
+        let header = create_sll_header(packet_type::OUTGOING, arphrd::IPGRE, 0, [0; 8], 0x0800);
+        let result = LinuxSllProtocol.parse(&header, &ParseContext::new(LINKTYPE_LINUX_SLL));
+        assert!(result.hint("ethertype").is_none());
     }
 
     // ==========================================================================

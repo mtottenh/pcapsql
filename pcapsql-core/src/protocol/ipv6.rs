@@ -154,6 +154,7 @@ impl Protocol for Ipv6Protocol {
             "vlan",
             "mpls",
             "linux_sll",
+            "sll2",
             "gre",
             "vxlan",
             "gtp",

@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Linux SLL2 cooked captures (LINKTYPE 276, the default for `tcpdump -i any`
+  with libpcap >= 1.10) are parsed: new `sll2` table with `interface_index`,
+  reachable from `ipv4`/`ipv6`/`netlink` under protocol pruning
+  ([#111](https://github.com/mtottenh/pcapsql/issues/111)).
+
 ## [0.4.0] - 2026-10-23
 
 The ingestion layer and the query engine were rebuilt in two stacked series of

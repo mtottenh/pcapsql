@@ -49,7 +49,7 @@ reader.process_packets(1000, |packet| {
 
 | Layer | Protocols |
 |-------|-----------|
-| Link | Ethernet, VLAN (802.1Q), Linux SLL |
+| Link | Ethernet, VLAN (802.1Q), Linux SLL, Linux SLL2 |
 | Network | IPv4, IPv6, ARP, ICMP, ICMPv6 |
 | Transport | TCP, UDP |
 | Application | DNS, DHCP, NTP, HTTP, TLS, SSH, QUIC |
