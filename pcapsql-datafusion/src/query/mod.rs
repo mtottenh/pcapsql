@@ -164,19 +164,35 @@ impl Default for EngineOptions {
     }
 }
 
+/// A query's results together with the statistics of the parse that
+/// produced them (see [`QueryEngine::execute`]).
+#[derive(Clone, Debug)]
+pub struct QueryOutput {
+    /// The result batches.
+    pub batches: Vec<RecordBatch>,
+    /// What this query parsed; [`ServedFrom::PlanOnly`] for a statement that never
+    /// executed a scan.
+    pub stats: ParseStats,
+}
+
 /// Query engine for PCAP files.
 ///
 /// # Concurrency
 ///
-/// The engine is `Send + Sync` and may be shared between tasks, but queries
-/// issued through [`QueryEngine::query`] are **serialized per engine**: a
-/// query's prepared tables (materialized batches or streaming receivers) are
-/// held in engine state that the table providers resolve while DataFusion
-/// builds the physical plan, so two queries in flight at once would read each
-/// other's state. An async mutex therefore admits one query at a time;
-/// concurrent callers wait, they do not fail. The query-scoped design that
-/// lets independent queries run in parallel is described in
-/// `docs/query-context-design.md`.
+/// The engine is `Send + Sync` and may be shared between tasks;
+/// [`QueryEngine::query`] / [`QueryEngine::execute`] may be called
+/// concurrently from any number of tasks. Each query prepares the tables it
+/// needs on its own context (one scoped parse pass, or the retention
+/// policy's cache), so independent queries do not interfere. Under
+/// [`RetentionPolicy::CacheOnTouch`] concurrent first-touch queries of one
+/// table may each parse it; the cache only ever widens and converges to the
+/// widest column set. [`QueryEngine::context`] is shared: DDL through it is
+/// visible to every query, while a data query issued through it builds a
+/// plan (`EXPLAIN` works) but fails at execution, since only `query` /
+/// `execute` prepare tables. Statistics belong to the query that produced
+/// them: use [`QueryEngine::execute`] under concurrency;
+/// [`QueryEngine::last_parse_stats`] reports the most recently completed
+/// query. Design: `docs/query-context-design.md`.
 pub struct QueryEngine {
     ctx: SessionContext,
     registry: Arc<ProtocolRegistry>,
@@ -194,9 +210,9 @@ pub struct QueryEngine {
     last_stats: RwLock<ParseStats>,
     /// Table names this engine registered (the harvest universe).
     known_tables: HashSet<String>,
-    /// Serializes [`Self::query`] (`docs/query-context-design.md`); lifted by
-    /// the follow-up that makes concurrent queries a supported contract.
-    query_lock: tokio::sync::Mutex<()>,
+    /// Serializes the one-time capture time-range bootstrap
+    /// ([`Self::ensure_time_range`]) between concurrent first queries.
+    time_range_lock: tokio::sync::Mutex<()>,
 }
 
 /// Type-erased scoped parse over the engine's source: either materialize the
@@ -561,7 +577,7 @@ impl QueryEngine {
             parse_source,
             last_stats: RwLock::new(ParseStats::default()),
             known_tables,
-            query_lock: tokio::sync::Mutex::new(()),
+            time_range_lock: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -574,13 +590,18 @@ impl QueryEngine {
     /// The range therefore comes from the boundary index when the source has
     /// one (no packet parsing), else from one header-only pass over the
     /// capture (a `frames`-only scope runs no protocol parser). Either way it
-    /// is established once per engine.
+    /// is established once per engine, also when concurrent first queries
+    /// need it at the same time.
     ///
     /// Returns the statistics of the header-only pass when one ran (so the
     /// query can report it), or an empty `ParseStats` otherwise.
-    fn ensure_time_range(&self) -> Result<ParseStats, Error> {
+    async fn ensure_time_range(&self) -> Result<ParseStats, Error> {
         if self.time_range.is_complete() {
             return Ok(ParseStats::default());
+        }
+        let _once = self.time_range_lock.lock().await;
+        if self.time_range.is_complete() {
+            return Ok(ParseStats::default()); // bootstrapped while we waited
         }
         if let Some((start_us, end_us)) = self.parse_source.time_range_us() {
             self.time_range.record(start_us, end_us);
@@ -625,15 +646,19 @@ impl QueryEngine {
     /// query. `CREATE TABLE … AS SELECT` over a capture table and `EXECUTE`
     /// are rejected with a clear error.
     ///
-    /// Queries on one engine run one at a time (see the type-level
-    /// documentation): a concurrent caller waits for the running query to
-    /// finish. Dropping the returned future releases its turn.
+    /// Queries on one engine may run concurrently (see the type-level
+    /// documentation). Only the batches are returned; [`Self::execute`] also
+    /// returns the query's [`ParseStats`].
     pub async fn query(&self, sql: &str) -> Result<Vec<RecordBatch>, Error> {
-        // One query at a time per engine while the query-scoped context is
-        // validated (#123). The guard is held until this future completes or
-        // is dropped.
-        let _serialized = self.query_lock.lock().await;
+        Ok(self.execute(sql).await?.batches)
+    }
 
+    /// Execute a SQL query and return its results together with the
+    /// statistics of the parse it performed (the query path is described on
+    /// [`Self::query`]). The statistics are this query's own, whatever else
+    /// runs on the engine; they are also what [`Self::last_parse_stats`]
+    /// reports until another query completes.
+    pub async fn execute(&self, sql: &str) -> Result<QueryOutput, Error> {
         // A per-query copy of the shared session state: the query's prepared
         // tables ride on its config as an extension.
         let mut state = self.ctx.state();
@@ -646,11 +671,12 @@ impl QueryEngine {
             // DDL / session statements: nothing to prepare. Run on the shared
             // context so e.g. CREATE VIEW lands in the shared catalog.
             let batches = self.collect_on_context(plan).await?;
-            *self.last_stats.write().expect("stats lock poisoned") = ParseStats {
+            let stats = ParseStats {
                 served_from: ServedFrom::PlanOnly,
                 ..Default::default()
             };
-            return Ok(batches);
+            *self.last_stats.write().expect("stats lock poisoned") = stats.clone();
+            return Ok(QueryOutput { batches, stats });
         }
         // The time UDFs are `Stable`, so the optimizer constant-folds
         // `start_time()` / `end_time()` *during* `optimize`: the range must be
@@ -658,7 +684,7 @@ impl QueryEngine {
         // (Also for EXPLAIN, so the displayed constant is the real one; the
         // range comes from the boundary index without a packet parse.)
         let bootstrap = if uses_time_range_udfs(&plan) {
-            self.ensure_time_range()?
+            self.ensure_time_range().await?
         } else {
             ParseStats::default()
         };
@@ -672,11 +698,12 @@ impl QueryEngine {
             let batches = Self::execute_plan(&state, &optimized).await?;
             // The only parse a plan-only statement can trigger is the
             // time-range bootstrap; report it rather than claim zero.
-            *self.last_stats.write().expect("stats lock poisoned") = ParseStats {
+            let stats = ParseStats {
                 served_from: ServedFrom::PlanOnly,
                 ..bootstrap
             };
-            return Ok(batches);
+            *self.last_stats.write().expect("stats lock poisoned") = stats.clone();
+            return Ok(QueryOutput { batches, stats });
         }
 
         let needs = harvest_table_needs(&optimized, &self.known_tables)?;
@@ -760,11 +787,16 @@ impl QueryEngine {
         stats.parse_passes += bootstrap.parse_passes;
         stats.packets_scanned += bootstrap.packets_scanned;
 
-        *self.last_stats.write().expect("stats lock poisoned") = stats;
+        // Written once, after the producers are folded, so what
+        // `last_parse_stats` reports is always a completed query's.
+        *self.last_stats.write().expect("stats lock poisoned") = stats.clone();
 
         match producer_error {
             Some(e) => Err(e),
-            None => result,
+            None => Ok(QueryOutput {
+                batches: result?,
+                stats,
+            }),
         }
     }
 
@@ -998,10 +1030,13 @@ impl QueryEngine {
         (subscription, hits)
     }
 
-    /// Instrumentation for the most recent query: parse passes (0 when fully
-    /// served from cache, 1 otherwise — the shared-parse invariant), packets
-    /// scanned, partitions, and rows built per table. A statement that never
-    /// executed a scan (EXPLAIN, DDL) reports [`ServedFrom::PlanOnly`].
+    /// Instrumentation of the most recently *completed* query on this engine:
+    /// parse passes (0 when fully served from cache, 1 otherwise — the
+    /// shared-parse invariant), packets scanned, partitions, and rows built
+    /// per table. A statement that never executed a scan (EXPLAIN, DDL)
+    /// reports [`ServedFrom::PlanOnly`]. Exact for sequential use (the CLI, the REPL);
+    /// with concurrent queries, use [`Self::execute`], which returns each
+    /// query's own statistics.
     pub fn last_parse_stats(&self) -> ParseStats {
         self.last_stats.read().expect("stats lock poisoned").clone()
     }

@@ -16,6 +16,7 @@
 //! and review the diff like any other code change.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use arrow::util::pretty::pretty_format_batches;
 use pcapsql_datafusion::query::{EngineOptions, QueryEngine, RetentionPolicy, SourceSpec};
@@ -963,6 +964,57 @@ async fn golden_corpus_matches_snapshots() {
             failures.push(format!(
                 "=== {name} ===\n--- expected ---\n{expected}\n--- got ---\n{got}\n"
             ));
+        }
+    }
+
+    // The whole corpus of a capture at once, from concurrent tasks on one
+    // engine, under both retention policies: results must still match the
+    // snapshots. Queries that must be the first on a fresh engine are left
+    // out.
+    if !update {
+        let captures = [
+            (Capture::Eth, &eth_path),
+            (Capture::Sll, &sll_path),
+            (Capture::Sll2, &sll2_path),
+            (Capture::Http, &http_path),
+        ];
+        for (capture, path) in captures {
+            for retention in [RetentionPolicy::CacheOnTouch, RetentionPolicy::None] {
+                let eng = Arc::new(
+                    QueryEngine::open(
+                        SourceSpec::Path(path.to_path_buf()),
+                        EngineOptions {
+                            batch_size: 1000,
+                            target_partitions: Some(2),
+                            index_stride: Some(4),
+                            retention,
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .expect("build engine"),
+                );
+                let mut tasks = tokio::task::JoinSet::new();
+                for (c, name, sql) in CORPUS {
+                    if *c != capture || FRESH_ENGINE_QUERIES.contains(name) {
+                        continue;
+                    }
+                    let eng = eng.clone();
+                    tasks.spawn(async move { (*name, run(&eng, sql).await) });
+                }
+                while let Some(joined) = tasks.join_next().await {
+                    let (name, got) = joined.expect("query task");
+                    let expected =
+                        std::fs::read_to_string(golden_dir().join(format!("{name}.snap")))
+                            .expect("snapshot");
+                    if got != expected {
+                        failures.push(format!(
+                            "=== {name} (concurrent, {retention:?}) ===\n\
+                             --- expected ---\n{expected}\n--- got ---\n{got}\n"
+                        ));
+                    }
+                }
+            }
         }
     }
 

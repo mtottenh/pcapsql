@@ -30,6 +30,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - GRE transparent Ethernet bridging (NVGRE) reaches the inner Ethernet frame
   ([#125](https://github.com/mtottenh/pcapsql/issues/125)).
 - `pcapsql-core/README.md` shows the current API.
+- `QueryEngine::query` is safe to call concurrently on one engine: each
+  query's prepared tables are scoped to that query, the `CacheOnTouch` cache
+  only ever widens, and the capture time range is bootstrapped once, so
+  queries from several tasks no longer fail with "table … was not prepared",
+  "stream … already consumed" or "column … was not materialized", and the
+  contract is documented on `QueryEngine`
+  ([#123](https://github.com/mtottenh/pcapsql/issues/123); design in
+  `docs/query-context-design.md`).
+- `EXPLAIN`, DDL (`CREATE VIEW`, …), `DESCRIBE` and session statements no
+  longer parse the capture: `EXPLAIN` is planned over plan-only scans and
+  displayed, statements run on the shared context, and `--stats` /
+  `ParseStats.served_from` say so. `ServedFrom::{Parse, Cache, Index,
+  PlanOnly}` also lets `--stats` tell the `count(*)` index fast path from a
+  cache hit; the new `ParseStats.served_from` field breaks code that builds
+  `ParseStats` with a struct literal. `EXPLAIN ANALYZE` still executes. An
+  `EXPLAIN` of a time-UDF query on a source without a boundary index
+  (compressed) still pays the one-time header-only time-range pass, which is
+  now reported in the stats. A data query issued directly on
+  `engine.context()` fails at execution rather than at planning;
+  `CREATE TABLE … AS SELECT` over a capture table and `EXECUTE` are rejected
+  with a clear message ([#124](https://github.com/mtottenh/pcapsql/issues/124)).
 
 ### Changed
 
@@ -68,29 +89,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with libpcap >= 1.10) are parsed: new `sll2` table with `interface_index`,
   reachable from `ipv4`/`ipv6`/`netlink` under protocol pruning
   ([#111](https://github.com/mtottenh/pcapsql/issues/111)).
-
-### Fixed
-
-- `QueryEngine::query` calls on one engine are serialized by an async mutex,
-  so concurrent queries from several tasks no longer interfere with each
-  other's prepared tables ("table … was not prepared", "stream … already
-  consumed", "column … was not materialized"). This is the short-term fix for
-  [#123](https://github.com/mtottenh/pcapsql/issues/123); the query-scoped
-  design that lets independent queries run in parallel is in
-  `docs/query-context-design.md`.
-- `EXPLAIN`, DDL (`CREATE VIEW`, …), `DESCRIBE` and session statements no
-  longer parse the capture: `EXPLAIN` is planned over plan-only scans and
-  displayed, statements run on the shared context, and `--stats` /
-  `ParseStats.served_from` say so. `ServedFrom::{Parse, Cache, Index,
-  PlanOnly}` also lets `--stats` tell the `count(*)` index fast path from a
-  cache hit; the new `ParseStats.served_from` field breaks code that builds
-  `ParseStats` with a struct literal. `EXPLAIN ANALYZE` still executes. An
-  `EXPLAIN` of a time-UDF query on a source without a boundary index
-  (compressed) still pays the one-time header-only time-range pass, which is
-  now reported in the stats. A data query issued directly on
-  `engine.context()` fails at execution rather than at planning;
-  `CREATE TABLE … AS SELECT` over a capture table and `EXECUTE` are rejected
-  with a clear message ([#124](https://github.com/mtottenh/pcapsql/issues/124)).
+- `QueryEngine::execute` returns a query's batches together with its own
+  `ParseStats` (`QueryOutput`), which is what concurrent callers should use;
+  `last_parse_stats()` reports the most recently completed query. The one-shot
+  CLI prints `--stats` from it.
 
 ## [0.4.0] - 2026-10-23
 

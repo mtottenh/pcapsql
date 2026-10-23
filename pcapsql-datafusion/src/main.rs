@@ -13,8 +13,9 @@ use pcapsql_datafusion::cli::{
     Args, ExportFormat, Exporter, InputSource, OutputFormatter, Repl, ReplCommand, ReplInput,
 };
 use pcapsql_datafusion::query::{
-    bpf, tables, udf, views, EngineOptions, ProgressFn, QueryEngine, ServedFrom, SourceSpec,
+    bpf, tables, udf, views, EngineOptions, ProgressFn, QueryEngine, SourceSpec,
 };
+use pcapsql_datafusion::{ParseStats, QueryOutput, ServedFrom};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -148,9 +149,9 @@ async fn main() -> Result<()> {
     // Execute query from -e flag
     if let Some(query) = args.query {
         let query = apply_bpf_filter(&query, &bpf_filter);
-        let batches = engine.query(&query).await;
+        let output = engine.execute(&query).await;
         finish_progress();
-        let batches = batches?;
+        let QueryOutput { batches, stats } = output?;
 
         // Export if output file specified
         if let Some(output_path) = &args.output {
@@ -169,7 +170,7 @@ async fn main() -> Result<()> {
 
         // Show parse/partition stats if requested
         if args.show_stats {
-            print_parse_stats(&engine);
+            print_parse_stats(&stats);
         }
 
         return Ok(());
@@ -181,9 +182,9 @@ async fn main() -> Result<()> {
             .with_context(|| format!("Failed to read query file: {}", query_file.display()))?;
 
         let query = apply_bpf_filter(&query, &bpf_filter);
-        let batches = engine.query(&query).await;
+        let output = engine.execute(&query).await;
         finish_progress();
-        let batches = batches?;
+        let QueryOutput { batches, stats } = output?;
 
         // Export if output file specified
         if let Some(output_path) = &args.output {
@@ -202,7 +203,7 @@ async fn main() -> Result<()> {
 
         // Show parse/partition stats if requested
         if args.show_stats {
-            print_parse_stats(&engine);
+            print_parse_stats(&stats);
         }
 
         return Ok(());
@@ -212,8 +213,7 @@ async fn main() -> Result<()> {
     run_repl(&engine, &formatter, &source_name).await
 }
 
-fn print_parse_stats(engine: &QueryEngine) {
-    let stats = engine.last_parse_stats();
+fn print_parse_stats(stats: &ParseStats) {
     eprintln!();
     match stats.served_from {
         ServedFrom::PlanOnly => {

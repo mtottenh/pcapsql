@@ -1,7 +1,7 @@
 # Design: query-scoped prepared tables (#123) and plan-only statements (#124)
 
 **Status:** approved with changes (independent review incorporated); implemented
-as the `feat/query-context-{1,2,3,4}` stack.
+as the `feat/query-context-{1,2,3,4}` stack (PR 5 not shipped).
 **Baseline:** `main` @ `16e39db` (includes #113/#114/#115). `file:line` anchors
 are into that commit under `pcapsql-datafusion/src/query/`; symbols are
 authoritative. DataFusion references are to the 51.0.0 crates.
@@ -194,13 +194,16 @@ parallelism), the `frame_number` ordering, `Precision::Absent` statistics,
 displays as `mode=plan-only`, and its `execute` returns
 `Execution("… was not prepared for this query; run through QueryEngine::query")`.
 
-`ParseStats` gains `plan_only: bool` so a plan-only statement is
-distinguishable from a cache hit (`parse_passes == 0` for both); `--stats`
-prints "Parse passes: 0 (plan only: no scan was executed)". `EXPLAIN ANALYZE`
-runs the real parse and reports it. Accepted and documented: `EXPLAIN` of a
-query using `start_time()` still runs `ensure_time_range` so the folded
-constant in the displayed plan is faithful (free from the index; one
-header-only pass for compressed sources). Deferred: EXPLAIN's displayed
+`ParseStats` gains `served_from: ServedFrom { Parse, Cache, Index, PlanOnly }`
+so a plan-only statement, a cache hit and the `count(*)` index fast path are
+distinguishable (`parse_passes == 0` for all three); `--stats` prints
+"Parse passes: 0 (plan only: no scan was executed)". `EXPLAIN ANALYZE` runs
+the real parse and reports it. Accepted and documented: `EXPLAIN` of a query
+using `start_time()` still runs `ensure_time_range` so the folded constant in
+the displayed plan is faithful — free from the index, one header-only pass on
+a source without one (compressed); `ensure_time_range` returns that pass's
+statistics and the query folds them into its own (`parse_passes`,
+`packets_scanned`), so the cost is reported, not hidden. Deferred: EXPLAIN's displayed
 physical plan omits `merge_ordered_partitions` (pre-existing).
 
 ## 4. API, semantics and migration
@@ -232,8 +235,8 @@ the REPL keeps `last_parse_stats()` for `.cachestats`.
 
 **Breaking (pre-1.0, CHANGELOG):** `EngineTables` → `TableCache` +
 `QueryTables` (re-exported from `providers`); `ProtocolTableProvider::new`
-takes `default_partitions` instead of the tables handle; `ParseStats.plan_only`
-(a non-exhaustive-style struct literal update for anyone constructing it).
+takes `default_partitions` instead of the tables handle; `ParseStats.served_from`
+(a struct-literal break for anyone constructing `ParseStats`).
 
 **Short-term mitigation (PR 1):** `query_lock: tokio::sync::Mutex<()>` held for
 the whole of `query()` (cancel-safe) plus the rustdoc line "queries on one
@@ -251,20 +254,29 @@ additions to `golden_corpus.rs`.
    `tokio::sync::mpsc::UnboundedSender`). Query A is deliberately expensive to
    *plan* (a `CASE` with thousands of arms over `frames.length`, plus
    `raw_data` under `CacheOnTouch`), so its install → physical-plan window is
-   tens of milliseconds. The callback fires when A's parse has read every
-   packet — under `None` the 3 batches fit the 4-batch exchange so the
-   producer finishes before A plans; under `CacheOnTouch` the final callback
-   precedes `install` by microseconds. On that signal the test issues B
-   (`SELECT count(*) FROM udp`; under `CacheOnTouch` the narrower
-   `SELECT length FROM frames`). Baseline: I1 ("not prepared") / I3 ("column
-   … not materialized"). PR 1: B waits on the lock. PR 3+: isolation.
+   hundreds of milliseconds (measured: a second optimizer pass over 3000
+   `CASE` arms takes ~320 ms in a debug build; B's whole parse 6–11 ms).
+   Under `None` B (`SELECT count(*) FROM udp`) is started when A's parse has
+   read every packet (the 3 batches fit the 4-batch exchange, so the
+   producer finishes before A plans) and its pre-harvest `clear()` lands in
+   A's window. Under `CacheOnTouch` B (`SELECT length FROM frames`) must read
+   the cache *before* A installs and install *after*: it is started at A's
+   first progress chunk, misses, and its own parse — recognisable as the
+   second pass, whose running total restarts at the first chunk — is parked
+   until A's final chunk, so B's narrower install lands inside A's window.
+   Baseline: I1 ("not prepared") / I3 ("column … not materialized") on every
+   run. PR 1: B waits on the lock. PR 3+: isolation; PR 4 additionally
+   checks that A's wider cache entry survives B's install.
    Plus a JoinSet stress run (8 tasks × 20 rounds over a mixed query set
    incl. self-join, fast path, stream table, time UDF) compared to a
    sequential baseline.
 2. **Plan-only, fresh engines per case:** `EXPLAIN SELECT * FROM frames`,
    `EXPLAIN … JOIN …` under both policies → output contains `ProtocolScanExec`
-   and `plan-only`, `plan_only && parse_passes == 0 && packets_scanned == 0`;
-   `EXPLAIN ANALYZE` → `parse_passes == 1`; `CREATE VIEW` → plan-only, then a
+   and `plan-only`, `served_from == PlanOnly && parse_passes == 0 &&
+   packets_scanned == 0`; `EXPLAIN ANALYZE` → `parse_passes == 1`; `EXPLAIN`
+   of a time-UDF query on a gzip copy (no boundary index) → `PlanOnly` with
+   `parse_passes == 1` and `packets_scanned == N` (the bootstrap), then 0 on
+   the next statement; `CREATE VIEW` → plan-only, then a
    `SELECT` from it parses; `DESCRIBE frames` → plan-only; CTAS over `frames`
    → clear error; `CREATE TABLE t (…)` + `INSERT INTO t SELECT … FROM frames`
    → works; `engine.context().sql("SELECT … FROM frames")` → EXPLAIN works,
@@ -291,7 +303,7 @@ additions to `golden_corpus.rs`.
 | PR | Content | Files | Risk |
 |---|---|---|---|
 | 1 | `query_lock` + concurrency rustdoc; this document at `docs/query-context-design.md`; test (1) | `query/mod.rs`, `lib.rs`, `CHANGELOG.md`, `docs/`, `tests/engine_query_context.rs` | none; CLI throughput unchanged |
-| 2 (Closes #124) | §3 classification; `ScanSource::Unprepared`/`plan_only`; providers tolerate a missing table; `ParseStats.plan_only`; CLI text; test (2) | `query/mod.rs`, `providers/{scan_exec,protocol_provider,shared}.rs`, `main.rs`, tests | pre-split "missing" means "absent from `EngineTables`", so a cached table under `CacheOnTouch` shows `mode=batches` — test (2) uses fresh engines |
+| 2 (Closes #124) | §3 classification; `ScanSource::Unprepared`/`plan_only`; providers tolerate a missing table; `ParseStats.served_from`; CLI text; test (2) | `query/mod.rs`, `providers/{scan_exec,protocol_provider,shared}.rs`, `main.rs`, tests | pre-split "missing" means "absent from `EngineTables`", so a cached table under `CacheOnTouch` shows `mode=batches` — test (2) uses fresh engines |
 | 3 | `TableCache`/`QueryTables` split; extension-based `scan`; per-query `SessionState`; `query_planner().create_physical_plan`; delete `ClearStreamsOnDrop` and the `None` pre/post clears; fast path → `QueryTables`; lock kept; test (3) | `providers/protocol_provider.rs`, `providers/mod.rs`, `query/mod.rs`, tests | mechanical; judged by golden corpus + §5.5; cancellation now relies on ownership (test 3) |
 | 4 (Closes #123) | `execute()`/`QueryOutput`; widen-only cache; `ensure_time_range` mutex; CLI `--stats` via `execute`; remove `query_lock`; stress test; concurrent corpus pass | `query/mod.rs`, `providers/protocol_provider.rs`, `main.rs`, `CHANGELOG.md`, tests | duplicate first-touch parses under `CacheOnTouch` (accepted, documented) |
 | 5 (optional) | `materialize` under `spawn_blocking`; de-duplicate in-flight fills | `query/mod.rs`, `providers/shared.rs` | re-baseline `streaming_memory.rs` if thread accounting shifts |

@@ -26,8 +26,8 @@
 //! }
 //! ```
 //!
-//! A [`QueryEngine`] can be shared between tasks; queries on one engine are
-//! serialized (see [`query::QueryEngine`] for the concurrency contract).
+//! A [`QueryEngine`] can be shared between tasks and queried concurrently
+//! (see [`query::QueryEngine`] for the concurrency contract).
 //!
 //! ## Architecture
 //!
@@ -57,4 +57,4 @@ pub use pcapsql_core;
 
 // Re-export commonly used types
 pub use error::{Error, QueryError, Result};
-pub use query::QueryEngine;
+pub use query::{ParseStats, QueryEngine, QueryOutput, ServedFrom};
