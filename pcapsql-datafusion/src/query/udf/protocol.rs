@@ -68,7 +68,7 @@ struct IpProtoNameUdf {
 impl IpProtoNameUdf {
     fn new() -> Self {
         Self {
-            signature: Signature::exact(vec![DataType::UInt8], Volatility::Immutable),
+            signature: super::coercible_signature(&[DataType::UInt8], Volatility::Immutable),
         }
     }
 }
@@ -266,7 +266,7 @@ struct EthertypeNameUdf {
 impl EthertypeNameUdf {
     fn new() -> Self {
         Self {
-            signature: Signature::exact(vec![DataType::UInt16], Volatility::Immutable),
+            signature: super::coercible_signature(&[DataType::UInt16], Volatility::Immutable),
         }
     }
 }
@@ -379,7 +379,7 @@ struct DscpNameUdf {
 impl DscpNameUdf {
     fn new() -> Self {
         Self {
-            signature: Signature::exact(vec![DataType::UInt8], Volatility::Immutable),
+            signature: super::coercible_signature(&[DataType::UInt8], Volatility::Immutable),
         }
     }
 }
@@ -441,7 +441,7 @@ struct EcnNameUdf {
 impl EcnNameUdf {
     fn new() -> Self {
         Self {
-            signature: Signature::exact(vec![DataType::UInt8], Volatility::Immutable),
+            signature: super::coercible_signature(&[DataType::UInt8], Volatility::Immutable),
         }
     }
 }

@@ -105,10 +105,7 @@ impl ScalarUDFImpl for MacUdf {
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
         let args = ColumnarValue::values_to_arrays(&args.args)?;
-        let mac_strings = args[0]
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .expect("mac: expected string array");
+        let mac_strings = super::string_arg(&args[0], "mac")?;
 
         let values: Vec<Option<[u8; 6]>> = mac_strings
             .iter()

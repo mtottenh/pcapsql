@@ -58,7 +58,8 @@ SELECT method, path, status FROM http2 WHERE method IS NOT NULL;
 | `dns`, `dhcp`, `ntp`, `http` | Application protocols |
 | `tls` | TLS records and handshakes |
 | `http2` | HTTP/2 frames (requires TLS decryption) |
-| `vxlan`, `gre`, `mpls`, `gtp` | Tunnel headers |
+| `vxlan`, `gre`, `gtp`, `ipsec` | Tunnel headers (inner layers get `encap_depth` > 0 and a `tunnel_type`) |
+| `mpls` | Label stacks (label switching, not counted as a tunnel) |
 | `bgp`, `ospf` | Routing protocols |
 
 ## CLI Options

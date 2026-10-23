@@ -47,7 +47,7 @@ struct BgpMessageTypeNameUdf {
 impl BgpMessageTypeNameUdf {
     fn new() -> Self {
         Self {
-            signature: Signature::exact(vec![DataType::UInt8], Volatility::Immutable),
+            signature: super::coercible_signature(&[DataType::UInt8], Volatility::Immutable),
         }
     }
 }
@@ -107,7 +107,7 @@ struct BgpOriginNameUdf {
 impl BgpOriginNameUdf {
     fn new() -> Self {
         Self {
-            signature: Signature::exact(vec![DataType::UInt8], Volatility::Immutable),
+            signature: super::coercible_signature(&[DataType::UInt8], Volatility::Immutable),
         }
     }
 }

@@ -123,10 +123,7 @@ impl ScalarUDFImpl for UnhexUdf {
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
         let args = ColumnarValue::values_to_arrays(&args.args)?;
-        let hex_values = args[0]
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .expect("unhex: expected string array");
+        let hex_values = super::string_arg(&args[0], "unhex")?;
 
         let result: BinaryArray = hex_values
             .iter()

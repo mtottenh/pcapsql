@@ -73,7 +73,7 @@ struct IcmpTypeNameUdf {
 impl IcmpTypeNameUdf {
     fn new() -> Self {
         Self {
-            signature: Signature::exact(vec![DataType::UInt8], Volatility::Immutable),
+            signature: super::coercible_signature(&[DataType::UInt8], Volatility::Immutable),
         }
     }
 }
@@ -160,7 +160,7 @@ struct Icmpv6TypeNameUdf {
 impl Icmpv6TypeNameUdf {
     fn new() -> Self {
         Self {
-            signature: Signature::exact(vec![DataType::UInt8], Volatility::Immutable),
+            signature: super::coercible_signature(&[DataType::UInt8], Volatility::Immutable),
         }
     }
 }
@@ -265,8 +265,8 @@ struct IcmpCodeNameUdf {
 impl IcmpCodeNameUdf {
     fn new() -> Self {
         Self {
-            signature: Signature::exact(
-                vec![DataType::UInt8, DataType::UInt8],
+            signature: super::coercible_signature(
+                &[DataType::UInt8, DataType::UInt8],
                 Volatility::Immutable,
             ),
         }
@@ -401,8 +401,8 @@ struct Icmpv6CodeNameUdf {
 impl Icmpv6CodeNameUdf {
     fn new() -> Self {
         Self {
-            signature: Signature::exact(
-                vec![DataType::UInt8, DataType::UInt8],
+            signature: super::coercible_signature(
+                &[DataType::UInt8, DataType::UInt8],
                 Volatility::Immutable,
             ),
         }

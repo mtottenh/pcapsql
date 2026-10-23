@@ -58,7 +58,7 @@ struct TcpFlagsStrUdf {
 impl TcpFlagsStrUdf {
     fn new() -> Self {
         Self {
-            signature: Signature::exact(vec![DataType::UInt16], Volatility::Immutable),
+            signature: super::coercible_signature(&[DataType::UInt16], Volatility::Immutable),
         }
     }
 }
@@ -123,8 +123,8 @@ struct HasTcpFlagUdf {
 impl HasTcpFlagUdf {
     fn new() -> Self {
         Self {
-            signature: Signature::exact(
-                vec![DataType::UInt16, DataType::Utf8],
+            signature: super::coercible_signature(
+                &[DataType::UInt16, DataType::Utf8],
                 Volatility::Immutable,
             ),
         }
@@ -154,10 +154,7 @@ impl ScalarUDFImpl for HasTcpFlagUdf {
             .as_any()
             .downcast_ref::<UInt16Array>()
             .expect("has_tcp_flag: expected uint16 array for flags");
-        let name_values = args[1]
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .expect("has_tcp_flag: expected string array for flag name");
+        let name_values = super::string_arg(&args[1], "has_tcp_flag")?;
 
         let result: BooleanArray = flags_values
             .iter()
