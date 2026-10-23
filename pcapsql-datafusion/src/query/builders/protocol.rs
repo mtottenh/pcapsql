@@ -12,7 +12,7 @@ use arrow::record_batch::RecordBatch;
 
 use crate::error::{Error, QueryError};
 use crate::query::tables;
-use pcapsql_core::{FieldValue, ParseResult, RawPacket};
+use pcapsql_core::{FieldValue, ParseResult};
 
 /// Dynamic array builder that can hold different builder types.
 enum DynamicBuilder {
@@ -441,45 +441,7 @@ impl ProtocolBatchBuilder {
         self.rows >= self.batch_size
     }
 
-    /// Add a row for the frames table.
-    pub fn add_frame(&mut self, raw: &RawPacket) {
-        if self.protocol_name != "frames" {
-            return;
-        }
-
-        self.rows += 1;
-
-        for (field_name, idx) in &self.field_index {
-            let builder = &mut self.builders[*idx];
-            match field_name.as_str() {
-                "frame_number" => builder.append_u64(raw.frame_number),
-                // Arrow timestamp column is microseconds; reader timestamps are ns.
-                "timestamp" => builder.append_timestamp(raw.timestamp_ns / 1_000),
-                "length" => {
-                    if let DynamicBuilder::UInt32(b) = builder {
-                        b.append_value(raw.captured_length);
-                    }
-                }
-                "original_length" => {
-                    if let DynamicBuilder::UInt32(b) = builder {
-                        b.append_value(raw.original_length);
-                    }
-                }
-                "link_type" => {
-                    if let DynamicBuilder::UInt16(b) = builder {
-                        b.append_value(raw.link_type);
-                    }
-                }
-                "raw_data" => builder.append_binary(&raw.data),
-                _ => builder.append_null(),
-            }
-        }
-    }
-
     /// Add a row for the frames table from raw components.
-    ///
-    /// This is used in streaming mode where we have the raw packet data
-    /// but not a `RawPacket` struct.
     pub fn add_frame_from_raw(
         &mut self,
         frame_number: u64,
@@ -638,16 +600,8 @@ mod tests {
     fn test_frames_builder() {
         let mut builder = ProtocolBatchBuilder::new("frames", 10).unwrap();
 
-        let raw = RawPacket {
-            frame_number: 1,
-            timestamp_ns: 1_000_000_000,
-            captured_length: 100,
-            original_length: 100,
-            link_type: 1,
-            data: vec![0u8; 100].into(),
-        };
-
-        builder.add_frame(&raw);
+        let data = vec![0u8; 100];
+        builder.add_frame_from_raw(1, 1_000_000_000, 100, 100, &data, 1);
         assert_eq!(builder.row_count(), 1);
 
         let batch = builder.finish().unwrap().unwrap();

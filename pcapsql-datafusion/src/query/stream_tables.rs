@@ -16,7 +16,7 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 
 use pcapsql_core::stream::{Http2StreamParser, ParsedMessage, StreamManager};
-use pcapsql_core::{FieldValue, KeyLog, PcapReader};
+use pcapsql_core::{FieldValue, KeyLog, PacketReader};
 
 use crate::error::{Error, QueryError};
 
@@ -53,10 +53,9 @@ impl StreamTableBuilder {
         }
     }
 
-    /// Process a PCAP file and collect stream-parsed messages.
-    pub fn process_pcap(&mut self, path: &str) -> Result<(), Error> {
-        let mut reader = PcapReader::open(path)?;
-
+    /// Process every packet from a sequential reader, collecting
+    /// stream-parsed messages (TCP reassembly, TLS decryption, HTTP/2).
+    pub fn process_reader<R: PacketReader>(&mut self, reader: &mut R) -> Result<(), Error> {
         // We need to extract TCP info from each packet
         // and feed it to the stream manager
         loop {

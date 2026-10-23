@@ -9,12 +9,16 @@
 //! ## Quick Start
 //!
 //! ```rust,no_run
-//! use pcapsql_datafusion::query::QueryEngine;
+//! use pcapsql_datafusion::query::{EngineOptions, QueryEngine, SourceSpec};
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
-//!     // Create query engine for a PCAP file
-//!     let engine = QueryEngine::new("capture.pcap", 8192).await?;
+//!     // Open a capture (local path or cloud URL) and build the engine
+//!     let engine = QueryEngine::open(
+//!         SourceSpec::Path("capture.pcap".into()),
+//!         EngineOptions::default(),
+//!     )
+//!     .await?;
 //!
 //!     // Execute SQL queries
 //!     let results = engine.query("SELECT COUNT(*) FROM frames").await?;
