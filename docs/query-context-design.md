@@ -99,6 +99,11 @@ let mut state = self.ctx.state();                       // clone of the shared s
 let plan = state.create_logical_plan(sql).await?;
 let optimized = state.optimize(&plan)?;
 let (prepared, producers, stats) = self.prepare(&optimized).await?;   // Arc<QueryTables>
+// Plan for the partitions the query actually has (#122): a scan with fewer
+// partitions than target_partitions is round-robin repartitioned and, with
+// no ORDER BY, loses its frame_number ordering before the final merge.
+state.config_mut().options_mut().execution.target_partitions =
+    session_target_partitions(prepared.partitions(), self.parallelism); // k, or parallelism.max(2) for k <= 1
 state.config_mut().set_extension(prepared.clone());
 let result = async {
     let physical = state.query_planner().create_physical_plan(&optimized, &state).await?; // no 2nd optimize

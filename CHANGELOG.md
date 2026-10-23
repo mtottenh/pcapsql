@@ -51,6 +51,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `engine.context()` fails at execution rather than at planning;
   `CREATE TABLE … AS SELECT` over a capture table and `EXECUTE` are rejected
   with a clear message ([#124](https://github.com/mtottenh/pcapsql/issues/124)).
+- Un-`ORDER BY`ed queries come back in capture order when the boundary index
+  yields fewer parse partitions than the engine's parallelism (a ~300k-frame
+  capture at the default 65536-frame checkpoint stride parses in 5 partitions
+  on an 8-core machine). DataFusion round-robin repartitioned such a scan up
+  to `target_partitions` above a filter or projection and, with no `ORDER BY`,
+  dropped the scan's `frame_number` ordering with it, so the final merge fell
+  back to arrival order and rows came out interleaved across partitions (a
+  `LIMIT` returned arbitrary frames). Each query now plans on the partition
+  count its tables actually have, so no scan with more than one partition is
+  repartitioned; a one-partition scan keeps the engine's parallelism, which
+  is order-safe ([#122](https://github.com/mtottenh/pcapsql/issues/122)).
 
 ### Changed
 

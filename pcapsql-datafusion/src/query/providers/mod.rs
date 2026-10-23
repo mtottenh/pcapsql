@@ -55,6 +55,13 @@ use datafusion::physical_plan::ExecutionPlan;
 /// same way, so results come back in capture order exactly as they did with a
 /// single partition. Inputs without an ordering (aggregates, hash joins) are
 /// left alone — their row order is unspecified anyway.
+///
+/// This relies on the scan's ordering surviving to the coalesce: a scan with
+/// several partitions must be planned with `target_partitions` equal to its
+/// partition count, or DataFusion repartitions it round-robin and, absent an
+/// `ORDER BY`, drops the ordering with it (#122; the engine re-targets each
+/// query's session state in `QueryEngine::execute`). A round-robin
+/// repartition from a single ordered partition keeps the order.
 pub fn merge_ordered_partitions(plan: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
     let original = Arc::clone(&plan);
     let plan = plan
