@@ -8,8 +8,8 @@ use super::{
     ArpProtocol, BgpProtocol, DhcpProtocol, DnsProtocol, EthernetProtocol, GreProtocol,
     GtpProtocol, IcmpProtocol, Icmpv6Protocol, IpsecProtocol, Ipv4Protocol, Ipv6Protocol,
     LinuxSllProtocol, MplsProtocol, NetlinkProtocol, NtpProtocol, OspfProtocol, ParseContext,
-    ParseResult, QuicProtocol, RtnetlinkProtocol, SshProtocol, TcpProtocol, TlsProtocol,
-    UdpProtocol, VlanProtocol, VxlanProtocol,
+    ParseResult, QuicProtocol, RtnetlinkProtocol, Sll2Protocol, SshProtocol, TcpProtocol,
+    TlsProtocol, UdpProtocol, VlanProtocol, VxlanProtocol,
 };
 
 /// How a protocol's remaining bytes should be handled.
@@ -120,6 +120,7 @@ pub trait Protocol: Send + Sync {
 pub enum BuiltinProtocol {
     Ethernet(EthernetProtocol),
     LinuxSll(LinuxSllProtocol),
+    Sll2(Sll2Protocol),
     Arp(ArpProtocol),
     Vlan(VlanProtocol),
     Mpls(MplsProtocol),
@@ -151,6 +152,7 @@ macro_rules! delegate_protocol {
         match $self {
             BuiltinProtocol::Ethernet(p) => p.$method($($arg),*),
             BuiltinProtocol::LinuxSll(p) => p.$method($($arg),*),
+            BuiltinProtocol::Sll2(p) => p.$method($($arg),*),
             BuiltinProtocol::Arp(p) => p.$method($($arg),*),
             BuiltinProtocol::Vlan(p) => p.$method($($arg),*),
             BuiltinProtocol::Mpls(p) => p.$method($($arg),*),
@@ -250,6 +252,12 @@ impl From<EthernetProtocol> for BuiltinProtocol {
 impl From<LinuxSllProtocol> for BuiltinProtocol {
     fn from(p: LinuxSllProtocol) -> Self {
         BuiltinProtocol::LinuxSll(p)
+    }
+}
+
+impl From<Sll2Protocol> for BuiltinProtocol {
+    fn from(p: Sll2Protocol) -> Self {
+        BuiltinProtocol::Sll2(p)
     }
 }
 

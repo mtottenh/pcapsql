@@ -232,6 +232,7 @@ impl Protocol for Ipv4Protocol {
             "vlan",
             "mpls",
             "linux_sll",
+            "sll2",
             "gre",
             "vxlan",
             "gtp",

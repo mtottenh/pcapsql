@@ -64,6 +64,7 @@ mod ntp;
 mod ospf;
 mod quic;
 mod rtnetlink;
+mod sll2;
 mod ssh;
 mod tcp;
 mod tls;
@@ -101,6 +102,7 @@ pub use ntp::NtpProtocol;
 pub use ospf::OspfProtocol;
 pub use quic::QuicProtocol;
 pub use rtnetlink::RtnetlinkProtocol;
+pub use sll2::Sll2Protocol;
 pub use ssh::SshProtocol;
 pub use tcp::TcpProtocol;
 pub use tls::TlsProtocol;
@@ -139,6 +141,7 @@ pub fn default_registry() -> ProtocolRegistry {
     // Layer 2
     registry.register(EthernetProtocol);
     registry.register(LinuxSllProtocol);
+    registry.register(Sll2Protocol);
     registry.register(ArpProtocol);
     registry.register(VlanProtocol);
     registry.register(MplsProtocol);

@@ -106,8 +106,11 @@ impl Protocol for NetlinkProtocol {
             return Some(100);
         }
 
-        // Also parse when parent is linux_sll with ARPHRD_NETLINK
-        if context.parent_protocol == Some("linux_sll") && context.hint("is_netlink") == Some(1) {
+        // Also parse when parent is a Linux cooked-capture header (SLL or
+        // SLL2) with ARPHRD_NETLINK
+        if matches!(context.parent_protocol, Some("linux_sll") | Some("sll2"))
+            && context.hint("is_netlink") == Some(1)
+        {
             return Some(100);
         }
 
