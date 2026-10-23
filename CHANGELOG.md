@@ -54,6 +54,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reachable from `ipv4`/`ipv6`/`netlink` under protocol pruning
   ([#111](https://github.com/mtottenh/pcapsql/issues/111)).
 
+### Fixed
+
+- `QueryEngine::query` calls on one engine are serialized by an async mutex,
+  so concurrent queries from several tasks no longer interfere with each
+  other's prepared tables ("table … was not prepared", "stream … already
+  consumed", "column … was not materialized"). This is the short-term fix for
+  [#123](https://github.com/mtottenh/pcapsql/issues/123); the query-scoped
+  design that lets independent queries run in parallel is in
+  `docs/query-context-design.md`.
+
 ## [0.4.0] - 2026-10-23
 
 The ingestion layer and the query engine were rebuilt in two stacked series of
