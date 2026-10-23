@@ -293,7 +293,7 @@ pcapsql az://container/capture.pcap -e "SELECT * FROM tls"
 
 ### Performance Notes
 
-- Cloud sources always use streaming mode for memory efficiency
+- Large objects are parsed in parallel with independent byte-range reads; the boundary index that makes this possible is cached locally (`$PCAPSQL_INDEX_CACHE`, else `$XDG_CACHE_HOME/pcapsql/index`, else `~/.cache/pcapsql/index`) so later opens of the same object do not re-download it
 - Default chunk size is 8MB; increase for high-latency connections
 - Compression is recommended to reduce transfer time
 - Both legacy PCAP and PCAPNG formats are supported
