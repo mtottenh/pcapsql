@@ -13,37 +13,46 @@ This crate provides the core parsing functionality for pcapsql, without any SQL 
 - **Protocol Parsing**: 17+ built-in protocol parsers
 - **PCAP Reading**: PCAP and PCAPNG formats with gzip/zstd compression
 - **Memory-Mapped I/O**: Efficient reading of large capture files
-- **Parse Caching**: LRU cache to avoid redundant parsing during JOINs
+- **Boundary Index**: Record-boundary checkpoints (persisted as a sidecar) so a capture can be read in parallel partitions, locally or over cloud byte ranges
+- **Scoped Parsing**: `ParseScope` prunes the protocol walk and projects fields to what a query needs
 - **TCP Stream Reassembly**: Connection tracking and application-layer parsing
 - **TLS Decryption**: Support for TLS 1.2/1.3 with SSLKEYLOGFILE
 
 ## Quick Start
 
 ```rust
-use pcapsql_core::prelude::*;
-use pcapsql_core::io::FilePacketSource;
+use pcapsql_core::io::{FilePacketSource, PacketReader, PacketSource};
+use pcapsql_core::{default_registry, parse_packet, ParseScope};
 
-// Create a protocol registry with all built-in parsers
+// A registry with every built-in parser; a scope that parses everything.
 let registry = default_registry();
+let scope = ParseScope::full();
 
-// Open a PCAP file
+// Open a capture (pcap or pcapng, optionally gzip/zstd compressed).
 let source = FilePacketSource::open("capture.pcap").unwrap();
-let mut reader = source.reader(None).unwrap();
+let mut reader = source.sequential_reader().unwrap();
 
-// Read and parse packets
-reader.process_packets(1000, |packet| {
-    let results = pcapsql_core::parse_packet(
-        &registry,
-        packet.link_type as u16,
-        &packet.data,
-    );
-
-    for (protocol_name, result) in results {
-        println!("{}: {} fields", protocol_name, result.fields.len());
+// Read packets zero-copy; `packet.data` borrows the reader's buffer.
+loop {
+    let processed = reader
+        .process_packets(1000, |packet| {
+            let layers = parse_packet(&registry, packet.link_type, packet.data, &scope);
+            for (protocol, result) in &layers {
+                println!("frame {} {}: {} fields", packet.frame_number, protocol, result.fields.len());
+            }
+            Ok(())
+        })
+        .unwrap();
+    if processed == 0 {
+        break;
     }
-    Ok(())
-}).unwrap();
+}
 ```
+
+Timestamps are nanoseconds (`packet.timestamp_ns`). Scope a parse to the
+tables a query touches with `ParseScope::for_tables(&["tcp", "dns"], &registry)`;
+the dependency closure (link and network layers, tunnels) is parsed
+automatically.
 
 ## Supported Protocols
 
@@ -73,10 +82,9 @@ reader.process_packets(1000, |packet| {
 ```
 pcapsql-core
 ├── schema/     - FieldDescriptor, DataKind (engine-agnostic types)
-├── protocol/   - Protocol trait, parsers, FieldValue
-├── io/         - PacketSource, PacketReader, mmap support
-├── pcap/       - PCAP/PCAPNG reading, compression
-├── cache/      - LRU parse cache
+├── protocol/   - Protocol trait, parsers, FieldValue, ParseScope / pruning
+├── io/         - PacketSource / SeekablePacketSource, readers (file, mmap,
+│                 cloud), boundary index + sidecar, compression
 ├── stream/     - TCP reassembly, HTTP/TLS stream parsing
 ├── tls/        - TLS key derivation and decryption
 └── format/     - Address formatting utilities

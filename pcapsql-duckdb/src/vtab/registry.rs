@@ -356,6 +356,7 @@ fn duckdb_type_name(kind: &DataKind) -> String {
         DataKind::UInt32 => "UINTEGER".to_string(),
         DataKind::UInt64 => "UBIGINT".to_string(),
         DataKind::Int64 => "BIGINT".to_string(),
+        DataKind::Int8 => "TINYINT".to_string(),
         DataKind::Float64 => "DOUBLE".to_string(),
         DataKind::String => "VARCHAR".to_string(),
         DataKind::Binary => "BLOB".to_string(),

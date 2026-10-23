@@ -26,8 +26,12 @@ pub enum FieldValue<'data> {
     UInt32(u32),
     /// Unsigned 64-bit integer
     UInt64(u64),
+    /// Signed 8-bit integer
+    Int8(i8),
     /// Signed 64-bit integer
     Int64(i64),
+    /// 64-bit float (fixed-point protocol fields converted to real units)
+    Float64(f64),
     /// Boolean value
     Bool(bool),
 
@@ -127,6 +131,7 @@ impl<'data> FieldValue<'data> {
     pub fn as_i64(&self) -> Option<i64> {
         match self {
             FieldValue::Int64(v) => Some(*v),
+            FieldValue::Int8(v) => Some(*v as i64),
             FieldValue::UInt8(v) => Some(*v as i64),
             FieldValue::UInt16(v) => Some(*v as i64),
             FieldValue::UInt32(v) => Some(*v as i64),
@@ -172,7 +177,9 @@ impl<'data> FieldValue<'data> {
             FieldValue::UInt16(v) => Some(v.to_string()),
             FieldValue::UInt32(v) => Some(v.to_string()),
             FieldValue::UInt64(v) => Some(v.to_string()),
+            FieldValue::Int8(v) => Some(v.to_string()),
             FieldValue::Int64(v) => Some(v.to_string()),
+            FieldValue::Float64(v) => Some(v.to_string()),
             FieldValue::Bool(v) => Some(v.to_string()),
             _ => None,
         }
@@ -202,7 +209,9 @@ impl<'data> FieldValue<'data> {
             FieldValue::UInt16(v) => FieldValue::UInt16(*v),
             FieldValue::UInt32(v) => FieldValue::UInt32(*v),
             FieldValue::UInt64(v) => FieldValue::UInt64(*v),
+            FieldValue::Int8(v) => FieldValue::Int8(*v),
             FieldValue::Int64(v) => FieldValue::Int64(*v),
+            FieldValue::Float64(v) => FieldValue::Float64(*v),
             FieldValue::Bool(v) => FieldValue::Bool(*v),
             FieldValue::IpAddr(v) => FieldValue::IpAddr(*v),
             FieldValue::MacAddr(v) => FieldValue::MacAddr(*v),
@@ -225,7 +234,9 @@ impl<'data> std::fmt::Display for FieldValue<'data> {
             FieldValue::UInt16(v) => write!(f, "{v}"),
             FieldValue::UInt32(v) => write!(f, "{v}"),
             FieldValue::UInt64(v) => write!(f, "{v}"),
+            FieldValue::Int8(v) => write!(f, "{v}"),
             FieldValue::Int64(v) => write!(f, "{v}"),
+            FieldValue::Float64(v) => write!(f, "{v}"),
             FieldValue::Bool(v) => write!(f, "{v}"),
             FieldValue::Str(s) => write!(f, "{s}"),
             FieldValue::OwnedString(s) => write!(f, "{s}"),
@@ -256,7 +267,9 @@ impl<'a, 'b> PartialEq<FieldValue<'b>> for FieldValue<'a> {
             (FieldValue::UInt16(a), FieldValue::UInt16(b)) => a == b,
             (FieldValue::UInt32(a), FieldValue::UInt32(b)) => a == b,
             (FieldValue::UInt64(a), FieldValue::UInt64(b)) => a == b,
+            (FieldValue::Int8(a), FieldValue::Int8(b)) => a == b,
             (FieldValue::Int64(a), FieldValue::Int64(b)) => a == b,
+            (FieldValue::Float64(a), FieldValue::Float64(b)) => a == b,
             (FieldValue::Bool(a), FieldValue::Bool(b)) => a == b,
             (FieldValue::IpAddr(a), FieldValue::IpAddr(b)) => a == b,
             (FieldValue::MacAddr(a), FieldValue::MacAddr(b)) => a == b,

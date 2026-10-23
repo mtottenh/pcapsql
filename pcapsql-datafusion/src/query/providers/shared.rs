@@ -255,9 +255,17 @@ fn decide_ranges<S: SeekablePacketSource>(
         }
     };
     if want <= 1 {
-        Ok(vec![PacketRange::whole()])
-    } else {
-        Ok(source.partitions(want)?)
+        return Ok(vec![PacketRange::whole()]);
+    }
+    // The boundary index is an optimization: if it cannot be built (a corrupt
+    // record header, an unreadable sidecar) the capture is still readable
+    // sequentially, with the reader's own truncation handling.
+    match source.partitions(want) {
+        Ok(ranges) => Ok(ranges),
+        Err(e) => {
+            tracing::warn!(error = %e, "boundary index unavailable; parsing in one partition");
+            Ok(vec![PacketRange::whole()])
+        }
     }
 }
 

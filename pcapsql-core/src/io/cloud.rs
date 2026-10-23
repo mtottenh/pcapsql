@@ -33,10 +33,10 @@
 use std::io::{self, Chain, Cursor, Read};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 
-use tokio::runtime::Handle;
+use tokio::runtime::{Handle, RuntimeFlavor};
 
 use object_store::{path::Path as ObjectPath, ObjectStore};
 use url::Url;
@@ -52,21 +52,61 @@ use crate::error::Error;
 ///   every byte-range GET from a worker thread would build and tear down a
 ///   fresh runtime, re-establishing the HTTP connection pool each time.
 /// - Otherwise: a temporary single-threaded runtime.
+/// - On a `current_thread` runtime (`#[tokio::test]`, `#[tokio::main(flavor =
+///   "current_thread")]`) neither `block_in_place` nor `Handle::block_on` from
+///   another thread can work: the former panics, the latter never drives the
+///   runtime's I/O driver while the runtime thread is blocked. Such callers,
+///   and plain threads without a saved handle, use a dedicated multi-thread
+///   I/O runtime owned by this module, driven from a helper thread.
 fn run_async<F, T>(saved: Option<&Handle>, future: F) -> T
 where
-    F: std::future::Future<Output = T>,
+    F: std::future::Future<Output = T> + Send,
+    T: Send,
 {
     match Handle::try_current() {
-        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(future)),
+        Ok(handle) if handle.runtime_flavor() == RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(|| handle.block_on(future))
+        }
+        // Inside a current_thread runtime: cannot block here.
+        Ok(_) => io_runtime_block_on(future),
         Err(_) => match saved {
-            Some(handle) => handle.block_on(future),
-            None => tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("Failed to create temporary runtime")
-                .block_on(future),
+            Some(handle) if handle.runtime_flavor() == RuntimeFlavor::MultiThread => {
+                handle.block_on(future)
+            }
+            _ => io_runtime_block_on(future),
         },
     }
+}
+
+/// A runtime handle worth saving for worker threads: only a multi-thread
+/// runtime can be driven from a thread that is not its own.
+fn saveable_handle() -> Option<Handle> {
+    Handle::try_current()
+        .ok()
+        .filter(|h| h.runtime_flavor() == RuntimeFlavor::MultiThread)
+}
+
+/// Run `future` to completion on the module's dedicated I/O runtime from a
+/// helper thread, so it is safe to call from inside any tokio context.
+fn io_runtime_block_on<F, T>(future: F) -> T
+where
+    F: std::future::Future<Output = T> + Send,
+    T: Send,
+{
+    static IO_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    let rt = IO_RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .thread_name("pcapsql-cloud-io")
+            .enable_all()
+            .build()
+            .expect("Failed to create cloud I/O runtime")
+    });
+    std::thread::scope(|s| {
+        s.spawn(|| rt.handle().block_on(future))
+            .join()
+            .expect("cloud I/O future panicked")
+    })
 }
 
 /// Directory for cached boundary indexes of remote objects, if one can be
@@ -353,7 +393,7 @@ impl ObjectStoreReader {
     pub fn open(location: &CloudLocation) -> Result<Self, Error> {
         let store = location.build_store()?;
         let path = location.object_path();
-        let handle = Handle::try_current().ok();
+        let handle = saveable_handle();
         let (object_size, _) = head_object(&store, &path, handle.as_ref())?;
         Ok(Self::new(
             store,
@@ -419,7 +459,7 @@ impl ObjectStoreReader {
             path,
             object_size,
             chunk_size,
-            Handle::try_current().ok(),
+            saveable_handle(),
             Arc::new(AtomicU64::new(0)),
         );
         reader.buffer = header_bytes;
@@ -577,13 +617,14 @@ impl CloudPacketSource {
     /// - In-memory decompression and parsing (no additional requests)
     ///
     /// Can be called from both sync and async contexts - handles runtime
-    /// nesting correctly using `block_in_place` when called from async.
+    /// nesting correctly: blocking I/O runs in place on a multi-thread
+    /// runtime and on a dedicated I/O runtime otherwise (see `run_async`).
     pub fn open(location: CloudLocation) -> Result<Self, Error> {
         // Build object store
         let store = location.build_store()?;
         let path = location.object_path();
 
-        let handle = Handle::try_current().ok();
+        let handle = saveable_handle();
         let fetched = Arc::new(AtomicU64::new(0));
 
         // 1. HEAD request to get object size (and last-modified for the index cache)
@@ -1069,6 +1110,43 @@ pub fn is_cloud_url(url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `run_async` must not panic or hang when the caller is inside a
+    /// current_thread runtime (`#[tokio::test]`, current_thread mains).
+    #[test]
+    fn run_async_works_inside_a_current_thread_runtime() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let v = rt.block_on(async {
+            run_async(None, async {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                41 + 1
+            })
+        });
+        assert_eq!(v, 42);
+        // A current_thread handle is never saved for worker threads.
+        rt.block_on(async { assert!(saveable_handle().is_none()) });
+    }
+
+    /// From a plain thread with no runtime at all, and from inside a
+    /// multi-thread runtime.
+    #[test]
+    fn run_async_works_without_a_runtime_and_on_multi_thread() {
+        assert_eq!(run_async(None, async { 7 }), 7);
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let v = rt.block_on(async {
+            let saved = saveable_handle();
+            assert!(saved.is_some());
+            run_async(saved.as_ref(), async { 8 })
+        });
+        assert_eq!(v, 8);
+    }
 
     #[test]
     fn test_parse_s3_url() {

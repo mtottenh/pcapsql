@@ -546,9 +546,15 @@ fn scan_pcapng<S: Read>(
 }
 
 fn grow<I: PcapReaderIterator>(reader: &mut I, capacity: usize) -> Result<usize, Error> {
+    // Same ceiling as the packet reader: a corrupt record length must turn
+    // into an error, not a multi-GiB zero-filled allocation.
     let new_cap = capacity.saturating_mul(2);
-    if new_cap == capacity || !reader.grow(new_cap) {
-        return Err(invalid("index scan: frame exceeds maximum buffer size"));
+    if new_cap == capacity || new_cap > super::pcap_stream::MAX_BUFFER_SIZE || !reader.grow(new_cap)
+    {
+        return Err(invalid(&format!(
+            "index scan: frame exceeds maximum buffer size ({} MiB)",
+            super::pcap_stream::MAX_BUFFER_SIZE / (1024 * 1024)
+        )));
     }
     reader
         .refill()

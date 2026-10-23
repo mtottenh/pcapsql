@@ -15,7 +15,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use pcapsql_core::{default_registry, parse_packet};
+use pcapsql_core::{default_registry, parse_packet, ParseScope};
 
 // Include generated frame wrappers
 include!("../src/frames.rs");
@@ -166,7 +166,7 @@ fuzz_target!(|data: &[u8]| {
 
             frame.extend_from_slice(&patched_header);
 
-            let _ = parse_packet(&registry, 1, &frame);
+            let _ = parse_packet(&registry, 1, &frame, &ParseScope::full());
         }
         1 => {
             // Test IPv6 with extension headers
@@ -174,7 +174,7 @@ fuzz_target!(|data: &[u8]| {
             let ipv6_header = build_ipv6_header(payload);
             frame.extend_from_slice(&ipv6_header);
 
-            let _ = parse_packet(&registry, 1, &frame);
+            let _ = parse_packet(&registry, 1, &frame, &ParseScope::full());
         }
         _ => {
             // Test both IPv4 and IPv6 with same fuzz data
@@ -193,7 +193,7 @@ fuzz_target!(|data: &[u8]| {
                 patched_header[3] = (total_len & 0xff) as u8;
                 frame.extend_from_slice(&patched_header);
 
-                let _ = parse_packet(&registry, 1, &frame);
+                let _ = parse_packet(&registry, 1, &frame, &ParseScope::full());
             }
 
             // IPv6 path
@@ -201,7 +201,7 @@ fuzz_target!(|data: &[u8]| {
             let ipv6_header = build_ipv6_header(payload);
             frame.extend_from_slice(&ipv6_header);
 
-            let _ = parse_packet(&registry, 1, &frame);
+            let _ = parse_packet(&registry, 1, &frame, &ParseScope::full());
         }
     }
 });

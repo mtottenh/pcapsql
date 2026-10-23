@@ -1075,3 +1075,59 @@ async fn stream_tables_ignore_ethernet_padding() {
     let tls = run(&e_padded, "SELECT version FROM tls_sessions").await;
     assert!(tls.contains("TLS 1.3"), "{tls}");
 }
+
+/// NTP packet (48 bytes): LI=0, VN=4, mode=3 (client), stratum 2, poll 6,
+/// precision -20, root delay 0.5 s, root dispersion 0.25 s, ref id
+/// 10.0.0.9, transmit timestamp 2023-11-14T22:13:20Z (NTP era 0).
+fn ntp_client_packet() -> Vec<u8> {
+    let mut p = vec![0x23, 2, 6, 0xEC];
+    p.extend_from_slice(&0x0000_8000u32.to_be_bytes()); // root delay 0.5
+    p.extend_from_slice(&0x0000_4000u32.to_be_bytes()); // root dispersion 0.25
+    p.extend_from_slice(&[10, 0, 0, 9]);
+    p.extend_from_slice(&[0u8; 24]); // reference, origin, receive: unset
+    let ntp_seconds: u32 = 1_700_000_000 + 2_208_988_800;
+    p.extend_from_slice(&ntp_seconds.to_be_bytes());
+    p.extend_from_slice(&0x8000_0000u32.to_be_bytes()); // + 0.5 s
+    p
+}
+
+/// The `ntp` table shipped with Int8/Float64 columns no builder supported,
+/// so any capture with NTP failed to materialize. Pin that it works and that
+/// the values are in real units.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ntp_table_materializes_with_real_units() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("ntp.pcap");
+    let frame = eth(
+        MAC_B,
+        MAC_A,
+        ETH_IP4,
+        &ipv4(
+            [10, 0, 0, 1],
+            [10, 0, 0, 9],
+            17,
+            1,
+            &udp(123, 123, &ntp_client_packet()),
+        ),
+    );
+    std::fs::write(&path, to_capture(vec![frame], LINKTYPE_ETHERNET)).unwrap();
+    let eng = engine(&path, 1).await;
+    let out = run(
+        &eng,
+        "SELECT version, mode, stratum, poll, precision, root_delay, root_dispersion, \
+         reference_id, transmit_ts FROM ntp",
+    )
+    .await;
+    assert!(out.contains("| 4 "), "{out}");
+    assert!(out.contains("| -20 "), "precision must be signed: {out}");
+    assert!(out.contains("| 0.5 "), "root delay in seconds: {out}");
+    assert!(out.contains("| 0.25 "), "root dispersion in seconds: {out}");
+    assert!(out.contains("10.0.0.9"), "{out}");
+    assert!(
+        out.contains("1700000000.5"),
+        "transmit_ts as Unix seconds: {out}"
+    );
+    // SELECT * exercises every column's builder.
+    let all = run(&eng, "SELECT * FROM ntp").await;
+    assert!(all.contains("| 2 "), "{all}");
+}

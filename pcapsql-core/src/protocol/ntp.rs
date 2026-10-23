@@ -63,19 +63,25 @@ impl Protocol for NtpProtocol {
 
         // Third byte: Poll (signed, log2 seconds)
         let poll = data[2] as i8;
-        fields.push(("poll", FieldValue::UInt8(poll as u8)));
+        fields.push(("poll", FieldValue::Int8(poll)));
 
         // Fourth byte: Precision (signed, log2 seconds)
         let precision = data[3] as i8;
-        fields.push(("precision", FieldValue::UInt8(precision as u8)));
+        fields.push(("precision", FieldValue::Int8(precision)));
 
-        // Root Delay (4 bytes, signed fixed-point)
-        let root_delay = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
-        fields.push(("root_delay", FieldValue::UInt32(root_delay)));
+        // Root Delay (NTP short format: 16.16 signed fixed-point seconds)
+        let root_delay = i32::from_be_bytes([data[4], data[5], data[6], data[7]]);
+        fields.push((
+            "root_delay",
+            FieldValue::Float64(root_delay as f64 / 65_536.0),
+        ));
 
-        // Root Dispersion (4 bytes, unsigned fixed-point)
+        // Root Dispersion (NTP short format: 16.16 unsigned fixed-point seconds)
         let root_dispersion = u32::from_be_bytes([data[8], data[9], data[10], data[11]]);
-        fields.push(("root_dispersion", FieldValue::UInt32(root_dispersion)));
+        fields.push((
+            "root_dispersion",
+            FieldValue::Float64(root_dispersion as f64 / 65_536.0),
+        ));
 
         // Reference ID (4 bytes) - meaning depends on stratum
         let ref_id_bytes = &data[12..16];
@@ -93,19 +99,19 @@ impl Protocol for NtpProtocol {
 
         // Reference Timestamp (8 bytes) - NTP format
         let reference_ts = read_ntp_timestamp(&data[16..24]);
-        fields.push(("reference_ts", FieldValue::Int64(reference_ts)));
+        fields.push(("reference_ts", FieldValue::Float64(reference_ts)));
 
         // Origin Timestamp (8 bytes)
         let origin_ts = read_ntp_timestamp(&data[24..32]);
-        fields.push(("origin_ts", FieldValue::Int64(origin_ts)));
+        fields.push(("origin_ts", FieldValue::Float64(origin_ts)));
 
         // Receive Timestamp (8 bytes)
         let receive_ts = read_ntp_timestamp(&data[32..40]);
-        fields.push(("receive_ts", FieldValue::Int64(receive_ts)));
+        fields.push(("receive_ts", FieldValue::Float64(receive_ts)));
 
         // Transmit Timestamp (8 bytes)
         let transmit_ts = read_ntp_timestamp(&data[40..48]);
-        fields.push(("transmit_ts", FieldValue::Int64(transmit_ts)));
+        fields.push(("transmit_ts", FieldValue::Float64(transmit_ts)));
 
         // Any remaining data would be extension fields or authentication
         let remaining = &data[NTP_HEADER_SIZE..];
@@ -119,15 +125,15 @@ impl Protocol for NtpProtocol {
             FieldDescriptor::new("ntp.mode", DataKind::UInt8).set_nullable(true),
             FieldDescriptor::new("ntp.leap_indicator", DataKind::UInt8).set_nullable(true),
             FieldDescriptor::new("ntp.stratum", DataKind::UInt8).set_nullable(true),
-            FieldDescriptor::new("ntp.poll", DataKind::UInt8).set_nullable(true),
-            FieldDescriptor::new("ntp.precision", DataKind::UInt8).set_nullable(true),
-            FieldDescriptor::new("ntp.root_delay", DataKind::UInt32).set_nullable(true),
-            FieldDescriptor::new("ntp.root_dispersion", DataKind::UInt32).set_nullable(true),
+            FieldDescriptor::new("ntp.poll", DataKind::Int8).set_nullable(true),
+            FieldDescriptor::new("ntp.precision", DataKind::Int8).set_nullable(true),
+            FieldDescriptor::new("ntp.root_delay", DataKind::Float64).set_nullable(true),
+            FieldDescriptor::new("ntp.root_dispersion", DataKind::Float64).set_nullable(true),
             FieldDescriptor::new("ntp.reference_id", DataKind::String).set_nullable(true),
-            FieldDescriptor::new("ntp.reference_ts", DataKind::Int64).set_nullable(true),
-            FieldDescriptor::new("ntp.origin_ts", DataKind::Int64).set_nullable(true),
-            FieldDescriptor::new("ntp.receive_ts", DataKind::Int64).set_nullable(true),
-            FieldDescriptor::new("ntp.transmit_ts", DataKind::Int64).set_nullable(true),
+            FieldDescriptor::new("ntp.reference_ts", DataKind::Float64).set_nullable(true),
+            FieldDescriptor::new("ntp.origin_ts", DataKind::Float64).set_nullable(true),
+            FieldDescriptor::new("ntp.receive_ts", DataKind::Float64).set_nullable(true),
+            FieldDescriptor::new("ntp.transmit_ts", DataKind::Float64).set_nullable(true),
         ]
     }
 
@@ -142,14 +148,29 @@ impl Protocol for NtpProtocol {
 
 /// Read an NTP timestamp (8 bytes) and return as i64 (seconds since 1900).
 /// NTP timestamp: 32-bit seconds + 32-bit fraction.
-fn read_ntp_timestamp(data: &[u8]) -> i64 {
+/// NTP timestamp (32.32 fixed-point seconds since 1900-01-01) as seconds
+/// since the Unix epoch, fraction included. A zero timestamp (unset field)
+/// stays 0.
+fn read_ntp_timestamp(data: &[u8]) -> f64 {
     if data.len() < 8 {
-        return 0;
+        return 0.0;
     }
     let seconds = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-    // We're ignoring the fractional part for simplicity
-    seconds as i64
+    let fraction = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
+    if seconds == 0 && fraction == 0 {
+        return 0.0;
+    }
+    // Era 0 (1900–2036); era 1 wraps per RFC 5905 §6 for dates before 1968.
+    let unix_seconds = if seconds >= NTP_UNIX_OFFSET {
+        (seconds - NTP_UNIX_OFFSET) as f64
+    } else {
+        (seconds as f64) + 4_294_967_296.0 - NTP_UNIX_OFFSET as f64
+    };
+    unix_seconds + fraction as f64 / 4_294_967_296.0
 }
+
+/// Seconds between the NTP epoch (1900-01-01) and the Unix epoch (1970-01-01).
+const NTP_UNIX_OFFSET: u32 = 2_208_988_800;
 
 /// NTP modes.
 #[allow(dead_code)]
@@ -176,6 +197,57 @@ pub mod stratum {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Signed fields and fixed-point conversions: poll/precision are signed
+    /// log2 seconds, root delay is a signed 16.16 fixed-point second count,
+    /// root dispersion unsigned.
+    #[test]
+    fn test_signed_and_fixed_point_fields() {
+        let mut packet = vec![0u8; 48];
+        packet[0] = 0x24; // LI=0, VN=4, mode 4 (server)
+        packet[1] = 2;
+        packet[2] = 0xFA; // poll = -6
+        packet[3] = 0xEC; // precision = -20
+        packet[4..8].copy_from_slice(&(-0x0000_8000i32).to_be_bytes()); // -0.5 s
+        packet[8..12].copy_from_slice(&0x0001_4000u32.to_be_bytes()); // 1.25 s
+        let result = NtpProtocol.parse(&packet, &ParseContext::new(1));
+        assert!(result.is_ok());
+        assert_eq!(result.get("poll"), Some(&FieldValue::Int8(-6)));
+        assert_eq!(result.get("precision"), Some(&FieldValue::Int8(-20)));
+        assert_eq!(result.get("root_delay"), Some(&FieldValue::Float64(-0.5)));
+        assert_eq!(
+            result.get("root_dispersion"),
+            Some(&FieldValue::Float64(1.25))
+        );
+    }
+
+    /// NTP timestamps become Unix seconds with their fraction; a zero field
+    /// stays 0; era 1 (seconds past 2036-02-07) is folded per RFC 5905 §6.
+    #[test]
+    fn test_ntp_timestamp_conversion() {
+        // 2023-11-14T22:13:20Z + 0.5 s
+        let mut ts = ((1_700_000_000u32).wrapping_add(NTP_UNIX_OFFSET))
+            .to_be_bytes()
+            .to_vec();
+        ts.extend_from_slice(&0x8000_0000u32.to_be_bytes());
+        assert_eq!(read_ntp_timestamp(&ts), 1_700_000_000.5);
+
+        assert_eq!(read_ntp_timestamp(&[0u8; 8]), 0.0);
+
+        // Era 1: wire seconds 10 means 2^32 + 10 seconds after 1900.
+        let mut era1 = 10u32.to_be_bytes().to_vec();
+        era1.extend_from_slice(&[0, 0, 0, 0]);
+        let expected = 4_294_967_296.0 + 10.0 - NTP_UNIX_OFFSET as f64;
+        assert_eq!(read_ntp_timestamp(&era1), expected);
+
+        // Fraction resolution: one 2^-32 tick is below f64 resolution at this
+        // magnitude, so sub-microsecond differences may collapse (documented).
+        let mut t = ((1_700_000_000u32).wrapping_add(NTP_UNIX_OFFSET))
+            .to_be_bytes()
+            .to_vec();
+        t.extend_from_slice(&4_295u32.to_be_bytes()); // ~1 µs
+        assert!((read_ntp_timestamp(&t) - 1_700_000_000.000_001).abs() < 1e-6);
+    }
 
     /// Create an NTP client request packet.
     fn create_ntp_client_request() -> Vec<u8> {

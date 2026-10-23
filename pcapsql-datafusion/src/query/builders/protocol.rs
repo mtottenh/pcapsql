@@ -20,8 +20,10 @@ enum DynamicBuilder {
     UInt16(UInt16Builder),
     UInt32(UInt32Builder),
     UInt64(UInt64Builder),
+    Int8(Int8Builder),
     Int32(Int32Builder),
     Int64(Int64Builder),
+    Float64(Float64Builder),
     Boolean(BooleanBuilder),
     Utf8(StringBuilder),
     Binary(BinaryBuilder),
@@ -43,8 +45,10 @@ impl DynamicBuilder {
             DataType::UInt16 => DynamicBuilder::UInt16(UInt16Builder::with_capacity(capacity)),
             DataType::UInt32 => DynamicBuilder::UInt32(UInt32Builder::with_capacity(capacity)),
             DataType::UInt64 => DynamicBuilder::UInt64(UInt64Builder::with_capacity(capacity)),
+            DataType::Int8 => DynamicBuilder::Int8(Int8Builder::with_capacity(capacity)),
             DataType::Int32 => DynamicBuilder::Int32(Int32Builder::with_capacity(capacity)),
             DataType::Int64 => DynamicBuilder::Int64(Int64Builder::with_capacity(capacity)),
+            DataType::Float64 => DynamicBuilder::Float64(Float64Builder::with_capacity(capacity)),
             DataType::Boolean => DynamicBuilder::Boolean(BooleanBuilder::with_capacity(capacity)),
             DataType::Utf8 => {
                 DynamicBuilder::Utf8(StringBuilder::with_capacity(capacity, capacity * 32))
@@ -86,6 +90,36 @@ impl DynamicBuilder {
         }
     }
 
+    /// Whether `data_type` has a dedicated builder (the Utf8 fallback would
+    /// make `RecordBatch::try_new` reject the column).
+    #[cfg(test)]
+    fn supports(data_type: &DataType) -> bool {
+        match data_type {
+            DataType::UInt8
+            | DataType::UInt16
+            | DataType::UInt32
+            | DataType::UInt64
+            | DataType::Int8
+            | DataType::Int32
+            | DataType::Int64
+            | DataType::Float64
+            | DataType::Boolean
+            | DataType::Utf8
+            | DataType::Binary
+            | DataType::FixedSizeBinary(_)
+            | DataType::Timestamp(TimeUnit::Microsecond, _) => true,
+            DataType::List(field) => matches!(
+                field.data_type(),
+                DataType::UInt16
+                    | DataType::UInt32
+                    | DataType::Utf8
+                    | DataType::Binary
+                    | DataType::FixedSizeBinary(_)
+            ),
+            _ => false,
+        }
+    }
+
     /// Append a null value.
     fn append_null(&mut self) {
         match self {
@@ -95,6 +129,8 @@ impl DynamicBuilder {
             DynamicBuilder::UInt64(b) => b.append_null(),
             DynamicBuilder::Int32(b) => b.append_null(),
             DynamicBuilder::Int64(b) => b.append_null(),
+            DynamicBuilder::Int8(b) => b.append_null(),
+            DynamicBuilder::Float64(b) => b.append_null(),
             DynamicBuilder::Boolean(b) => b.append_null(),
             DynamicBuilder::ListOfUInt16(b) => b.append_null(),
             DynamicBuilder::ListOfUInt32(b) => b.append_null(),
@@ -161,10 +197,28 @@ impl DynamicBuilder {
             },
             DynamicBuilder::Int64(b) => match value {
                 FieldValue::Int64(v) => b.append_value(*v),
+                FieldValue::Int8(v) => b.append_value(*v as i64),
                 FieldValue::UInt8(v) => b.append_value(*v as i64),
                 FieldValue::UInt16(v) => b.append_value(*v as i64),
                 FieldValue::UInt32(v) => b.append_value(*v as i64),
                 FieldValue::UInt64(v) => b.append_value(*v as i64),
+                FieldValue::Null => b.append_null(),
+                _ => b.append_null(),
+            },
+            DynamicBuilder::Int8(b) => match value {
+                FieldValue::Int8(v) => b.append_value(*v),
+                FieldValue::Int64(v) => b.append_value(*v as i8),
+                FieldValue::Null => b.append_null(),
+                _ => b.append_null(),
+            },
+            DynamicBuilder::Float64(b) => match value {
+                FieldValue::Float64(v) => b.append_value(*v),
+                FieldValue::Int8(v) => b.append_value(*v as f64),
+                FieldValue::Int64(v) => b.append_value(*v as f64),
+                FieldValue::UInt8(v) => b.append_value(*v as f64),
+                FieldValue::UInt16(v) => b.append_value(*v as f64),
+                FieldValue::UInt32(v) => b.append_value(*v as f64),
+                FieldValue::UInt64(v) => b.append_value(*v as f64),
                 FieldValue::Null => b.append_null(),
                 _ => b.append_null(),
             },
@@ -333,6 +387,8 @@ impl DynamicBuilder {
             DynamicBuilder::UInt64(b) => Arc::new(b.finish()),
             DynamicBuilder::Int32(b) => Arc::new(b.finish()),
             DynamicBuilder::Int64(b) => Arc::new(b.finish()),
+            DynamicBuilder::Int8(b) => Arc::new(b.finish()),
+            DynamicBuilder::Float64(b) => Arc::new(b.finish()),
             DynamicBuilder::Boolean(b) => Arc::new(b.finish()),
             DynamicBuilder::Utf8(b) => Arc::new(b.finish()),
             DynamicBuilder::Binary(b) => Arc::new(b.finish()),
@@ -356,6 +412,8 @@ impl DynamicBuilder {
             DynamicBuilder::UInt64(b) => b.len(),
             DynamicBuilder::Int32(b) => b.len(),
             DynamicBuilder::Int64(b) => b.len(),
+            DynamicBuilder::Int8(b) => b.len(),
+            DynamicBuilder::Float64(b) => b.len(),
             DynamicBuilder::Boolean(b) => b.len(),
             DynamicBuilder::Utf8(b) => b.len(),
             DynamicBuilder::Binary(b) => b.len(),
@@ -585,6 +643,24 @@ impl ProtocolBatchBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every registered table column type must have a dedicated builder;
+    /// the Utf8 fallback makes `RecordBatch::try_new` reject the batch as
+    /// soon as the table has rows (this is how `ntp` shipped broken).
+    #[test]
+    fn every_table_column_type_has_a_builder() {
+        for name in crate::query::tables::all_table_names() {
+            let schema = crate::query::tables::get_table_schema(name).expect("schema");
+            for field in schema.fields() {
+                assert!(
+                    DynamicBuilder::supports(field.data_type()),
+                    "{name}.{}: no builder for {:?}",
+                    field.name(),
+                    field.data_type()
+                );
+            }
+        }
+    }
     use pcapsql_core::TunnelType;
     use smallvec::SmallVec;
 
