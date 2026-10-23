@@ -26,10 +26,11 @@ use datafusion::physical_plan::{
 };
 use futures::stream;
 use futures::StreamExt;
-use tokio::sync::mpsc::UnboundedReceiver;
+
+use super::exchange::BatchReceiver;
 
 /// Per-partition batch receiver, taken once at `execute`.
-type ReceiverSlot = Mutex<Option<UnboundedReceiver<DFResult<RecordBatch>>>>;
+type ReceiverSlot = Mutex<Option<BatchReceiver>>;
 
 /// Where a scan's rows come from.
 enum ScanSource {

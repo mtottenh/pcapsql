@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- One-shot (streaming) queries now run the parse behind a bounded exchange
+  with backpressure: a producer waits for a slow consumer instead of
+  buffering, and only queues batches of a table while DataFusion is parked
+  waiting on another table of the same pass (hash-join build side, sorted
+  join input), which is inherent to that plan. That queueing is reported per
+  table in `--stats` and `ParseStats`
+  ([#107](https://github.com/mtottenh/pcapsql/issues/107)).
+
 ### Added
 
 - Linux SLL2 cooked captures (LINKTYPE 276, the default for `tcpdump -i any`

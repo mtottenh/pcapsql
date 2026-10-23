@@ -6,14 +6,13 @@
 
 use std::collections::HashMap;
 
-use arrow::record_batch::RecordBatch;
-use datafusion::error::Result as DFResult;
-use tokio::sync::mpsc::UnboundedSender;
-
 use super::protocol::ProtocolBatchBuilder;
 use crate::error::{Error, QueryError};
 use crate::query::filter::FilterEvaluator;
-use crate::query::providers::ParseSubscription;
+use arrow::record_batch::RecordBatch;
+use std::sync::Arc;
+
+use crate::query::providers::{BatchSender, OverflowStats, Pacer, ParseSubscription};
 use pcapsql_core::io::PacketRef;
 use pcapsql_core::ParseResult;
 
@@ -21,8 +20,9 @@ use pcapsql_core::ParseResult;
 enum BatchSink {
     /// Accumulate in memory (materialize / cache-fill path).
     Accumulate(Vec<RecordBatch>),
-    /// Stream to a consumer as batches complete (streaming path).
-    Stream(UnboundedSender<DFResult<RecordBatch>>),
+    /// Stream to a consumer as batches complete (streaming path), through a
+    /// bounded exchange that buffers (and accounts) when the consumer lags.
+    Stream(BatchSender),
 }
 
 impl BatchSink {
@@ -34,7 +34,7 @@ impl BatchSink {
                 v.push(batch);
                 false
             }
-            BatchSink::Stream(tx) => tx.send(Ok(batch)).is_err(),
+            BatchSink::Stream(tx) => tx.send(batch),
         }
     }
 }
@@ -81,6 +81,8 @@ impl TableSlot {
 /// ```
 pub struct NormalizedBatchSet {
     slots: HashMap<String, TableSlot>,
+    /// Streaming only: wakes the producer when a consumer takes a batch.
+    pacer: Option<Arc<Pacer>>,
 }
 
 impl NormalizedBatchSet {
@@ -93,17 +95,22 @@ impl NormalizedBatchSet {
     }
 
     /// Create builders that stream each table's completed batches to the
-    /// matching sender (streaming mode). A table without a sender
-    /// accumulates (and is dropped on finish).
+    /// matching sender (streaming mode), taking ownership of the senders. A
+    /// table without a sender accumulates (and is dropped on finish).
     pub fn new_streaming(
         batch_size: usize,
         subscription: &ParseSubscription,
-        senders: &HashMap<String, UnboundedSender<DFResult<RecordBatch>>>,
+        mut senders: HashMap<String, BatchSender>,
+        pacer: Arc<Pacer>,
     ) -> Result<Self, Error> {
-        Self::build(batch_size, subscription, |name| match senders.get(name) {
-            Some(tx) => BatchSink::Stream(tx.clone()),
-            None => BatchSink::Accumulate(Vec::new()),
-        })
+        let mut set = Self::build(batch_size, subscription, |name| {
+            match senders.remove(name) {
+                Some(tx) => BatchSink::Stream(tx),
+                None => BatchSink::Accumulate(Vec::new()),
+            }
+        })?;
+        set.pacer = Some(pacer);
+        Ok(set)
     }
 
     fn build(
@@ -128,7 +135,42 @@ impl NormalizedBatchSet {
                 },
             );
         }
-        Ok(Self { slots })
+        Ok(Self { slots, pacer: None })
+    }
+
+    /// Streaming: the producer may proceed with a batch for `name` when that
+    /// table can take it normally, when its consumer is gone, or when the
+    /// consumer is parked waiting on some *other* live streamed table — it
+    /// will not poll this one until that table is complete (hash-join build
+    /// side, sort input), so waiting here would deadlock.
+    fn may_proceed(slots: &HashMap<String, TableSlot>, name: &str) -> bool {
+        let this = match &slots[name].sink {
+            BatchSink::Stream(tx) => tx,
+            BatchSink::Accumulate(_) => return true,
+        };
+        if this.consumer_gone() || !this.is_backlogged() {
+            return true;
+        }
+        slots.iter().any(|(other, slot)| {
+            other != name
+                && matches!(&slot.sink, BatchSink::Stream(tx) if !tx.consumer_gone() && tx.consumer_waiting())
+        })
+    }
+
+    /// Deliver a completed batch for `name`, applying backpressure first:
+    /// while this table is backlogged and the consumer is not parked on
+    /// another table, the consumer is merely slower than the parse, so wait
+    /// for it. Otherwise the batch is offered and, if the channel is still
+    /// full, goes to the table's accounted overflow queue rather than
+    /// stalling the pass.
+    fn deliver(&mut self, name: &str, batch: RecordBatch) {
+        if let Some(pacer) = &self.pacer {
+            if !Self::may_proceed(&self.slots, name) {
+                let slots = &self.slots;
+                pacer.wait_until(|| Self::may_proceed(slots, name));
+            }
+        }
+        self.slots.get_mut(name).expect("table slot").emit(batch);
     }
 
     /// Add a packet to the subscribed tables.
@@ -157,7 +199,7 @@ impl NormalizedBatchSet {
                 );
                 slot.rows_added += 1;
                 if let Some(batch) = slot.builder.try_build()? {
-                    slot.emit(batch);
+                    self.deliver("frames", batch);
                 }
             }
         }
@@ -178,7 +220,7 @@ impl NormalizedBatchSet {
                 slot.builder.add_parsed_row(frame_number, result);
                 slot.rows_added += 1;
                 if let Some(batch) = slot.builder.try_build()? {
-                    slot.emit(batch);
+                    self.deliver(proto_name, batch);
                 }
             }
         }
@@ -197,21 +239,47 @@ impl NormalizedBatchSet {
 
     /// Finish building. Flushes each table's final partial batch into its
     /// sink and returns the accumulated batches per table (empty for tables
-    /// in streaming mode — those went to their channels; the sender is
-    /// dropped here, closing the stream).
+    /// in streaming mode — those went to their exchanges, which are closed
+    /// here).
     pub fn finish(self) -> Result<HashMap<String, Vec<RecordBatch>>, Error> {
+        let (batches, _) = self.finish_inner()?;
+        Ok(batches)
+    }
+
+    /// Finish a streaming batch set: flush final batches, close every
+    /// exchange and return, per streamed table, what went through its
+    /// overflow buffer because the consumer was not draining it.
+    pub fn finish_streaming(self) -> Result<HashMap<String, OverflowStats>, Error> {
+        let (_, overflowed) = self.finish_inner()?;
+        Ok(overflowed)
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn finish_inner(
+        self,
+    ) -> Result<
+        (
+            HashMap<String, Vec<RecordBatch>>,
+            HashMap<String, OverflowStats>,
+        ),
+        Error,
+    > {
         let mut out = HashMap::with_capacity(self.slots.len());
+        let mut overflowed = HashMap::new();
         for (name, mut slot) in self.slots {
             if let Some(batch) = slot.builder.finish()? {
                 slot.emit(batch);
             }
             let batches = match slot.sink {
                 BatchSink::Accumulate(v) => v,
-                BatchSink::Stream(_) => Vec::new(),
+                BatchSink::Stream(tx) => {
+                    overflowed.insert(name.clone(), tx.finish());
+                    Vec::new()
+                }
             };
             out.insert(name, batches);
         }
-        Ok(out)
+        Ok((out, overflowed))
     }
 
     /// Rows added to a table so far (pending and built).
