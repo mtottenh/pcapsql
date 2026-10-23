@@ -383,43 +383,51 @@ and fresh-engine time-UDF queries); `streaming_results_match_materialized`;
 `complete_scan = false`); `streaming_hash_join_completes_without_deadlock`.
 Gate: standard + golden; `query_limit` improves for unfiltered LIMIT.
 
-### P4 — Stream analysis joins the single pass
+### P4 — Stream analysis is on-demand and query-scoped
 
-*Goal: the keylog/HTTP-2 second read of the capture is deleted; TCP
-reassembly becomes a subscriber of the same parse pass. Stream tables return
-as real, queryable tables.*
+*Goal: nothing stream-related happens at engine open or for queries that do
+not touch a stream table; the keylog/HTTP-2 pass runs only when a query
+references `http2`.*
+
+**As shipped (#103).** This is a narrower phase than first proposed. The
+original plan (TCP reassembly as a subscriber of the single packet pass,
+deleting the embedded mini-parser, and reviving `tcp_connections` /
+`tls_sessions` / `http_messages` as real tables) is recorded under
+*Deferred*; P0 deleted those three builders on the premise that P4 would
+re-add them, so that promise is now explicitly open.
 
 Changes:
-- `StreamSubscriber` consumes the per-packet callback **with the already-parsed
-  layers** (`Vec<(&str, ParseResult)>`) — deleting `StreamTableBuilder`'s
-  private re-parse of Ethernet/IP/TCP inside `process_packet`
-  (`stream_tables.rs:84-`). Feeds `StreamManager` (reassembly → TLS decrypt →
-  HTTP/2) exactly as today.
-- Ordering constraint made explicit: stream reassembly requires whole-capture
-  sequential order, so a `QueryNeeds` touching stream tables forces
-  `partitions = 1` for that query (recorded in `ParseStats`; partitioned
-  reassembly with connection handoff is future work, out of scope).
-- `tcp_connections`, `tls_sessions`, `http_messages` come back as registered
-  tables (added to `tables/mod.rs::all_table_names`), built by the subscriber;
-  `http2` stops being a keylog-only special case
-  (`query/mod.rs` interim registration from P1 deleted). Scoping maps these
-  tables → "stream" requirement → subscriber attached + single partition.
-- `EngineOptions.keylog` is consumed by the subscriber configuration.
+- `ParseSource::stream_pass()`: one sequential read feeding `StreamManager`
+  (TCP reassembly → TLS decryption → HTTP/2), producing `STREAM_TABLES`
+  (`http2`). Stream reassembly needs whole-capture order, so this pass is
+  always single-partition.
+- `QueryEngine::query` splits harvested needs into stream tables and packet
+  tables; the stream pass runs once per query that references a stream table
+  not already prepared. A query mixing stream and packet tables runs both
+  passes (`ParseStats.parse_passes = 2` for that query — the one deliberate
+  exception to the one-pass invariant, until reassembly joins the packet
+  pass).
+- Retention applies uniformly: `CacheOnTouch` caches `http2` after first
+  touch; `None` installs it for the query and clears it afterwards.
+- The `http2` batches are built against the registered table schema
+  (`tables::http2_table_schema` + encapsulation columns; `connection_id`
+  added, never-populated columns removed), so `SELECT * FROM http2` works on
+  a capture with decrypted traffic — previously the registered and produced
+  schemas disagreed.
+- Deleted: the eager keylog second read in `build()`, and
+  `EngineTables::pin` / the `pinned` map.
 
-Deletions:
+Deferred (tracked follow-ups, not in this phase):
+- `StreamSubscriber` consuming the already-parsed layers of the packet pass
+  (one read for mixed queries) and deleting `StreamTableBuilder`'s embedded
+  Ethernet/IPv4/TCP mini-parser.
+- `tcp_connections`, `tls_sessions`, `http_messages` as registered tables.
+- A keylog fixture in the golden corpus.
 
-| Item | Location |
-|---|---|
-| `StreamTableBuilder::process_pcap` (second full read) and its embedded Ethernet/IPv4/TCP mini-parser | `stream_tables.rs:57-…` |
-| The P1 interim: keylog second-pass invocation + `ProtocolTableProvider::in_memory` http2 registration in `open` | `query/mod.rs` (P1 form) |
-| `ProtocolTableProvider::in_memory` + the `TableSource` enum entirely, if the http2 interim was its last consumer (empty tables are served by the exchange with zero batches) | `protocol_provider.rs:29-57` |
-
-Tests: keylog/HTTP-2 integration tests assert identical results to the
-two-pass implementation (golden corpus gains a keylog fixture in this phase);
-single-partition forcing asserted via `ParseStats`; stream tables get golden
-entries.
-Gate: standard + golden; keylog end-to-end wall-clock should drop ~2× on
-IO-bound captures (one read, one parse).
+Tests: `http2_stream_table_is_on_demand` (a non-stream query runs no stream
+pass; querying `http2` runs it once); `e2e_tls_http2`; the stream pass
+schema test (`stream_tables::schema_tests`).
+Gate: standard + golden.
 
 ### P5 — `raw_data` late materialization
 
@@ -488,7 +496,7 @@ Everything removed by this migration, by phase:
 | P1 | 7 `QueryEngine` constructors, `load_normalized_packets`, `extract_timestamp_range`, `query/provider.rs` (`PcapTableProvider`), `pcapsql-core/src/pcap/reader.rs` (`PcapReader`), `RawPacket` builder APIs (+ `RawPacket` if orphaned), `--streaming` flag, `indicatif` (likely) | ~900 |
 | P2 | `parse_packet_pruned`/`_projected`/`_pruned_projected` as separate functions, construction-time parse, `parse_pass_count`/`partition_count`, post-hoc `batch.project()` | ~350 |
 | P3 | `TableSource::Shared`; `SharedParseState` and the materialize path are **retained** for `CacheOnTouch` (see §4-P3 *Deferred*) | ~60 |
-| P4 | `StreamTableBuilder::process_pcap` + embedded mini-parser, keylog interim wiring, `ProtocolTableProvider::in_memory`/`TableSource` | ~300 |
+| P4 | eager keylog second read in `build()`, `EngineTables::pin`/`pinned`; the mini-parser and `StreamTableBuilder` second read are **retained** (see §4-P4 *Deferred*) | ~50 |
 | P5 | Unconditional `raw_data` copy path, `append_binary` | ~30 |
 
 Net effect on the public surface: `QueryEngine` 8 constructors → 1; parse
@@ -505,9 +513,9 @@ entry points 4 → 1; `TableProvider` impls 2 → 1; CLI mode flags
 | `--streaming`, `--mmap` | mode flags | removed / `--no-mmap` (P1) |
 | `--stats` | stale cache text | `ParseStats`: packets scanned/skipped, rows built, partitions, overflow (P2+) |
 | Compressed captures | via legacy `PcapReader` in-memory path | via sources, single-partition (P1; existing source support) |
-| Keylog/HTTP-2 | second full file read | same pass, single partition (P4) |
-| `tcp_connections`/`tls_sessions`/`http_messages` | unreachable from SQL | real tables (P4) |
-| Queries on stream tables | n/a | forced single-partition (P4, documented) |
+| Keylog/HTTP-2 | second full file read at open | on-demand second read, only for queries touching `http2`, single partition (P4) |
+| `tcp_connections`/`tls_sessions`/`http_messages` | unreachable from SQL | deleted in P0; re-adding them as real tables is deferred (see §4-P4) |
+| Queries on stream tables | n/a | separate single-partition stream pass (P4, documented) |
 
 Library consumers: `pcapsql-datafusion`'s constructor surface changes in P1
 (pre-1.0 crate; CHANGELOG entry per phase). `pcapsql-core`'s `parse_packet`

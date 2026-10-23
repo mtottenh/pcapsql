@@ -8,8 +8,13 @@ use arrow::datatypes::{DataType, Field, Schema};
 
 /// Build the schema for the `http2` table.
 ///
+/// The columns are exactly those the stream pass (`stream_tables`) produces,
+/// plus the encapsulation columns every table carries; the two must agree or
+/// `SELECT *` fails on a capture with decrypted HTTP/2 traffic.
+///
 /// ## Frame Information
 /// - `frame_number`: Reference to frames table
+/// - `connection_id`: Reassembled TCP connection the frame belongs to
 /// - `frame_type`: HTTP/2 frame type (DATA, HEADERS, SETTINGS, etc.)
 /// - `stream_id`: HTTP/2 stream identifier (0 for connection-level frames)
 /// - `flags`: Raw frame flags byte
@@ -25,8 +30,6 @@ use arrow::datatypes::{DataType, Field, Schema};
 /// - `status`: HTTP status code (:status pseudo-header)
 ///
 /// ## Headers
-/// - `request_headers`: All request headers as semicolon-separated string
-/// - `response_headers`: All response headers as semicolon-separated string
 /// - `content_type`: Content-Type header value
 /// - `content_length`: Content-Length header value
 /// - `user_agent`: User-Agent header value
@@ -38,7 +41,6 @@ use arrow::datatypes::{DataType, Field, Schema};
 /// - `padding_length`: Length of padding (if PADDED flag set)
 ///
 /// ## SETTINGS Frames
-/// - `settings`: Settings as comma-separated key=value pairs
 /// - `ack`: Whether ACK flag is set
 /// - `header_table_size`: SETTINGS_HEADER_TABLE_SIZE value
 /// - `max_concurrent_streams`: SETTINGS_MAX_CONCURRENT_STREAMS value
@@ -51,7 +53,6 @@ use arrow::datatypes::{DataType, Field, Schema};
 ///
 /// ## GOAWAY Frames
 /// - `last_stream_id`: Last stream ID from GOAWAY
-/// - `debug_data`: Debug data from GOAWAY
 ///
 /// ## WINDOW_UPDATE Frames
 /// - `window_increment`: Window size increment
@@ -63,17 +64,15 @@ use arrow::datatypes::{DataType, Field, Schema};
 ///
 /// ## PUSH_PROMISE Frames
 /// - `promised_stream_id`: Promised stream ID
-///
-/// ## Stream State
-/// - `stream_state`: Current stream state (idle, open, half-closed, closed)
 pub fn http2_table_schema() -> Schema {
     Schema::new(vec![
         // Frame information
         Field::new("frame_number", DataType::UInt64, false),
-        Field::new("frame_type", DataType::Utf8, false),
-        Field::new("stream_id", DataType::UInt32, false),
-        Field::new("flags", DataType::UInt8, false),
-        Field::new("length", DataType::UInt32, false),
+        Field::new("connection_id", DataType::UInt64, true),
+        Field::new("frame_type", DataType::Utf8, true),
+        Field::new("stream_id", DataType::UInt32, true),
+        Field::new("flags", DataType::UInt8, true),
+        Field::new("length", DataType::UInt32, true),
         // Request (pseudo-headers)
         Field::new("method", DataType::Utf8, true),
         Field::new("path", DataType::Utf8, true),
@@ -82,18 +81,15 @@ pub fn http2_table_schema() -> Schema {
         // Response
         Field::new("status", DataType::UInt16, true),
         // Headers
-        Field::new("request_headers", DataType::Utf8, true),
-        Field::new("response_headers", DataType::Utf8, true),
         Field::new("content_type", DataType::Utf8, true),
         Field::new("content_length", DataType::UInt64, true),
         Field::new("user_agent", DataType::Utf8, true),
-        // DATA frame fields
+        // DATA frames
         Field::new("data_length", DataType::UInt64, true),
         Field::new("end_stream", DataType::Boolean, true),
         Field::new("end_headers", DataType::Boolean, true),
         Field::new("padding_length", DataType::UInt8, true),
-        // SETTINGS frame fields
-        Field::new("settings", DataType::Utf8, true),
+        // SETTINGS frames
         Field::new("ack", DataType::Boolean, true),
         Field::new("header_table_size", DataType::UInt32, true),
         Field::new("max_concurrent_streams", DataType::UInt32, true),
@@ -102,19 +98,16 @@ pub fn http2_table_schema() -> Schema {
         // Error handling
         Field::new("error_code", DataType::UInt32, true),
         Field::new("error_name", DataType::Utf8, true),
-        // GOAWAY fields
+        // GOAWAY frames
         Field::new("last_stream_id", DataType::UInt32, true),
-        Field::new("debug_data", DataType::Utf8, true),
-        // WINDOW_UPDATE fields
+        // WINDOW_UPDATE frames
         Field::new("window_increment", DataType::UInt32, true),
-        // Priority fields
+        // PRIORITY frames
         Field::new("priority_exclusive", DataType::Boolean, true),
         Field::new("priority_dependency", DataType::UInt32, true),
         Field::new("priority_weight", DataType::UInt8, true),
-        // PUSH_PROMISE fields
+        // PUSH_PROMISE frames
         Field::new("promised_stream_id", DataType::UInt32, true),
-        // Stream state
-        Field::new("stream_state", DataType::Utf8, true),
     ])
 }
 
@@ -127,7 +120,7 @@ mod tests {
         let schema = http2_table_schema();
 
         // Should have all expected fields
-        assert_eq!(schema.fields().len(), 35);
+        assert_eq!(schema.fields().len(), 31);
 
         // Frame info
         assert!(schema.field_with_name("frame_number").is_ok());
@@ -145,14 +138,13 @@ mod tests {
         // Response
         assert!(schema.field_with_name("status").is_ok());
 
-        // Headers
-        assert!(schema.field_with_name("request_headers").is_ok());
-        assert!(schema.field_with_name("response_headers").is_ok());
+        // Headers / connection
+        assert!(schema.field_with_name("connection_id").is_ok());
         assert!(schema.field_with_name("content_type").is_ok());
 
         // Frame-specific fields
         assert!(schema.field_with_name("data_length").is_ok());
-        assert!(schema.field_with_name("settings").is_ok());
+        assert!(schema.field_with_name("ack").is_ok());
         assert!(schema.field_with_name("error_code").is_ok());
         assert!(schema.field_with_name("window_increment").is_ok());
     }
@@ -173,17 +165,9 @@ mod tests {
     fn test_required_fields_not_nullable() {
         let schema = http2_table_schema();
 
-        // frame_number should not be nullable
+        // frame_number is the join key and is always present.
         let frame_number = schema.field_with_name("frame_number").unwrap();
         assert!(!frame_number.is_nullable());
-
-        // frame_type should not be nullable
-        let frame_type = schema.field_with_name("frame_type").unwrap();
-        assert!(!frame_type.is_nullable());
-
-        // stream_id should not be nullable
-        let stream_id = schema.field_with_name("stream_id").unwrap();
-        assert!(!stream_id.is_nullable());
     }
 
     #[test]
@@ -198,8 +182,8 @@ mod tests {
         let status = schema.field_with_name("status").unwrap();
         assert!(status.is_nullable());
 
-        // settings should be nullable (only in SETTINGS frames)
-        let settings = schema.field_with_name("settings").unwrap();
-        assert!(settings.is_nullable());
+        // ack is only set on SETTINGS frames
+        let ack = schema.field_with_name("ack").unwrap();
+        assert!(ack.is_nullable());
     }
 }
