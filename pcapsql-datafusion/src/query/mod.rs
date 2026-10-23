@@ -73,8 +73,6 @@ fn default_target_partitions() -> usize {
 /// Tables produced by the stream-analysis pass (TCP reassembly / TLS
 /// decryption / HTTP-2) rather than the per-packet parse. They are built
 /// on demand by a single sequential read when a query references them.
-const STREAM_TABLES: &[&str] = &["http2"];
-
 /// Configure DataFusion for SortMergeJoin on frame_number-sorted streams.
 fn create_session_context(target_partitions: usize) -> SessionContext {
     let mut config = ConfigOptions::default();
@@ -190,9 +188,6 @@ trait ParseSource: Send + Sync {
     /// The source's own answer for the capture time range (microseconds, from
     /// its boundary index); `None` when it has to be scanned for.
     fn time_range_us(&self) -> Option<(i64, i64)>;
-    /// Run the stream-analysis pass (one sequential read, single partition):
-    /// TCP reassembly + TLS decryption + HTTP/2, producing the [`STREAM_TABLES`].
-    fn stream_pass(&self) -> Result<HashMap<String, TableData>, Error>;
     /// Total frame count from the boundary index, if cheaply available
     /// (header-only scan; `None` for compressed/non-seekable sources).
     fn frame_count(&self) -> Option<u64>;
@@ -205,7 +200,7 @@ struct SourceParser<S: SeekablePacketSource> {
     batch_size: usize,
     partitions: usize,
     progress: Option<providers::ProgressFn>,
-    /// TLS keylog enabling decrypted HTTP/2 in the stream pass.
+    /// TLS keylog enabling decrypted HTTP/2 in the stream subscriber.
     keylog: Option<Arc<KeyLog>>,
 }
 
@@ -218,6 +213,7 @@ impl<S: SeekablePacketSource> ParseSource for SourceParser<S> {
             self.partitions,
             self.progress.clone(),
             sub,
+            self.keylog.clone(),
         )
     }
 
@@ -240,28 +236,6 @@ impl<S: SeekablePacketSource> ParseSource for SourceParser<S> {
 
     fn frame_count(&self) -> Option<u64> {
         self.source.frame_count()
-    }
-
-    fn stream_pass(&self) -> Result<HashMap<String, TableData>, Error> {
-        // Stream reassembly needs whole-capture sequential order, so this is
-        // always a single sequential read (single partition).
-        let mut builder = stream_tables::StreamTableBuilder::new(self.keylog.clone());
-        let mut reader = self.source.sequential_reader()?;
-        builder.process_reader(&mut reader)?;
-
-        let mut out = HashMap::new();
-        let http2 = builder.http2_batches(self.batch_size)?;
-        // The batches are built against the registered table schema, so the
-        // empty and populated cases advertise the same columns.
-        let schema = Arc::new(tables::get_table_schema("http2").expect("http2 schema"));
-        out.insert(
-            "http2".to_string(),
-            TableData {
-                schema,
-                partitions: vec![http2],
-            },
-        );
-        Ok(out)
     }
 }
 
@@ -593,32 +567,17 @@ impl QueryEngine {
 
         let mut needs = harvest_table_needs(&optimized, &self.known_tables)?;
 
-        // Stream-analysis tables are produced by the on-demand stream pass,
-        // not the per-packet parse. Split them out and run the pass once if a
-        // referenced stream table isn't already prepared (cached). A query
-        // mixing stream and packet tables runs both passes.
-        let stream_needed: Vec<String> = needs
+        // Stream-analysis tables (TCP reassembly → TLS → HTTP) are built by a
+        // subscriber of the same packet pass, not by per-packet builders.
+        // They are complete only at end of capture and need the whole capture
+        // in order, so a query touching one takes the single-partition
+        // materialize path. Already prepared (cached) ones need nothing.
+        let stream_needed: HashSet<String> = needs
             .keys()
-            .filter(|t| STREAM_TABLES.contains(&t.as_str()))
+            .filter(|t| tables::is_stream_table(t) && !self.tables.contains(t))
             .cloned()
             .collect();
-        for t in &stream_needed {
-            needs.remove(t);
-        }
-        let mut stream_rows: HashMap<String, usize> = HashMap::new();
-        let mut stream_passes = 0usize;
-        if stream_needed.iter().any(|t| !self.tables.contains(t)) {
-            let produced = self.parse_source.stream_pass()?;
-            let installed: HashMap<String, Arc<TableData>> = produced
-                .into_iter()
-                .map(|(name, data)| {
-                    stream_rows.insert(name.clone(), data.total_rows());
-                    (name, Arc::new(data))
-                })
-                .collect();
-            self.tables.install(installed);
-            stream_passes = 1;
-        }
+        needs.retain(|t, _| !tables::is_stream_table(t));
 
         // Fast path: a pure `count(*) FROM frames` (frames only, no columns,
         // no filter, no limit, single scan) is answered from the boundary
@@ -660,7 +619,8 @@ impl QueryEngine {
         // but a stream can be consumed once. Such queries take the materialize
         // path for this one query — still a single parse pass.
         let any_multi_scan = needs.values().any(|n| n.scan_count > 1);
-        let subscription = self.build_subscription(needs);
+        let mut subscription = self.build_subscription(needs);
+        subscription.stream_tables = stream_needed;
 
         // CacheOnTouch materializes (so the cache can serve any later query);
         // RetentionPolicy::None streams — producers hand batches to DataFusion
@@ -670,11 +630,12 @@ impl QueryEngine {
         // nothing to parse.
         let streaming = self.retention == RetentionPolicy::None
             && !subscription.tables.is_empty()
+            && subscription.stream_tables.is_empty()
             && !any_multi_scan;
 
         let mut producers: Vec<JoinHandle<Result<PartitionStat, Error>>> = Vec::new();
         let mut stream_guard: Option<ClearStreamsOnDrop<'_>> = None;
-        if subscription.tables.is_empty() {
+        if subscription.is_empty() {
             let mut stats = ParseStats::default();
             if let Some(n) = fast_frame_count {
                 stats.partitions = 1;
@@ -783,15 +744,6 @@ impl QueryEngine {
                 }
             }
             *self.last_stats.write().expect("stats lock poisoned") = stats;
-        }
-
-        // Fold the stream pass into the reported statistics.
-        if stream_passes > 0 {
-            let mut stats = self.last_stats.write().expect("stats lock poisoned");
-            stats.parse_passes += stream_passes;
-            for (t, n) in stream_rows {
-                stats.rows_built.insert(t, n);
-            }
         }
 
         if self.retention == RetentionPolicy::None {

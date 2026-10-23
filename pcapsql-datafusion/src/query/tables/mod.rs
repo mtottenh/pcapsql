@@ -18,6 +18,7 @@ mod gre;
 mod gtp;
 mod http;
 mod http2;
+mod http_messages;
 mod icmp;
 mod icmpv6;
 mod ipsec;
@@ -33,7 +34,9 @@ mod rtnetlink;
 mod sll2;
 mod ssh;
 mod tcp;
+mod tcp_connections;
 mod tls;
+mod tls_sessions;
 mod udp;
 mod vlan;
 mod vxlan;
@@ -48,6 +51,7 @@ pub use gre::gre_table_schema;
 pub use gtp::gtp_table_schema;
 pub use http::http_table_schema;
 pub use http2::http2_table_schema;
+pub use http_messages::http_messages_table_schema;
 pub use icmp::icmp_table_schema;
 pub use icmpv6::icmpv6_table_schema;
 pub use ipsec::ipsec_table_schema;
@@ -63,7 +67,9 @@ pub use rtnetlink::rtnetlink_table_schema;
 pub use sll2::sll2_table_schema;
 pub use ssh::ssh_table_schema;
 pub use tcp::tcp_table_schema;
+pub use tcp_connections::tcp_connections_table_schema;
 pub use tls::tls_table_schema;
+pub use tls_sessions::tls_sessions_table_schema;
 pub use udp::udp_table_schema;
 pub use vlan::vlan_table_schema;
 pub use vxlan::vxlan_table_schema;
@@ -130,7 +136,20 @@ pub fn all_table_names() -> Vec<&'static str> {
         "quic",
         "netlink",
         "rtnetlink",
+        "tcp_connections",
+        "tls_sessions",
+        "http_messages",
     ]
+}
+
+/// Tables produced by stream analysis (TCP reassembly → TLS → HTTP) rather
+/// than by per-packet parsing. They are built by the stream subscriber of
+/// the packet pass, which needs the whole capture in order (one partition).
+pub const STREAM_TABLES: &[&str] = &["http2", "tcp_connections", "tls_sessions", "http_messages"];
+
+/// True for a stream-analysis table (see [`STREAM_TABLES`]).
+pub fn is_stream_table(name: &str) -> bool {
+    STREAM_TABLES.contains(&name)
 }
 
 /// Get a table schema by protocol name.
@@ -170,6 +189,9 @@ pub fn get_table_schema(name: &str) -> Option<Schema> {
         "quic" => Some(with_encap_fields(quic_table_schema())),
         "netlink" => Some(with_encap_fields(netlink_table_schema())),
         "rtnetlink" => Some(with_encap_fields(rtnetlink_table_schema())),
+        "tcp_connections" => Some(with_encap_fields(tcp_connections_table_schema())),
+        "tls_sessions" => Some(with_encap_fields(tls_sessions_table_schema())),
+        "http_messages" => Some(with_encap_fields(http_messages_table_schema())),
         _ => None,
     }
 }

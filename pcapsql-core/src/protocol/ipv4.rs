@@ -193,8 +193,19 @@ impl Protocol for Ipv4Protocol {
                     child_hints.push(("ethertype", ethertype::IPV6 as u64));
                 }
 
+                // The payload ends where the IP datagram ends: frames shorter
+                // than the Ethernet minimum carry trailer padding that is not
+                // payload (it would corrupt TCP reassembly). A zero total
+                // length (segmentation offload captures) means "unknown", so
+                // the frame length is kept.
                 let header_len = ipv4.slice().len();
-                ParseResult::success(fields, &data[header_len..], child_hints)
+                let total_len = ipv4.total_len() as usize;
+                let end = if total_len >= header_len && total_len < data.len() {
+                    total_len
+                } else {
+                    data.len()
+                };
+                ParseResult::success(fields, &data[header_len..end], child_hints)
             }
             Err(e) => ParseResult::error(format!("IPv4 parse error: {e}"), data),
         }

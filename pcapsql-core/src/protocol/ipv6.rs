@@ -108,8 +108,20 @@ impl Protocol for Ipv6Protocol {
                     child_hints.push(("ethertype", ethertype::IPV6 as u64));
                 }
 
+                // Trim Ethernet trailer padding: the payload ends at the IPv6
+                // payload length (counted from the end of the fixed header).
+                // A zero payload length (jumbogram / offload) is "unknown".
                 let total_consumed = base_header_len + ext_consumed;
-                ParseResult::success(fields, &data[total_consumed..], child_hints)
+                let declared_end = base_header_len + ipv6.payload_length() as usize;
+                let end = if ipv6.payload_length() != 0
+                    && declared_end >= total_consumed
+                    && declared_end < data.len()
+                {
+                    declared_end
+                } else {
+                    data.len()
+                };
+                ParseResult::success(fields, &data[total_consumed..end], child_hints)
             }
             Err(e) => ParseResult::error(format!("IPv6 parse error: {e}"), data),
         }

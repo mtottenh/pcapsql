@@ -28,7 +28,9 @@ use super::exchange::{self, BatchReceiver, OverflowStats, Pacer, STREAM_CHANNEL_
 use crate::error::Error;
 use crate::query::builders::NormalizedBatchSet;
 use crate::query::filter::FilterEvaluator;
+use crate::query::stream_tables::StreamSubscriber;
 use crate::query::tables;
+use pcapsql_core::KeyLog;
 
 /// Minimum object size before a `Cheap`-seek source is partitioned.
 const CHEAP_MIN_BYTES: u64 = 4 * 1024 * 1024;
@@ -74,7 +76,11 @@ pub struct TableSubscription {
 /// with optional column scoping, predicates and row caps.
 #[derive(Clone, Debug, Default)]
 pub struct ParseSubscription {
+    /// Per-packet protocol tables.
     pub tables: HashMap<String, TableSubscription>,
+    /// Stream-analysis tables (`tables::STREAM_TABLES`) built by the stream
+    /// subscriber of the same pass. Non-empty pins the pass to one partition.
+    pub stream_tables: HashSet<String>,
 }
 
 impl ParseSubscription {
@@ -90,19 +96,34 @@ impl ParseSubscription {
                 .into_iter()
                 .map(|n| (n.into(), TableSubscription::default()))
                 .collect(),
+            stream_tables: HashSet::new(),
         }
+    }
+
+    /// Nothing to parse: no packet table and no stream table.
+    pub fn is_empty(&self) -> bool {
+        self.tables.is_empty() && self.stream_tables.is_empty()
     }
 
     /// The protocol-level scope for this subscription: the subscribed
     /// tables' protocols plus dependency closure, with per-protocol field
     /// projections where columns are scoped.
     fn parse_scope(&self, registry: &ProtocolRegistry) -> ParseScope {
-        let names: Vec<&str> = self.tables.keys().map(String::as_str).collect();
+        let mut names: Vec<&str> = self.tables.keys().map(String::as_str).collect();
+        // Stream analysis reads the TCP layer (ports, seq, flags, payload) and
+        // the IP addresses from every packet.
+        let streams = !self.stream_tables.is_empty();
+        if streams {
+            names.push("tcp");
+        }
         let mut scope = ParseScope::for_tables(&names, registry);
 
         for (table, sub) in &self.tables {
             if table == "frames" {
                 continue; // frames come from packet metadata, not parsing
+            }
+            if streams && matches!(table.as_str(), "tcp" | "ipv4" | "ipv6") {
+                continue; // the stream subscriber needs these layers' full fields
             }
             if let Some(columns) = &sub.columns {
                 // Pseudo-columns are populated from ParseResult context, not
@@ -186,6 +207,9 @@ pub struct ParseStats {
     /// at once (summed over partitions) — the memory the exchange used
     /// beyond its channel bound.
     pub overflow_peak_bytes: HashMap<String, usize>,
+    /// Stream-analysis tables built by this pass's stream subscriber (sorted).
+    /// Non-empty means the pass ran as one partition for reassembly order.
+    pub stream_tables: Vec<String>,
 }
 
 /// Result of one scoped parse pass.
@@ -240,6 +264,9 @@ fn decide_ranges<S: SeekablePacketSource>(
 /// Per-partition parse output.
 struct PartitionOutput {
     batches: HashMap<String, Vec<RecordBatch>>,
+    /// Stream tables (only from the single partition of a pass that has a
+    /// stream subscriber).
+    stream_tables: HashMap<String, TableData>,
     min_us: i64,
     max_us: i64,
     packets: u64,
@@ -258,6 +285,7 @@ fn parse_partition<S: SeekablePacketSource>(
     range: &PacketRange,
     single: bool,
     progress: Option<(&AtomicU64, &ProgressFn)>,
+    mut subscriber: Option<StreamSubscriber>,
 ) -> Result<PartitionOutput, Error> {
     let mut reader = if single {
         source.sequential_reader()?
@@ -282,6 +310,9 @@ fn parse_partition<S: SeekablePacketSource>(
             }
             // Per-packet link type is correct even for PCAPNG multi-interface.
             let parsed = parse_packet(registry, packet.link_type, packet.data, scope);
+            if let Some(sub) = subscriber.as_mut() {
+                sub.observe(&packet, &parsed)?;
+            }
             batch_set.add_packet_from_ref(packet, &parsed)?;
             Ok(())
         })?;
@@ -293,14 +324,22 @@ fn parse_partition<S: SeekablePacketSource>(
         if processed == 0 {
             break;
         }
-        if batch_set.all_capped() {
+        // Stream tables are complete only at end of capture: never stop early
+        // while a subscriber is attached.
+        if subscriber.is_none() && batch_set.all_capped() {
             capped = true;
             break;
         }
     }
 
+    let stream_tables = match subscriber {
+        Some(sub) => sub.finish(batch_size)?,
+        None => HashMap::new(),
+    };
+
     Ok(PartitionOutput {
         batches: batch_set.finish()?,
+        stream_tables,
         min_us,
         max_us,
         packets,
@@ -311,6 +350,10 @@ fn parse_partition<S: SeekablePacketSource>(
 /// Run one scoped parse pass over a seekable source, fanning out to the
 /// subscribed tables. Parses partitions in parallel when more than one;
 /// each worker owns its reader and builders — no shared mutable state.
+///
+/// A subscription with stream tables attaches a [`StreamSubscriber`] (TCP
+/// reassembly → TLS → HTTP) to the same pass; reassembly needs the capture
+/// in order, so such a pass is pinned to a single partition.
 pub fn run_shared_parse<S: SeekablePacketSource>(
     source: &Arc<S>,
     registry: &Arc<ProtocolRegistry>,
@@ -318,13 +361,21 @@ pub fn run_shared_parse<S: SeekablePacketSource>(
     target_partitions: usize,
     progress: Option<ProgressFn>,
     subscription: &ParseSubscription,
+    keylog: Option<Arc<KeyLog>>,
 ) -> Result<SharedParseState, Error> {
     let scope = subscription.parse_scope(registry);
-    let ranges = decide_ranges(source.as_ref(), target_partitions)?;
+    let streams = !subscription.stream_tables.is_empty();
+    let ranges = if streams {
+        vec![PacketRange::whole()]
+    } else {
+        decide_ranges(source.as_ref(), target_partitions)?
+    };
     let single = ranges.len() == 1;
     let progress_count = AtomicU64::new(0);
 
     let results: Vec<Result<PartitionOutput, Error>> = if single {
+        let subscriber =
+            streams.then(|| StreamSubscriber::new(subscription.stream_tables.clone(), keylog));
         vec![parse_partition(
             source.as_ref(),
             registry,
@@ -334,6 +385,7 @@ pub fn run_shared_parse<S: SeekablePacketSource>(
             &ranges[0],
             true,
             progress.as_ref().map(|cb| (&progress_count, cb)),
+            subscriber,
         )]
     } else {
         std::thread::scope(|thread_scope| {
@@ -355,6 +407,7 @@ pub fn run_shared_parse<S: SeekablePacketSource>(
                             &range,
                             false,
                             progress,
+                            None,
                         )
                     })
                 })
@@ -378,6 +431,7 @@ pub fn run_shared_parse<S: SeekablePacketSource>(
     let mut end_ts_us = i64::MIN;
     let mut packets_scanned: u64 = 0;
     let mut complete_scan = true;
+    let mut stream_tables: HashMap<String, TableData> = HashMap::new();
     for r in results {
         let out = r?;
         if out.min_us != i64::MAX {
@@ -388,6 +442,7 @@ pub fn run_shared_parse<S: SeekablePacketSource>(
         }
         packets_scanned += out.packets;
         complete_scan &= !out.capped;
+        stream_tables.extend(out.stream_tables);
         outputs.push(out.batches);
     }
     if start_ts_us == i64::MAX {
@@ -414,6 +469,13 @@ pub fn run_shared_parse<S: SeekablePacketSource>(
         tables_out.insert(table.clone(), Arc::new(data));
     }
 
+    let mut stream_names: Vec<String> = stream_tables.keys().cloned().collect();
+    stream_names.sort();
+    for (name, data) in stream_tables {
+        rows_built.insert(name.clone(), data.total_rows());
+        tables_out.insert(name, Arc::new(data));
+    }
+
     Ok(SharedParseState {
         tables: tables_out,
         stats: ParseStats {
@@ -426,6 +488,7 @@ pub fn run_shared_parse<S: SeekablePacketSource>(
             complete_scan,
             overflowed_bytes: HashMap::new(),
             overflow_peak_bytes: HashMap::new(),
+            stream_tables: stream_names,
         },
     })
 }
@@ -483,6 +546,13 @@ pub fn run_streaming_parse<S: SeekablePacketSource>(
     progress: Option<ProgressFn>,
     subscription: &ParseSubscription,
 ) -> Result<StreamingHandle, Error> {
+    if !subscription.stream_tables.is_empty() {
+        // Stream tables are complete only at end of capture; the engine
+        // routes queries that touch them through the materialize path.
+        return Err(Error::Query(crate::error::QueryError::Execution(
+            "stream tables cannot be streamed; use run_shared_parse".into(),
+        )));
+    }
     let scope = Arc::new(subscription.parse_scope(registry));
     let ranges = decide_ranges(source.as_ref(), target_partitions)?;
     let single = ranges.len() == 1;
