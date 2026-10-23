@@ -441,6 +441,7 @@ define_protocol_vtab!(ReadUdpVTab, "udp");
 define_protocol_vtab!(ReadDnsVTab, "dns");
 define_protocol_vtab!(ReadDhcpVTab, "dhcp");
 define_protocol_vtab!(ReadNtpVTab, "ntp");
+define_protocol_vtab!(ReadHttpVTab, "http");
 define_protocol_vtab!(ReadTlsVTab, "tls");
 define_protocol_vtab!(ReadSshVTab, "ssh");
 define_protocol_vtab!(ReadQuicVTab, "quic");
@@ -477,6 +478,7 @@ pub fn register(con: &duckdb::Connection) -> DuckResult<(), Box<dyn std::error::
     con.register_table_function::<ReadDnsVTab>("read_dns")?;
     con.register_table_function::<ReadDhcpVTab>("read_dhcp")?;
     con.register_table_function::<ReadNtpVTab>("read_ntp")?;
+    con.register_table_function::<ReadHttpVTab>("read_http")?;
     con.register_table_function::<ReadTlsVTab>("read_tls")?;
     con.register_table_function::<ReadSshVTab>("read_ssh")?;
     con.register_table_function::<ReadQuicVTab>("read_quic")?;
@@ -504,8 +506,8 @@ mod tests {
         let registry = default_registry();
         let protocols = [
             "ethernet", "vlan", "arp", "mpls", "ipv4", "ipv6", "icmp", "icmpv6", "tcp", "udp",
-            "dns", "dhcp", "ntp", "tls", "ssh", "quic", "vxlan", "gre", "gtp", "ipsec", "bgp",
-            "ospf",
+            "dns", "dhcp", "ntp", "http", "tls", "ssh", "quic", "vxlan", "gre", "gtp", "ipsec",
+            "bgp", "ospf",
         ];
 
         for proto in protocols {

@@ -12,9 +12,11 @@
 //! | Link | Ethernet, VLAN (802.1Q) |
 //! | Network | IPv4, IPv6, ARP, ICMP, ICMPv6 |
 //! | Transport | TCP, UDP |
-//! | Application | DNS, DHCP, NTP, TLS, SSH, QUIC |
+//! | Application | DNS, DHCP, NTP, HTTP/1.x, TLS, SSH, QUIC |
 //!
-//! Note: HTTP is parsed via TCP stream reassembly (see `stream::parsers::http`).
+//! Note: the packet-level HTTP parser sees the segment that starts a message
+//! (request/status line and headers); reassembled messages come from the
+//! stream layer (see `stream::parsers::http`).
 //!
 //! ## Example
 //!
@@ -52,6 +54,7 @@ mod dns;
 mod ethernet;
 mod gre;
 mod gtp;
+pub(crate) mod http;
 mod icmp;
 mod icmpv6;
 mod ipsec;
@@ -90,6 +93,7 @@ pub use dns::DnsProtocol;
 pub use ethernet::EthernetProtocol;
 pub use gre::GreProtocol;
 pub use gtp::GtpProtocol;
+pub use http::HttpProtocol;
 pub use icmp::IcmpProtocol;
 pub use icmpv6::Icmpv6Protocol;
 pub use ipsec::IpsecProtocol;
@@ -167,10 +171,10 @@ pub fn default_registry() -> ProtocolRegistry {
     registry.register(OspfProtocol);
 
     // Application layer
-    // Note: HTTP is parsed via TCP stream reassembly (see stream::parsers::http)
     registry.register(DnsProtocol);
     registry.register(DhcpProtocol);
     registry.register(NtpProtocol);
+    registry.register(HttpProtocol);
     registry.register(TlsProtocol);
     registry.register(SshProtocol);
     registry.register(QuicProtocol);

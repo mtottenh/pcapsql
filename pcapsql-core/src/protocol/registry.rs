@@ -6,10 +6,10 @@ use crate::schema::FieldDescriptor;
 
 use super::{
     ArpProtocol, BgpProtocol, DhcpProtocol, DnsProtocol, EthernetProtocol, GreProtocol,
-    GtpProtocol, IcmpProtocol, Icmpv6Protocol, IpsecProtocol, Ipv4Protocol, Ipv6Protocol,
-    LinuxSllProtocol, MplsProtocol, NetlinkProtocol, NtpProtocol, OspfProtocol, ParseContext,
-    ParseResult, QuicProtocol, RtnetlinkProtocol, Sll2Protocol, SshProtocol, TcpProtocol,
-    TlsProtocol, UdpProtocol, VlanProtocol, VxlanProtocol,
+    GtpProtocol, HttpProtocol, IcmpProtocol, Icmpv6Protocol, IpsecProtocol, Ipv4Protocol,
+    Ipv6Protocol, LinuxSllProtocol, MplsProtocol, NetlinkProtocol, NtpProtocol, OspfProtocol,
+    ParseContext, ParseResult, QuicProtocol, RtnetlinkProtocol, Sll2Protocol, SshProtocol,
+    TcpProtocol, TlsProtocol, UdpProtocol, VlanProtocol, VxlanProtocol,
 };
 
 /// How a protocol's remaining bytes should be handled.
@@ -139,6 +139,7 @@ pub enum BuiltinProtocol {
     Dns(DnsProtocol),
     Dhcp(DhcpProtocol),
     Ntp(NtpProtocol),
+    Http(HttpProtocol),
     Tls(TlsProtocol),
     Ssh(SshProtocol),
     Quic(QuicProtocol),
@@ -171,6 +172,7 @@ macro_rules! delegate_protocol {
             BuiltinProtocol::Dns(p) => p.$method($($arg),*),
             BuiltinProtocol::Dhcp(p) => p.$method($($arg),*),
             BuiltinProtocol::Ntp(p) => p.$method($($arg),*),
+            BuiltinProtocol::Http(p) => p.$method($($arg),*),
             BuiltinProtocol::Tls(p) => p.$method($($arg),*),
             BuiltinProtocol::Ssh(p) => p.$method($($arg),*),
             BuiltinProtocol::Quic(p) => p.$method($($arg),*),
@@ -366,6 +368,12 @@ impl From<DhcpProtocol> for BuiltinProtocol {
 impl From<NtpProtocol> for BuiltinProtocol {
     fn from(p: NtpProtocol) -> Self {
         BuiltinProtocol::Ntp(p)
+    }
+}
+
+impl From<HttpProtocol> for BuiltinProtocol {
+    fn from(p: HttpProtocol) -> Self {
+        BuiltinProtocol::Http(p)
     }
 }
 
