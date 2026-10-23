@@ -33,7 +33,9 @@ use crate::io::{PacketPosition, PacketRange, PcapFormat};
 pub const DEFAULT_CHECKPOINT_STRIDE: u64 = 65536;
 
 /// Sidecar file format magic + version.
-const SIDECAR_MAGIC: &[u8; 8] = b"PCSQIDX\x01";
+/// Sidecar magic + format version. v2 adds the section byte order to each
+/// PCAPNG checkpoint; v1 sidecars fail the magic check and are rebuilt.
+const SIDECAR_MAGIC: &[u8; 8] = b"PCSQIDX\x02";
 
 /// A sparse checkpoint into the capture.
 #[derive(Clone, Debug, PartialEq)]
@@ -197,6 +199,7 @@ impl BoundaryIndex {
                 None => w.push(0),
                 Some(state) => {
                     w.push(1);
+                    w.push(u8::from(state.big_endian));
                     put_u32(&mut w, state.interfaces.len() as u32);
                     for iface in &state.interfaces {
                         put_u32(&mut w, iface.link_type);
@@ -234,6 +237,11 @@ impl BoundaryIndex {
             let interface_state = match c.u8()? {
                 0 => None,
                 1 => {
+                    let big_endian = match c.u8()? {
+                        0 => false,
+                        1 => true,
+                        _ => return Err(invalid("bad byte-order tag")),
+                    };
                     let count = c.u32()? as usize;
                     let mut interfaces = Vec::with_capacity(count.min(1 << 16));
                     for _ in 0..count {
@@ -246,7 +254,10 @@ impl BoundaryIndex {
                             snaplen,
                         });
                     }
-                    Some(InterfaceState { interfaces })
+                    Some(InterfaceState {
+                        interfaces,
+                        big_endian,
+                    })
                 }
                 _ => return Err(invalid("bad interface-state tag")),
             };
@@ -274,10 +285,23 @@ impl BoundaryIndex {
     }
 
     /// Write the index to a sidecar path.
+    ///
+    /// Written to a temporary file in the same directory and renamed into
+    /// place, so a concurrent reader never observes a torn sidecar.
     pub fn write_sidecar(&self, path: &Path) -> Result<(), Error> {
-        let mut f = std::fs::File::create(path).map_err(Error::Io)?;
-        f.write_all(&self.to_bytes()).map_err(Error::Io)?;
-        Ok(())
+        let mut tmp = path.as_os_str().to_os_string();
+        tmp.push(format!(".tmp.{}", std::process::id()));
+        let tmp = PathBuf::from(tmp);
+        let result = (|| {
+            let mut f = std::fs::File::create(&tmp)?;
+            f.write_all(&self.to_bytes())?;
+            f.sync_all()?;
+            std::fs::rename(&tmp, path)
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        result.map_err(Error::Io)
     }
 
     /// Read an index from a sidecar path.
@@ -360,6 +384,8 @@ struct IndexBuilder {
     link_type: u32,
     snaplen: u32,
     interfaces: Vec<InterfaceInfo>,
+    /// Byte order of the current PCAPNG section.
+    big_endian: bool,
     checkpoints: Vec<Checkpoint>,
     cur: Option<usize>,
 }
@@ -372,6 +398,7 @@ impl IndexBuilder {
             link_type: 1,
             snaplen: 0,
             interfaces: Vec::new(),
+            big_endian: false,
             checkpoints: Vec::new(),
             cur: None,
         }
@@ -387,6 +414,7 @@ impl IndexBuilder {
             let interface_state = if pcapng {
                 Some(InterfaceState {
                     interfaces: self.interfaces.clone(),
+                    big_endian: self.big_endian,
                 })
             } else {
                 None
@@ -460,8 +488,9 @@ fn scan_pcapng<S: Read>(
             Ok((offset, block)) => {
                 if let PcapBlockOwned::NG(ng) = block {
                     match ng {
-                        Block::SectionHeader(_) => {
+                        Block::SectionHeader(shb) => {
                             builder.interfaces.clear();
+                            builder.big_endian = shb.big_endian();
                         }
                         Block::InterfaceDescription(idb) => {
                             let info = InterfaceInfo {
@@ -535,55 +564,58 @@ pub fn synth_legacy_header(format: PcapFormat, link_type: u32, snaplen: u32) -> 
 }
 
 /// Synthesize a PCAPNG section header + interface descriptions for a mid-file
-/// partition, reconstructing the interface table (link type + `if_tsresol`).
+/// partition, reconstructing the interface table (link type + `if_tsresol`)
+/// in the byte order of the section the partition starts in.
 pub fn synth_pcapng_header(state: &InterfaceState) -> Vec<u8> {
+    let be = state.big_endian;
     let mut v = Vec::new();
-    // Section Header Block (little-endian on disk), 28 bytes, no options.
-    put_u32_le(&mut v, 0x0A0D_0D0A); // block type
-    put_u32_le(&mut v, 28); // total length
-    put_u32_le(&mut v, 0x1A2B_3C4D); // byte-order magic
-    put_u16_le(&mut v, 1); // major
-    put_u16_le(&mut v, 0); // minor
-    put_u64_le(&mut v, u64::MAX); // section length: unknown
-    put_u32_le(&mut v, 28); // total length (trailer)
+    // Section Header Block, 28 bytes, no options. The byte-order magic is the
+    // same 32-bit value written in the section's own byte order, which is how
+    // readers detect it.
+    put_u32_e(&mut v, 0x0A0D_0D0A, be); // block type
+    put_u32_e(&mut v, 28, be); // total length
+    put_u32_e(&mut v, 0x1A2B_3C4D, be); // byte-order magic
+    put_u16_e(&mut v, 1, be); // major
+    put_u16_e(&mut v, 0, be); // minor
+    put_u64_e(&mut v, u64::MAX, be); // section length: unknown
+    put_u32_e(&mut v, 28, be); // total length (trailer)
 
     for iface in &state.interfaces {
         // Interface Description Block, 32 bytes with if_tsresol option.
-        put_u32_le(&mut v, 0x0000_0001); // block type
-        put_u32_le(&mut v, 32); // total length
-        put_u16_le(&mut v, iface.link_type as u16); // linktype
-        put_u16_le(&mut v, 0); // reserved
-        put_u32_le(
+        put_u32_e(&mut v, 0x0000_0001, be); // block type
+        put_u32_e(&mut v, 32, be); // total length
+        put_u16_e(&mut v, iface.link_type as u16, be); // linktype
+        put_u16_e(&mut v, 0, be); // reserved
+        put_u32_e(
             &mut v,
             if iface.snaplen == 0 {
                 65535
             } else {
                 iface.snaplen
             },
+            be,
         );
         // Option: if_tsresol (code 9, len 1), value padded to 4 bytes.
-        put_u16_le(&mut v, 9);
-        put_u16_le(&mut v, 1);
+        put_u16_e(&mut v, 9, be);
+        put_u16_e(&mut v, 1, be);
         v.push(iface.if_tsresol);
         v.extend_from_slice(&[0, 0, 0]);
         // opt_endofopt
-        put_u16_le(&mut v, 0);
-        put_u16_le(&mut v, 0);
-        put_u32_le(&mut v, 32); // total length (trailer)
+        put_u16_e(&mut v, 0, be);
+        put_u16_e(&mut v, 0, be);
+        put_u32_e(&mut v, 32, be); // total length (trailer)
     }
     v
 }
 
 // ---- little-endian / endian-aware encoding helpers ----
 
-fn put_u16_le(v: &mut Vec<u8>, x: u16) {
-    v.extend_from_slice(&x.to_le_bytes());
-}
-fn put_u32_le(v: &mut Vec<u8>, x: u32) {
-    v.extend_from_slice(&x.to_le_bytes());
-}
-fn put_u64_le(v: &mut Vec<u8>, x: u64) {
-    v.extend_from_slice(&x.to_le_bytes());
+fn put_u64_e(v: &mut Vec<u8>, x: u64, be: bool) {
+    if be {
+        v.extend_from_slice(&x.to_be_bytes());
+    } else {
+        v.extend_from_slice(&x.to_le_bytes());
+    }
 }
 fn put_u16_e(v: &mut Vec<u8>, x: u16, be: bool) {
     if be {
@@ -746,6 +778,7 @@ mod tests {
                                 snaplen: 262144,
                             },
                         ],
+                        big_endian: true,
                     }),
                     min_ts: Some(10),
                     max_ts: Some(20),
@@ -930,10 +963,24 @@ mod tests {
                     snaplen: 65535,
                 },
             ],
+            big_endian: false,
         };
         let h = synth_pcapng_header(&state);
         // SHB(28) + 2 * IDB(32)
         assert_eq!(h.len(), 28 + 64);
+        // Little-endian byte-order magic on disk.
+        assert_eq!(&h[8..12], &[0x4D, 0x3C, 0x2B, 0x1A]);
+
+        let be = InterfaceState {
+            big_endian: true,
+            ..state
+        };
+        let h = synth_pcapng_header(&be);
+        assert_eq!(h.len(), 28 + 64);
+        assert_eq!(&h[8..12], &[0x1A, 0x2B, 0x3C, 0x4D]);
+        // Block lengths are big-endian too, so a BE reader parses it.
+        assert_eq!(&h[4..8], &[0, 0, 0, 28]);
+        assert_eq!(&h[28 + 4..28 + 8], &[0, 0, 0, 32]);
     }
 }
 
@@ -949,7 +996,7 @@ mod build_tests {
             Format::LegacyBeMicro => PcapFormat::LegacyBeMicro,
             Format::LegacyLeNano => PcapFormat::LegacyLeNano,
             Format::LegacyBeNano => PcapFormat::LegacyBeNano,
-            Format::Pcapng => PcapFormat::PcapNg,
+            Format::Pcapng | Format::PcapngBe => PcapFormat::PcapNg,
         }
     }
 

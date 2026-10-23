@@ -13,8 +13,8 @@ use pcapsql_core::io::{
 };
 use pcapsql_testgen::{
     generate, jumbo_straddle_capture, legacy_pcap, oversized_frame_capture, pcapng,
-    truncated_capture, CaptureSpec, ExpectedFrame, Format, GenPacket, GeneratedCapture,
-    LegacyVariant, PcapngInterface, PcapngPacket, PcapngSection,
+    pcapng_with_byte_order, truncated_capture, CaptureSpec, ExpectedFrame, Format, GenPacket,
+    GeneratedCapture, LegacyVariant, PcapngInterface, PcapngPacket, PcapngSection,
 };
 use proptest::prelude::*;
 use tempfile::TempDir;
@@ -333,6 +333,60 @@ fn second_idb_after_first_epb(bytes: &[u8]) -> bool {
 }
 
 #[test]
+fn pcapng_big_endian_sections() {
+    // Big-endian PCAPNG is valid per spec. A mid-file partition starts with a
+    // synthesized SHB + IDBs; those must be written in the section's byte
+    // order or every block length that follows is misread.
+    let gc = pcapng_with_byte_order(
+        &[PcapngSection {
+            interfaces: vec![
+                PcapngInterface {
+                    link_type: 1,
+                    tsresol: 6,
+                    snaplen: 65535,
+                },
+                PcapngInterface {
+                    link_type: 113,
+                    tsresol: 9,
+                    snaplen: 262144,
+                },
+            ],
+            packets: (0..40)
+                .map(|i| PcapngPacket {
+                    interface_id: (i % 2) as u32,
+                    ts_sec: 1_700_000_000 + i,
+                    ts_frac_units: if i % 2 == 0 {
+                        (i * 11) % 1_000_000
+                    } else {
+                        (i * 13) % 1_000_000_000
+                    },
+                    data: vec![(i % 256) as u8; 30 + (i as usize % 7)],
+                    origlen: 30 + (i as u32 % 7),
+                })
+                .collect(),
+        }],
+        true,
+    );
+    // On-disk byte-order magic is big-endian.
+    assert_eq!(&gc.bytes[8..12], &[0x1A, 0x2B, 0x3C, 0x4D]);
+    assert_equivalent(&gc, 3);
+
+    // Generator path: multi-section, midstream IDB, big-endian throughout.
+    let spec = CaptureSpec {
+        format: Format::PcapngBe,
+        seed: 7,
+        packet_count: 36,
+        min_size: 16,
+        max_size: 90,
+        link_type: 1,
+        interfaces: vec![6, 3],
+        sections: 2,
+        add_interface_midstream: true,
+    };
+    assert_equivalent(&generate(&spec), 2);
+}
+
+#[test]
 fn pcapng_interface_added_midstream() {
     let spec = CaptureSpec {
         format: Format::Pcapng,
@@ -394,6 +448,7 @@ fn format_strategy() -> impl Strategy<Value = Format> {
         Just(Format::LegacyLeNano),
         Just(Format::LegacyBeNano),
         Just(Format::Pcapng),
+        Just(Format::PcapngBe),
     ]
 }
 

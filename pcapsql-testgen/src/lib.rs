@@ -357,29 +357,46 @@ fn pcapng_ts_ns(ticks: u64, resolution: u64) -> i64 {
     ((ticks as u128 * 1_000_000_000u128) / resolution as u128) as i64
 }
 
-/// Little-endian PCAPNG byte sink with block helpers.
+/// PCAPNG byte sink with block helpers; writes every multi-byte field in the
+/// section's byte order (little-endian unless `big_endian` is set).
 struct NgWriter {
     buf: Vec<u8>,
+    big_endian: bool,
 }
 
 impl NgWriter {
-    fn new() -> Self {
-        Self { buf: Vec::new() }
+    fn new(big_endian: bool) -> Self {
+        Self {
+            buf: Vec::new(),
+            big_endian,
+        }
     }
 
     #[inline]
     fn u16(&mut self, v: u16) {
-        self.buf.extend_from_slice(&v.to_le_bytes());
+        if self.big_endian {
+            self.buf.extend_from_slice(&v.to_be_bytes());
+        } else {
+            self.buf.extend_from_slice(&v.to_le_bytes());
+        }
     }
 
     #[inline]
     fn u32(&mut self, v: u32) {
-        self.buf.extend_from_slice(&v.to_le_bytes());
+        if self.big_endian {
+            self.buf.extend_from_slice(&v.to_be_bytes());
+        } else {
+            self.buf.extend_from_slice(&v.to_le_bytes());
+        }
     }
 
     #[inline]
     fn i64(&mut self, v: i64) {
-        self.buf.extend_from_slice(&v.to_le_bytes());
+        if self.big_endian {
+            self.buf.extend_from_slice(&v.to_be_bytes());
+        } else {
+            self.buf.extend_from_slice(&v.to_le_bytes());
+        }
     }
 
     #[inline]
@@ -462,6 +479,15 @@ impl NgWriter {
 /// wrapper over [`pcapng_ordered`]: each section becomes "all interfaces, then
 /// all packets", which is byte-identical to emitting them in that order.
 pub fn pcapng(sections: &[PcapngSection]) -> GeneratedCapture {
+    pcapng_with_byte_order(sections, false)
+}
+
+/// [`pcapng`] with an explicit section byte order (`true` = big-endian).
+///
+/// Big-endian PCAPNG is valid per the specification (the SHB byte-order magic
+/// tells readers which it is) and is where header-synthesis code that assumes
+/// little-endian breaks.
+pub fn pcapng_with_byte_order(sections: &[PcapngSection], big_endian: bool) -> GeneratedCapture {
     let ordered: Vec<PcapngOrderedSection> = sections
         .iter()
         .map(|s| {
@@ -471,7 +497,7 @@ pub fn pcapng(sections: &[PcapngSection]) -> GeneratedCapture {
             PcapngOrderedSection { blocks }
         })
         .collect();
-    pcapng_ordered(&ordered)
+    pcapng_ordered_with_byte_order(&ordered, big_endian)
 }
 
 /// Build a PCAPNG capture from sections whose blocks are emitted in exactly the
@@ -483,7 +509,15 @@ pub fn pcapng(sections: &[PcapngSection]) -> GeneratedCapture {
 /// header resets the table. Timestamp and link-type ground truth are computed
 /// against the referenced interface, identically to [`pcapng`].
 pub fn pcapng_ordered(sections: &[PcapngOrderedSection]) -> GeneratedCapture {
-    let mut w = NgWriter::new();
+    pcapng_ordered_with_byte_order(sections, false)
+}
+
+/// [`pcapng_ordered`] with an explicit section byte order (`true` = big-endian).
+pub fn pcapng_ordered_with_byte_order(
+    sections: &[PcapngOrderedSection],
+    big_endian: bool,
+) -> GeneratedCapture {
+    let mut w = NgWriter::new(big_endian);
     let mut expected = Vec::new();
     let mut frame_number: u64 = 0;
 
@@ -538,6 +572,15 @@ pub enum Format {
     LegacyLeNano,
     LegacyBeNano,
     Pcapng,
+    /// PCAPNG with big-endian sections.
+    PcapngBe,
+}
+
+impl Format {
+    /// True for either PCAPNG byte order.
+    pub fn is_pcapng(self) -> bool {
+        matches!(self, Format::Pcapng | Format::PcapngBe)
+    }
 }
 
 /// Full specification for a deterministic capture.
@@ -619,7 +662,8 @@ pub fn generate(spec: &CaptureSpec) -> GeneratedCapture {
         Format::LegacyBeMicro => generate_legacy(spec, LegacyVariant::BeMicro),
         Format::LegacyLeNano => generate_legacy(spec, LegacyVariant::LeNano),
         Format::LegacyBeNano => generate_legacy(spec, LegacyVariant::BeNano),
-        Format::Pcapng => generate_pcapng(spec),
+        Format::Pcapng => generate_pcapng(spec, false),
+        Format::PcapngBe => generate_pcapng(spec, true),
     }
 }
 
@@ -657,7 +701,7 @@ fn generate_legacy(spec: &CaptureSpec, variant: LegacyVariant) -> GeneratedCaptu
     legacy_pcap(variant, spec.link_type, snaplen, &packets)
 }
 
-fn generate_pcapng(spec: &CaptureSpec) -> GeneratedCapture {
+fn generate_pcapng(spec: &CaptureSpec, big_endian: bool) -> GeneratedCapture {
     assert!(spec.sections >= 1, "sections must be >= 1");
     assert!(
         !spec.interfaces.is_empty(),
@@ -762,7 +806,7 @@ fn generate_pcapng(spec: &CaptureSpec) -> GeneratedCapture {
         sections.push(PcapngOrderedSection { blocks });
     }
 
-    pcapng_ordered(&sections)
+    pcapng_ordered_with_byte_order(&sections, big_endian)
 }
 
 // ---------------------------------------------------------------------------
@@ -1335,6 +1379,18 @@ mod tests {
                 interfaces: vec![0x8A, 6],
                 sections: 1,
                 add_interface_midstream: false,
+            });
+            // big-endian sections, multi-section with a midstream IDB
+            v.push(CaptureSpec {
+                format: Format::PcapngBe,
+                seed,
+                packet_count: 14,
+                min_size: 16,
+                max_size: 160,
+                link_type: 1,
+                interfaces: vec![6, 9],
+                sections: 2,
+                add_interface_midstream: true,
             });
             // multi-section
             v.push(CaptureSpec {
