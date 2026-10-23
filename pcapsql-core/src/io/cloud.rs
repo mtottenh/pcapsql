@@ -17,14 +17,26 @@
 //! use pcapsql_core::io::{CloudPacketSource, CloudLocation};
 //!
 //! let location = CloudLocation::parse("s3://bucket/capture.pcap")?;
-//! let source = CloudPacketSource::open(location).await?;
-//!
-//! // Now use with QueryEngine
-//! let engine = QueryEngine::with_streaming_source(source).await?;
+//! // `open` is synchronous; it drives its own HTTP requests (see `run_async`).
+//! let source = CloudPacketSource::open(location)?;
 //! ```
+//!
+//! ## Partitioned reads and the boundary index
+//!
+//! Partitioning a remote object needs a [`BoundaryIndex`], which is built by one
+//! sequential read of the whole object. That index is cached on local disk
+//! (keyed by the object URL, validated by size, last-modified time and header
+//! hash) under `$PCAPSQL_INDEX_CACHE`, else `$XDG_CACHE_HOME/pcapsql/index`,
+//! else `$HOME/.cache/pcapsql/index`, so later opens of the same object — in
+//! this process or another — partition immediately with no full download.
 
 use std::io::{self, Chain, Cursor, Read};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
+
+use tokio::runtime::Handle;
 
 use object_store::{path::Path as ObjectPath, ObjectStore};
 use url::Url;
@@ -33,29 +45,59 @@ use crate::error::Error;
 
 /// Execute an async operation, handling runtime nesting correctly.
 ///
-/// If called from within a tokio runtime, uses `block_in_place` to allow
-/// blocking while running the future on the current runtime's handle.
-/// If called outside a runtime, creates a temporary single-threaded runtime.
-fn run_async<F, T>(future: F) -> T
+/// - Inside a tokio runtime: `block_in_place` + `block_on` on the current handle.
+/// - On a plain thread with a `saved` handle (captured when the source was
+///   opened inside a runtime, then handed to parse worker threads): run the
+///   future on that runtime. This is the partitioned-parse case; without it
+///   every byte-range GET from a worker thread would build and tear down a
+///   fresh runtime, re-establishing the HTTP connection pool each time.
+/// - Otherwise: a temporary single-threaded runtime.
+fn run_async<F, T>(saved: Option<&Handle>, future: F) -> T
 where
     F: std::future::Future<Output = T>,
 {
-    // Try to get the current runtime handle
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) => {
-            // We're in a runtime, need to block in place and run on current handle
-            tokio::task::block_in_place(|| handle.block_on(future))
-        }
-        Err(_) => {
-            // Not in a runtime, create a temporary one
-            // Use current_thread to minimize overhead for blocking operations
-            tokio::runtime::Builder::new_current_thread()
+    match Handle::try_current() {
+        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(future)),
+        Err(_) => match saved {
+            Some(handle) => handle.block_on(future),
+            None => tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .expect("Failed to create temporary runtime")
-                .block_on(future)
+                .block_on(future),
+        },
+    }
+}
+
+/// Directory for cached boundary indexes of remote objects, if one can be
+/// determined. `None` disables caching (the index is rebuilt per open).
+fn index_cache_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("PCAPSQL_INDEX_CACHE") {
+        return (!dir.is_empty()).then(|| PathBuf::from(dir));
+    }
+    if let Some(dir) = std::env::var_os("XDG_CACHE_HOME") {
+        if !dir.is_empty() {
+            return Some(PathBuf::from(dir).join("pcapsql").join("index"));
         }
     }
+    std::env::var_os("HOME").filter(|h| !h.is_empty()).map(|h| {
+        PathBuf::from(h)
+            .join(".cache")
+            .join("pcapsql")
+            .join("index")
+    })
+}
+
+/// Cache file for a location's boundary index: `<cache-dir>/<fnv(url)>.idx`.
+fn index_cache_path(location: &CloudLocation) -> Option<PathBuf> {
+    let key = format!(
+        "{}://{}/{}@{}",
+        location.scheme(),
+        location.bucket().unwrap_or(""),
+        location.key(),
+        location.endpoint().unwrap_or("")
+    );
+    index_cache_dir().map(|d| d.join(format!("{:016x}.idx", index::header_hash(key.as_bytes()))))
 }
 use super::index::{self, BoundaryIndex};
 use super::source::synth_header_for;
@@ -292,47 +334,73 @@ pub struct ObjectStoreReader {
     store: Arc<dyn ObjectStore>,
     path: ObjectPath,
     object_size: u64,
+    /// Exclusive upper bound for reads (`object_size` for a whole-object read;
+    /// the next partition's start offset for a partition reader, so a worker
+    /// never fetches bytes that belong to its neighbour).
+    limit: u64,
     position: u64,
     buffer: Vec<u8>,
     buffer_start: u64,
     chunk_size: usize,
+    /// Runtime to run requests on from plain threads (see `run_async`).
+    handle: Option<Handle>,
+    /// Bytes fetched over the network, shared with the owning source.
+    fetched: Arc<AtomicU64>,
 }
 
 impl ObjectStoreReader {
-    /// Open a cloud object for reading.
+    /// Open a cloud object for reading (one HEAD request for the size).
     pub fn open(location: &CloudLocation) -> Result<Self, Error> {
         let store = location.build_store()?;
         let path = location.object_path();
-
-        // Get object size via HEAD request
-        let object_size = run_async(async {
-            let meta = store.head(&path).await.map_err(|e| {
-                Error::Io(io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!("Failed to HEAD cloud object: {e}"),
-                ))
-            })?;
-            Ok::<u64, Error>(meta.size as u64)
-        })?;
-
-        Ok(Self {
+        let handle = Handle::try_current().ok();
+        let (object_size, _) = head_object(&store, &path, handle.as_ref())?;
+        Ok(Self::new(
             store,
             path,
             object_size,
+            location.chunk_size(),
+            handle,
+            Arc::new(AtomicU64::new(0)),
+        ))
+    }
+
+    /// Reader over an already-described object (no HEAD request).
+    fn new(
+        store: Arc<dyn ObjectStore>,
+        path: ObjectPath,
+        object_size: u64,
+        chunk_size: usize,
+        handle: Option<Handle>,
+        fetched: Arc<AtomicU64>,
+    ) -> Self {
+        Self {
+            store,
+            path,
+            object_size,
+            limit: object_size,
             position: 0,
             buffer: Vec::new(),
             buffer_start: 0,
-            chunk_size: location.chunk_size(),
-        })
+            chunk_size,
+            handle,
+            fetched,
+        }
     }
 
     /// Open a reader positioned at a byte offset (for mid-file partitions).
     pub fn open_at(location: &CloudLocation, start: u64) -> Result<Self, Error> {
-        let mut reader = Self::open(location)?;
-        reader.position = start;
-        reader.buffer_start = start;
-        reader.buffer.clear();
-        Ok(reader)
+        Ok(Self::open(location)?.starting_at(start, None))
+    }
+
+    /// Position the reader at `start` and cap reads at `end` (exclusive;
+    /// `None` = end of object).
+    fn starting_at(mut self, start: u64, end: Option<u64>) -> Self {
+        self.position = start;
+        self.buffer_start = start;
+        self.buffer.clear();
+        self.limit = end.unwrap_or(self.object_size).min(self.object_size);
+        self
     }
 
     /// Create a reader with pre-fetched header bytes.
@@ -346,15 +414,16 @@ impl ObjectStoreReader {
         chunk_size: usize,
         header_bytes: Vec<u8>,
     ) -> Self {
-        Self {
+        let mut reader = Self::new(
             store,
             path,
             object_size,
-            position: 0,
-            buffer: header_bytes,
-            buffer_start: 0,
             chunk_size,
-        }
+            Handle::try_current().ok(),
+            Arc::new(AtomicU64::new(0)),
+        );
+        reader.buffer = header_bytes;
+        reader
     }
 
     /// Set the chunk size for fetching data.
@@ -372,7 +441,7 @@ impl ObjectStoreReader {
     fn fetch_range(&self, start: u64, end: u64) -> io::Result<Vec<u8>> {
         let store = Arc::clone(&self.store);
         let path = self.path.clone();
-        run_async(async move {
+        let bytes = run_async(self.handle.as_ref(), async move {
             let range = std::ops::Range {
                 start: start as usize,
                 end: end as usize,
@@ -383,8 +452,11 @@ impl ObjectStoreReader {
                 .await
                 .map_err(|e| io::Error::other(format!("Cloud GetRange failed: {e}")))?;
 
-            Ok(bytes.to_vec())
-        })
+            Ok::<Vec<u8>, io::Error>(bytes.to_vec())
+        })?;
+        self.fetched
+            .fetch_add(bytes.len() as u64, Ordering::Relaxed);
+        Ok(bytes)
     }
 
     /// Ensure buffer contains data at current position.
@@ -397,14 +469,16 @@ impl ObjectStoreReader {
         }
 
         // Need to fetch new chunk
-        if self.position >= self.object_size {
+        if self.position >= self.limit {
             // At EOF, clear buffer
             self.buffer.clear();
             return Ok(());
         }
 
         let start = self.position;
-        let end = (start + self.chunk_size as u64).min(self.object_size);
+        // Never fetch past this reader's limit: a partition reader stops at the
+        // next partition's first record, so the neighbour's bytes are its own.
+        let end = (start + self.chunk_size as u64).min(self.limit);
 
         self.buffer = self.fetch_range(start, end)?;
         self.buffer_start = start;
@@ -413,9 +487,31 @@ impl ObjectStoreReader {
     }
 }
 
+/// HEAD an object: `(size, last_modified)`.
+fn head_object(
+    store: &Arc<dyn ObjectStore>,
+    path: &ObjectPath,
+    handle: Option<&Handle>,
+) -> Result<(u64, Option<SystemTime>), Error> {
+    let store = Arc::clone(store);
+    let path = path.clone();
+    run_async(handle, async move {
+        let meta = store.head(&path).await.map_err(|e| {
+            Error::Io(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("Failed to HEAD cloud object: {e}"),
+            ))
+        })?;
+        Ok::<(u64, Option<SystemTime>), Error>((
+            meta.size as u64,
+            Some(SystemTime::from(meta.last_modified)),
+        ))
+    })
+}
+
 impl Read for ObjectStoreReader {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if self.position >= self.object_size {
+        if self.position >= self.limit {
             return Ok(0); // EOF
         }
 
@@ -427,8 +523,10 @@ impl Read for ObjectStoreReader {
 
         // Calculate how much we can read from buffer
         let buffer_offset = (self.position - self.buffer_start) as usize;
-        let available = self.buffer.len() - buffer_offset;
-        let to_read = buf.len().min(available);
+        let in_buffer = self.buffer.len() - buffer_offset;
+        // Also respect `limit` when the buffer was filled before `limit` applied.
+        let to_limit = (self.limit - self.position) as usize;
+        let to_read = buf.len().min(in_buffer).min(to_limit);
 
         buf[..to_read].copy_from_slice(&self.buffer[buffer_offset..buffer_offset + to_read]);
         self.position += to_read as u64;
@@ -450,6 +548,13 @@ impl Unpin for ObjectStoreReader {}
 #[derive(Clone)]
 pub struct CloudPacketSource {
     location: CloudLocation,
+    /// The store and object path, built once and shared by every reader
+    /// (partition readers issue no HEAD and build no client of their own).
+    store: Arc<dyn ObjectStore>,
+    path: ObjectPath,
+    object_size: u64,
+    /// Object last-modified time from HEAD (validity guard for the cached index).
+    last_modified: Option<SystemTime>,
     metadata: PacketSourceMetadata,
     compression: Compression,
     pcap_format: PcapFormat,
@@ -457,6 +562,10 @@ pub struct CloudPacketSource {
     index: Arc<Mutex<Option<Arc<BoundaryIndex>>>>,
     index_stride: u64,
     header_hash: u64,
+    /// Runtime the source was opened under, for requests from plain threads.
+    handle: Option<Handle>,
+    /// Bytes fetched over the network by every reader of this source.
+    fetched: Arc<AtomicU64>,
 }
 
 impl CloudPacketSource {
@@ -474,18 +583,11 @@ impl CloudPacketSource {
         let store = location.build_store()?;
         let path = location.object_path();
 
-        // 1. HEAD request to get object size
-        let store_clone = Arc::clone(&store);
-        let path_clone = path.clone();
-        let object_size = run_async(async move {
-            let meta = store_clone.head(&path_clone).await.map_err(|e| {
-                Error::Io(io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!("Failed to HEAD cloud object: {e}"),
-                ))
-            })?;
-            Ok::<u64, Error>(meta.size as u64)
-        })?;
+        let handle = Handle::try_current().ok();
+        let fetched = Arc::new(AtomicU64::new(0));
+
+        // 1. HEAD request to get object size (and last-modified for the index cache)
+        let (object_size, last_modified) = head_object(&store, &path, handle.as_ref())?;
 
         if object_size < 24 {
             return Err(Error::Io(io::Error::new(
@@ -498,7 +600,7 @@ impl CloudPacketSource {
         let header_size = HEADER_READ_SIZE.min(object_size as usize);
         let store_clone = Arc::clone(&store);
         let path_clone = path.clone();
-        let header_bytes = run_async(async move {
+        let header_bytes = run_async(handle.as_ref(), async move {
             let range = std::ops::Range {
                 start: 0,
                 end: header_size,
@@ -513,6 +615,7 @@ impl CloudPacketSource {
                 })?;
             Ok::<Vec<u8>, Error>(bytes.to_vec())
         })?;
+        fetched.fetch_add(header_bytes.len() as u64, Ordering::Relaxed);
 
         if header_bytes.len() < 6 {
             return Err(Error::Io(io::Error::new(
@@ -565,13 +668,38 @@ impl CloudPacketSource {
 
         Ok(Self {
             location,
+            store,
+            path,
+            object_size,
+            last_modified,
             metadata,
             compression,
             pcap_format,
             index: Arc::new(Mutex::new(None)),
             index_stride: index::DEFAULT_CHECKPOINT_STRIDE,
             header_hash,
+            handle,
+            fetched,
         })
+    }
+
+    /// Total bytes fetched over the network by this source and all its readers.
+    pub fn bytes_fetched(&self) -> u64 {
+        self.fetched.load(Ordering::Relaxed)
+    }
+
+    /// A reader over the raw object bytes, reusing the source's store, size and
+    /// runtime handle (no HEAD request).
+    fn raw_reader(&self, start: u64, end: Option<u64>) -> ObjectStoreReader {
+        ObjectStoreReader::new(
+            Arc::clone(&self.store),
+            self.path.clone(),
+            self.object_size,
+            self.location.chunk_size(),
+            self.handle.clone(),
+            Arc::clone(&self.fetched),
+        )
+        .starting_at(start, end)
     }
 
     /// Set the checkpoint stride for index building (smaller = finer partitions).
@@ -580,9 +708,12 @@ impl CloudPacketSource {
         self
     }
 
-    /// Build (and memoize) the boundary index by scanning the uncompressed
-    /// object. This is the one full read; subsequent partition reads use exact
-    /// offsets from the index (no byte-range re-sync).
+    /// Build (and memoize) the boundary index of the uncompressed object.
+    ///
+    /// Building needs one full sequential read of the object, so the result is
+    /// cached on local disk (see the module docs) and validated against the
+    /// object's size, last-modified time and header hash before reuse.
+    /// Subsequent partition reads use exact offsets from the index.
     fn ensure_index(&self) -> Result<Arc<BoundaryIndex>, Error> {
         if self.compression.is_compressed() {
             return Err(Error::Io(io::Error::new(
@@ -594,15 +725,37 @@ impl CloudPacketSource {
         if let Some(idx) = guard.as_ref() {
             return Ok(idx.clone());
         }
-        let reader = ObjectStoreReader::open(&self.location)?;
+
+        let cache_path = index_cache_path(&self.location);
+        if let Some(cached) = cache_path
+            .as_deref()
+            .and_then(|p| BoundaryIndex::read_sidecar(p).ok())
+        {
+            if cached.stride == self.index_stride
+                && cached.is_valid_for(self.object_size, self.last_modified, self.header_hash)
+            {
+                let idx = Arc::new(cached);
+                *guard = Some(idx.clone());
+                return Ok(idx);
+            }
+        }
+
+        let reader = self.raw_reader(0, None);
         let idx = index::build_boundary_index(
             reader,
             self.pcap_format,
             self.index_stride,
-            self.metadata.size_bytes.unwrap_or(0),
-            None,
+            self.object_size,
+            self.last_modified,
             self.header_hash,
         )?;
+        if let Some(p) = cache_path.as_deref() {
+            // Best effort: a missing or read-only cache dir just means no reuse.
+            if let Some(dir) = p.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let _ = idx.write_sidecar(p);
+        }
         let idx = Arc::new(idx);
         *guard = Some(idx.clone());
         Ok(idx)
@@ -770,7 +923,7 @@ impl PacketSource for CloudPacketSource {
     }
 
     fn sequential_reader(&self) -> Result<Self::Reader, Error> {
-        CloudPacketReader::sequential(&self.location, self.compression, self.pcap_format)
+        CloudPacketReader::sequential(self.raw_reader(0, None), self.compression, self.pcap_format)
     }
 }
 
@@ -786,11 +939,12 @@ impl SeekablePacketSource for CloudPacketSource {
         let idx = self.ensure_index()?;
         let header = synth_header_for(&idx, range.start.frame_number, self.pcap_format)?;
         let end_frame = range.end.as_ref().map(|e| e.frame_number);
+        // Fetch only this partition's bytes: [start offset, next partition start).
+        let end_offset = range.end.as_ref().map(|e| e.byte_offset);
         CloudPacketReader::at(
-            &self.location,
+            self.raw_reader(range.start.byte_offset, end_offset),
             self.pcap_format,
             header,
-            range.start.byte_offset,
             range.start.frame_number,
             end_frame,
         )
@@ -820,11 +974,10 @@ pub struct CloudPacketReader {
 impl CloudPacketReader {
     /// Sequential reader over the whole object (honors compression).
     fn sequential(
-        location: &CloudLocation,
+        cloud_reader: ObjectStoreReader,
         compression: Compression,
         format: PcapFormat,
     ) -> Result<Self, Error> {
-        let cloud_reader = ObjectStoreReader::open(location)?;
         let chain = Cursor::new(Vec::new()).chain(cloud_reader);
         let decompress = DecompressReader::new(chain, compression)?;
         let inner = GenericPcapReader::with_format(decompress, format)?;
@@ -839,14 +992,12 @@ impl CloudPacketReader {
     /// Reader at a byte offset, prepending a synthesized header. Uncompressed
     /// objects only (the only ones that are partitioned).
     fn at(
-        location: &CloudLocation,
+        cloud_reader: ObjectStoreReader,
         format: PcapFormat,
         synth_header: Vec<u8>,
-        byte_offset: u64,
         start_frame: u64,
         end_frame: Option<u64>,
     ) -> Result<Self, Error> {
-        let cloud_reader = ObjectStoreReader::open_at(location, byte_offset)?;
         let chain = Cursor::new(synth_header).chain(cloud_reader);
         let decompress = DecompressReader::new(chain, Compression::None)?;
         let inner = GenericPcapReader::with_format_starting_at(decompress, format, start_frame)?;

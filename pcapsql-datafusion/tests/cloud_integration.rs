@@ -22,7 +22,7 @@ use object_store::{ObjectStore, PutPayload};
 use pcapsql_core::io::{
     CloudLocation, CloudPacketSource, PacketReader, PacketSource, SeekablePacketSource,
 };
-use pcapsql_testgen::{legacy_pcap, GenPacket, LegacyVariant};
+use pcapsql_testgen::{generate, legacy_pcap, CaptureSpec, Format, GenPacket, LegacyVariant};
 
 /// Endpoint of the test object store, or `None` to skip (store unavailable).
 fn endpoint() -> Option<String> {
@@ -170,4 +170,189 @@ async fn s3_small_object_sequential() {
     let source = CloudPacketSource::open(location(&ep, key)).expect("open");
     let mut r = source.sequential_reader().expect("reader");
     assert_eq!(drain(&mut r).len(), 50);
+}
+
+// ----------------------------------------------------------------------------
+// Format, compression and error-path coverage (ported from the pre-stage-6
+// suite, now generated on the fly and exercised through the current API).
+// ----------------------------------------------------------------------------
+
+/// 200 UDP frames in the requested legacy variant.
+fn small_capture(variant: LegacyVariant) -> Vec<u8> {
+    let packets: Vec<GenPacket> = (0..200)
+        .map(|i| {
+            let data = udp_packet(40_000 + i as u16, 32);
+            let origlen = data.len() as u32;
+            GenPacket {
+                ts_sec: 1_700_000_000 + i as u32,
+                ts_frac: (i as u32 * 7919) % 1_000_000,
+                data,
+                origlen,
+            }
+        })
+        .collect();
+    legacy_pcap(variant, 1, 65535, &packets).bytes
+}
+
+fn count_sequential(source: &CloudPacketSource) -> usize {
+    let mut r = source.sequential_reader().expect("sequential reader");
+    drain(&mut r).len()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_not_found_is_an_error() {
+    let Some(ep) = endpoint() else {
+        eprintln!("skipping cloud test: PCAPSQL_S3_TEST_ENDPOINT not set");
+        return;
+    };
+    assert!(CloudPacketSource::open(location(&ep, "missing/does-not-exist.pcap")).is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_all_legacy_variants_and_pcapng() {
+    let Some(ep) = endpoint() else {
+        eprintln!("skipping cloud test: PCAPSQL_S3_TEST_ENDPOINT not set");
+        return;
+    };
+    for (name, variant) in [
+        ("le_micro", LegacyVariant::LeMicro),
+        ("be_micro", LegacyVariant::BeMicro),
+        ("le_nano", LegacyVariant::LeNano),
+        ("be_nano", LegacyVariant::BeNano),
+    ] {
+        let key = format!("formats/{name}.pcap");
+        upload(&ep, &key, small_capture(variant)).await;
+        let source = CloudPacketSource::open(location(&ep, &key)).expect("open");
+        assert_eq!(source.metadata().link_type, 1, "{name}: link type");
+        assert_eq!(count_sequential(&source), 200, "{name}: frame count");
+    }
+
+    // PCAPNG, both byte orders, with a mid-stream IDB.
+    for (name, format) in [("le", Format::Pcapng), ("be", Format::PcapngBe)] {
+        let gc = generate(&CaptureSpec {
+            format,
+            seed: 11,
+            packet_count: 200,
+            min_size: 60,
+            max_size: 200,
+            link_type: 1,
+            interfaces: vec![6, 9],
+            sections: 2,
+            add_interface_midstream: true,
+        });
+        let key = format!("formats/pcapng_{name}.pcapng");
+        upload(&ep, &key, gc.bytes.clone()).await;
+        let source = CloudPacketSource::open(location(&ep, &key)).expect("open pcapng");
+        assert_eq!(source.metadata().link_type, 1);
+        assert_eq!(count_sequential(&source), 200, "pcapng {name}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_compressed_objects_read_sequentially() {
+    use std::io::Write;
+    let Some(ep) = endpoint() else {
+        eprintln!("skipping cloud test: PCAPSQL_S3_TEST_ENDPOINT not set");
+        return;
+    };
+    let raw = small_capture(LegacyVariant::LeMicro);
+
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    gz.write_all(&raw).unwrap();
+    let gz = gz.finish().unwrap();
+    let zst = zstd::encode_all(&raw[..], 3).unwrap();
+
+    for (key, bytes) in [("compressed/c.pcap.gz", gz), ("compressed/c.pcap.zst", zst)] {
+        upload(&ep, key, bytes).await;
+        let source = CloudPacketSource::open(location(&ep, key)).expect("open compressed");
+        assert_eq!(source.metadata().link_type, 1, "{key}");
+        assert_eq!(count_sequential(&source), 200, "{key}");
+        // Compressed objects are not partitionable: one whole-range partition.
+        assert_eq!(source.partitions(4).expect("partitions").len(), 1, "{key}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_small_chunk_size_crosses_chunk_boundaries() {
+    let Some(ep) = endpoint() else {
+        eprintln!("skipping cloud test: PCAPSQL_S3_TEST_ENDPOINT not set");
+        return;
+    };
+    let key = "chunks/small_chunks.pcap";
+    upload(&ep, key, small_capture(LegacyVariant::LeMicro)).await;
+    let source = CloudPacketSource::open(location(&ep, key).with_chunk_size(1024)).expect("open");
+    assert_eq!(count_sequential(&source), 200);
+}
+
+/// The boundary index of a remote object is cached locally: a second source
+/// over the same (unchanged) object partitions without re-downloading it, and
+/// each partition reader fetches only its own byte range.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s3_index_is_cached_and_partitions_fetch_only_their_range() {
+    let Some(ep) = endpoint() else {
+        eprintln!("skipping cloud test: PCAPSQL_S3_TEST_ENDPOINT not set");
+        return;
+    };
+    let cache = tempfile::TempDir::new().expect("tempdir");
+    // Process-wide, but the cloud tests are the only readers of it.
+    std::env::set_var("PCAPSQL_INDEX_CACHE", cache.path());
+
+    let key = "cache/indexed.pcap";
+    let total = 20_000u64;
+    let bytes = big_capture(total as usize, 1000);
+    let size = bytes.len() as u64;
+    upload(&ep, key, bytes).await;
+
+    let first = CloudPacketSource::open(location(&ep, key))
+        .expect("open")
+        .with_index_stride(2048);
+    let ranges = first.partitions(4).expect("partitions");
+    assert!(ranges.len() > 1);
+    // Building the index read the whole object once.
+    assert!(
+        first.bytes_fetched() >= size,
+        "index build must read the object"
+    );
+    assert!(
+        std::fs::read_dir(cache.path()).unwrap().count() == 1,
+        "one cached index file expected"
+    );
+
+    // A fresh source over the same object: the cached index is reused.
+    let second = CloudPacketSource::open(location(&ep, key))
+        .expect("open")
+        .with_index_stride(2048);
+    let ranges2 = second.partitions(4).expect("partitions");
+    assert_eq!(ranges2, ranges);
+    assert!(
+        second.bytes_fetched() < 128 * 1024,
+        "partitioning with a cached index must not download the object (fetched {} bytes)",
+        second.bytes_fetched()
+    );
+
+    // Reading every partition fetches the object about once in total, not once
+    // per partition plus an 8 MiB over-fetch each.
+    let mut all = Vec::new();
+    for r in &ranges2 {
+        let mut reader = second.reader_at(r).expect("reader_at");
+        all.extend(drain(&mut reader));
+    }
+    assert_eq!(all, (1..=total).collect::<Vec<_>>());
+    let fetched = second.bytes_fetched();
+    assert!(
+        fetched < size + 2 * 1024 * 1024,
+        "partition readers over-fetched: {fetched} bytes for a {size}-byte object"
+    );
+
+    // A changed object (different size) invalidates the cached index.
+    upload(&ep, key, big_capture(total as usize + 1, 1000)).await;
+    let third = CloudPacketSource::open(location(&ep, key))
+        .expect("open")
+        .with_index_stride(2048);
+    let ranges3 = third.partitions(4).expect("partitions");
+    assert_ne!(ranges3, ranges2);
+    assert!(
+        third.bytes_fetched() >= size,
+        "stale cache must trigger a rebuild"
+    );
 }

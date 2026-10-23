@@ -72,7 +72,7 @@ impl PacketPosition {
 }
 
 /// Range of packets for partitioning.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PacketRange {
     /// Start position (inclusive). `byte_offset` MUST land on a record boundary.
     pub start: PacketPosition,

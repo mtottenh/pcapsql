@@ -3536,6 +3536,7 @@ dependencies = [
  "datafusion-catalog",
  "datafusion-datasource",
  "dirs",
+ "flate2",
  "futures",
  "hdrhistogram",
  "hex",
@@ -3556,6 +3557,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "zstd",
 ]
 
 [[package]]
