@@ -142,8 +142,9 @@ pub struct Args {
 
     /// Disable memory-mapped I/O and use buffered file reads instead.
     ///
-    /// Local files are memory-mapped by default (with automatic fallback to
-    /// buffered reads when mmap is unavailable, e.g. compressed captures).
+    /// Local files are memory-mapped by default, compressed captures included
+    /// (they are decompressed from the map and parsed as one partition);
+    /// buffered reads are the fallback when mapping the file fails.
     #[arg(long = "no-mmap")]
     pub no_mmap: bool,
 

@@ -18,9 +18,13 @@ fuzz_target!(|data: &[u8]| {
         // Test full PCAP parsing with detected format
         let cursor = Cursor::new(data);
         if let Ok(mut reader) = GenericPcapReader::with_format(cursor, format) {
-            // Read all packets - should never panic
-            while let Ok(Some(_packet)) = reader.next_packet() {
-                // Process packet successfully
+            // Read all packets through the zero-copy callback API - should
+            // never panic; errors (truncated/corrupt records) are expected.
+            loop {
+                match reader.process_packets(64, |_packet| Ok(())) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
             }
         }
     }

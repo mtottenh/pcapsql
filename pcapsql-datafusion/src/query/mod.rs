@@ -108,8 +108,9 @@ pub struct EngineOptions {
     pub target_partitions: Option<usize>,
     /// TLS keylog enabling the decrypted `http2` table.
     pub keylog: Option<Arc<KeyLog>>,
-    /// Memory-map local files; falls back to buffered file I/O when mmap
-    /// fails (e.g. compressed captures).
+    /// Memory-map local files (compressed captures included: they are
+    /// decompressed from the map and parsed as a single partition); falls
+    /// back to buffered file I/O only when mapping the file fails.
     pub mmap: bool,
     /// Boundary-index checkpoint stride override (mainly tests/benchmarks).
     pub index_stride: Option<u64>,
