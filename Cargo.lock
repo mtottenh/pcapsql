@@ -3487,6 +3487,7 @@ dependencies = [
  "nom 7.1.3",
  "object_store 0.11.2",
  "pcap-parser",
+ "pcapsql-testgen",
  "ring",
  "simple-dns",
  "smallvec",

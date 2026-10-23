@@ -214,7 +214,7 @@ impl<R: PacketReader> ProtocolBatchStream<R> {
                     if table_name == "frames" {
                         builder.add_frame_from_raw(
                             packet.frame_number,
-                            packet.timestamp_us,
+                            packet.timestamp_ns,
                             packet.captured_len,
                             packet.original_len,
                             packet.data, // Borrowed slice - copied into Arrow buffer
