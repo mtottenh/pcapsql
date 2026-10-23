@@ -487,4 +487,126 @@ async fn context_queries_plan_but_fail_at_execution() {
         err.to_string().contains("was not prepared for this query"),
         "{err}"
     );
+
+    // Also on a CacheOnTouch engine that has the table cached: the cache is
+    // read into a query's own context, never by the context directly.
+    let engine = fresh(&path, RetentionPolicy::CacheOnTouch).await;
+    engine
+        .query("SELECT count(*) AS c FROM udp")
+        .await
+        .expect("cache udp");
+    let err = engine
+        .context()
+        .sql("SELECT count(*) FROM udp")
+        .await
+        .expect("plan")
+        .collect()
+        .await
+        .expect_err("execution must fail even when the table is cached");
+    assert!(
+        err.to_string().contains("was not prepared for this query"),
+        "{err}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Cancellation: dropping a query's future releases its stream producers.
+// ---------------------------------------------------------------------------
+
+/// Parks the parse thread of the first query at its first progress chunk
+/// (telling the test it is parked) until the test opens the gate.
+struct Gate {
+    parked: tokio::sync::mpsc::UnboundedSender<()>,
+    open: (std::sync::Mutex<bool>, std::sync::Condvar),
+    first_seen: std::sync::atomic::AtomicBool,
+}
+
+impl Gate {
+    fn on_progress(&self, total: u64) {
+        use std::sync::atomic::Ordering;
+        if total != CHUNK || self.first_seen.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let _ = self.parked.send(());
+        let (lock, cv) = &self.open;
+        let mut open = lock.lock().unwrap();
+        while !*open {
+            open = cv.wait(open).unwrap();
+        }
+    }
+
+    fn release(&self) {
+        let (lock, cv) = &self.open;
+        *lock.lock().unwrap() = true;
+        cv.notify_all();
+    }
+}
+
+/// Run a streaming query whose producer parks after its first chunk, cancel
+/// the query, release the producer, and require the next query to complete.
+///
+/// The runtime has a single blocking thread: a producer that did not notice
+/// its consumers were gone would keep it, and the next query's producer could
+/// never start. With `batch_size` below the chunk a batch is already in
+/// flight when the producer parks (the query is cancelled inside `collect`);
+/// above the capture size nothing has been sent yet.
+fn cancel_case(batch_size: usize) {
+    const N: usize = 3000;
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let dir = TempDir::new().unwrap();
+        let path = write_capture(&dir, N);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let gate = Arc::new(Gate {
+            parked: tx,
+            open: Default::default(),
+            first_seen: Default::default(),
+        });
+        let progress: ProgressFn = {
+            let gate = gate.clone();
+            Arc::new(move |total| gate.on_progress(total))
+        };
+        let engine = Arc::new(open(&path, RetentionPolicy::None, batch_size, Some(progress)).await);
+
+        let cancelled = tokio::spawn({
+            let engine = engine.clone();
+            async move { engine.query("SELECT frame_number, dst_port FROM udp").await }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(30), rx.recv())
+            .await
+            .expect("producer parks within 30s")
+            .expect("gate alive");
+        // Let the query reach `collect` (it is already past planning once the
+        // producer runs), then drop its future.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        cancelled.abort();
+        assert!(cancelled.await.unwrap_err().is_cancelled());
+
+        // The producer resumes, must see its consumers gone and exit, freeing
+        // the only blocking thread for the next query.
+        gate.release();
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            engine.query("SELECT count(*) AS c FROM udp"),
+        )
+        .await
+        .expect("a cancelled query's producer must not block the next query")
+        .expect("query ok");
+        assert_eq!(first_i64(&out), N as i64);
+    });
+}
+
+#[test]
+fn cancelled_query_releases_producer_mid_stream() {
+    cancel_case(1000);
+}
+
+#[test]
+fn cancelled_query_releases_producer_before_first_batch() {
+    cancel_case(5000);
 }

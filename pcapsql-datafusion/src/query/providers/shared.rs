@@ -202,7 +202,9 @@ pub enum ServedFrom {
 /// Instrumentation for the most recent parse pass.
 #[derive(Clone, Debug, Default)]
 pub struct ParseStats {
-    /// Parse passes performed for the last query (0 = served from cache).
+    /// Parse passes performed for the query (0 = served from cache or the
+    /// index). Includes the one-time header-only time-range bootstrap that a
+    /// time-UDF query pays on a source without a boundary index.
     pub parse_passes: usize,
     /// Packets read from the source during the pass.
     pub packets_scanned: u64,

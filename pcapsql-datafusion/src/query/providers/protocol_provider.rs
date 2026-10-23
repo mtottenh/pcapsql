@@ -1,18 +1,28 @@
-//! Protocol table provider backed by the engine's per-query parse state.
+//! Protocol table provider resolving its data from the query's own context.
 //!
-//! Every provider holds the same [`EngineTables`] handle. `QueryEngine::query`
-//! installs each query's scoped parse result (or cache entries) before
-//! executing the physical plan, and the provider serves its table from that
-//! state — so a query touching N tables still parses the capture exactly
-//! once, scoped to what the query needs.
+//! `QueryEngine::query` prepares the tables one query needs into a
+//! [`QueryTables`] (materialized batches, or per-partition streaming
+//! receivers) and carries it to the providers as a `SessionConfig` extension
+//! of a per-query `SessionState`. DataFusion hands that state to
+//! [`TableProvider::scan`] while it builds the physical plan — views are
+//! inlined at logical planning, so every protocol scan reaches the provider
+//! as a plain `TableScan` — and the provider serves its table from that
+//! context. Nothing a query prepares is visible to another query, so
+//! independent queries on one engine do not interfere; a query touching N
+//! tables still parses the capture exactly once, scoped to what it needs.
 //!
-//! A table that is not prepared when `scan` runs (EXPLAIN, DDL, or a query
-//! issued directly on the session context) yields a plan-only scan over the
-//! table's full schema, so the plan can be built and displayed without a
-//! parse; executing it fails with a clear message.
+//! Under `RetentionPolicy::CacheOnTouch` materialized tables are also kept in
+//! the engine-global [`TableCache`]; a later query snapshots the entries it
+//! hits into its own `QueryTables`.
+//!
+//! When `scan` runs with no query context at all (EXPLAIN, DDL, or a query
+//! issued directly on the session context) it yields a plan-only scan over
+//! the table's full schema, so the plan can be built and displayed without
+//! a parse; executing it fails with a clear message. A query context that
+//! lacks the table is an error at planning time.
 
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
 
 use super::exchange::BatchReceiver;
@@ -32,9 +42,9 @@ use datafusion::physical_plan::ExecutionPlan;
 /// `execute`).
 pub type PartitionReceivers = Arc<Vec<Mutex<Option<BatchReceiver>>>>;
 
-/// A table prepared for the current query: either materialized batches
-/// (`CacheOnTouch` cache, or the on-demand stream pass) or per-partition streaming receivers
-/// (`RetentionPolicy::None`).
+/// A table prepared for one query: either materialized batches (a cache
+/// entry, the on-demand stream pass, or a materialize-path query) or
+/// per-partition streaming receivers (`RetentionPolicy::None`).
 pub enum PreparedTable {
     Batches(Arc<TableData>),
     Stream {
@@ -53,34 +63,31 @@ impl PreparedTable {
     }
 }
 
-/// The tables prepared for query execution.
+/// The tables prepared for **one** query.
 ///
-/// `current` holds the per-query scoped parse result
-/// (`RetentionPolicy::None`, cleared after each query) or the accumulated
-/// cache (`RetentionPolicy::CacheOnTouch`). Stream-analysis tables (`http2`)
-/// are installed here on demand by the stream pass.
+/// Built by `QueryEngine::query` before planning, carried to the providers as
+/// a `SessionConfig` extension of that query's `SessionState`, and dropped
+/// with the query: its stream receivers go away with it, so a cancelled query
+/// releases its producers by ownership. Immutable once handed to DataFusion.
 #[derive(Default)]
-pub struct EngineTables {
-    current: RwLock<HashMap<String, Arc<PreparedTable>>>,
+pub struct QueryTables {
+    tables: HashMap<String, Arc<PreparedTable>>,
 }
 
-impl EngineTables {
+impl QueryTables {
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Install (or replace) materialized table entries for the current query
-    /// or cache.
-    pub fn install(&self, tables: HashMap<String, Arc<TableData>>) {
-        let mut current = self.current.write().expect("EngineTables lock poisoned");
-        for (name, data) in tables {
-            current.insert(name, Arc::new(PreparedTable::Batches(data)));
-        }
+    /// Serve `name` from materialized batches.
+    pub fn insert_batches(&mut self, name: String, data: Arc<TableData>) {
+        self.tables
+            .insert(name, Arc::new(PreparedTable::Batches(data)));
     }
 
-    /// Install per-partition streaming receivers from an in-flight parse.
-    pub fn install_streams(&self, handle: &mut StreamingHandle) {
-        let mut current = self.current.write().expect("EngineTables lock poisoned");
+    /// Serve the streamed tables of an in-flight parse (takes the handle's
+    /// receivers).
+    pub fn insert_streams(&mut self, handle: &mut StreamingHandle) {
         for (name, receivers) in handle.receivers.drain() {
             let schema = handle
                 .schemas
@@ -91,7 +98,7 @@ impl EngineTables {
                 .into_iter()
                 .map(|rx| Mutex::new(Some(rx)))
                 .collect();
-            current.insert(
+            self.tables.insert(
                 name,
                 Arc::new(PreparedTable::Stream {
                     schema,
@@ -101,65 +108,144 @@ impl EngineTables {
         }
     }
 
-    /// Drop all entries (`RetentionPolicy::None`, post-query).
-    pub fn clear(&self) {
-        self.current
-            .write()
-            .expect("EngineTables lock poisoned")
-            .clear();
+    /// The prepared table, if any.
+    pub fn get(&self, name: &str) -> Option<Arc<PreparedTable>> {
+        self.tables.get(name).cloned()
     }
 
-    /// Fetch a table's prepared data.
-    pub fn get(&self, name: &str) -> Option<Arc<PreparedTable>> {
-        self.current
+    /// Whether the table is prepared for this query.
+    pub fn contains(&self, name: &str) -> bool {
+        self.tables.contains_key(name)
+    }
+}
+
+/// The engine-global, column-aware table cache of
+/// `RetentionPolicy::CacheOnTouch` (always empty under `RetentionPolicy::None`).
+///
+/// Shared by every query on the engine. A query reads the entries it hits
+/// once, into its own [`QueryTables`], so a concurrent re-install can never
+/// remove a column a running query planned against.
+#[derive(Default)]
+pub struct TableCache {
+    entries: RwLock<HashMap<String, Arc<TableData>>>,
+}
+
+impl TableCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Install (or replace) materialized tables.
+    pub fn install(&self, tables: HashMap<String, Arc<TableData>>) {
+        let mut entries = self.entries.write().expect("TableCache lock poisoned");
+        for (name, data) in tables {
+            entries.insert(name, data);
+        }
+    }
+
+    /// The cached table, if any.
+    pub fn get(&self, name: &str) -> Option<Arc<TableData>> {
+        self.entries
             .read()
-            .expect("EngineTables lock poisoned")
+            .expect("TableCache lock poisoned")
             .get(name)
             .cloned()
     }
 
-    /// Whether the table is already prepared.
+    /// Whether the table is cached (with any column set).
     pub fn contains(&self, name: &str) -> bool {
         self.get(name).is_some()
     }
 
-    /// The column names of a prepared table (`None` if not prepared).
-    pub fn cached_columns(&self, name: &str) -> Option<std::collections::HashSet<String>> {
-        self.get(name).map(|prepared| {
-            prepared
-                .schema()
-                .fields()
-                .iter()
-                .map(|f| f.name().clone())
-                .collect()
-        })
+    /// The column names of a cached table (`None` if not cached).
+    pub fn cached_columns(&self, name: &str) -> Option<HashSet<String>> {
+        self.get(name).map(|data| column_names(&data))
     }
 }
 
-/// Table provider for a single protocol table, serving from [`EngineTables`].
+/// The column names of a materialized table.
+pub fn column_names(data: &TableData) -> HashSet<String> {
+    data.schema
+        .fields()
+        .iter()
+        .map(|f| f.name().clone())
+        .collect()
+}
+
+/// Table provider for a single protocol table, serving from the query's
+/// [`QueryTables`].
 pub struct ProtocolTableProvider {
     table_name: String,
     /// The table's full schema (planning surface; data may be a subset).
     schema: SchemaRef,
-    tables: Arc<EngineTables>,
     /// Nominal partition count reported by a plan-only scan (the engine's
     /// parse parallelism).
     default_partitions: usize,
 }
 
 impl ProtocolTableProvider {
-    pub fn new(
-        table_name: String,
-        schema: SchemaRef,
-        tables: Arc<EngineTables>,
-        default_partitions: usize,
-    ) -> Self {
+    pub fn new(table_name: String, schema: SchemaRef, default_partitions: usize) -> Self {
         Self {
             table_name,
             schema,
-            tables,
             default_partitions,
         }
+    }
+
+    /// Scan a table prepared for this query, remapping the projection from
+    /// the full schema to the (possibly column-subset) prepared data.
+    fn scan_prepared(
+        &self,
+        prepared: &PreparedTable,
+        projection: Option<&Vec<usize>>,
+    ) -> DFResult<Arc<dyn ExecutionPlan>> {
+        let data_schema = prepared.schema();
+
+        // `projection` indexes the FULL table schema; the materialized/streamed
+        // data may be a column subset. Remap by field name into that schema.
+        let remapped: Option<Vec<usize>> = match projection {
+            Some(indices) => Some(
+                indices
+                    .iter()
+                    .map(|&i| {
+                        let name = self.schema.field(i).name();
+                        data_schema.index_of(name).map_err(|_| {
+                            DataFusionError::Execution(format!(
+                                "column '{}' of table '{}' was not materialized for this query",
+                                name, self.table_name
+                            ))
+                        })
+                    })
+                    .collect::<DFResult<Vec<usize>>>()?,
+            ),
+            None => {
+                // Full-schema scan: only valid when the data is full-width.
+                if data_schema.fields().len() != self.schema.fields().len() {
+                    return Err(DataFusionError::Execution(format!(
+                        "table '{}' was materialized with a column subset but \
+                         scanned without a projection",
+                        self.table_name
+                    )));
+                }
+                None
+            }
+        };
+
+        let exec = match prepared {
+            PreparedTable::Batches(data) => ProtocolScanExec::batches(
+                self.table_name.clone(),
+                data.schema.clone(),
+                Arc::new(data.partitions.clone()),
+                remapped,
+            ),
+            PreparedTable::Stream { schema, receivers } => ProtocolScanExec::streaming(
+                self.table_name.clone(),
+                schema.clone(),
+                receivers.clone(),
+                remapped,
+            ),
+        };
+        Ok(Arc::new(exec))
     }
 }
 
@@ -199,14 +285,17 @@ impl TableProvider for ProtocolTableProvider {
 
     async fn scan(
         &self,
-        _state: &dyn Session,
+        state: &dyn Session,
         projection: Option<&Vec<usize>>,
         _filters: &[Expr],
         _limit: Option<usize>,
     ) -> DFResult<Arc<dyn ExecutionPlan>> {
-        let Some(prepared) = self.tables.get(&self.table_name) else {
-            // Not prepared: the statement is plan-only (EXPLAIN) or bypassed
-            // `QueryEngine::query`. Plan over the full schema; fail at execute.
+        // The query's prepared tables travel on the session config; the
+        // physical planner passes the per-query state straight into `scan`.
+        let Some(tables) = state.config().get_extension::<QueryTables>() else {
+            // No query context: the statement is plan-only (EXPLAIN) or
+            // bypassed `QueryEngine::query`. Plan over the full schema; fail
+            // at execute.
             return Ok(Arc::new(ProtocolScanExec::plan_only(
                 self.table_name.clone(),
                 self.schema.clone(),
@@ -214,53 +303,16 @@ impl TableProvider for ProtocolTableProvider {
                 self.default_partitions,
             )));
         };
-        let data_schema = prepared.schema();
-
-        // `projection` indexes the FULL table schema; the materialized/streamed
-        // data may be a column subset. Remap by field name into that schema.
-        let remapped: Option<Vec<usize>> = match projection {
-            Some(indices) => Some(
-                indices
-                    .iter()
-                    .map(|&i| {
-                        let name = self.schema.field(i).name();
-                        data_schema.index_of(name).map_err(|_| {
-                            DataFusionError::Execution(format!(
-                                "column '{}' of table '{}' was not materialized for this query",
-                                name, self.table_name
-                            ))
-                        })
-                    })
-                    .collect::<DFResult<Vec<usize>>>()?,
-            ),
-            None => {
-                // Full-schema scan: only valid when the data is full-width.
-                if data_schema.fields().len() != self.schema.fields().len() {
-                    return Err(DataFusionError::Execution(format!(
-                        "table '{}' was materialized with a column subset but \
-                         scanned without a projection",
-                        self.table_name
-                    )));
-                }
-                None
-            }
-        };
-
-        let exec = match prepared.as_ref() {
-            PreparedTable::Batches(data) => ProtocolScanExec::batches(
-                self.table_name.clone(),
-                data.schema.clone(),
-                Arc::new(data.partitions.clone()),
-                remapped,
-            ),
-            PreparedTable::Stream { schema, receivers } => ProtocolScanExec::streaming(
-                self.table_name.clone(),
-                schema.clone(),
-                receivers.clone(),
-                remapped,
-            ),
-        };
-        Ok(Arc::new(exec))
+        // A query context that lacks this table means the engine's harvest
+        // missed a scan: fail at planning, never serve a plan-only exec.
+        let prepared = tables.get(&self.table_name).ok_or_else(|| {
+            DataFusionError::Execution(format!(
+                "table '{}' was not prepared for this query; \
+                 run queries through QueryEngine::query",
+                self.table_name
+            ))
+        })?;
+        self.scan_prepared(&prepared, projection)
     }
 }
 

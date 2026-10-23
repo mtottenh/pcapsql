@@ -45,13 +45,15 @@ use std::sync::{Arc, RwLock};
 use arrow::array::RecordBatch;
 use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion::config::ConfigOptions;
+use datafusion::execution::session_state::SessionState;
 use datafusion::logical_expr::{DdlStatement, Expr, LogicalPlan, Statement};
 use datafusion::prelude::*;
 use tokio::task::JoinHandle;
 
 use crate::error::{Error, QueryError};
 use crate::query::providers::{
-    run_shared_parse, EngineTables, PartitionStat, SharedParseState, StreamingHandle, TableData,
+    run_shared_parse, PartitionStat, QueryTables, SharedParseState, StreamingHandle, TableCache,
+    TableData,
 };
 use pcapsql_core::{
     default_registry, FilePacketSource, KeyLog, MmapPacketSource, ProtocolRegistry,
@@ -178,8 +180,10 @@ impl Default for EngineOptions {
 pub struct QueryEngine {
     ctx: SessionContext,
     registry: Arc<ProtocolRegistry>,
-    /// Tables materialized for the current query (or cached, per retention).
-    tables: Arc<EngineTables>,
+    /// `CacheOnTouch`'s column-aware table cache (empty under
+    /// `RetentionPolicy::None`). Each query snapshots the entries it hits
+    /// into its own [`QueryTables`].
+    cache: Arc<TableCache>,
     /// Capture time range, widened by every parse pass (drives time UDFs).
     time_range: Arc<CaptureTimeRange>,
     retention: RetentionPolicy,
@@ -190,9 +194,8 @@ pub struct QueryEngine {
     last_stats: RwLock<ParseStats>,
     /// Table names this engine registered (the harvest universe).
     known_tables: HashSet<String>,
-    /// Serializes [`Self::query`]: prepared tables are engine-global until the
-    /// query-scoped context lands (`docs/query-context-design.md`), so only one
-    /// query may be between "tables prepared" and "plan executed" at a time.
+    /// Serializes [`Self::query`] (`docs/query-context-design.md`); lifted by
+    /// the follow-up that makes concurrent queries a supported contract.
     query_lock: tokio::sync::Mutex<()>,
 }
 
@@ -301,6 +304,19 @@ struct TableNeeds {
     scan_count: usize,
 }
 
+/// A query's prepared tables plus what is still in flight.
+struct PreparedQuery {
+    /// What the query's providers serve; handed to DataFusion on the query's
+    /// session state and dropped with the query.
+    tables: Arc<QueryTables>,
+    /// Streaming producers to await after execution (fold stats, surface
+    /// parse errors).
+    producers: Vec<JoinHandle<Result<PartitionStat, Error>>>,
+    /// Statistics known before execution (materialize path, cache hit, fast
+    /// path); streaming folds the producers' numbers in afterwards.
+    stats: ParseStats,
+}
+
 /// Walk an optimized plan and collect per-table needs for our tables.
 fn harvest_table_needs(
     plan: &LogicalPlan,
@@ -397,17 +413,6 @@ fn classify_statement(
 ///
 /// `cached` is the cached entry's column names (`None` = not cached).
 /// `needed` is the query's projected columns (`None` = all columns).
-/// Clears the engine's prepared-table entries when dropped: installed stream
-/// receivers must not outlive the query that installed them, including a
-/// query whose future is dropped mid-way.
-struct ClearStreamsOnDrop<'a>(&'a EngineTables);
-
-impl Drop for ClearStreamsOnDrop<'_> {
-    fn drop(&mut self) {
-        self.0.clear();
-    }
-}
-
 fn cache_covers(
     cached: Option<&std::collections::HashSet<String>>,
     needed: &Option<HashSet<String>>,
@@ -519,8 +524,9 @@ impl QueryEngine {
         let time_range = Arc::new(CaptureTimeRange::new());
         udf::register_time_udfs(&ctx, time_range.clone())?;
 
-        // One provider per table, all serving from the same engine state.
-        let engine_tables = Arc::new(EngineTables::new());
+        // One provider per table; each query hands them its own prepared
+        // tables through the session state it is planned with.
+        let cache = Arc::new(TableCache::new());
         let mut known_tables = HashSet::new();
         for table_name in tables::all_table_names() {
             let schema = Arc::new(tables::get_table_schema(table_name).ok_or_else(|| {
@@ -528,12 +534,8 @@ impl QueryEngine {
                     "Unknown table: {table_name}"
                 )))
             })?);
-            let provider = providers::ProtocolTableProvider::new(
-                table_name.to_string(),
-                schema,
-                engine_tables.clone(),
-                parallelism,
-            );
+            let provider =
+                providers::ProtocolTableProvider::new(table_name.to_string(), schema, parallelism);
             ctx.register_table(table_name, Arc::new(provider))
                 .map_err(|e| Error::Query(QueryError::Execution(e.to_string())))?;
             known_tables.insert(table_name.to_string());
@@ -553,7 +555,7 @@ impl QueryEngine {
         Ok(Self {
             ctx,
             registry,
-            tables: engine_tables,
+            cache,
             time_range,
             retention: opts.retention,
             parse_source,
@@ -608,11 +610,13 @@ impl QueryEngine {
 
     /// Execute a SQL query and return results.
     ///
-    /// Plans first, harvests the optimized plan's table needs, runs one
-    /// scoped parse pass covering them (subject to the retention policy's
-    /// cache), then executes. This is THE query path: queries issued
-    /// directly against [`Self::context`] bypass the parse and fail at
-    /// execution with "table was not prepared for this query".
+    /// Plans first, harvests the optimized plan's table needs, prepares them
+    /// for this query (one scoped parse pass, or the retention policy's
+    /// cache) into a [`QueryTables`] carried on the query's own session
+    /// state, then executes exactly the plan that was harvested. This is THE
+    /// query path: queries issued directly against [`Self::context`] bypass
+    /// the parse and fail at execution with "table was not prepared for this
+    /// query".
     ///
     /// Statements that never poll a scan parse nothing: `EXPLAIN` is planned
     /// over unprepared (plan-only) tables and displayed; DDL and session
@@ -625,13 +629,14 @@ impl QueryEngine {
     /// documentation): a concurrent caller waits for the running query to
     /// finish. Dropping the returned future releases its turn.
     pub async fn query(&self, sql: &str) -> Result<Vec<RecordBatch>, Error> {
-        // One query at a time per engine: the prepared-table state below is
-        // engine-global and resolved by the providers at physical-planning
-        // time, so an interleaved query would clear or replace it (#123).
-        // The guard is held until this future completes or is dropped.
+        // One query at a time per engine while the query-scoped context is
+        // validated (#123). The guard is held until this future completes or
+        // is dropped.
         let _serialized = self.query_lock.lock().await;
 
-        let state = self.ctx.state();
+        // A per-query copy of the shared session state: the query's prepared
+        // tables ride on its config as an extension.
+        let mut state = self.ctx.state();
         let plan = state
             .create_logical_plan(sql)
             .await
@@ -661,9 +666,10 @@ impl QueryEngine {
             .optimize(&plan)
             .map_err(|e| Error::Query(QueryError::from(e)))?;
         if kind == StatementKind::PlanOnly {
-            // EXPLAIN: build and display the plan over unprepared tables (the
-            // providers return plan-only scans); no parse, no execution.
-            let batches = self.collect_on_context(optimized).await?;
+            // EXPLAIN: build and display the plan on a state without prepared
+            // tables (the providers return plan-only scans); no parse, no
+            // execution.
+            let batches = Self::execute_plan(&state, &optimized).await?;
             // The only parse a plan-only statement can trigger is the
             // time-range bootstrap; report it rather than claim zero.
             *self.last_stats.write().expect("stats lock poisoned") = ParseStats {
@@ -673,152 +679,35 @@ impl QueryEngine {
             return Ok(batches);
         }
 
-        // One-shot engines keep nothing between queries. Clearing *before*
-        // preparing (not only after executing) also disposes of entries a
-        // cancelled query left behind: a dropped `query()` future never reaches
-        // the post-execution clear, and a stale stream entry would otherwise
-        // be treated as "already prepared" by the next query.
-        if self.retention == RetentionPolicy::None {
-            self.tables.clear();
-        }
+        let needs = harvest_table_needs(&optimized, &self.known_tables)?;
+        let PreparedQuery {
+            tables: prepared,
+            producers,
+            mut stats,
+        } = self.prepare(needs)?;
 
-        let mut needs = harvest_table_needs(&optimized, &self.known_tables)?;
+        // Hand this query's tables to its providers and execute. The result
+        // is captured, not returned early: the producers below must always be
+        // joined (fail closed on a parse error).
+        state.config_mut().set_extension(prepared.clone());
+        let result = Self::execute_plan(&state, &optimized).await;
 
-        // Stream-analysis tables (TCP reassembly → TLS → HTTP) are built by a
-        // subscriber of the same packet pass, not by per-packet builders.
-        // They are complete only at end of capture and need the whole capture
-        // in order, so a query touching one takes the single-partition
-        // materialize path. Already prepared (cached) ones need nothing.
-        let stream_needed: HashSet<String> = needs
-            .keys()
-            .filter(|t| tables::is_stream_table(t) && !self.tables.contains(t))
-            .cloned()
-            .collect();
-        needs.retain(|t, _| !tables::is_stream_table(t));
-
-        // Fast path: a pure `count(*) FROM frames` (frames only, no columns,
-        // no filter, no limit, single scan) is answered from the boundary
-        // index's frame count — a header-only scan (persisted in a sidecar),
-        // no packet parse. Falls through to a normal parse when the count
-        // isn't cheaply available (compressed/non-seekable) or frames is
-        // already prepared.
-        let mut fast_frame_count: Option<u64> = None;
-        let is_count_only_frames = needs.len() == 1
-            && needs.get("frames").is_some_and(|n| {
-                n.scan_count == 1
-                    && n.filters.is_empty()
-                    && n.fetch.is_none()
-                    && matches!(&n.columns, Some(c) if c.is_empty())
-            });
-        if is_count_only_frames && !self.tables.contains("frames") {
-            if let Some(n) = self.parse_source.frame_count() {
-                let schema = std::sync::Arc::new(arrow::datatypes::Schema::empty());
-                let options =
-                    arrow::array::RecordBatchOptions::new().with_row_count(Some(n as usize));
-                let batch = RecordBatch::try_new_with_options(schema.clone(), vec![], &options)
-                    .map_err(|e| Error::Query(QueryError::Arrow(e.to_string())))?;
-                let mut tables = HashMap::new();
-                tables.insert(
-                    "frames".to_string(),
-                    std::sync::Arc::new(TableData {
-                        schema,
-                        partitions: vec![vec![batch]],
-                    }),
-                );
-                self.tables.install(tables);
-                needs.clear();
-                fast_frame_count = Some(n);
-            }
-        }
-
-        // A table scanned twice in one plan (self-join, IN-subquery on the same
-        // table, a view joined with one of its members) needs two consumers,
-        // but a stream can be consumed once. Such queries take the materialize
-        // path for this one query — still a single parse pass.
-        let any_multi_scan = needs.values().any(|n| n.scan_count > 1);
-        let mut subscription = self.build_subscription(needs);
-        subscription.stream_tables = stream_needed;
-
-        // CacheOnTouch materializes (so the cache can serve any later query);
-        // RetentionPolicy::None streams — producers hand batches to DataFusion
-        // as they form, so memory stays flat while consumers keep pace — and
-        // the producer stats are folded after execution. An empty
-        // subscription means every referenced table is already cached/prepared —
-        // nothing to parse.
-        let streaming = self.retention == RetentionPolicy::None
-            && !subscription.tables.is_empty()
-            && subscription.stream_tables.is_empty()
-            && !any_multi_scan;
-
-        let mut producers: Vec<JoinHandle<Result<PartitionStat, Error>>> = Vec::new();
-        let mut stream_guard: Option<ClearStreamsOnDrop<'_>> = None;
-        if subscription.is_empty() {
-            let mut stats = ParseStats {
-                served_from: ServedFrom::Cache,
-                ..Default::default()
-            };
-            if let Some(n) = fast_frame_count {
-                stats.served_from = ServedFrom::Index;
-                stats.partitions = 1;
-                stats.complete_scan = true;
-                stats.rows_built.insert("frames".to_string(), n as usize);
-            }
-            *self.last_stats.write().expect("stats lock poisoned") = stats;
-        } else if streaming {
-            let mut handle = self.parse_source.stream(&subscription)?;
-            self.tables.install_streams(&mut handle);
-            // If this future is dropped before execution takes the receivers
-            // (cancelled while planning), the installed stream entries must
-            // go away, or the producers wait on them forever.
-            stream_guard = Some(ClearStreamsOnDrop(&self.tables));
-            producers = std::mem::take(&mut handle.producers);
-            *self.last_stats.write().expect("stats lock poisoned") = ParseStats {
-                parse_passes: 1,
-                partitions: handle.num_partitions,
-                ..Default::default()
-            };
-        } else {
-            let (tables, stats) = self.parse_source.materialize(&subscription)?.into_tables();
-            if stats.packets_scanned > 0 {
-                self.time_range.record(stats.start_ts_us, stats.end_ts_us);
-                // Timestamps are observed for every scanned packet, before
-                // any predicate, so a complete scan fixes the whole range.
-                if stats.complete_scan {
-                    self.time_range.mark_complete();
-                }
-            }
-            self.tables.install(tables);
-            *self.last_stats.write().expect("stats lock poisoned") = stats;
-        }
-
-        let result = async {
-            let df = self
-                .ctx
-                .execute_logical_plan(optimized)
-                .await
-                .map_err(|e| Error::Query(QueryError::from(e)))?;
-            let plan = df
-                .create_physical_plan()
-                .await
-                .map_err(|e| Error::Query(QueryError::from(e)))?;
-            // Keep capture order for un-ORDERed queries over a partitioned parse.
-            let plan = merge_ordered_partitions(plan);
-            datafusion::physical_plan::collect(plan, self.ctx.task_ctx())
-                .await
-                .map_err(|e| Error::Query(QueryError::from(e)))
-        }
-        .await;
+        // Every holder of the query's tables goes away before the producers
+        // are joined: the physical plan and the TaskContext were owned by
+        // `execute_plan`; `state` carries the extension on its config;
+        // `prepared` is ours. Receivers of partitions the plan never executed
+        // (a LIMIT satisfied early) drop here, so a producer waiting on them
+        // sees its consumers gone rather than waiting forever. Dropping this
+        // future anywhere above has the same effect.
+        drop(state);
+        drop(prepared);
 
         // Streaming: collect() drove the producers to completion. Await them
         // to fold statistics and surface any parse error (fail closed).
         let mut producer_error = None;
         if !producers.is_empty() {
-            // Drop receivers of partitions the plan never executed (a LIMIT
-            // satisfied early): a producer waiting on them must see its
-            // consumers gone rather than wait forever.
-            drop(stream_guard.take());
             let outcomes = futures::future::join_all(producers).await;
-            let mut stats = ParseStats {
+            stats = ParseStats {
                 parse_passes: 1,
                 partitions: outcomes.len(),
                 complete_scan: true,
@@ -864,17 +753,168 @@ impl QueryEngine {
                     self.time_range.mark_complete();
                 }
             }
-            *self.last_stats.write().expect("stats lock poisoned") = stats;
         }
 
-        if self.retention == RetentionPolicy::None {
-            self.tables.clear();
-        }
+        // A time-range bootstrap pass (source without a boundary index) is
+        // part of what this query cost; fold it in rather than hide it.
+        stats.parse_passes += bootstrap.parse_passes;
+        stats.packets_scanned += bootstrap.packets_scanned;
+
+        *self.last_stats.write().expect("stats lock poisoned") = stats;
 
         match producer_error {
             Some(e) => Err(e),
             None => result,
         }
+    }
+
+    /// Plan an already optimized logical plan and run it to completion on
+    /// `state`, whose config carries the query's [`QueryTables`] (or none,
+    /// for a plan-only statement).
+    ///
+    /// The physical planner is called directly: `SessionState::create_physical_plan`
+    /// would optimize again, and the plan executed must be exactly the one the
+    /// table needs were harvested from. The physical plan and the
+    /// `TaskContext` are owned here, so nothing of the query's context
+    /// outlives the call.
+    async fn execute_plan(
+        state: &SessionState,
+        optimized: &LogicalPlan,
+    ) -> Result<Vec<RecordBatch>, Error> {
+        let plan = state
+            .query_planner()
+            .create_physical_plan(optimized, state)
+            .await
+            .map_err(|e| Error::Query(QueryError::from(e)))?;
+        // Keep capture order for un-ORDERed queries over a partitioned parse.
+        let plan = merge_ordered_partitions(plan);
+        datafusion::physical_plan::collect(plan, state.task_ctx())
+            .await
+            .map_err(|e| Error::Query(QueryError::from(e)))
+    }
+
+    /// Prepare the tables a query needs into its own [`QueryTables`]: cache
+    /// hits are snapshotted, the `count(*) FROM frames` fast path is answered
+    /// from the boundary index, and whatever remains is parsed in one scoped
+    /// pass — materialized (`CacheOnTouch`, which also fills the cache; or a
+    /// query that needs two consumers of one table / a stream table) or
+    /// streamed to the plan (`RetentionPolicy::None`).
+    fn prepare(&self, mut needs: HashMap<String, TableNeeds>) -> Result<PreparedQuery, Error> {
+        let mut tables = QueryTables::new();
+        // Until something is parsed, whatever the query gets comes from the
+        // cache (or the index, below).
+        let mut stats = ParseStats {
+            served_from: ServedFrom::Cache,
+            ..Default::default()
+        };
+
+        // Stream-analysis tables (TCP reassembly → TLS → HTTP) are built by a
+        // subscriber of the same packet pass, not by per-packet builders.
+        // They are complete only at end of capture and need the whole capture
+        // in order, so a query touching one takes the single-partition
+        // materialize path. Cached ones are hits like any table.
+        let mut stream_needed: HashSet<String> = HashSet::new();
+        for name in needs.keys().filter(|t| tables::is_stream_table(t)) {
+            match self.cache.get(name) {
+                Some(data) => tables.insert_batches(name.clone(), data),
+                None => {
+                    stream_needed.insert(name.clone());
+                }
+            }
+        }
+        needs.retain(|t, _| !tables::is_stream_table(t));
+
+        // Fast path: a pure `count(*) FROM frames` (frames only, no columns,
+        // no filter, no limit, single scan) is answered from the boundary
+        // index's frame count — a header-only scan (persisted in a sidecar),
+        // no packet parse. Falls through to a normal parse when the count
+        // isn't cheaply available (compressed/non-seekable) or frames is
+        // cached (the cache serves it).
+        let is_count_only_frames = needs.len() == 1
+            && needs.get("frames").is_some_and(|n| {
+                n.scan_count == 1
+                    && n.filters.is_empty()
+                    && n.fetch.is_none()
+                    && matches!(&n.columns, Some(c) if c.is_empty())
+            });
+        if is_count_only_frames && !self.cache.contains("frames") {
+            if let Some(n) = self.parse_source.frame_count() {
+                let schema = Arc::new(arrow::datatypes::Schema::empty());
+                let options =
+                    arrow::array::RecordBatchOptions::new().with_row_count(Some(n as usize));
+                let batch = RecordBatch::try_new_with_options(schema.clone(), vec![], &options)
+                    .map_err(|e| Error::Query(QueryError::Arrow(e.to_string())))?;
+                tables.insert_batches(
+                    "frames".to_string(),
+                    Arc::new(TableData {
+                        schema,
+                        partitions: vec![vec![batch]],
+                    }),
+                );
+                needs.clear();
+                stats.served_from = ServedFrom::Index;
+                stats.partitions = 1;
+                stats.complete_scan = true;
+                stats.rows_built.insert("frames".to_string(), n as usize);
+            }
+        }
+
+        // A table scanned twice in one plan (self-join, IN-subquery on the same
+        // table, a view joined with one of its members) needs two consumers,
+        // but a stream can be consumed once. Such queries take the materialize
+        // path for this one query — still a single parse pass.
+        let any_multi_scan = needs.values().any(|n| n.scan_count > 1);
+        let (mut subscription, hits) = self.build_subscription(needs);
+        for (name, data) in hits {
+            tables.insert_batches(name, data);
+        }
+        subscription.stream_tables = stream_needed;
+
+        // CacheOnTouch materializes (so the cache can serve any later query);
+        // RetentionPolicy::None streams — producers hand batches to DataFusion
+        // as they form, so memory stays flat while consumers keep pace — and
+        // the producer stats are folded after execution. An empty
+        // subscription means every referenced table is served from the cache
+        // or the fast path — nothing to parse.
+        let streaming = self.retention == RetentionPolicy::None
+            && !subscription.tables.is_empty()
+            && subscription.stream_tables.is_empty()
+            && !any_multi_scan;
+
+        let mut producers: Vec<JoinHandle<Result<PartitionStat, Error>>> = Vec::new();
+        if subscription.is_empty() {
+            // Nothing to parse.
+        } else if streaming {
+            let mut handle = self.parse_source.stream(&subscription)?;
+            tables.insert_streams(&mut handle);
+            producers = std::mem::take(&mut handle.producers);
+            stats.served_from = ServedFrom::Parse;
+            stats.parse_passes = 1;
+            stats.partitions = handle.num_partitions;
+        } else {
+            let (parsed, pass) = self.parse_source.materialize(&subscription)?.into_tables();
+            if pass.packets_scanned > 0 {
+                self.time_range.record(pass.start_ts_us, pass.end_ts_us);
+                // Timestamps are observed for every scanned packet, before
+                // any predicate, so a complete scan fixes the whole range.
+                if pass.complete_scan {
+                    self.time_range.mark_complete();
+                }
+            }
+            if self.retention == RetentionPolicy::CacheOnTouch {
+                self.cache.install(parsed.clone());
+            }
+            for (name, data) in parsed {
+                tables.insert_batches(name, data);
+            }
+            stats = pass;
+        }
+
+        Ok(PreparedQuery {
+            tables: Arc::new(tables),
+            producers,
+            stats,
+        })
     }
 
     /// Execute a plan on the shared context without preparing any table
@@ -891,8 +931,16 @@ impl QueryEngine {
 
     /// Build the parse subscription for a query, honoring the retention policy
     /// and the pushdown/retention matrix (`docs/query-scoped-parse-migration.md`).
-    fn build_subscription(&self, needs: HashMap<String, TableNeeds>) -> ParseSubscription {
+    ///
+    /// Also returns the cache entries that serve the query as they are (the
+    /// hits), read once here so that a concurrent re-install cannot change
+    /// what this query planned against.
+    fn build_subscription(
+        &self,
+        needs: HashMap<String, TableNeeds>,
+    ) -> (ParseSubscription, HashMap<String, Arc<TableData>>) {
         let mut subscription = ParseSubscription::default();
+        let mut hits = HashMap::new();
         match self.retention {
             RetentionPolicy::CacheOnTouch => {
                 // Column-aware cache: cache exactly the columns a query touches
@@ -902,14 +950,18 @@ impl QueryEngine {
                 // heavy/rarely-queried columns (notably frames.raw_data) and
                 // unused wide-table columns out of the cache until selected.
                 for (name, table_needs) in needs {
-                    let cached = self.tables.cached_columns(&name);
+                    let cached = self.cache.get(&name);
+                    let cached_columns = cached.as_deref().map(providers::column_names);
                     let needed = &table_needs.columns;
-                    if cache_covers(cached.as_ref(), needed, &name) {
-                        continue; // subset already cached
+                    if cache_covers(cached_columns.as_ref(), needed, &name) {
+                        if let Some(data) = cached {
+                            hits.insert(name, data); // subset already cached
+                        }
+                        continue;
                     }
                     // Subscribe the union of cached and needed columns so the
                     // rebuilt entry is a superset (no churn / loss).
-                    let columns = column_union(cached, needed);
+                    let columns = column_union(cached_columns, needed);
                     subscription.tables.insert(
                         name,
                         TableSubscription {
@@ -922,9 +974,6 @@ impl QueryEngine {
             }
             RetentionPolicy::None => {
                 for (name, table_needs) in needs {
-                    if self.tables.contains(&name) {
-                        continue; // already prepared (stream pass above) or cached
-                    }
                     let multi_scan = table_needs.scan_count > 1;
                     let predicate = if multi_scan || name == "frames" {
                         None
@@ -946,7 +995,7 @@ impl QueryEngine {
                 }
             }
         }
-        subscription
+        (subscription, hits)
     }
 
     /// Instrumentation for the most recent query: parse passes (0 when fully
