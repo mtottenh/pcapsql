@@ -129,6 +129,9 @@ pub use ntp::{mode as ntp_mode, stratum as ntp_stratum};
 pub use ospf::{lsa_type as ospf_lsa_type, packet_type as ospf_packet_type};
 pub use tls::{record_type as tls_record_type, version as tls_version};
 
+// IPv4 header field constants
+pub use ipv4::{dscp, ecn};
+
 /// Create a registry with all built-in protocol parsers.
 pub fn default_registry() -> ProtocolRegistry {
     let mut registry = ProtocolRegistry::new();

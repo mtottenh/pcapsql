@@ -10,7 +10,7 @@ use datafusion::common::Result as DFResult;
 use datafusion::logical_expr::{
     ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
 };
-use pcapsql_core::protocol::ethertype;
+use pcapsql_core::protocol::{dscp, ecn, ethertype};
 
 /// Create the `ip_proto_name()` UDF that converts IP protocol number to name.
 ///
@@ -32,6 +32,28 @@ pub fn create_ip_proto_name_udf() -> ScalarUDF {
 /// ```
 pub fn create_ethertype_name_udf() -> ScalarUDF {
     ScalarUDF::new_from_impl(EthertypeNameUdf::new())
+}
+
+/// Create the `dscp_name()` UDF that converts DSCP value to name.
+///
+/// # Example
+/// ```sql
+/// SELECT dscp_name(dscp) FROM ipv4;
+/// -- Returns: "EF", "AF11", "CS0", "BE", etc.
+/// ```
+pub fn create_dscp_name_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(DscpNameUdf::new())
+}
+
+/// Create the `ecn_name()` UDF that converts ECN value to name.
+///
+/// # Example
+/// ```sql
+/// SELECT ecn_name(ecn) FROM ipv4;
+/// -- Returns: "Not-ECT", "ECT(1)", "ECT(0)", "CE"
+/// ```
+pub fn create_ecn_name_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(EcnNameUdf::new())
 }
 
 // ============================================================================
@@ -345,6 +367,120 @@ fn ethertype_to_name(etype: u16) -> String {
     }
 }
 
+// ============================================================================
+// dscp_name() UDF Implementation
+// ============================================================================
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct DscpNameUdf {
+    signature: Signature,
+}
+
+impl DscpNameUdf {
+    fn new() -> Self {
+        Self {
+            signature: Signature::exact(vec![DataType::UInt8], Volatility::Immutable),
+        }
+    }
+}
+
+impl ScalarUDFImpl for DscpNameUdf {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        "dscp_name"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::Utf8)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
+        let dscp_values = args[0]
+            .as_any()
+            .downcast_ref::<UInt8Array>()
+            .expect("dscp_name: expected uint8 array");
+
+        let result: StringArray = dscp_values
+            .iter()
+            .map(|opt| opt.map(dscp_to_name))
+            .collect();
+
+        Ok(ColumnarValue::Array(Arc::new(result)))
+    }
+}
+
+/// Convert DSCP (Differentiated Services Code Point) value to name per RFC 2474/4594.
+fn dscp_to_name(value: u8) -> String {
+    // Use the to_name function from pcapsql-core, which returns a static str for known values
+    let name = dscp::to_name(value);
+    if name.is_empty() {
+        // Unknown DSCP value - format with numeric value
+        format!("DSCP{}", value & 0x3F)
+    } else {
+        name.to_string()
+    }
+}
+
+// ============================================================================
+// ecn_name() UDF Implementation
+// ============================================================================
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct EcnNameUdf {
+    signature: Signature,
+}
+
+impl EcnNameUdf {
+    fn new() -> Self {
+        Self {
+            signature: Signature::exact(vec![DataType::UInt8], Volatility::Immutable),
+        }
+    }
+}
+
+impl ScalarUDFImpl for EcnNameUdf {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        "ecn_name"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::Utf8)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
+        let ecn_values = args[0]
+            .as_any()
+            .downcast_ref::<UInt8Array>()
+            .expect("ecn_name: expected uint8 array");
+
+        let result: StringArray = ecn_values.iter().map(|opt| opt.map(ecn_to_name)).collect();
+
+        Ok(ColumnarValue::Array(Arc::new(result)))
+    }
+}
+
+/// Convert ECN (Explicit Congestion Notification) value to name per RFC 3168.
+fn ecn_to_name(value: u8) -> String {
+    ecn::to_name(value).to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -397,5 +533,58 @@ mod tests {
         assert_eq!(ethertype_to_name(0x86DD), "IPv6");
         assert_eq!(ethertype_to_name(0x0806), "ARP");
         assert_eq!(ethertype_to_name(0x8100), "VLAN");
+    }
+
+    #[test]
+    fn test_dscp_class_selector() {
+        // Class Selector values using constants from pcapsql-core
+        assert_eq!(dscp_to_name(dscp::CS0), "CS0/BE");
+        assert_eq!(dscp_to_name(dscp::CS1), "CS1");
+        assert_eq!(dscp_to_name(dscp::CS2), "CS2");
+        assert_eq!(dscp_to_name(dscp::CS3), "CS3");
+        assert_eq!(dscp_to_name(dscp::CS4), "CS4");
+        assert_eq!(dscp_to_name(dscp::CS5), "CS5");
+        assert_eq!(dscp_to_name(dscp::CS6), "CS6");
+        assert_eq!(dscp_to_name(dscp::CS7), "CS7");
+    }
+
+    #[test]
+    fn test_dscp_assured_forwarding() {
+        // Assured Forwarding values using constants from pcapsql-core
+        assert_eq!(dscp_to_name(dscp::AF11), "AF11");
+        assert_eq!(dscp_to_name(dscp::AF12), "AF12");
+        assert_eq!(dscp_to_name(dscp::AF13), "AF13");
+        assert_eq!(dscp_to_name(dscp::AF21), "AF21");
+        assert_eq!(dscp_to_name(dscp::AF22), "AF22");
+        assert_eq!(dscp_to_name(dscp::AF23), "AF23");
+        assert_eq!(dscp_to_name(dscp::AF31), "AF31");
+        assert_eq!(dscp_to_name(dscp::AF32), "AF32");
+        assert_eq!(dscp_to_name(dscp::AF33), "AF33");
+        assert_eq!(dscp_to_name(dscp::AF41), "AF41");
+        assert_eq!(dscp_to_name(dscp::AF42), "AF42");
+        assert_eq!(dscp_to_name(dscp::AF43), "AF43");
+    }
+
+    #[test]
+    fn test_dscp_special_values() {
+        // Special PHBs using constants from pcapsql-core
+        assert_eq!(dscp_to_name(dscp::EF), "EF");
+        assert_eq!(dscp_to_name(dscp::VA), "VA");
+        assert_eq!(dscp_to_name(dscp::LE), "LE");
+        // Unknown value
+        assert_eq!(dscp_to_name(2), "DSCP2");
+        assert_eq!(dscp_to_name(63), "DSCP63");
+    }
+
+    #[test]
+    fn test_ecn_values() {
+        // ECN values using constants from pcapsql-core
+        assert_eq!(ecn_to_name(ecn::NOT_ECT), "Not-ECT");
+        assert_eq!(ecn_to_name(ecn::ECT1), "ECT(1)");
+        assert_eq!(ecn_to_name(ecn::ECT0), "ECT(0)");
+        assert_eq!(ecn_to_name(ecn::CE), "CE");
+        // Values should be masked to 2 bits
+        assert_eq!(ecn_to_name(4), "Not-ECT"); // 100 & 11 = 00
+        assert_eq!(ecn_to_name(7), "CE"); // 111 & 11 = 11
     }
 }

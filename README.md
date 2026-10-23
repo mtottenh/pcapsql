@@ -191,6 +191,8 @@ pcapsql provides specialized functions for network analysis. Run `pcapsql --list
 | `hdr_histogram(value)` | Build histogram (aggregate function) |
 | `hdr_percentile(hist, 0.99)` | Extract percentile from histogram |
 | `hdr_count/min/max/mean(hist)` | Extract statistics from histogram |
+| `hdr_buckets(hist)` | Distribution as log-scale bucket rows (explode with `UNNEST`) |
+| `hdr_ascii(hist)` | Render ASCII histogram with cumulative % (CDF) |
 
 ### Utility Functions
 

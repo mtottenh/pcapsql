@@ -22,6 +22,13 @@
 //! - `hdr_mean(hist)` - Mean of recorded values
 //! - `hdr_stdev(hist)` - Standard deviation
 //!
+//! ## Distribution Functions
+//!
+//! - `hdr_buckets(hist)` - Log-scale bucket rows as `List<Struct<lo,hi,count>>`,
+//!   to be exploded with `UNNEST` for machine-readable distribution tables
+//! - `hdr_ascii(hist)` - Rendered ASCII histogram with cumulative % (CDF),
+//!   for interactive inspection of the distribution shape
+//!
 //! ## Example Usage
 //!
 //! ```sql
@@ -51,8 +58,13 @@
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef, BinaryArray, Float64Array, Int64Array, UInt64Array};
-use arrow::datatypes::{DataType, Field};
+use arrow::array::{
+    Array, ArrayBuilder, ArrayRef, BinaryArray, Float32Array, Float64Array, Int16Array, Int32Array,
+    Int64Array, Int8Array, ListArray, StringArray, StructArray, UInt16Array, UInt32Array,
+    UInt64Array, UInt64Builder, UInt8Array,
+};
+use arrow::buffer::{BooleanBuffer, NullBuffer, OffsetBuffer, ScalarBuffer};
+use arrow::datatypes::{DataType, Field, Fields};
 use datafusion::common::{Result as DFResult, ScalarValue};
 use datafusion::logical_expr::{
     Accumulator, AggregateUDF, AggregateUDFImpl, ColumnarValue, ScalarFunctionArgs, ScalarUDF,
@@ -175,36 +187,50 @@ impl Accumulator for HdrHistogramAccumulator {
 
         let values_array = &values[0];
 
-        // Handle different numeric types
-        if let Some(float_array) = values_array.as_any().downcast_ref::<Float64Array>() {
-            for i in 0..float_array.len() {
-                if !float_array.is_null(i) {
-                    let value = float_array.value(i);
-                    if value >= 0.0 {
-                        // HdrHistogram uses u64, so we scale floats
-                        // For sub-millisecond precision, multiply by 1000 (microseconds)
-                        // The caller should use appropriate scaling
-                        let _ = self.histogram.record(value as u64);
+        // Handle every numeric array type; anything else is ignored.
+        // Note: floats are truncated (`as u64`), so callers wanting
+        // sub-unit precision should scale values before recording.
+
+        // Signed and float inputs: skip negative values.
+        macro_rules! record_signed {
+            ($array_ty:ty) => {
+                if let Some(a) = values_array.as_any().downcast_ref::<$array_ty>() {
+                    for i in 0..a.len() {
+                        let v = a.value(i);
+                        if !a.is_null(i) && v >= 0 as _ {
+                            let _ = self.histogram.record(v as u64);
+                        }
                     }
+                    return Ok(());
                 }
-            }
-        } else if let Some(int_array) = values_array.as_any().downcast_ref::<Int64Array>() {
-            for i in 0..int_array.len() {
-                if !int_array.is_null(i) {
-                    let value = int_array.value(i);
-                    if value >= 0 {
-                        let _ = self.histogram.record(value as u64);
-                    }
-                }
-            }
-        } else if let Some(uint_array) = values_array.as_any().downcast_ref::<UInt64Array>() {
-            for i in 0..uint_array.len() {
-                if !uint_array.is_null(i) {
-                    let _ = self.histogram.record(uint_array.value(i));
-                }
-            }
+            };
         }
-        // Silently ignore other types
+
+        // Unsigned inputs: every value is recordable.
+        macro_rules! record_unsigned {
+            ($array_ty:ty) => {
+                if let Some(a) = values_array.as_any().downcast_ref::<$array_ty>() {
+                    for i in 0..a.len() {
+                        if !a.is_null(i) {
+                            let _ = self.histogram.record(a.value(i) as u64);
+                        }
+                    }
+                    return Ok(());
+                }
+            };
+        }
+
+        record_signed!(Float64Array);
+        record_signed!(Float32Array);
+        record_signed!(Int64Array);
+        record_signed!(Int32Array);
+        record_signed!(Int16Array);
+        record_signed!(Int8Array);
+        record_unsigned!(UInt64Array);
+        record_unsigned!(UInt32Array);
+        record_unsigned!(UInt16Array);
+        record_unsigned!(UInt8Array);
+        // Silently ignore non-numeric types
 
         Ok(())
     }
@@ -293,6 +319,16 @@ pub fn create_hdr_stdev_udf() -> ScalarUDF {
     ScalarUDF::new_from_impl(HdrStdevUdf::new())
 }
 
+/// Create the `hdr_buckets()` UDF.
+pub fn create_hdr_buckets_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(HdrBucketsUdf::new())
+}
+
+/// Create the `hdr_ascii()` UDF.
+pub fn create_hdr_ascii_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(HdrAsciiUdf::new())
+}
+
 // Helper to deserialize histogram from binary
 fn deserialize_histogram(bytes: &[u8]) -> Option<Histogram<u64>> {
     use hdrhistogram::serialization::Deserializer;
@@ -300,6 +336,123 @@ fn deserialize_histogram(bytes: &[u8]) -> Option<Histogram<u64>> {
     deserializer
         .deserialize(&mut std::io::Cursor::new(bytes))
         .ok()
+}
+
+// ----------------------------------------------------------------------------
+// Distribution helpers (log-scale bucketing + ASCII rendering)
+// ----------------------------------------------------------------------------
+
+/// Cap on bucket rows produced by `hdr_buckets` / `hdr_ascii`.
+const MAX_BUCKETS: usize = 64;
+
+/// Split the recorded value range into log-scale buckets.
+///
+/// Returns inclusive `(lo, hi, count)` rows covering the recorded range,
+/// including empty buckets so gaps in the distribution stay visible. Bucket
+/// edges are powers of two, aligned with the histogram's internal grid so
+/// every recorded value lands in exactly one bucket (bucket counts always sum
+/// back to the total). Falls back to powers of ten when the value range is
+/// too wide for `max_rows` binary buckets.
+fn log_buckets(hist: &Histogram<u64>, max_rows: usize) -> Vec<(u64, u64, u64)> {
+    if hist.is_empty() {
+        return Vec::new();
+    }
+
+    for base in [2.0_f64, 10.0] {
+        let mut rows = Vec::new();
+        let mut lo = 0_u64;
+        for iv in hist.iter_log(1, base) {
+            let hi = iv.value_iterated_to();
+            rows.push((lo, hi, iv.count_since_last_iteration()));
+            lo = hi.saturating_add(1);
+        }
+        // iter_log always leads with a [0,0] step and visits every bucket
+        // from 1 up; trim the empty run below the recorded minimum so the
+        // output starts at the real value range.
+        let first_nonzero = rows.iter().position(|r| r.2 > 0).unwrap_or(0);
+        rows.drain(0..first_nonzero);
+
+        if rows.len() <= max_rows || base == 10.0 {
+            return rows;
+        }
+    }
+    unreachable!()
+}
+
+/// Render an ASCII histogram with per-bucket counts and cumulative percent.
+fn render_ascii(hist: &Histogram<u64>) -> String {
+    use std::fmt::Write;
+
+    const BAR_WIDTH: usize = 40;
+
+    let total = hist.len();
+    if total == 0 {
+        return "(empty histogram)".to_string();
+    }
+    let rows = log_buckets(hist, MAX_BUCKETS);
+    let max_count = rows.iter().map(|r| r.2).max().unwrap_or(0).max(1);
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "{} samples | min {} | max {} | mean {:.1} | stdev {:.1}",
+        total,
+        hist.min(),
+        hist.max(),
+        hist.mean(),
+        hist.stdev()
+    );
+
+    let bucket_width = rows
+        .iter()
+        .map(|(lo, hi, _)| format!("{lo}-{hi}").len())
+        .max()
+        .unwrap_or(6)
+        .max(6);
+    let _ = writeln!(
+        out,
+        "{:>bw$} {:>12} {:>7} {:>7} bar",
+        "bucket",
+        "count",
+        "pct",
+        "cum",
+        bw = bucket_width
+    );
+
+    let mut cum = 0_u64;
+    for (lo, hi, count) in rows {
+        cum += count;
+        let bar_len = ((BAR_WIDTH as f64 * count as f64) / max_count as f64).round() as usize;
+        let _ = writeln!(
+            out,
+            "{:>bw$} {:>12} {:>6.1}% {:>6.1}% {}",
+            format!("{lo}-{hi}"),
+            count,
+            100.0 * count as f64 / total as f64,
+            100.0 * cum as f64 / total as f64,
+            "#".repeat(bar_len),
+            bw = bucket_width
+        );
+    }
+    out
+}
+
+/// Struct fields for a single bucket row.
+fn bucket_struct_fields() -> Fields {
+    Fields::from(vec![
+        Field::new("lo", DataType::UInt64, false),
+        Field::new("hi", DataType::UInt64, false),
+        Field::new("count", DataType::UInt64, false),
+    ])
+}
+
+/// Arrow type returned by `hdr_buckets`: list of (lo, hi, count) structs.
+fn bucket_list_type() -> DataType {
+    DataType::List(Arc::new(Field::new(
+        "item",
+        DataType::Struct(bucket_struct_fields()),
+        true,
+    )))
 }
 
 // ----------------------------------------------------------------------------
@@ -631,6 +784,148 @@ impl ScalarUDFImpl for HdrStdevUdf {
     }
 }
 
+// ----------------------------------------------------------------------------
+// hdr_buckets(hist) -> List<Struct<lo, hi, count>>
+// ----------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct HdrBucketsUdf {
+    signature: Signature,
+}
+
+impl HdrBucketsUdf {
+    fn new() -> Self {
+        Self {
+            signature: Signature::exact(vec![DataType::Binary], Volatility::Immutable),
+        }
+    }
+}
+
+impl ScalarUDFImpl for HdrBucketsUdf {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        "hdr_buckets"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(bucket_list_type())
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
+        let hist_array = args[0]
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .expect("hdr_buckets: expected binary array");
+
+        let mut lo_builder = UInt64Builder::new();
+        let mut hi_builder = UInt64Builder::new();
+        let mut count_builder = UInt64Builder::new();
+        let mut offsets: Vec<i32> = Vec::with_capacity(hist_array.len() + 1);
+        let mut validity: Vec<bool> = Vec::with_capacity(hist_array.len());
+        offsets.push(0);
+
+        for hist_opt in hist_array.iter() {
+            match hist_opt.and_then(deserialize_histogram) {
+                Some(hist) => {
+                    for (lo, hi, count) in log_buckets(&hist, MAX_BUCKETS) {
+                        lo_builder.append_value(lo);
+                        hi_builder.append_value(hi);
+                        count_builder.append_value(count);
+                    }
+                    validity.push(true);
+                }
+                None => validity.push(false),
+            }
+            offsets.push(lo_builder.len() as i32);
+        }
+
+        let values = Arc::new(StructArray::new(
+            bucket_struct_fields(),
+            vec![
+                Arc::new(lo_builder.finish()) as ArrayRef,
+                Arc::new(hi_builder.finish()) as ArrayRef,
+                Arc::new(count_builder.finish()) as ArrayRef,
+            ],
+            None,
+        )) as ArrayRef;
+
+        let result = ListArray::new(
+            Arc::new(Field::new(
+                "item",
+                DataType::Struct(bucket_struct_fields()),
+                true,
+            )),
+            OffsetBuffer::new(ScalarBuffer::from(offsets)),
+            values,
+            Some(NullBuffer::new(BooleanBuffer::from(validity))),
+        );
+
+        Ok(ColumnarValue::Array(Arc::new(result)))
+    }
+}
+
+// ----------------------------------------------------------------------------
+// hdr_ascii(hist) -> Utf8 (rendered histogram with cumulative percent)
+// ----------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct HdrAsciiUdf {
+    signature: Signature,
+}
+
+impl HdrAsciiUdf {
+    fn new() -> Self {
+        Self {
+            signature: Signature::exact(vec![DataType::Binary], Volatility::Immutable),
+        }
+    }
+}
+
+impl ScalarUDFImpl for HdrAsciiUdf {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        "hdr_ascii"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::Utf8)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
+        let hist_array = args[0]
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .expect("hdr_ascii: expected binary array");
+
+        let result: StringArray = hist_array
+            .iter()
+            .map(|hist_opt| {
+                hist_opt
+                    .and_then(deserialize_histogram)
+                    .map(|hist| render_ascii(&hist))
+            })
+            .collect();
+
+        Ok(ColumnarValue::Array(Arc::new(result)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -686,5 +981,86 @@ mod tests {
         assert_eq!(acc1.histogram.len(), 6);
         assert_eq!(acc1.histogram.min(), 1);
         assert_eq!(acc1.histogram.max(), 6);
+    }
+
+    #[test]
+    fn test_log_buckets_powers_of_two_with_gaps() {
+        let mut acc = HdrHistogramAccumulator::new(2);
+        let batch = Arc::new(Float64Array::from(vec![1.0, 2.0, 100.0, 1024.0])) as ArrayRef;
+        acc.update_batch(&[batch]).unwrap();
+
+        let rows = log_buckets(&acc.histogram, 48);
+
+        // Buckets [1,1], [2,3], [4,7], ..., [1024,2047]
+        assert_eq!(rows.len(), 11);
+        assert_eq!(rows[0], (1, 1, 1));
+        assert_eq!(rows[1], (2, 3, 1));
+        // The gap is visible: intermediate buckets exist with zero counts
+        assert_eq!(rows[2], (4, 7, 0));
+        let b = rows.iter().find(|r| r.0 == 64).unwrap();
+        assert_eq!(*b, (64, 127, 1)); // 100 recorded here
+        assert_eq!(rows.last().unwrap().0, 1024);
+        assert_eq!(rows.last().unwrap().2, 1);
+        // Counts sum back to the total
+        assert_eq!(rows.iter().map(|r| r.2).sum::<u64>(), 4);
+    }
+
+    #[test]
+    fn test_log_buckets_coarsens_to_powers_of_ten() {
+        let mut acc = HdrHistogramAccumulator::new(2);
+        let batch = Arc::new(Float64Array::from(vec![1.0, 500.0, 5000.0])) as ArrayRef;
+        acc.update_batch(&[batch]).unwrap();
+
+        // 14 binary buckets don't fit in 8 rows -> decades
+        let rows = log_buckets(&acc.histogram, 8);
+        assert!(rows.len() <= 8);
+        assert_eq!(rows.first().unwrap().0, 1);
+        let last = rows.last().unwrap();
+        assert!(last.1 >= 5000);
+        // Aligned to the histogram's internal grid, so no double counting
+        assert_eq!(rows.iter().map(|r| r.2).sum::<u64>(), 3);
+    }
+
+    #[test]
+    fn test_log_buckets_empty_histogram() {
+        let acc = HdrHistogramAccumulator::new(2);
+        assert!(log_buckets(&acc.histogram, 48).is_empty());
+        assert_eq!(render_ascii(&acc.histogram), "(empty histogram)");
+    }
+
+    #[test]
+    fn test_render_ascii_shape() {
+        let mut acc = HdrHistogramAccumulator::new(2);
+        let batch = Arc::new(Float64Array::from(vec![2.0, 2.0, 2.0, 100.0, 4000.0])) as ArrayRef;
+        acc.update_batch(&[batch]).unwrap();
+
+        let out = render_ascii(&acc.histogram);
+        let lines: Vec<&str> = out.lines().collect();
+
+        assert!(lines[0].contains("5 samples"));
+        assert!(lines[1].contains("cum"));
+        // Header + 5 buckets: [2,3], [4,7], ..., [4096,8191]
+        assert_eq!(lines.len(), 2 + log_buckets(&acc.histogram, 64).len());
+        // The dominant bucket bar is at full width, empties have none
+        let dominant = lines.iter().find(|l| l.contains("2-3")).unwrap();
+        assert!(dominant.contains("####"));
+        let empty = lines.iter().find(|l| l.contains("4-7")).unwrap();
+        assert!(!empty.contains('#'));
+        // Cumulative percent reaches 100 on the last bucket
+        assert!(lines.last().unwrap().contains("100.0%"));
+    }
+
+    #[test]
+    fn test_uint32_values_are_recorded() {
+        // frames.length is UInt32; it used to be silently dropped
+        let mut acc = HdrHistogramAccumulator::new(2);
+        let batch = Arc::new(UInt32Array::from(vec![136_u32, 583, 65080])) as ArrayRef;
+        acc.update_batch(&[batch]).unwrap();
+
+        assert_eq!(acc.histogram.len(), 3);
+        assert_eq!(acc.histogram.min(), 136);
+        // max() is the highest *equivalent* value at the histogram's
+        // significant-figure precision, so 65080 may quantize upward.
+        assert!(acc.histogram.max() >= 65080);
     }
 }

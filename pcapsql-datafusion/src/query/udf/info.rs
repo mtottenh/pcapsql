@@ -271,6 +271,22 @@ pub fn all_udfs() -> Vec<UdfInfo> {
             example: "ethertype_name(ethertype) -> 'IPv4'",
             category: UdfCategory::Protocol,
         },
+        UdfInfo {
+            name: "dscp_name",
+            description: "Convert DSCP value to name (CS, AF, EF, etc.)",
+            signature: "dscp_name(uint8)",
+            return_type: "String",
+            example: "dscp_name(dscp) -> 'EF'",
+            category: UdfCategory::Protocol,
+        },
+        UdfInfo {
+            name: "ecn_name",
+            description: "Convert ECN field value to name",
+            signature: "ecn_name(uint8)",
+            return_type: "String",
+            example: "ecn_name(ecn) -> 'CE'",
+            category: UdfCategory::Protocol,
+        },
         // === DateTime Functions ===
         UdfInfo {
             name: "strftime",
@@ -400,6 +416,22 @@ pub fn all_udfs() -> Vec<UdfInfo> {
             signature: "hdr_stdev(binary)",
             return_type: "Float64",
             example: "hdr_stdev(hist)",
+            category: UdfCategory::Histogram,
+        },
+        UdfInfo {
+            name: "hdr_buckets",
+            description: "Distribution as log-scale bucket rows (explode with UNNEST)",
+            signature: "hdr_buckets(binary)",
+            return_type: "List<Struct<lo,hi,count>>",
+            example: "SELECT * FROM (SELECT hdr_buckets(hist) b FROM t) x, UNNEST(x.b)",
+            category: UdfCategory::Histogram,
+        },
+        UdfInfo {
+            name: "hdr_ascii",
+            description: "Render ASCII histogram with cumulative % (CDF)",
+            signature: "hdr_ascii(binary)",
+            return_type: "String",
+            example: "SELECT hdr_ascii(hdr_histogram(length)) FROM frames",
             category: UdfCategory::Histogram,
         },
         // === Utility Functions ===

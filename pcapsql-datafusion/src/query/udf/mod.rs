@@ -118,7 +118,9 @@ pub use icmp::{
 };
 pub use ntp_proto::{create_ntp_mode_name_udf, create_ntp_stratum_name_udf};
 pub use ospf::{create_ospf_lsa_type_name_udf, create_ospf_packet_type_name_udf};
-pub use protocol::{create_ethertype_name_udf, create_ip_proto_name_udf};
+pub use protocol::{
+    create_dscp_name_udf, create_ecn_name_udf, create_ethertype_name_udf, create_ip_proto_name_udf,
+};
 pub use tcp::{create_has_tcp_flag_udf, create_tcp_flags_str_udf};
 pub use tls_proto::{create_tls_record_type_name_udf, create_tls_version_name_udf};
 
@@ -139,8 +141,9 @@ pub use time::{
 
 // Re-export histogram UDAFs and UDFs
 pub use histogram::{
-    create_hdr_count_udf, create_hdr_histogram_udaf, create_hdr_max_udf, create_hdr_mean_udf,
-    create_hdr_min_udf, create_hdr_percentile_udf, create_hdr_stdev_udf,
+    create_hdr_ascii_udf, create_hdr_buckets_udf, create_hdr_count_udf, create_hdr_histogram_udaf,
+    create_hdr_max_udf, create_hdr_mean_udf, create_hdr_min_udf, create_hdr_percentile_udf,
+    create_hdr_stdev_udf,
 };
 
 use crate::error::Error;
@@ -193,6 +196,10 @@ pub fn register_protocol_udfs(ctx: &SessionContext) -> Result<(), Error> {
     // Protocol numbers
     ctx.register_udf(create_ip_proto_name_udf());
     ctx.register_udf(create_ethertype_name_udf());
+
+    // IP header fields
+    ctx.register_udf(create_dscp_name_udf());
+    ctx.register_udf(create_ecn_name_udf());
 
     // BGP
     ctx.register_udf(create_bgp_message_type_name_udf());
@@ -248,6 +255,8 @@ pub fn register_datetime_udfs(ctx: &SessionContext) -> Result<(), Error> {
 /// - `hdr_histogram(value)` - UDAF that builds histogram from streamed values
 /// - `hdr_percentile(hist, p)` - Extract percentile from histogram
 /// - `hdr_count/min/max/mean/stdev(hist)` - Extract statistics
+/// - `hdr_buckets(hist)` - Distribution as bucket rows (explode with UNNEST)
+/// - `hdr_ascii(hist)` - Rendered ASCII histogram with cumulative %
 pub fn register_histogram_udfs(ctx: &SessionContext) -> Result<(), Error> {
     // Aggregate function for building histograms
     ctx.register_udaf(create_hdr_histogram_udaf());
@@ -259,6 +268,10 @@ pub fn register_histogram_udfs(ctx: &SessionContext) -> Result<(), Error> {
     ctx.register_udf(create_hdr_max_udf());
     ctx.register_udf(create_hdr_mean_udf());
     ctx.register_udf(create_hdr_stdev_udf());
+
+    // Distribution rendering
+    ctx.register_udf(create_hdr_buckets_udf());
+    ctx.register_udf(create_hdr_ascii_udf());
 
     Ok(())
 }
