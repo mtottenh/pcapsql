@@ -163,6 +163,18 @@ impl Default for EngineOptions {
 }
 
 /// Query engine for PCAP files.
+///
+/// # Concurrency
+///
+/// The engine is `Send + Sync` and may be shared between tasks, but queries
+/// issued through [`QueryEngine::query`] are **serialized per engine**: a
+/// query's prepared tables (materialized batches or streaming receivers) are
+/// held in engine state that the table providers resolve while DataFusion
+/// builds the physical plan, so two queries in flight at once would read each
+/// other's state. An async mutex therefore admits one query at a time;
+/// concurrent callers wait, they do not fail. The query-scoped design that
+/// lets independent queries run in parallel is described in
+/// `docs/query-context-design.md`.
 pub struct QueryEngine {
     ctx: SessionContext,
     registry: Arc<ProtocolRegistry>,
@@ -178,6 +190,10 @@ pub struct QueryEngine {
     last_stats: RwLock<ParseStats>,
     /// Table names this engine registered (the harvest universe).
     known_tables: HashSet<String>,
+    /// Serializes [`Self::query`]: prepared tables are engine-global until the
+    /// query-scoped context lands (`docs/query-context-design.md`), so only one
+    /// query may be between "tables prepared" and "plan executed" at a time.
+    query_lock: tokio::sync::Mutex<()>,
 }
 
 /// Type-erased scoped parse over the engine's source: either materialize the
@@ -494,6 +510,7 @@ impl QueryEngine {
             parse_source,
             last_stats: RwLock::new(ParseStats::default()),
             known_tables,
+            query_lock: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -540,7 +557,17 @@ impl QueryEngine {
     /// cache), then executes. This is THE query path: queries issued
     /// directly against [`Self::context`] bypass the parse and will fail
     /// with "table was not prepared".
+    ///
+    /// Queries on one engine run one at a time (see the type-level
+    /// documentation): a concurrent caller waits for the running query to
+    /// finish. Dropping the returned future releases its turn.
     pub async fn query(&self, sql: &str) -> Result<Vec<RecordBatch>, Error> {
+        // One query at a time per engine: the prepared-table state below is
+        // engine-global and resolved by the providers at physical-planning
+        // time, so an interleaved query would clear or replace it (#123).
+        // The guard is held until this future completes or is dropped.
+        let _serialized = self.query_lock.lock().await;
+
         let state = self.ctx.state();
         let plan = state
             .create_logical_plan(sql)

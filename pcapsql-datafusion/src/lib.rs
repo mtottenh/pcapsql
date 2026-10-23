@@ -26,6 +26,9 @@
 //! }
 //! ```
 //!
+//! A [`QueryEngine`] can be shared between tasks; queries on one engine are
+//! serialized (see [`query::QueryEngine`] for the concurrency contract).
+//!
 //! ## Architecture
 //!
 //! ```text
