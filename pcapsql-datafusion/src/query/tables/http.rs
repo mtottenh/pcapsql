@@ -1,6 +1,10 @@
 //! HTTP table schema definition.
 //!
-//! The `http` table contains HTTP request and response fields.
+//! The `http` table has one row per TCP segment that starts an HTTP/1.x
+//! message: the request line or status line and the headers present in
+//! that segment, as parsed per packet by `pcapsql_core`'s `http` protocol.
+//! Reassembled messages (bodies, headers spanning segments, keep-alive
+//! streams) are the stream table `http_messages`.
 
 use arrow::datatypes::{DataType, Field, Schema};
 
@@ -9,13 +13,14 @@ use arrow::datatypes::{DataType, Field, Schema};
 /// Fields:
 /// - `frame_number`: Reference to frames table
 /// - `is_request`: True if this is a request, false if response
-/// - `headers_complete`: True if all headers were parsed
+/// - `headers_complete`: True if the whole header block is in this segment
 /// - `method`: HTTP method (GET, POST, etc.)
 /// - `uri`: Request URI
 /// - `version`: HTTP version (e.g., "HTTP/1.1")
 /// - `status_code`: Response status code (200, 404, etc.)
 /// - `status_text`: Response status text
-/// - `body_length`: Actual body bytes seen
+/// - `body_length`: Payload bytes after the header block in this segment
+///   (headers complete only; may include pipelined requests or chunk framing)
 /// - `host`: Host header value
 /// - `content_type`: Content-Type header value
 /// - `content_length`: Content-Length header value
@@ -24,7 +29,7 @@ use arrow::datatypes::{DataType, Field, Schema};
 /// - `transfer_encoding`: Transfer-Encoding header value
 /// - `connection`: Connection header value
 /// - `cookie`: Cookie header value
-/// - `set_cookie`: Set-Cookie header value
+/// - `set_cookie`: First Set-Cookie header value
 /// - `referer`: Referer header value
 /// - `accept`: Accept header value
 /// - `accept_encoding`: Accept-Encoding header value

@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The `http` table was never populated: it was registered, but no packet
+  parser fed it, so `SELECT * FROM http` and the `http_packets` view returned
+  no rows and the `packets` view's `http_*` columns were always NULL. A
+  packet-level HTTP/1.x parser now parses the request/status line and the
+  common headers from the TCP segment that starts a message (TCP sniffs the
+  payload, so body segments and non-HTTP traffic on HTTP ports add no rows);
+  the DuckDB extension gains `read_http`. Reassembled messages remain in the
+  stream table `http_messages`
+  ([#117](https://github.com/mtottenh/pcapsql/issues/117)).
 - `ntp` table could not be materialized (its `Int8`/`Float64` columns had no
   builder); `poll`/`precision` are now signed, `root_delay`/`root_dispersion`
   are seconds, and the NTP timestamps are Unix seconds with their fraction;
