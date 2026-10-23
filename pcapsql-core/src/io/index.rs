@@ -1337,6 +1337,7 @@ mod build_tests {
                 interfaces: vec![6],
                 sections: 1,
                 add_interface_midstream: false,
+                if_tsoffset: 0,
             };
             let stride = 4u64;
             let (idx, expected_count, len) = build_for(&spec, stride);
@@ -1402,6 +1403,7 @@ mod build_tests {
             interfaces: vec![6],
             sections: 2,
             add_interface_midstream: true,
+            if_tsoffset: 0,
         };
         let (idx, expected_count, _) = build_for(&spec, 3);
         assert_eq!(idx.packet_count, expected_count as u64);

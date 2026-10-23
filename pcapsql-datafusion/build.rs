@@ -59,6 +59,11 @@ fn main() {
         .expect("Failed to render man page");
     println!("cargo:warning=Generated man page: {}", man_path.display());
 
-    // Tell cargo to rerun if args.rs changes
+    // Tell cargo to rerun if args.rs changes, or assets are requested.
+    // The generated completions and man page describe the flags of the
+    // binary being built: with `--features cloud` they include the
+    // `--cloud-*` flags, without it (the default and what the release
+    // packages build) they do not.
     println!("cargo:rerun-if-changed=src/cli/args.rs");
+    println!("cargo:rerun-if-env-changed=PCAPSQL_GENERATE_ASSETS");
 }

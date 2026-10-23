@@ -18,6 +18,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the DuckDB extension gains `read_http`. Reassembled messages remain in the
   stream table `http_messages`
   ([#117](https://github.com/mtottenh/pcapsql/issues/117)).
+- Review follow-ups from the 0.4.0 stack
+  ([#126](https://github.com/mtottenh/pcapsql/issues/126)):
+  - Ingestion: pcapng timestamps saturate instead of wrapping past the
+    `i64` nanosecond range, honour `if_tsoffset`, and an undecodable
+    `if_tsresol` is normalized to microseconds; an EPB whose interface id has
+    no IDB is logged once; a Simple Packet Block's `captured_len` no longer
+    includes the block's padding when `origlen > snaplen`; `reader_at` on a
+    range starting at byte 0 (`PacketRange::whole()`) reads the source's own
+    header instead of synthesizing one on top of it.
+  - Boundary-index sidecar format v3: a payload checksum, `if_tsoffset` per
+    interface and the object e-tag (cloud sources, where `last_modified` has
+    one-second granularity); older sidecars are rebuilt, never misread;
+    `validate()` rejects link types wider than 16 bits and undecodable
+    `if_tsresol`; no sidecar is written next to captures under 1 MiB. Cloud
+    pcapng open finds the first IDB behind other blocks instead of requiring
+    it to follow the SHB directly.
+  - Engine: builders never narrow an integer with a wrapping cast (a value
+    that does not fit its column is NULL); parser field widths are pinned to
+    the table schemas by a test (`gtp.sequence` is `UInt32`;
+    `rtnetlink.hw_addr` is `FixedSizeBinary(6)` and populated); time-range
+    UDFs are also detected in a `TableScan` that still carries a view plan;
+    `--progress` and `--stats` work in the REPL and the spinner reports a
+    real packets/s rate; `.cachestats` reports the engine's table cache and
+    `.cachestats reset` clears it.
+  - UDFs with integer parameters (`dscp_name`, `ecn_name`,
+    `gtp_message_type_name`, `icmp_code_name`, `tls_version_name`,
+    `ip4_to_string`, …) accept integer literals and columns of another
+    integer width (`dscp_name(46)` plans); non-integer arguments are still
+    rejected at planning.
+  - A parser that fails without extracting any field no longer produces an
+    all-NULL row in its protocol table (partial results keep their fields);
+    MPLS label stacks are no longer counted as a tunnel (`encap_depth` stays
+    0 and `tunnel_type` NULL for the inner IP layer; the `mpls` table is
+    unchanged).
+  - DuckDB extension: `read_linux_sll`, `read_sll2`, `read_netlink` and
+    `read_rtnetlink` table functions.
+  - Tests/CI: `cargo check --workspace --all-targets` (benches compile) and
+    clippy over all targets in CI; the partition-equivalence property covers
+    seven link types, coarse and binary `if_tsresol` values, up to four
+    interfaces and three sections; the test generator rejects unrepresentable
+    `if_tsresol` bytes instead of overflowing and keeps mixed-resolution
+    captures monotonic.
+  - Docs: `pcapsql-core` README and crate docs, `query/mod.rs` option docs,
+    PKGBUILD version, changelog links.
 - `ntp` table could not be materialized (its `Int8`/`Float64` columns had no
   builder); `poll`/`precision` are now signed, `root_delay`/`root_dispersion`
   are seconds, and the NTP timestamps are Unix seconds with their fraction;

@@ -32,6 +32,9 @@ jobs:
       - name: Build
         run: cargo build --workspace
 
+      - name: Check every target (benches, examples)
+        run: cargo check --workspace --all-targets
+
       - name: Run tests
         run: cargo test --workspace
 
@@ -57,7 +60,7 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Clippy
-        run: cargo clippy --workspace -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Check fuzz targets compile
         run: cargo check --manifest-path fuzz/Cargo.toml
