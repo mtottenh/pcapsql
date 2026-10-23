@@ -12,30 +12,13 @@ use tls_parser::{
     parse_tls_extensions, parse_tls_plaintext, TlsExtension, TlsMessage, TlsMessageHandshake,
 };
 
+use super::tls::is_tls_port;
 use crate::protocol::{FieldValue, OwnedFieldValue};
 use crate::schema::{DataKind, FieldDescriptor};
 use crate::stream::{Direction, ParsedMessage, StreamContext, StreamParseResult, StreamParser};
 use crate::tls::{
     extract_tls13_inner_content_type, Direction as TlsDirection, KeyLog, TlsSession, TlsVersion,
 };
-
-/// Standard TLS ports.
-const TLS_PORTS: &[u16] = &[
-    443,   // HTTPS
-    8443,  // HTTPS alternate
-    993,   // IMAPS
-    995,   // POP3S
-    465,   // SMTPS (submission)
-    636,   // LDAPS
-    853,   // DNS over TLS
-    5061,  // SIP over TLS
-    14433, // Test port (used by testdata/tls/)
-];
-
-/// Check if a port is commonly used for TLS.
-fn is_tls_port(port: u16) -> bool {
-    TLS_PORTS.contains(&port)
-}
 
 /// Per-connection TLS state.
 struct ConnectionTlsState {
@@ -200,6 +183,8 @@ impl DecryptingTlsStreamParser {
 
                 fields.insert("handshake_type", FieldValue::Str("ServerHello"));
                 fields.insert("cipher_suite", FieldValue::UInt16(cipher_suite));
+                fields.insert("server_version", FieldValue::UInt16(sh.version.0));
+                fields.insert("selected_version", FieldValue::UInt16(version.to_wire()));
 
                 if let Some(name) = state.session.cipher_suite_name() {
                     fields.insert(

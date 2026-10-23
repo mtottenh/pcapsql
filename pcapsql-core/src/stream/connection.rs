@@ -186,6 +186,8 @@ impl Connection {
 /// Tracks TCP connections.
 pub struct ConnectionTracker {
     connections: HashMap<ConnectionKey, Connection>,
+    /// Connection id -> key, for O(1) lookup by id.
+    by_id: HashMap<u64, ConnectionKey>,
     next_id: u64,
 }
 
@@ -193,6 +195,7 @@ impl ConnectionTracker {
     pub fn new() -> Self {
         Self {
             connections: HashMap::new(),
+            by_id: HashMap::new(),
             next_id: 1,
         }
     }
@@ -243,6 +246,7 @@ impl ConnectionTracker {
                 last_frame: frame_number,
             };
 
+            self.by_id.insert(conn.id, key.clone());
             self.next_id += 1;
             self.connections.insert(key.clone(), conn);
         }
@@ -325,6 +329,13 @@ impl ConnectionTracker {
         self.connections.values()
     }
 
+    /// Look up a connection by id.
+    pub fn get_by_id(&self, id: u64) -> Option<&Connection> {
+        self.by_id
+            .get(&id)
+            .and_then(|key| self.connections.get(key))
+    }
+
     /// Remove timed-out connections.
     pub fn cleanup_timeout(&mut self, current_time: i64, timeout_us: i64) -> Vec<Connection> {
         let mut removed = Vec::new();
@@ -336,6 +347,9 @@ impl ConnectionTracker {
                 true
             }
         });
+        for conn in &removed {
+            self.by_id.remove(&conn.id);
+        }
         removed
     }
 }
@@ -349,6 +363,30 @@ impl Default for ConnectionTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn get_by_id_finds_each_connection() {
+        use std::net::Ipv4Addr;
+        let mut t = ConnectionTracker::new();
+        let a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let syn = TcpFlags {
+            syn: true,
+            ack: false,
+            fin: false,
+            rst: false,
+        };
+        let (c1, _) = t.get_or_create(a, 40000, b, 80, syn, 1, 1, 0);
+        let id1 = c1.id;
+        let (c2, _) = t.get_or_create(a, 40001, b, 443, syn, 1, 2, 0);
+        let id2 = c2.id;
+        assert_ne!(id1, id2);
+        assert_eq!(t.get_by_id(id1).unwrap().client_port(), 40000);
+        assert_eq!(t.get_by_id(id2).unwrap().client_port(), 40001);
+        assert!(t.get_by_id(id2 + 1).is_none());
+        t.cleanup_timeout(10_000_000, 1);
+        assert!(t.get_by_id(id1).is_none());
+    }
     use std::net::Ipv4Addr;
 
     fn ip(a: u8, b: u8, c: u8, d: u8) -> IpAddr {

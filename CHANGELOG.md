@@ -19,6 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Stream-analysis tables `tcp_connections`, `tls_sessions` and `http_messages`
+  (one row per TCP connection, TLS handshake and HTTP/1.x message, reassembled
+  from TCP streams), alongside `http2`. Stream analysis is now a subscriber of
+  the single packet pass: a query mixing stream and packet tables reads the
+  capture once (it runs as one partition, reported by `--stats`)
+  ([#108](https://github.com/mtottenh/pcapsql/issues/108)).
 - Linux SLL2 cooked captures (LINKTYPE 276, the default for `tcpdump -i any`
   with libpcap >= 1.10) are parsed: new `sll2` table with `interface_index`,
   reachable from `ipv4`/`ipv6`/`netlink` under protocol pruning

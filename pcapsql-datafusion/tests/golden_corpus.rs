@@ -291,6 +291,157 @@ fn sll2_capture() -> Vec<u8> {
     to_capture(frames, LINKTYPE_LINUX_SLL2)
 }
 
+/// A TLS record (type 0x16 handshake, record version `rec_version`) wrapping
+/// one handshake message of type `hs_type`.
+fn tls_handshake_record(rec_version: u16, hs_type: u8, body: &[u8]) -> Vec<u8> {
+    let mut hs = vec![hs_type];
+    hs.extend_from_slice(&(body.len() as u32).to_be_bytes()[1..]);
+    hs.extend_from_slice(body);
+    let mut rec = vec![0x16];
+    rec.extend_from_slice(&rec_version.to_be_bytes());
+    rec.extend_from_slice(&(hs.len() as u16).to_be_bytes());
+    rec.extend_from_slice(&hs);
+    rec
+}
+
+/// ClientHello offering TLS_AES_128_GCM_SHA256 / TLS_AES_256_GCM_SHA384 with
+/// SNI and ALPN extensions.
+fn client_hello(sni: &str, alpn: &str) -> Vec<u8> {
+    let mut body = vec![0x03, 0x03];
+    body.extend_from_slice(&[0x11; 32]); // random
+    body.push(0); // session id
+    body.extend_from_slice(&[0x00, 0x04, 0x13, 0x01, 0x13, 0x02]); // cipher suites
+    body.extend_from_slice(&[0x01, 0x00]); // compression: null
+    let mut exts = Vec::new();
+    // server_name: list(len) -> type 0, name(len), name
+    let mut sni_ext = Vec::new();
+    sni_ext.extend_from_slice(&((sni.len() + 3) as u16).to_be_bytes());
+    sni_ext.push(0);
+    sni_ext.extend_from_slice(&(sni.len() as u16).to_be_bytes());
+    sni_ext.extend_from_slice(sni.as_bytes());
+    exts.extend_from_slice(&[0x00, 0x00]);
+    exts.extend_from_slice(&(sni_ext.len() as u16).to_be_bytes());
+    exts.extend_from_slice(&sni_ext);
+    // application_layer_protocol_negotiation: list(len) -> proto(len), proto
+    let mut alpn_ext = Vec::new();
+    alpn_ext.extend_from_slice(&((alpn.len() + 1) as u16).to_be_bytes());
+    alpn_ext.push(alpn.len() as u8);
+    alpn_ext.extend_from_slice(alpn.as_bytes());
+    exts.extend_from_slice(&[0x00, 0x10]);
+    exts.extend_from_slice(&(alpn_ext.len() as u16).to_be_bytes());
+    exts.extend_from_slice(&alpn_ext);
+    body.extend_from_slice(&(exts.len() as u16).to_be_bytes());
+    body.extend_from_slice(&exts);
+    tls_handshake_record(0x0301, 0x01, &body)
+}
+
+/// ServerHello selecting `cipher`, negotiating TLS 1.3 through the
+/// supported_versions extension (legacy version field stays 0x0303).
+fn server_hello(cipher: u16) -> Vec<u8> {
+    let mut body = vec![0x03, 0x03];
+    body.extend_from_slice(&[0x22; 32]); // random
+    body.push(0); // session id
+    body.extend_from_slice(&cipher.to_be_bytes());
+    body.push(0); // compression: null
+    body.extend_from_slice(&[0x00, 0x06, 0x00, 0x2b, 0x00, 0x02, 0x03, 0x04]); // supported_versions: 1.3
+    tls_handshake_record(0x0303, 0x02, &body)
+}
+
+/// Pad every frame to the 60-byte Ethernet minimum the way a NIC or SPAN
+/// port does; the padding is not IP payload and must not reach reassembly.
+fn pad_frames(frames: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+    frames
+        .into_iter()
+        .map(|mut f| {
+            if f.len() < 60 {
+                f.resize(60, 0);
+            }
+            f
+        })
+        .collect()
+}
+
+const HTTP_REQUEST: &[u8] = b"GET /index.html HTTP/1.1\r\nHost: example.test\r\n\
+User-Agent: pcapsql-corpus/1.0\r\nAccept: text/plain\r\n\r\n";
+const HTTP_RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\nServer: corpus\r\nContent-Type: text/plain\r\n\
+Content-Length: 5\r\n\r\nhello";
+
+/// The stream-analysis corpus capture: a complete HTTP/1.1 exchange on port
+/// 80 (handshake, request, response, orderly close) followed by a TLS
+/// handshake on port 443 (ClientHello with SNI/ALPN, ServerHello) that the
+/// client resets. Exercises TCP reassembly, `tcp_connections`,
+/// `http_messages` and `tls_sessions` without a keylog.
+fn http_capture() -> Vec<u8> {
+    to_capture(http_frames(), LINKTYPE_ETHERNET)
+}
+
+/// `http_capture()` with every frame padded to the Ethernet minimum.
+fn padded_http_capture() -> Vec<u8> {
+    to_capture(pad_frames(http_frames()), LINKTYPE_ETHERNET)
+}
+
+fn http_frames() -> Vec<Vec<u8>> {
+    let a = [10, 0, 0, 1];
+    let b = [10, 0, 0, 2];
+    let seg = |src: [u8; 4], dst: [u8; 4], id: u16, tcp_bytes: Vec<u8>| -> Vec<u8> {
+        let (smac, dmac) = if src == a {
+            (MAC_A, MAC_B)
+        } else {
+            (MAC_B, MAC_A)
+        };
+        eth(dmac, smac, ETH_IP4, &ipv4(src, dst, 6, id, &tcp_bytes))
+    };
+    let req_len = HTTP_REQUEST.len() as u32;
+    let resp_len = HTTP_RESPONSE.len() as u32;
+    let ch = client_hello("example.test", "h2");
+    let sh = server_hello(0x1301);
+    let ch_len = ch.len() as u32;
+    let frames: Vec<Vec<u8>> = vec![
+        // --- HTTP/1.1: a:40002 -> b:80 ---
+        // 1 SYN, 2 SYN-ACK, 3 ACK
+        seg(a, b, 1, tcp(40002, 80, 1000, 0, 0x02, &[])),
+        seg(b, a, 2, tcp(80, 40002, 5000, 1001, 0x12, &[])),
+        seg(a, b, 3, tcp(40002, 80, 1001, 5001, 0x10, &[])),
+        // 4 request, 5 response
+        seg(a, b, 4, tcp(40002, 80, 1001, 5001, 0x18, HTTP_REQUEST)),
+        seg(
+            b,
+            a,
+            5,
+            tcp(80, 40002, 5001, 1001 + req_len, 0x18, HTTP_RESPONSE),
+        ),
+        // 6 FIN-ACK client, 7 FIN-ACK server, 8 final ACK
+        seg(
+            a,
+            b,
+            6,
+            tcp(40002, 80, 1001 + req_len, 5001 + resp_len, 0x11, &[]),
+        ),
+        seg(
+            b,
+            a,
+            7,
+            tcp(80, 40002, 5001 + resp_len, 1002 + req_len, 0x11, &[]),
+        ),
+        seg(
+            a,
+            b,
+            8,
+            tcp(40002, 80, 1002 + req_len, 5002 + resp_len, 0x10, &[]),
+        ),
+        // --- TLS: a:40003 -> b:443 ---
+        // 9 SYN, 10 SYN-ACK, 11 ACK
+        seg(a, b, 9, tcp(40003, 443, 2000, 0, 0x02, &[])),
+        seg(b, a, 10, tcp(443, 40003, 7000, 2001, 0x12, &[])),
+        seg(a, b, 11, tcp(40003, 443, 2001, 7001, 0x10, &[])),
+        // 12 ClientHello, 13 ServerHello, 14 RST from the client
+        seg(a, b, 12, tcp(40003, 443, 2001, 7001, 0x18, &ch)),
+        seg(b, a, 13, tcp(443, 40003, 7001, 2001 + ch_len, 0x18, &sh)),
+        seg(a, b, 14, tcp(40003, 443, 2001 + ch_len, 7001, 0x14, &[])),
+    ];
+    frames
+}
+
 /// The fixed Ethernet corpus capture: 11 frames covering
 /// tcp/udp/dns/arp/icmp/ipv6 plus one VLAN-tagged and one VXLAN-encapsulated
 /// frame (the latter carries an inner Ethernet/IPv4/UDP frame).
@@ -414,6 +565,8 @@ enum Capture {
     Sll,
     /// `sll2_capture()`: Linux cooked v2 (SLL2) link type.
     Sll2,
+    /// `http_capture()`: reassembled HTTP/1.1 and TLS streams.
+    Http,
 }
 
 /// (capture, snapshot name, SQL). Every query is fully ordered so output is
@@ -645,6 +798,39 @@ const CORPUS: &[(Capture, &str, &str)] = &[
         "t05_sll2_tcp_only",
         "SELECT frame_number, src_port, dst_port, flag_syn FROM tcp ORDER BY frame_number",
     ),
+    // --- Stream analysis: tables built by the stream subscriber of the pass ---
+    (
+        Capture::Http,
+        "u01_tcp_connections",
+        "SELECT frame_number, connection_id, client_ip, server_ip, client_port, server_port, \
+         state, start_time, end_time, duration_us, first_frame, last_frame, \
+         packets_to_server, packets_to_client, bytes_to_server, bytes_to_client, is_complete \
+         FROM tcp_connections ORDER BY frame_number",
+    ),
+    (
+        Capture::Http,
+        "u02_http_messages",
+        "SELECT frame_number, connection_id, direction, is_request, method, uri, http_version, \
+         status_code, host, content_type, content_length, user_agent, server \
+         FROM http_messages ORDER BY frame_number",
+    ),
+    (
+        Capture::Http,
+        "u03_tls_sessions",
+        "SELECT frame_number, connection_id, version, cipher_suite, cipher_suite_id, sni, alpn, \
+         is_decrypted, server_hello_frame FROM tls_sessions ORDER BY frame_number",
+    ),
+    (
+        Capture::Http,
+        "u04_stream_join_packet",
+        "SELECT m.frame_number, m.method, m.status_code, t.src_port, t.dst_port, t.flag_psh \
+         FROM http_messages m JOIN tcp t USING (frame_number) ORDER BY m.frame_number",
+    ),
+    (
+        Capture::Http,
+        "u05_http2_empty",
+        "SELECT count(*) AS frames FROM http2",
+    ),
 ];
 
 /// Queries that must be the *first* query a fresh engine runs: their result
@@ -690,6 +876,8 @@ async fn golden_corpus_matches_snapshots() {
     std::fs::write(&sll_path, sll_capture()).unwrap();
     let sll2_path = dir.path().join("corpus_sll2.pcap");
     std::fs::write(&sll2_path, sll2_capture()).unwrap();
+    let http_path = dir.path().join("corpus_http.pcap");
+    std::fs::write(&http_path, http_capture()).unwrap();
 
     let update = std::env::var("PCAPSQL_GOLDEN_UPDATE").is_ok();
     if update {
@@ -699,6 +887,7 @@ async fn golden_corpus_matches_snapshots() {
     let eth = (engine(&eth_path, 2).await, engine(&eth_path, 1).await);
     let sll = (engine(&sll_path, 2).await, engine(&sll_path, 1).await);
     let sll2 = (engine(&sll2_path, 2).await, engine(&sll2_path, 1).await);
+    let http = (engine(&http_path, 2).await, engine(&http_path, 1).await);
     // One-shot CLI path: RetentionPolicy::None streams rather than
     // materializes. Its results must be identical.
     let streaming = |path: &Path| {
@@ -716,6 +905,7 @@ async fn golden_corpus_matches_snapshots() {
     let eth_streamed = streaming(&eth_path).await.expect("build streaming engine");
     let sll_streamed = streaming(&sll_path).await.expect("build streaming engine");
     let sll2_streamed = streaming(&sll2_path).await.expect("build streaming engine");
+    let http_streamed = streaming(&http_path).await.expect("build streaming engine");
 
     let mut failures = Vec::new();
     for (capture, name, sql) in CORPUS {
@@ -723,6 +913,7 @@ async fn golden_corpus_matches_snapshots() {
             Capture::Eth => &eth_path,
             Capture::Sll => &sll_path,
             Capture::Sll2 => &sll2_path,
+            Capture::Http => &http_path,
         };
         // Fresh engines (materialized and streaming) for queries whose result
         // depends on engine-wide state no earlier query may have established.
@@ -740,6 +931,7 @@ async fn golden_corpus_matches_snapshots() {
             (None, Capture::Eth) => (&eth.0, &eth.1, &eth_streamed),
             (None, Capture::Sll) => (&sll.0, &sll.1, &sll_streamed),
             (None, Capture::Sll2) => (&sll2.0, &sll2.1, &sll2_streamed),
+            (None, Capture::Http) => (&http.0, &http.1, &http_streamed),
         };
         let got = run(e2, sql).await;
 
@@ -779,4 +971,107 @@ async fn golden_corpus_matches_snapshots() {
         "golden corpus mismatches:\n{}",
         failures.join("\n")
     );
+}
+
+/// Stream tables are built by a subscriber of the one packet pass: a query
+/// mixing a stream table and a packet table reads the capture once, as one
+/// partition (reassembly order), and reports which tables pinned it. Under
+/// `CacheOnTouch` the stream table is then served from cache.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stream_tables_share_the_packet_pass() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("corpus_http.pcap");
+    std::fs::write(&path, http_capture()).unwrap();
+    let mixed = "SELECT m.method, t.dst_port FROM http_messages m \
+                 JOIN tcp t USING (frame_number) ORDER BY m.frame_number";
+
+    for retention in [RetentionPolicy::CacheOnTouch, RetentionPolicy::None] {
+        let eng = QueryEngine::open(
+            SourceSpec::Path(path.clone()),
+            EngineOptions {
+                batch_size: 1000,
+                target_partitions: Some(2),
+                index_stride: Some(4),
+                retention,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("open engine");
+
+        let out = run(&eng, mixed).await;
+        assert!(out.contains("GET"), "{out}");
+        let stats = eng.last_parse_stats();
+        assert_eq!(
+            stats.parse_passes, 1,
+            "{retention:?}: one read for a mixed query"
+        );
+        assert_eq!(
+            stats.partitions, 1,
+            "{retention:?}: reassembly pins one partition"
+        );
+        assert_eq!(stats.stream_tables, vec!["http_messages".to_string()]);
+        assert_eq!(stats.rows_built.get("http_messages"), Some(&2));
+        assert!(stats.complete_scan);
+
+        // A plain packet query afterwards is not pinned: the same engine
+        // splits this capture into its two requested partitions.
+        run(&eng, "SELECT count(*) FROM udp").await;
+        let stats = eng.last_parse_stats();
+        assert!(stats.stream_tables.is_empty());
+        assert_eq!(
+            stats.partitions, 2,
+            "{retention:?}: unpinned query uses both partitions"
+        );
+
+        let again = run(&eng, "SELECT count(*) AS n FROM http_messages").await;
+        assert!(again.contains("| 2 "), "{again}");
+        let stats = eng.last_parse_stats();
+        match retention {
+            RetentionPolicy::CacheOnTouch => {
+                assert_eq!(stats.parse_passes, 0, "stream table served from cache")
+            }
+            RetentionPolicy::None => {
+                assert_eq!(stats.parse_passes, 1);
+                assert_eq!(stats.partitions, 1);
+            }
+        }
+    }
+}
+
+/// Ethernet trailer padding is not TCP payload: a padded capture must
+/// reassemble exactly like the unpadded one (same messages, same byte
+/// counts), and the TLS 1.3 negotiation must be read from supported_versions.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stream_tables_ignore_ethernet_padding() {
+    let dir = TempDir::new().unwrap();
+    let plain = dir.path().join("plain.pcap");
+    let padded = dir.path().join("padded.pcap");
+    std::fs::write(&plain, http_capture()).unwrap();
+    std::fs::write(&padded, padded_http_capture()).unwrap();
+    assert!(std::fs::metadata(&padded).unwrap().len() > std::fs::metadata(&plain).unwrap().len());
+
+    let queries = [
+        "SELECT frame_number, method, status_code, host, content_length FROM http_messages \
+         ORDER BY frame_number",
+        "SELECT connection_id, bytes_to_server, bytes_to_client, state, duration_us \
+         FROM tcp_connections ORDER BY connection_id",
+        "SELECT version, cipher_suite, sni, alpn FROM tls_sessions",
+    ];
+    let (e_plain, e_padded) = (engine(&plain, 1).await, engine(&padded, 1).await);
+    for sql in queries {
+        let a = run(&e_plain, sql).await;
+        let b = run(&e_padded, sql).await;
+        assert_eq!(a, b, "padding changed the result of: {sql}\n{a}\n{b}");
+    }
+    let http = run(&e_padded, "SELECT count(*) AS n FROM http_messages").await;
+    assert!(http.contains("| 2 "), "{http}");
+    let bytes = run(
+        &e_padded,
+        "SELECT bytes_to_server FROM tcp_connections WHERE server_port = 80",
+    )
+    .await;
+    assert!(bytes.contains("| 100 "), "{bytes}");
+    let tls = run(&e_padded, "SELECT version FROM tls_sessions").await;
+    assert!(tls.contains("TLS 1.3"), "{tls}");
 }

@@ -201,16 +201,52 @@ impl TlsStreamParser {
         pos += 1 + session_id_len;
 
         // Selected cipher suite
-        if pos + 2 <= data.len() {
-            let cipher = u16::from_be_bytes([data[pos], data[pos + 1]]);
-            fields.insert("cipher_suite", FieldValue::UInt16(cipher));
-            fields.insert(
-                "cipher_suite_name",
-                FieldValue::OwnedString(CompactString::new(cipher_suite_name(cipher))),
-            );
+        if pos + 2 > data.len() {
+            return fields;
+        }
+        let cipher = u16::from_be_bytes([data[pos], data[pos + 1]]);
+        fields.insert("cipher_suite", FieldValue::UInt16(cipher));
+        fields.insert(
+            "cipher_suite_name",
+            FieldValue::OwnedString(CompactString::new(cipher_suite_name(cipher))),
+        );
+        pos += 2;
+
+        // Compression method, then extensions. TLS 1.3 keeps the legacy
+        // version field at 0x0303 and negotiates the real version in the
+        // supported_versions extension (0x002b, a single selected version).
+        pos += 1;
+        if pos + 2 > data.len() {
+            return fields;
+        }
+        let ext_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+        pos += 2;
+        if pos + ext_len <= data.len() {
+            if let Some(selected) = Self::extract_selected_version(&data[pos..pos + ext_len]) {
+                fields.insert("selected_version", FieldValue::UInt16(selected));
+            }
         }
 
         fields
+    }
+
+    /// The server-selected version from a ServerHello supported_versions
+    /// extension, if present.
+    fn extract_selected_version(extensions: &[u8]) -> Option<u16> {
+        let mut pos = 0;
+        while pos + 4 <= extensions.len() {
+            let ext_type = u16::from_be_bytes([extensions[pos], extensions[pos + 1]]);
+            let ext_len = u16::from_be_bytes([extensions[pos + 2], extensions[pos + 3]]) as usize;
+            pos += 4;
+            if pos + ext_len > extensions.len() {
+                break;
+            }
+            if ext_type == 0x002b && ext_len >= 2 {
+                return Some(u16::from_be_bytes([extensions[pos], extensions[pos + 1]]));
+            }
+            pos += ext_len;
+        }
+        None
     }
 
     /// Get TLS version name.
@@ -226,7 +262,26 @@ impl TlsStreamParser {
     }
 }
 
-fn cipher_suite_name(id: u16) -> String {
+/// Standard TLS ports.
+pub(crate) const TLS_PORTS: &[u16] = &[
+    443,   // HTTPS
+    8443,  // HTTPS alternate
+    993,   // IMAPS
+    995,   // POP3S
+    465,   // SMTPS (submission)
+    636,   // LDAPS
+    853,   // DNS over TLS
+    5061,  // SIP over TLS
+    14433, // Test port (used by testdata/tls/)
+];
+
+/// Check if a port is commonly used for TLS.
+pub(crate) fn is_tls_port(port: u16) -> bool {
+    TLS_PORTS.contains(&port)
+}
+
+/// IANA name of a TLS cipher suite id (hex for unknown suites).
+pub fn cipher_suite_name(id: u16) -> String {
     match id {
         0x1301 => "TLS_AES_128_GCM_SHA256".to_string(),
         0x1302 => "TLS_AES_256_GCM_SHA384".to_string(),
@@ -247,7 +302,7 @@ impl StreamParser for TlsStreamParser {
     }
 
     fn can_parse_stream(&self, context: &StreamContext) -> bool {
-        context.dst_port == 443 || context.src_port == 443
+        is_tls_port(context.dst_port) || is_tls_port(context.src_port)
     }
 
     fn parse_stream(&self, data: &[u8], context: &StreamContext) -> StreamParseResult {

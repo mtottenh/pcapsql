@@ -230,6 +230,12 @@ fn print_parse_stats(engine: &QueryEngine) {
             ", stopped early by LIMIT"
         }
     );
+    if !stats.stream_tables.is_empty() {
+        eprintln!(
+            "Stream analysis (single partition, same pass): {}",
+            stats.stream_tables.join(", ")
+        );
+    }
     let mut rows: Vec<_> = stats.rows_built.iter().filter(|(_, n)| **n > 0).collect();
     rows.sort();
     for (table, n) in rows {

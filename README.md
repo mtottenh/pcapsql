@@ -140,6 +140,7 @@ SELECT * FROM ipv4 WHERE tunnel_type = 'vxlan';
 | `ethernet`, `ipv4`, `ipv6`, `tcp`, `udp` | Layer 2-4 protocols |
 | `dns`, `dhcp`, `ntp`, `http` | Application protocols |
 | `tls` | TLS records and handshakes |
+| `tcp_connections`, `tls_sessions`, `http_messages` | Reassembled TCP streams: one row per connection, TLS handshake, HTTP/1.x message |
 | `http2` | HTTP/2 frames (requires TLS decryption) |
 | `vxlan`, `gre`, `mpls`, `gtp` | Tunnel headers |
 | `bgp`, `ospf` | Routing protocols |

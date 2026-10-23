@@ -191,10 +191,17 @@ impl StreamManager {
             // Build context for parser
             let context = self.build_context(connection_id, direction);
 
-            // Find parser
+            // Find parser. A stream nobody can parse must not be retained:
+            // drop what has been reassembled so far so unparsed connections
+            // (SSH, SMB, databases, ...) cost no memory beyond their counters.
             let parser = match self.stream_registry.find_parser(&context) {
                 Some(p) => p,
-                None => break, // No parser for this stream
+                None => {
+                    let n = data.len();
+                    self.reassembler.consume(connection_id, direction, n);
+                    self.total_memory = self.total_memory.saturating_sub(n);
+                    break;
+                }
             };
 
             // We need to copy data because we can't hold borrow across mutable ops
@@ -294,10 +301,7 @@ impl StreamManager {
 
     /// Build a StreamContext for the given connection.
     fn build_context(&self, connection_id: u64, direction: Direction) -> StreamContext {
-        let conn = self
-            .connections
-            .connections()
-            .find(|c| c.id == connection_id);
+        let conn = self.connections.get_by_id(connection_id);
 
         if let Some(conn) = conn {
             let (src_ip, dst_ip, src_port, dst_port) = match direction {
@@ -456,12 +460,12 @@ mod tests {
         assert_eq!(conn.server_port(), 80);
     }
 
-    // Test 3: Reassembly triggers parser (mock test - no real parser)
+    // Test 3: a stream nobody can parse is not retained
     #[test]
-    fn test_reassembly_triggers_parse() {
+    fn test_unparsed_stream_is_discarded() {
         let mut manager = StreamManager::with_defaults();
 
-        // No parser registered, but data should be buffered
+        // No parser registered: the connection is tracked, the bytes are not.
         let ack = TcpFlags {
             ack: true,
             ..Default::default()
@@ -481,8 +485,8 @@ mod tests {
             )
             .unwrap();
 
-        // Data should be in buffer (no parser to consume it)
-        assert!(manager.total_memory() > 0);
+        assert_eq!(manager.connections().count(), 1);
+        assert_eq!(manager.total_memory(), 0);
     }
 
     // Test 4: Parser NeedMore handling
@@ -510,13 +514,20 @@ mod tests {
             ..Default::default()
         };
         let mut manager = StreamManager::new(config);
+        // A parser that keeps asking for more (an unterminated request line)
+        // retains the reassembled bytes.
+        manager
+            .registry_mut()
+            .register(super::super::HttpStreamParser::new());
 
         let ack = TcpFlags {
             ack: true,
             ..Default::default()
         };
 
-        // Add data
+        // Add data: 500 bytes of a request whose headers never end.
+        let mut first = b"GET /".to_vec();
+        first.resize(500, b'a');
         manager
             .process_segment(
                 ip(192, 168, 1, 1),
@@ -526,7 +537,7 @@ mod tests {
                 1000,
                 0,
                 ack,
-                &[0u8; 500],
+                &first,
                 1,
                 0,
             )
@@ -545,7 +556,7 @@ mod tests {
                 1500,
                 0,
                 ack,
-                &[0u8; 600],
+                &[b'a'; 600],
                 2,
                 1,
             )

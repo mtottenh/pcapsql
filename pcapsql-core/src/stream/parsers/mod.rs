@@ -7,5 +7,5 @@ mod tls_decrypt;
 
 pub use http::HttpStreamParser;
 pub use http2::Http2StreamParser;
-pub use tls::TlsStreamParser;
+pub use tls::{cipher_suite_name, TlsStreamParser};
 pub use tls_decrypt::DecryptingTlsStreamParser;

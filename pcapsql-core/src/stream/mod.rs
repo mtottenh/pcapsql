@@ -41,7 +41,8 @@ pub use context::{Direction, ParsedMessage, StreamContext, StreamParseResult};
 pub use manager::{StreamConfig, StreamManager};
 pub use parser::StreamParser;
 pub use parsers::{
-    DecryptingTlsStreamParser, Http2StreamParser, HttpStreamParser, TlsStreamParser,
+    cipher_suite_name, DecryptingTlsStreamParser, Http2StreamParser, HttpStreamParser,
+    TlsStreamParser,
 };
 pub use reassembly::{Segment, SequenceGap, StreamBuffer, StreamKey, StreamStats, TcpReassembler};
 pub use registry::StreamRegistry;
