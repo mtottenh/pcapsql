@@ -10,8 +10,11 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 
+use super::exchange::BatchReceiver;
+use super::shared::{StreamingHandle, TableData};
+use super::ProtocolScanExec;
+use crate::query::filter::FilterEvaluator;
 use arrow::datatypes::SchemaRef;
-use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
 use datafusion::catalog::Session;
 use datafusion::common::DataFusionError;
@@ -19,15 +22,10 @@ use datafusion::datasource::{TableProvider, TableType};
 use datafusion::error::Result as DFResult;
 use datafusion::logical_expr::{Expr, TableProviderFilterPushDown};
 use datafusion::physical_plan::ExecutionPlan;
-use tokio::sync::mpsc::UnboundedReceiver;
-
-use super::shared::{StreamingHandle, TableData};
-use super::ProtocolScanExec;
-use crate::query::filter::FilterEvaluator;
 
 /// Per-partition batch receivers for a streamed table (taken once at
 /// `execute`).
-pub type PartitionReceivers = Arc<Vec<Mutex<Option<UnboundedReceiver<DFResult<RecordBatch>>>>>>;
+pub type PartitionReceivers = Arc<Vec<Mutex<Option<BatchReceiver>>>>;
 
 /// A table prepared for the current query: either materialized batches
 /// (`CacheOnTouch` cache, or the on-demand stream pass) or per-partition streaming receivers
@@ -84,7 +82,7 @@ impl EngineTables {
                 .get(&name)
                 .expect("streaming table schema")
                 .clone();
-            let slots: Vec<Mutex<Option<UnboundedReceiver<DFResult<RecordBatch>>>>> = receivers
+            let slots: Vec<Mutex<Option<BatchReceiver>>> = receivers
                 .into_iter()
                 .map(|rx| Mutex::new(Some(rx)))
                 .collect();

@@ -359,6 +359,17 @@ fn harvest_table_needs(
 ///
 /// `cached` is the cached entry's column names (`None` = not cached).
 /// `needed` is the query's projected columns (`None` = all columns).
+/// Clears the engine's prepared-table entries when dropped: installed stream
+/// receivers must not outlive the query that installed them, including a
+/// query whose future is dropped mid-way.
+struct ClearStreamsOnDrop<'a>(&'a EngineTables);
+
+impl Drop for ClearStreamsOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.clear();
+    }
+}
+
 fn cache_covers(
     cached: Option<&std::collections::HashSet<String>>,
     needed: &Option<HashSet<String>>,
@@ -662,6 +673,7 @@ impl QueryEngine {
             && !any_multi_scan;
 
         let mut producers: Vec<JoinHandle<Result<PartitionStat, Error>>> = Vec::new();
+        let mut stream_guard: Option<ClearStreamsOnDrop<'_>> = None;
         if subscription.tables.is_empty() {
             let mut stats = ParseStats::default();
             if let Some(n) = fast_frame_count {
@@ -673,6 +685,10 @@ impl QueryEngine {
         } else if streaming {
             let mut handle = self.parse_source.stream(&subscription)?;
             self.tables.install_streams(&mut handle);
+            // If this future is dropped before execution takes the receivers
+            // (cancelled while planning), the installed stream entries must
+            // go away, or the producers wait on them forever.
+            stream_guard = Some(ClearStreamsOnDrop(&self.tables));
             producers = std::mem::take(&mut handle.producers);
             *self.last_stats.write().expect("stats lock poisoned") = ParseStats {
                 parse_passes: 1,
@@ -715,6 +731,10 @@ impl QueryEngine {
         // to fold statistics and surface any parse error (fail closed).
         let mut producer_error = None;
         if !producers.is_empty() {
+            // Drop receivers of partitions the plan never executed (a LIMIT
+            // satisfied early): a producer waiting on them must see its
+            // consumers gone rather than wait forever.
+            drop(stream_guard.take());
             let outcomes = futures::future::join_all(producers).await;
             let mut stats = ParseStats {
                 parse_passes: 1,
@@ -737,6 +757,13 @@ impl QueryEngine {
                         }
                         for (t, n) in p.rows_built {
                             *stats.rows_built.entry(t).or_insert(0) += n;
+                        }
+                        for (t, o) in p.overflow {
+                            if o.total_bytes > 0 {
+                                *stats.overflowed_bytes.entry(t.clone()).or_insert(0) +=
+                                    o.total_bytes;
+                                *stats.overflow_peak_bytes.entry(t).or_insert(0) += o.peak_bytes;
+                            }
                         }
                     }
                     Ok(Err(e)) => producer_error = producer_error.or(Some(e)),

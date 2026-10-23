@@ -233,7 +233,28 @@ fn print_parse_stats(engine: &QueryEngine) {
     let mut rows: Vec<_> = stats.rows_built.iter().filter(|(_, n)| **n > 0).collect();
     rows.sort();
     for (table, n) in rows {
-        eprintln!("  {table}: {n} rows");
+        match stats.overflow_peak_bytes.get(table.as_str()) {
+            Some(b) if *b > 0 => eprintln!(
+                "  {table}: {n} rows (buffered up to {} past the stream bound, summed over partitions)",
+                human_bytes(*b)
+            ),
+            _ => eprintln!("  {table}: {n} rows"),
+        }
+    }
+}
+
+fn human_bytes(b: usize) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut v = b as f64;
+    let mut i = 0;
+    while v >= 1024.0 && i < UNITS.len() - 1 {
+        v /= 1024.0;
+        i += 1;
+    }
+    if i == 0 {
+        format!("{b} B")
+    } else {
+        format!("{v:.1} {}", UNITS[i])
     }
 }
 

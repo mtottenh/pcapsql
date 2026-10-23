@@ -333,22 +333,56 @@ within noise; REPL second-query latency within noise of P1.
 batches flow to DataFusion as they form, and LIMIT stops reading the file
 early.*
 
-**As shipped (#102).** The section below is the design as implemented; the
-original proposal (bounded channels with an overflow buffer, an overflow
-metric and a memory-ceiling test) is recorded under *Deferred* so the gap is
-explicit rather than implied.
+**As shipped (#102, exchange bounded in #107).** The section below is the
+design as implemented.
 
 Changes:
 - `run_streaming_parse`: one `spawn_blocking` producer per partition owns its
   reader and builders and runs the scoped parse to completion, sending each
-  completed `RecordBatch` to a per-(table × partition) **unbounded**
-  `tokio::sync::mpsc` channel. `ProtocolScanExec::execute(i)` serves the
-  receiver as a stream. Unbounded channels make the pass deadlock-free by
-  construction regardless of how DataFusion drains the tables; the price is
-  that memory is bounded only while consumers keep pace (the frame-ordered
-  sort-merge-join case). A lagging consumer (hash-join build side, sort)
-  buffers that table's batches in the channel — the same footprint as
-  materializing it.
+  completed `RecordBatch` to a per-(table × partition) **bounded exchange**
+  (`providers/exchange.rs`, `STREAM_CHANNEL_CAPACITY` = 4 batches).
+  `ProtocolScanExec::execute(i)` serves the receiver as a stream.
+- Backpressure vs. overflow: a channel being full means one of two things the
+  producer cannot tell apart from that table alone. If *no other live table's
+  consumer is parked waiting on it*, the consumer is merely slower than the
+  parse and the producer **waits** (a `Pacer` shared by the partition's
+  exchanges wakes it when any consumer takes a batch, parks on a table, or
+  drops its receiver). If the consumer is parked on another table, DataFusion
+  is consuming that table to completion before it will poll this one
+  (hash-join build side, a `SortExec` input) — and both come from this one
+  pass, so waiting would deadlock. The batch then goes to the table's
+  **overflow queue**, in order. The queue is shared with the receiver, which
+  reads the channel (always older) and then the queue, so an overflowed batch
+  is never invisible to a consumer that wants it; a table keeps queueing
+  until the consumer has drained the queue, which preserves order. The rule
+  is deadlock-free: a waiting producer has data on this table, so a consumer
+  that polls it progresses; one that parks elsewhere raises that table's
+  waiting flag and wakes the producer; one that finishes drops its receivers.
+  A "channel is empty" test was rejected as the trigger: a table can be
+  empty because the capture has no rows for it, which would let a
+  merely-slow consumer accumulate O(table) overflow on the dense table.
+- Cancellation: stream entries are installed before execution; a drop guard
+  clears them if the query future is dropped before `collect` takes the
+  receivers, so producers see their consumers gone instead of waiting.
+- `ParseStats.overflowed_bytes` (total through the queue) and
+  `overflow_peak_bytes` (most held at once, summed over partitions) per
+  table; `--stats` prints the peak so the degradation is visible.
+- Residual exposure: a consumer that is parked on table B while A is
+  backlogged is the hash-join/sort shape where A must be buffered until B
+  completes; that buffering is inherent to the plan and is what the metric
+  reports. Spilling the queue to disk would bound it (deferred).
+- Measured (`tests/streaming_memory.rs`, 100k frames / 25.7 MiB, 2
+  partitions, debug build): single-table scan with `max(raw_data)` peaks at
+  ~3 MiB heap with zero overflow (materialized: ~41 MiB); the frame-ordered
+  sort-merge join peaks at ~18 MiB (overflow peak ~5 MiB, structural and
+  byte-identical across runs: the hash-repartitioned SMJ drains the small
+  `tcp` side ahead of `frames`, so ~2/3 of `frames` passes through the queue
+  over the run while at most ~21 batches are queued at once); a join sorted on a
+  non-frame key overflows the un-polled table and reports it. DataFusion's
+  own `RepartitionExec` buffering (hash repartition for SMJ) dominates the
+  remaining footprint and grows with partition count — a range
+  co-partitioning declaration on the scans would remove the repartition but
+  is unsafe while any join input can be a non-scan plan.
 - Early stop: a producer stops reading the source once every subscribed table
   has reached its row cap **or every consumer has dropped its receiver** (the
   query finished — e.g. a `LIMIT` above a filter DataFusion kept — or was
@@ -369,12 +403,10 @@ Changes:
   result type (the deletion proposed below did not happen).
 
 Deferred (tracked follow-ups, not in this phase):
-- Bounded channels with a tracked overflow buffer and an `overflowed_bytes`
-  entry in `ParseStats`, so a lagging consumer degrades observably instead of
-  silently.
-- A memory-ceiling test (allocator counter on a large synthetic capture).
 - Deleting `SharedParseState` / the materialize-then-serve internals (still
   needed by `CacheOnTouch`).
+- Spilling the overflow buffer to disk, which would bound the un-polled table
+  case too (today it is accounted, not bounded).
 
 Tests: golden corpus runs under `RetentionPolicy::None` as well and asserts
 streaming ≡ materialized for every query (including the duplicate-reference
@@ -550,7 +582,7 @@ entry points 4 → 1; `TableProvider` impls 2 → 1; CLI mode flags
 | What | Before | After (phase) |
 |---|---|---|
 | `pcapsql query f.pcap "…"` first-result latency | full parse of capture up front | scoped parse of only what the query needs (P2), streaming + LIMIT early-stop (P3) |
-| Memory, one-shot | O(parsed capture) + raw_data copy | flat while consumers keep pace, up to O(table) for a lagging consumer (P3); `raw_data` built only when projected (P2) |
+| Memory, one-shot | O(parsed capture) + raw_data copy | bounded by backpressure for a slow consumer; a table DataFusion will not poll until another completes is queued and reported (P3/#107); `raw_data` built only when projected (P2) |
 | REPL first query per table | instant after slow startup | startup ~instant; first query touching a table pays its scoped parse; later queries on cached tables instant (P2) |
 | `--streaming`, `--mmap` | mode flags | removed / `--no-mmap` (P1) |
 | `--stats` | stale cache text | `ParseStats`: packets scanned/skipped, rows built, partitions, overflow (P2+) |
@@ -602,7 +634,7 @@ Criterion suite added in P0, run per phase; numbers recorded in each PR:
 |---|---|---|
 | SMJ correctness once `target_partitions` is unpinned | P2 | golden corpus + equivalence suites; if a plan regression appears, pin per-query when stream tables/joins demand it rather than re-pinning globally |
 | Plan-walk misses a table ref (subquery, view expansion, UDTF) | P2 | harvest from the *optimized* plan (views inlined); fallback: any unrecognized scan ⇒ `ParseScope::full()` for that query — correctness never depends on the harvest |
-| Exchange deadlock under non-SMJ plans | P3 | unbounded channels (never block); test that forces a hash join; overflow metric deferred |
+| Exchange deadlock under non-SMJ plans | P3 | bounded exchange that waits only while no other live channel is empty, overflow buffer otherwise (#107); `tests/streaming_memory.rs` forces a sorted-input join |
 | Self-join double-consumption | P3 | duplicate-ref detection ⇒ materialize path for that query; golden corpus q26–q28 |
 | Time-UDF bootstrap (`register_time_udfs_eager` needs capture time range before first query) | P2 | derive lazily: index `min_ts`/`max_ts` when present (free), else first parse populates; document one-query staleness window or resolve in P6 via index |
 | Cloud `raw_data` projection cost | P5 | per-batch coalesced range GETs; documented; only paid when projected |

@@ -17,8 +17,6 @@ use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
-use datafusion::error::Result as DFResult;
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 use tokio::task::JoinHandle;
 
 use pcapsql_core::io::PacketRange;
@@ -26,6 +24,7 @@ use pcapsql_core::{
     parse_packet, PacketReader, ParseScope, ProtocolRegistry, SeekablePacketSource,
 };
 
+use super::exchange::{self, BatchReceiver, OverflowStats, Pacer, STREAM_CHANNEL_CAPACITY};
 use crate::error::Error;
 use crate::query::builders::NormalizedBatchSet;
 use crate::query::filter::FilterEvaluator;
@@ -178,6 +177,15 @@ pub struct ParseStats {
     pub end_ts_us: i64,
     /// False when a row cap (LIMIT) stopped the pass before end of input.
     pub complete_scan: bool,
+    /// Streaming only: per table, bytes of batches that went through a
+    /// producer's overflow buffer because DataFusion was not draining that
+    /// table while it drained another (e.g. a hash-join probe side waiting
+    /// on the build side). Zero when consumers keep pace.
+    pub overflowed_bytes: HashMap<String, usize>,
+    /// Streaming only: per table, the most bytes the overflow buffers held
+    /// at once (summed over partitions) — the memory the exchange used
+    /// beyond its channel bound.
+    pub overflow_peak_bytes: HashMap<String, usize>,
 }
 
 /// Result of one scoped parse pass.
@@ -416,6 +424,8 @@ pub fn run_shared_parse<S: SeekablePacketSource>(
             start_ts_us,
             end_ts_us,
             complete_scan,
+            overflowed_bytes: HashMap::new(),
+            overflow_peak_bytes: HashMap::new(),
         },
     })
 }
@@ -431,6 +441,9 @@ pub struct PartitionStat {
     pub packets: u64,
     pub capped: bool,
     pub rows_built: HashMap<String, usize>,
+    /// Per table, what went through the exchange's overflow buffer (see
+    /// [`ParseStats::overflowed_bytes`] / [`ParseStats::overflow_peak_bytes`]).
+    pub overflow: HashMap<String, OverflowStats>,
 }
 
 /// Handle to an in-flight streaming parse.
@@ -440,25 +453,28 @@ pub struct PartitionStat {
 /// `execute(partition)`. The producer join handles are awaited by the engine
 /// after query execution to fold statistics and surface parse errors.
 pub struct StreamingHandle {
-    pub receivers: HashMap<String, Vec<UnboundedReceiver<DFResult<RecordBatch>>>>,
+    pub receivers: HashMap<String, Vec<BatchReceiver>>,
     pub producers: Vec<JoinHandle<Result<PartitionStat, Error>>>,
     pub num_partitions: usize,
     pub schemas: HashMap<String, SchemaRef>,
 }
 
 /// Start one scoped parse pass that **streams** each subscribed table's
-/// batches to per-(table, partition) unbounded channels.
+/// batches to per-(table, partition) bounded exchanges.
 ///
 /// One `spawn_blocking` producer per partition owns its reader and builders
 /// and runs the parse to completion, sending completed batches as they form.
-/// Channels are unbounded, so a producer never blocks on a consumer — the
-/// pass is deadlock-free regardless of how DataFusion drains the tables.
-/// Memory is therefore *not* bounded by construction: it stays flat while
-/// consumers keep pace (the sort-merge-join, frame-ordered common case) and
-/// grows to hold a table's batches when a consumer lags (a hash-join build
-/// side, a sort) — the same footprint as materializing that table. A
-/// producer stops early once every subscribed table is capped or every
-/// consumer has dropped its receiver (query finished or cancelled).
+/// Each exchange holds [`STREAM_CHANNEL_CAPACITY`] batches. A producer whose
+/// every live channel is full waits for the consumer (backpressure), so a
+/// consumer that is merely slower than the parse bounds memory at
+/// `O(tables × partitions × capacity × batch)`. A producer never waits on a
+/// channel while another of its tables is being drained — DataFusion drains a
+/// hash-join build side (or a sort input) to completion before polling the
+/// other table, and both come from this one pass, so waiting would deadlock;
+/// batches of the un-polled table go to an accounted overflow buffer instead,
+/// reported in [`ParseStats::overflowed_bytes`]. A producer stops early once
+/// every subscribed table is capped or every consumer has dropped its
+/// receiver (query finished or cancelled).
 pub fn run_streaming_parse<S: SeekablePacketSource>(
     source: &Arc<S>,
     registry: &Arc<ProtocolRegistry>,
@@ -485,17 +501,19 @@ pub fn run_streaming_parse<S: SeekablePacketSource>(
     }
 
     // receivers[table] = one receiver per partition, in partition order.
-    let mut receivers: HashMap<String, Vec<UnboundedReceiver<DFResult<RecordBatch>>>> = table_names
+    let mut receivers: HashMap<String, Vec<BatchReceiver>> = table_names
         .iter()
         .map(|n| (n.clone(), Vec::with_capacity(num_partitions)))
         .collect();
     let mut producers = Vec::with_capacity(num_partitions);
 
     for range in ranges {
-        // Per-table channel for this partition.
+        // Per-table exchange for this partition, sharing one pacer so the
+        // producer can wait for progress on any of them.
+        let pacer = Pacer::new();
         let mut senders = HashMap::with_capacity(table_names.len());
         for name in &table_names {
-            let (tx, rx) = unbounded_channel::<DFResult<RecordBatch>>();
+            let (tx, rx) = exchange::channel(STREAM_CHANNEL_CAPACITY, pacer.clone());
             senders.insert(name.clone(), tx);
             receivers.get_mut(name).expect("receiver slot").push(rx);
         }
@@ -515,7 +533,7 @@ pub fn run_streaming_parse<S: SeekablePacketSource>(
                 source.reader_at(&range)?
             };
             let mut batch_set =
-                NormalizedBatchSet::new_streaming(batch_size, &subscription, &senders)?;
+                NormalizedBatchSet::new_streaming(batch_size, &subscription, senders, pacer)?;
             let mut min_us = i64::MAX;
             let mut max_us = i64::MIN;
             let mut packets: u64 = 0;
@@ -549,10 +567,9 @@ pub fn run_streaming_parse<S: SeekablePacketSource>(
                 .iter()
                 .map(|t| (t.clone(), batch_set.row_count(t)))
                 .collect();
-            // finish() flushes final batches and drops the sink senders; the
-            // remaining `senders` map drops at return, closing the channels.
-            batch_set.finish()?;
-            drop(senders);
+            // Flushes final batches and closes every exchange (buffered
+            // batches become the receivers' tails).
+            let overflow = batch_set.finish_streaming()?;
 
             Ok(PartitionStat {
                 min_us,
@@ -560,6 +577,7 @@ pub fn run_streaming_parse<S: SeekablePacketSource>(
                 packets,
                 capped,
                 rows_built,
+                overflow,
             })
         }));
     }

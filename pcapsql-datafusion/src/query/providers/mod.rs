@@ -18,10 +18,12 @@
 //! times (#6), and that single pass is parallelized across partitions for
 //! seekable sources (#9).
 
+mod exchange;
 mod protocol_provider;
 mod scan_exec;
 mod shared;
 
+pub use exchange::{BatchReceiver, BatchSender, OverflowStats, Pacer, STREAM_CHANNEL_CAPACITY};
 pub use protocol_provider::{EngineTables, PreparedTable, ProtocolTableProvider};
 pub use scan_exec::ProtocolScanExec;
 pub use shared::{
