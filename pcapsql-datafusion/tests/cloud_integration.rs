@@ -103,13 +103,12 @@ mod cloud_tests {
 
     #[tokio::test(flavor = "multi_thread")]
     #[ignore]
-    async fn test_s3_query_with_cache() {
+    async fn test_s3_query() {
         let url = format!("s3://{}/small_dns.pcap", TEST_BUCKET);
 
         let engine = QueryEngine::with_cloud_source(
             &url,
-            1000,  // batch_size
-            10000, // cache_size
+            1000, // batch_size
             Some(TEST_ENDPOINT),
             true,            // anonymous
             8 * 1024 * 1024, // chunk_size
@@ -139,16 +138,10 @@ mod cloud_tests {
     async fn test_s3_streaming_join() {
         let url = format!("s3://{}/small_dns.pcap", TEST_BUCKET);
 
-        let engine = QueryEngine::with_cloud_source(
-            &url,
-            1000,
-            10000,
-            Some(TEST_ENDPOINT),
-            true,
-            8 * 1024 * 1024,
-        )
-        .await
-        .expect("Failed to create QueryEngine");
+        let engine =
+            QueryEngine::with_cloud_source(&url, 1000, Some(TEST_ENDPOINT), true, 8 * 1024 * 1024)
+                .await
+                .expect("Failed to create QueryEngine");
 
         // JOIN query across tables
         let result = engine
@@ -169,16 +162,10 @@ mod cloud_tests {
     async fn test_s3_dns_query() {
         let url = format!("s3://{}/small_dns.pcap", TEST_BUCKET);
 
-        let engine = QueryEngine::with_cloud_source(
-            &url,
-            1000,
-            10000,
-            Some(TEST_ENDPOINT),
-            true,
-            8 * 1024 * 1024,
-        )
-        .await
-        .expect("Failed to create QueryEngine");
+        let engine =
+            QueryEngine::with_cloud_source(&url, 1000, Some(TEST_ENDPOINT), true, 8 * 1024 * 1024)
+                .await
+                .expect("Failed to create QueryEngine");
 
         // Query DNS table
         let result = engine
@@ -298,16 +285,10 @@ mod cloud_tests {
     async fn test_s3_large_file_query() {
         let url = format!("s3://{}/large_10mb.pcap", TEST_BUCKET);
 
-        let engine = QueryEngine::with_cloud_source(
-            &url,
-            1000,
-            50000, // Larger cache for big file
-            Some(TEST_ENDPOINT),
-            true,
-            8 * 1024 * 1024,
-        )
-        .await
-        .expect("Failed to create QueryEngine");
+        let engine =
+            QueryEngine::with_cloud_source(&url, 1000, Some(TEST_ENDPOINT), true, 8 * 1024 * 1024)
+                .await
+                .expect("Failed to create QueryEngine");
 
         let result = engine
             .query("SELECT COUNT(*) FROM frames")

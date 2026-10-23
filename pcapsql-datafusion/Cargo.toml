@@ -88,6 +88,7 @@ compact_str.workspace = true
 
 # Cloud storage for integration tests
 pcapsql-core = { path = "../pcapsql-core", features = ["s3"] }
+pcapsql-testgen.workspace = true
 
 [build-dependencies]
 clap = { version = "4", features = ["derive"] }
