@@ -191,13 +191,6 @@ impl NormalizedBatchSet {
         tables::all_table_names()
     }
 
-    /// Get the accumulated batches so far (without finishing).
-    ///
-    /// Note: This clones the current batches, leaving partial batches in the builders.
-    pub fn current_batches(&self) -> &ProtocolBatches {
-        &self.batches
-    }
-
     /// Get the number of rows added to a specific table.
     pub fn row_count(&self, table_name: &str) -> usize {
         if table_name == "frames" {

@@ -14,7 +14,9 @@ mod repl;
 mod sqlite;
 mod uri;
 
-pub use args::{parse_size, Args, ExportFormat};
+#[cfg(feature = "cloud")]
+pub use args::parse_size;
+pub use args::{Args, ExportFormat};
 pub use export::Exporter;
 pub use output::{OutputFormat, OutputFormatter};
 pub use repl::{Repl, ReplCommand, ReplInput};

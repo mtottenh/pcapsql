@@ -123,5 +123,5 @@ assets = [
 ]
 
 [[bench]]
-name = "parsing"
+name = "baseline"
 harness = false
