@@ -13,7 +13,7 @@ use pcapsql_datafusion::cli::{
     Args, ExportFormat, Exporter, InputSource, OutputFormatter, Repl, ReplCommand, ReplInput,
 };
 use pcapsql_datafusion::query::{
-    bpf, tables, udf, views, EngineOptions, ProgressFn, QueryEngine, SourceSpec,
+    bpf, tables, udf, views, EngineOptions, ProgressFn, QueryEngine, ServedFrom, SourceSpec,
 };
 
 #[tokio::main]
@@ -215,9 +215,31 @@ async fn main() -> Result<()> {
 fn print_parse_stats(engine: &QueryEngine) {
     let stats = engine.last_parse_stats();
     eprintln!();
-    if stats.parse_passes == 0 {
-        eprintln!("Parse passes: 0 (served from cache)");
-        return;
+    match stats.served_from {
+        ServedFrom::PlanOnly => {
+            eprintln!(
+                "Parse passes: {} (plan only: no scan was executed{})",
+                stats.parse_passes,
+                if stats.parse_passes > 0 {
+                    format!(
+                        "; the capture time range was established by a header-only pass over {} packets",
+                        stats.packets_scanned
+                    )
+                } else {
+                    String::new()
+                }
+            );
+            return;
+        }
+        ServedFrom::Cache => {
+            eprintln!("Parse passes: 0 (served from cache)");
+            return;
+        }
+        ServedFrom::Index => {
+            eprintln!("Parse passes: 0 (answered from the boundary index)");
+            return;
+        }
+        ServedFrom::Parse => {}
     }
     eprintln!(
         "Parse passes: {}  (partitions: {}, packets scanned: {}{})",

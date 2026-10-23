@@ -28,7 +28,8 @@ pub use protocol_provider::{EngineTables, PreparedTable, ProtocolTableProvider};
 pub use scan_exec::ProtocolScanExec;
 pub use shared::{
     auto_target_partitions, run_shared_parse, run_streaming_parse, ParseStats, ParseSubscription,
-    PartitionStat, ProgressFn, SharedParseState, StreamingHandle, TableData, TableSubscription,
+    PartitionStat, ProgressFn, ServedFrom, SharedParseState, StreamingHandle, TableData,
+    TableSubscription,
 };
 
 use std::sync::Arc;

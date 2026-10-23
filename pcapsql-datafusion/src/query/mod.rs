@@ -34,7 +34,7 @@ pub use builders::NormalizedBatchSet;
 pub use filter::FilterEvaluator;
 pub use providers::{
     auto_target_partitions, merge_ordered_partitions, ParseStats, ParseSubscription, ProgressFn,
-    ProtocolScanExec, ProtocolTableProvider, TableSubscription,
+    ProtocolScanExec, ProtocolTableProvider, ServedFrom, TableSubscription,
 };
 pub use udf::CaptureTimeRange;
 
@@ -45,7 +45,7 @@ use std::sync::{Arc, RwLock};
 use arrow::array::RecordBatch;
 use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion::config::ConfigOptions;
-use datafusion::logical_expr::{Expr, LogicalPlan};
+use datafusion::logical_expr::{DdlStatement, Expr, LogicalPlan, Statement};
 use datafusion::prelude::*;
 use tokio::task::JoinHandle;
 
@@ -345,6 +345,54 @@ fn harvest_table_needs(
     Ok(needs)
 }
 
+/// What a statement does with the capture, decided from the top node of the
+/// unoptimized plan **before** anything is prepared.
+#[derive(Debug, PartialEq, Eq)]
+enum StatementKind {
+    /// Reads capture tables: harvest, prepare, execute.
+    Query,
+    /// Builds and displays a plan but never polls a scan (`EXPLAIN`):
+    /// planned without prepared tables, nothing parsed.
+    PlanOnly,
+    /// DDL / session statement (`CREATE VIEW`, `DESCRIBE`, `SET`, …):
+    /// executed on the shared context, nothing parsed.
+    Statement,
+}
+
+/// Classify a statement. `CREATE TABLE … AS SELECT` over a capture table and
+/// `EXECUTE` are rejected: DataFusion runs their input on the plain session
+/// state, where no table is prepared.
+fn classify_statement(
+    plan: &LogicalPlan,
+    known_tables: &HashSet<String>,
+) -> Result<StatementKind, Error> {
+    Ok(match plan {
+        LogicalPlan::Explain(_) => StatementKind::PlanOnly,
+        LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(cmd)) => {
+            if harvest_table_needs(&cmd.input, known_tables)?.is_empty() {
+                StatementKind::Statement
+            } else {
+                return Err(Error::Query(QueryError::Execution(
+                    "CREATE TABLE … AS SELECT over a capture table is not supported; \
+                     CREATE VIEW over it, or run the SELECT and keep its batches"
+                        .into(),
+                )));
+            }
+        }
+        LogicalPlan::Statement(Statement::Execute(_)) => {
+            return Err(Error::Query(QueryError::Execution(
+                "EXECUTE of a prepared statement is not supported through \
+                 QueryEngine::query; run the statement's SQL directly"
+                    .into(),
+            )));
+        }
+        LogicalPlan::Ddl(_) | LogicalPlan::Statement(_) | LogicalPlan::DescribeTable(_) => {
+            StatementKind::Statement
+        }
+        _ => StatementKind::Query,
+    })
+}
+
 /// Does a cached column set cover what a query needs?
 ///
 /// `cached` is the cached entry's column names (`None` = not cached).
@@ -484,6 +532,7 @@ impl QueryEngine {
                 table_name.to_string(),
                 schema,
                 engine_tables.clone(),
+                parallelism,
             );
             ctx.register_table(table_name, Arc::new(provider))
                 .map_err(|e| Error::Query(QueryError::Execution(e.to_string())))?;
@@ -524,14 +573,17 @@ impl QueryEngine {
     /// one (no packet parsing), else from one header-only pass over the
     /// capture (a `frames`-only scope runs no protocol parser). Either way it
     /// is established once per engine.
-    fn ensure_time_range(&self) -> Result<(), Error> {
+    ///
+    /// Returns the statistics of the header-only pass when one ran (so the
+    /// query can report it), or an empty `ParseStats` otherwise.
+    fn ensure_time_range(&self) -> Result<ParseStats, Error> {
         if self.time_range.is_complete() {
-            return Ok(());
+            return Ok(ParseStats::default());
         }
         if let Some((start_us, end_us)) = self.parse_source.time_range_us() {
             self.time_range.record(start_us, end_us);
             self.time_range.mark_complete();
-            return Ok(());
+            return Ok(ParseStats::default());
         }
         let mut subscription = ParseSubscription::default();
         subscription.tables.insert(
@@ -547,7 +599,11 @@ impl QueryEngine {
             self.time_range.record(stats.start_ts_us, stats.end_ts_us);
         }
         self.time_range.mark_complete();
-        Ok(())
+        // The pass built no table the query asked for; report the scan only.
+        Ok(ParseStats {
+            rows_built: HashMap::new(),
+            ..stats
+        })
     }
 
     /// Execute a SQL query and return results.
@@ -555,8 +611,15 @@ impl QueryEngine {
     /// Plans first, harvests the optimized plan's table needs, runs one
     /// scoped parse pass covering them (subject to the retention policy's
     /// cache), then executes. This is THE query path: queries issued
-    /// directly against [`Self::context`] bypass the parse and will fail
-    /// with "table was not prepared".
+    /// directly against [`Self::context`] bypass the parse and fail at
+    /// execution with "table was not prepared for this query".
+    ///
+    /// Statements that never poll a scan parse nothing: `EXPLAIN` is planned
+    /// over unprepared (plan-only) tables and displayed; DDL and session
+    /// statements run on the shared context. [`Self::last_parse_stats`] then
+    /// reports [`ServedFrom::PlanOnly`]. `EXPLAIN ANALYZE` executes and parses like a
+    /// query. `CREATE TABLE … AS SELECT` over a capture table and `EXECUTE`
+    /// are rejected with a clear error.
     ///
     /// Queries on one engine run one at a time (see the type-level
     /// documentation): a concurrent caller waits for the running query to
@@ -573,15 +636,42 @@ impl QueryEngine {
             .create_logical_plan(sql)
             .await
             .map_err(|e| Error::Query(QueryError::from(e)))?;
+        let kind = classify_statement(&plan, &self.known_tables)?;
+        if kind == StatementKind::Statement {
+            // DDL / session statements: nothing to prepare. Run on the shared
+            // context so e.g. CREATE VIEW lands in the shared catalog.
+            let batches = self.collect_on_context(plan).await?;
+            *self.last_stats.write().expect("stats lock poisoned") = ParseStats {
+                served_from: ServedFrom::PlanOnly,
+                ..Default::default()
+            };
+            return Ok(batches);
+        }
         // The time UDFs are `Stable`, so the optimizer constant-folds
         // `start_time()` / `end_time()` *during* `optimize`: the range must be
         // complete before that, hence the check on the unoptimized plan.
-        if uses_time_range_udfs(&plan) {
-            self.ensure_time_range()?;
-        }
+        // (Also for EXPLAIN, so the displayed constant is the real one; the
+        // range comes from the boundary index without a packet parse.)
+        let bootstrap = if uses_time_range_udfs(&plan) {
+            self.ensure_time_range()?
+        } else {
+            ParseStats::default()
+        };
         let optimized = state
             .optimize(&plan)
             .map_err(|e| Error::Query(QueryError::from(e)))?;
+        if kind == StatementKind::PlanOnly {
+            // EXPLAIN: build and display the plan over unprepared tables (the
+            // providers return plan-only scans); no parse, no execution.
+            let batches = self.collect_on_context(optimized).await?;
+            // The only parse a plan-only statement can trigger is the
+            // time-range bootstrap; report it rather than claim zero.
+            *self.last_stats.write().expect("stats lock poisoned") = ParseStats {
+                served_from: ServedFrom::PlanOnly,
+                ..bootstrap
+            };
+            return Ok(batches);
+        }
 
         // One-shot engines keep nothing between queries. Clearing *before*
         // preparing (not only after executing) also disposes of entries a
@@ -663,8 +753,12 @@ impl QueryEngine {
         let mut producers: Vec<JoinHandle<Result<PartitionStat, Error>>> = Vec::new();
         let mut stream_guard: Option<ClearStreamsOnDrop<'_>> = None;
         if subscription.is_empty() {
-            let mut stats = ParseStats::default();
+            let mut stats = ParseStats {
+                served_from: ServedFrom::Cache,
+                ..Default::default()
+            };
             if let Some(n) = fast_frame_count {
+                stats.served_from = ServedFrom::Index;
                 stats.partitions = 1;
                 stats.complete_scan = true;
                 stats.rows_built.insert("frames".to_string(), n as usize);
@@ -783,6 +877,18 @@ impl QueryEngine {
         }
     }
 
+    /// Execute a plan on the shared context without preparing any table
+    /// (DDL, session statements, EXPLAIN).
+    async fn collect_on_context(&self, plan: LogicalPlan) -> Result<Vec<RecordBatch>, Error> {
+        self.ctx
+            .execute_logical_plan(plan)
+            .await
+            .map_err(|e| Error::Query(QueryError::from(e)))?
+            .collect()
+            .await
+            .map_err(|e| Error::Query(QueryError::from(e)))
+    }
+
     /// Build the parse subscription for a query, honoring the retention policy
     /// and the pushdown/retention matrix (`docs/query-scoped-parse-migration.md`).
     fn build_subscription(&self, needs: HashMap<String, TableNeeds>) -> ParseSubscription {
@@ -845,7 +951,8 @@ impl QueryEngine {
 
     /// Instrumentation for the most recent query: parse passes (0 when fully
     /// served from cache, 1 otherwise — the shared-parse invariant), packets
-    /// scanned, partitions, and rows built per table.
+    /// scanned, partitions, and rows built per table. A statement that never
+    /// executed a scan (EXPLAIN, DDL) reports [`ServedFrom::PlanOnly`].
     pub fn last_parse_stats(&self) -> ParseStats {
         self.last_stats.read().expect("stats lock poisoned").clone()
     }

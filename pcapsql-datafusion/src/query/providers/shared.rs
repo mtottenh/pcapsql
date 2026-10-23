@@ -182,6 +182,23 @@ impl TableData {
     }
 }
 
+/// Where a query's rows came from — what `--stats` reports.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ServedFrom {
+    /// A scoped parse pass over the capture.
+    #[default]
+    Parse,
+    /// Entirely from the `CacheOnTouch` cache: nothing parsed.
+    Cache,
+    /// The boundary index (`count(*) FROM frames` fast path): nothing parsed.
+    Index,
+    /// The statement never executed a scan (`EXPLAIN`, DDL, `DESCRIBE`,
+    /// `SET`, …): nothing was prepared. The only parse it can report is the
+    /// one-time header-only time-range bootstrap of a source without a
+    /// boundary index.
+    PlanOnly,
+}
+
 /// Instrumentation for the most recent parse pass.
 #[derive(Clone, Debug, Default)]
 pub struct ParseStats {
@@ -210,6 +227,9 @@ pub struct ParseStats {
     /// Stream-analysis tables built by this pass's stream subscriber (sorted).
     /// Non-empty means the pass ran as one partition for reassembly order.
     pub stream_tables: Vec<String>,
+    /// Where the rows came from; distinguishes a cache hit, the index fast
+    /// path and a plan-only statement, which all report `parse_passes == 0`.
+    pub served_from: ServedFrom,
 }
 
 /// Result of one scoped parse pass.
@@ -497,6 +517,7 @@ pub fn run_shared_parse<S: SeekablePacketSource>(
             overflowed_bytes: HashMap::new(),
             overflow_peak_bytes: HashMap::new(),
             stream_tables: stream_names,
+            served_from: ServedFrom::Parse,
         },
     })
 }
