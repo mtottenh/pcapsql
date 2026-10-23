@@ -64,8 +64,11 @@ async fn main() -> Result<()> {
     let input_source = InputSource::parse(&pcap_file_arg.to_string_lossy());
     let source_name = input_source.display_name();
 
-    // Optional progress spinner driven by the parse callback.
-    let progress_bar = if args.progress {
+    // Optional progress spinner driven by the parse callback. Parsing happens
+    // at query time, so the spinner is only meaningful for a one-shot query
+    // (`-e` / `-f`); in the REPL it would interleave with query output.
+    let one_shot = args.query.is_some() || args.query_file.is_some();
+    let progress_bar = if args.progress && one_shot {
         let pb = indicatif::ProgressBar::new_spinner();
         pb.set_style(
             indicatif::ProgressStyle::with_template(
@@ -97,8 +100,16 @@ async fn main() -> Result<()> {
         InputSource::LocalFile(path) => SourceSpec::Path(path.clone()),
     };
 
+    // One-shot invocations retain nothing; the REPL caches touched tables.
+    let retention = if args.query.is_some() || args.query_file.is_some() {
+        pcapsql_datafusion::query::RetentionPolicy::None
+    } else {
+        pcapsql_datafusion::query::RetentionPolicy::CacheOnTouch
+    };
+
     let opts = EngineOptions {
         batch_size: args.batch_size,
+        retention,
         keylog,
         mmap: !args.no_mmap,
         progress: progress_cb,
@@ -114,10 +125,13 @@ async fn main() -> Result<()> {
     let engine = QueryEngine::open(spec, opts)
         .await
         .with_context(|| format!("Failed to open PCAP source: {source_name}"))?;
-
-    if let Some(pb) = progress_bar {
-        pb.finish_and_clear();
-    }
+    // `open` no longer parses; the spinner ticks during `query` below and is
+    // cleared once the one-shot query has run.
+    let finish_progress = || {
+        if let Some(pb) = &progress_bar {
+            pb.finish_and_clear();
+        }
+    };
 
     let formatter = OutputFormatter::new(args.format);
 
@@ -134,7 +148,9 @@ async fn main() -> Result<()> {
     // Execute query from -e flag
     if let Some(query) = args.query {
         let query = apply_bpf_filter(&query, &bpf_filter);
-        let batches = engine.query(&query).await?;
+        let batches = engine.query(&query).await;
+        finish_progress();
+        let batches = batches?;
 
         // Export if output file specified
         if let Some(output_path) = &args.output {
@@ -165,7 +181,9 @@ async fn main() -> Result<()> {
             .with_context(|| format!("Failed to read query file: {}", query_file.display()))?;
 
         let query = apply_bpf_filter(&query, &bpf_filter);
-        let batches = engine.query(&query).await?;
+        let batches = engine.query(&query).await;
+        finish_progress();
+        let batches = batches?;
 
         // Export if output file specified
         if let Some(output_path) = &args.output {
@@ -195,14 +213,28 @@ async fn main() -> Result<()> {
 }
 
 fn print_parse_stats(engine: &QueryEngine) {
-    // The parse cache was removed in favor of a single shared parse pass; report
-    // the parse-pass / partition instrumentation instead.
+    let stats = engine.last_parse_stats();
     eprintln!();
+    if stats.parse_passes == 0 {
+        eprintln!("Parse passes: 0 (served from cache)");
+        return;
+    }
     eprintln!(
-        "Parse passes: {}  (partitions: {})",
-        engine.parse_pass_count(),
-        engine.partition_count()
+        "Parse passes: {}  (partitions: {}, packets scanned: {}{})",
+        stats.parse_passes,
+        stats.partitions,
+        stats.packets_scanned,
+        if stats.complete_scan {
+            ""
+        } else {
+            ", stopped early by LIMIT"
+        }
     );
+    let mut rows: Vec<_> = stats.rows_built.iter().filter(|(_, n)| **n > 0).collect();
+    rows.sort();
+    for (table, n) in rows {
+        eprintln!("  {table}: {n} rows");
+    }
 }
 
 fn list_protocols() {
@@ -346,10 +378,10 @@ async fn run_repl(
                     ReplCommand::Protocols => list_protocols(),
                     ReplCommand::Udfs => list_udfs(),
                     ReplCommand::CacheStats => {
+                        let stats = engine.last_parse_stats();
                         println!(
-                            "Parse passes: {}  (partitions: {})",
-                            engine.parse_pass_count(),
-                            engine.partition_count()
+                            "Last query: {} parse pass(es), {} partition(s), {} packets scanned",
+                            stats.parse_passes, stats.partitions, stats.packets_scanned
                         );
                     }
                     ReplCommand::CacheStatsReset => {

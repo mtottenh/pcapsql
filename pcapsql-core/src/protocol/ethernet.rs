@@ -156,6 +156,14 @@ impl Protocol for EthernetProtocol {
     fn child_protocols(&self) -> &[&'static str] {
         &["ipv4", "ipv6", "arp", "vlan"]
     }
+
+    /// Ethernet is normally the link-layer root, but it also appears *inside*
+    /// VXLAN and GRE (transparent Ethernet bridging) tunnels. Listing the
+    /// tunnels here lets protocol pruning keep parsing through them to reach
+    /// the inner frame.
+    fn dependencies(&self) -> &'static [&'static str] {
+        &["vxlan", "gre"]
+    }
 }
 
 #[cfg(test)]

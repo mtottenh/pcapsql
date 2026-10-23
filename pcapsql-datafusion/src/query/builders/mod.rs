@@ -7,16 +7,11 @@
 //! ## Architecture
 //!
 //! ```text
-//! Parsed Packets → NormalizedBatchSet → Multiple Protocol Tables
-//!                        │
-//!                        ├─► frames table
-//!                        ├─► ethernet table
-//!                        ├─► ipv4 table
-//!                        ├─► ipv6 table
-//!                        ├─► tcp table
-//!                        ├─► udp table
-//!                        ├─► dns table
-//!                        └─► ... other protocol tables
+//! Parsed Packets → NormalizedBatchSet → the SUBSCRIBED protocol tables
+//!                        │                  (per-query column subsets,
+//!                        ├─► frames          parse-time predicates and
+//!                        ├─► tcp             row caps applied before any
+//!                        └─► …               Arrow materialization)
 //! ```
 //!
 //! Each protocol table contains only the fields relevant to that protocol,
@@ -27,13 +22,3 @@ mod protocol;
 
 pub use normalized::NormalizedBatchSet;
 pub use protocol::ProtocolBatchBuilder;
-
-use std::collections::HashMap;
-
-use arrow::record_batch::RecordBatch;
-
-/// A collection of RecordBatches for all protocol tables.
-pub type ProtocolBatches = HashMap<String, Vec<RecordBatch>>;
-
-/// A single set of RecordBatches, one per protocol table.
-pub type ProtocolBatchMap = HashMap<String, RecordBatch>;

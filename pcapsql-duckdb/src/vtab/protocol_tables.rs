@@ -26,7 +26,7 @@ use parking_lot::Mutex;
 
 use pcapsql_core::{
     default_registry, parse_packet, schema::DataKind, FieldValue, FilePacketReader,
-    FilePacketSource, PacketReader, PacketSource, Protocol, ProtocolRegistry,
+    FilePacketSource, PacketReader, PacketSource, ParseScope, Protocol, ProtocolRegistry,
 };
 
 use crate::duckdb_schema::to_duckdb_type;
@@ -176,7 +176,12 @@ fn func_protocol<T: VTab<InitData = ProtocolInitData, BindData = ProtocolBindDat
         let frame_num = init_data.frame_number.fetch_add(1, Ordering::Relaxed) + 1;
 
         // Parse and check if this packet contains our protocol
-        let results = parse_packet(&init_data.registry, packet.link_type, packet.data);
+        let results = parse_packet(
+            &init_data.registry,
+            packet.link_type,
+            packet.data,
+            &ParseScope::full(),
+        );
 
         for (proto_name, parsed) in &results {
             if *proto_name == bind_data.protocol_name {

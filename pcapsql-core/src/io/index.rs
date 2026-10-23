@@ -113,6 +113,15 @@ impl BoundaryIndex {
         ranges
     }
 
+    /// The capture's `[earliest, latest]` packet timestamp (nanoseconds), from
+    /// the per-checkpoint window bounds. `None` when no packet carried a
+    /// timestamp.
+    pub fn time_range_ns(&self) -> Option<(i64, i64)> {
+        let min = self.checkpoints.iter().filter_map(|c| c.min_ts).min()?;
+        let max = self.checkpoints.iter().filter_map(|c| c.max_ts).max()?;
+        Some((min, max))
+    }
+
     /// Find the checkpoint whose frame number exactly matches `frame`.
     pub fn checkpoint_at(&self, frame: u64) -> Option<&Checkpoint> {
         self.checkpoints.iter().find(|c| c.frame_number == frame)
