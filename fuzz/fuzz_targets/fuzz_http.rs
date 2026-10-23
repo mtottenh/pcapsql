@@ -1,13 +1,15 @@
-//! Fuzz target for HTTP/1.x and HTTP/2 stream parsers.
+//! Fuzz target for the HTTP/1.x and HTTP/2 stream parsers and the
+//! packet-level HTTP/1.x parser.
 //!
 //! This target tests the application-layer parsing of HTTP messages:
 //!
-//! **HTTP/1.x:**
+//! **HTTP/1.x (stream and packet level):**
 //! - Request line parsing (method, path, version)
 //! - Response status line parsing
 //! - Header field parsing (name: value)
-//! - Chunked transfer encoding
+//! - Chunked transfer encoding (stream)
 //! - Content-Length handling
+//! - Partial header blocks in a single segment (packet)
 //!
 //! **HTTP/2:**
 //! - Frame header (9 bytes)
@@ -19,6 +21,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
+use pcapsql_core::protocol::{HttpProtocol, ParseContext, Protocol};
 use pcapsql_core::stream::{
     Direction, Http2StreamParser, HttpStreamParser, StreamContext, StreamParser,
 };
@@ -60,7 +63,7 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // Use first byte to select which parser variant to test
-    let selector = data[0] % 4;
+    let selector = data[0] % 5;
     let payload = if data.len() > 1 { &data[1..] } else { &[] };
 
     if payload.is_empty() {
@@ -87,12 +90,21 @@ fuzz_target!(|data: &[u8]| {
             let ctx = http2_context();
             let _ = parser.parse_stream(payload, &ctx);
         }
-        _ => {
+        3 => {
             // Test HTTP/2 frame parsing (server -> client)
             let parser = Http2StreamParser::new();
             let mut ctx = http2_context();
             ctx.direction = Direction::ToClient;
             let _ = parser.parse_stream(payload, &ctx);
+        }
+        _ => {
+            // Test the packet-level HTTP/1.x parser on one TCP segment
+            // (request or response is decided from the payload).
+            let mut ctx = ParseContext::new(1);
+            ctx.insert_hint("src_port", 12345);
+            ctx.insert_hint("dst_port", 80);
+            ctx.insert_hint("transport", 6);
+            let _ = HttpProtocol.parse(payload, &ctx);
         }
     }
 });

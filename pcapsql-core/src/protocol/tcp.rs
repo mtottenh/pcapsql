@@ -6,7 +6,7 @@ use smallvec::SmallVec;
 
 use etherparse::{TcpHeaderSlice, TcpOptionElement};
 
-use super::{FieldValue, ParseContext, ParseResult, PayloadMode, Protocol};
+use super::{http, FieldValue, HintEntry, ParseContext, ParseResult, PayloadMode, Protocol};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// IP protocol number for TCP.
@@ -143,6 +143,20 @@ fn parse_tcp_options(tcp: &TcpHeaderSlice<'_>) -> ParsedTcpOptions {
     }
 
     result
+}
+
+/// Child hints for the layer above TCP: the ports, the transport, and
+/// whether the payload starts an HTTP/1.x message (a prefix test that lets
+/// the `http` parser match only message starts, not continuation segments).
+fn child_hints(src_port: u16, dst_port: u16, payload: &[u8]) -> SmallVec<[HintEntry; 4]> {
+    let mut child_hints = SmallVec::new();
+    child_hints.push(("src_port", src_port as u64));
+    child_hints.push(("dst_port", dst_port as u64));
+    child_hints.push(("transport", IP_PROTO_TCP as u64));
+    if http::starts_http_message(payload) {
+        child_hints.push((http::PAYLOAD_HINT, 1));
+    }
+    child_hints
 }
 
 /// TCP protocol parser.
@@ -303,12 +317,10 @@ impl Protocol for TcpProtocol {
                     fields.push(("ts_ecr", FieldValue::Null));
                 }
 
-                let mut child_hints = SmallVec::new();
-                child_hints.push(("src_port", tcp.source_port() as u64));
-                child_hints.push(("dst_port", tcp.destination_port() as u64));
-                child_hints.push(("transport", 6)); // TCP
+                let payload = &data[header_len..];
+                let child_hints = child_hints(tcp.source_port(), tcp.destination_port(), payload);
 
-                ParseResult::success(fields, &data[header_len..], child_hints)
+                ParseResult::success(fields, payload, child_hints)
             }
             Err(e) => ParseResult::error(format!("TCP parse error: {e}"), data),
         }
@@ -617,12 +629,10 @@ impl Protocol for TcpProtocol {
                 }
 
                 // Child hints always needed for protocol chaining
-                let mut child_hints = SmallVec::new();
-                child_hints.push(("src_port", src_port as u64));
-                child_hints.push(("dst_port", dst_port as u64));
-                child_hints.push(("transport", 6)); // TCP
+                let payload = &data[header_len..];
+                let child_hints = child_hints(src_port, dst_port, payload);
 
-                ParseResult::success(result_fields, &data[header_len..], child_hints)
+                ParseResult::success(result_fields, payload, child_hints)
             }
             Err(e) => ParseResult::error(format!("TCP parse error: {e}"), data),
         }

@@ -37,6 +37,7 @@ fn protocol_description(name: &str) -> &'static str {
         "dns" => "Domain Name System",
         "dhcp" => "Dynamic Host Configuration Protocol",
         "ntp" => "Network Time Protocol",
+        "http" => "HTTP/1.x request and status lines with headers (per packet)",
         "tls" => "Transport Layer Security",
         "ssh" => "Secure Shell Protocol",
         "quic" => "QUIC Transport Protocol",

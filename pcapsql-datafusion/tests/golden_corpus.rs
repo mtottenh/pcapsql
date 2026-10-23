@@ -832,6 +832,42 @@ const CORPUS: &[(Capture, &str, &str)] = &[
         "u05_http2_empty",
         "SELECT count(*) AS frames FROM http2",
     ),
+    // --- Packet-level HTTP/1.x: the `http` table and the views over it ---
+    (
+        Capture::Http,
+        "u06_http_table",
+        "SELECT frame_number, is_request, headers_complete, method, uri, version, status_code, \
+         status_text, body_length, host, content_type, content_length, user_agent, server, \
+         accept, encap_depth FROM http ORDER BY frame_number",
+    ),
+    (
+        Capture::Http,
+        "u07_http_packets_view",
+        "SELECT frame_number, src_ip_v4, dst_ip_v4, src_port, dst_port, is_request, method, uri, \
+         status_code, host, content_length FROM http_packets ORDER BY frame_number",
+    ),
+    (
+        Capture::Http,
+        "u08_packets_view_http_columns",
+        "SELECT frame_number, protocol, src_port, dst_port, http_method, http_uri, \
+         http_status_code, http_host, tls_sni FROM packets \
+         WHERE http_method IS NOT NULL OR http_status_code IS NOT NULL OR tls_sni IS NOT NULL \
+         ORDER BY frame_number",
+    ),
+    (
+        Capture::Http,
+        "u09_http_vs_http_messages",
+        "SELECT h.frame_number, h.method, h.status_code, h.headers_complete, \
+         m.method AS stream_method, m.status_code AS stream_status_code \
+         FROM http h JOIN http_messages m USING (frame_number) ORDER BY h.frame_number",
+    ),
+    (
+        Capture::Eth,
+        "q29_http_not_a_message_start",
+        "SELECT count(*) AS http_rows, \
+         (SELECT count(*) FROM tcp WHERE dst_port = 80 OR src_port = 80) AS port_80_segments \
+         FROM http",
+    ),
 ];
 
 /// Queries that must be the *first* query a fresh engine runs: their result

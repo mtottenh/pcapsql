@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use compact_str::CompactString;
 use httparse::{Request, Response, Status, EMPTY_HEADER};
 
+use crate::protocol::http::{header_field, starts_http_message, HTTP_PORTS};
 use crate::protocol::FieldValue;
 use crate::schema::{DataKind, FieldDescriptor};
 use crate::stream::{ParsedMessage, StreamContext, StreamParseResult, StreamParser};
@@ -28,97 +29,22 @@ impl HttpStreamParser {
         Self
     }
 
-    /// Extract headers from httparse header array into fields map.
-    /// Uses eq_ignore_ascii_case() for zero-allocation case-insensitive matching.
+    /// Extract the headers that have columns (the mapping is shared with the
+    /// packet-level `http` parser). A repeated header's last value wins,
+    /// except `Set-Cookie`, where the first is kept.
     fn extract_headers(
         headers: &[httparse::Header],
         fields: &mut HashMap<&'static str, FieldValue>,
     ) {
         for header in headers.iter().filter(|h| !h.name.is_empty()) {
-            let name = header.name;
-            let value = String::from_utf8_lossy(header.value).to_string();
-
-            if name.eq_ignore_ascii_case("host") {
-                fields.insert("host", FieldValue::OwnedString(CompactString::new(value)));
-            } else if name.eq_ignore_ascii_case("content-type") {
-                fields.insert(
-                    "content_type",
-                    FieldValue::OwnedString(CompactString::new(value)),
-                );
-            } else if name.eq_ignore_ascii_case("content-length") {
-                if let Ok(len) = value.parse::<u64>() {
-                    fields.insert("content_length", FieldValue::UInt64(len));
+            if let Some((column, value)) = header_field(header.name, header.value) {
+                let value = value.to_owned();
+                if column == "set_cookie" {
+                    fields.entry(column).or_insert(value);
+                } else {
+                    fields.insert(column, value);
                 }
-            } else if name.eq_ignore_ascii_case("user-agent") {
-                fields.insert(
-                    "user_agent",
-                    FieldValue::OwnedString(CompactString::new(value)),
-                );
-            } else if name.eq_ignore_ascii_case("server") {
-                fields.insert("server", FieldValue::OwnedString(CompactString::new(value)));
-            } else if name.eq_ignore_ascii_case("transfer-encoding") {
-                fields.insert(
-                    "transfer_encoding",
-                    FieldValue::OwnedString(CompactString::new(value)),
-                );
-            } else if name.eq_ignore_ascii_case("connection") {
-                fields.insert(
-                    "connection",
-                    FieldValue::OwnedString(CompactString::new(value)),
-                );
-            } else if name.eq_ignore_ascii_case("cookie") {
-                fields.insert("cookie", FieldValue::OwnedString(CompactString::new(value)));
-            } else if name.eq_ignore_ascii_case("set-cookie") {
-                fields
-                    .entry("set_cookie")
-                    .or_insert(FieldValue::OwnedString(CompactString::new(value)));
-            } else if name.eq_ignore_ascii_case("referer") || name.eq_ignore_ascii_case("referrer")
-            {
-                fields.insert(
-                    "referer",
-                    FieldValue::OwnedString(CompactString::new(value)),
-                );
-            } else if name.eq_ignore_ascii_case("accept") {
-                fields.insert("accept", FieldValue::OwnedString(CompactString::new(value)));
-            } else if name.eq_ignore_ascii_case("accept-encoding") {
-                fields.insert(
-                    "accept_encoding",
-                    FieldValue::OwnedString(CompactString::new(value)),
-                );
-            } else if name.eq_ignore_ascii_case("accept-language") {
-                fields.insert(
-                    "accept_language",
-                    FieldValue::OwnedString(CompactString::new(value)),
-                );
-            } else if name.eq_ignore_ascii_case("cache-control") {
-                fields.insert(
-                    "cache_control",
-                    FieldValue::OwnedString(CompactString::new(value)),
-                );
-            } else if name.eq_ignore_ascii_case("authorization") {
-                // Store auth type only for security
-                let auth_type = value.split_whitespace().next().unwrap_or(&value);
-                fields.insert(
-                    "authorization",
-                    FieldValue::OwnedString(CompactString::new(auth_type)),
-                );
-            } else if name.eq_ignore_ascii_case("location") {
-                fields.insert(
-                    "location",
-                    FieldValue::OwnedString(CompactString::new(value)),
-                );
-            } else if name.eq_ignore_ascii_case("x-forwarded-for") {
-                fields.insert(
-                    "x_forwarded_for",
-                    FieldValue::OwnedString(CompactString::new(value)),
-                );
-            } else if name.eq_ignore_ascii_case("x-real-ip") {
-                fields.insert(
-                    "x_real_ip",
-                    FieldValue::OwnedString(CompactString::new(value)),
-                );
             }
-            // Unknown headers are ignored
         }
     }
 
@@ -197,8 +123,6 @@ impl StreamParser for HttpStreamParser {
     }
 
     fn can_parse_stream(&self, context: &StreamContext) -> bool {
-        // Common HTTP ports
-        const HTTP_PORTS: [u16; 6] = [80, 8080, 8000, 8888, 3000, 5000];
         HTTP_PORTS.contains(&context.dst_port) || HTTP_PORTS.contains(&context.src_port)
     }
 
@@ -369,18 +293,8 @@ impl StreamParser for HttpStreamParser {
                 };
             }
             Err(_) => {
-                // Check if it looks like HTTP at all
-                if data.starts_with(b"GET ")
-                    || data.starts_with(b"POST ")
-                    || data.starts_with(b"PUT ")
-                    || data.starts_with(b"DELETE ")
-                    || data.starts_with(b"HEAD ")
-                    || data.starts_with(b"OPTIONS ")
-                    || data.starts_with(b"PATCH ")
-                    || data.starts_with(b"CONNECT ")
-                    || data.starts_with(b"HTTP/")
-                {
-                    // Looks like HTTP but parsing failed - need more data?
+                // Looks like HTTP but parsing failed - need more data?
+                if starts_http_message(data) {
                     return StreamParseResult::NeedMore {
                         minimum_bytes: None,
                     };
