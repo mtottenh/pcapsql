@@ -40,7 +40,7 @@ const BUFFER_SIZE: usize = 262144;
 /// `BufferTooSmall` is raised from the *declared* record length, so without a
 /// ceiling a single corrupt caplen would keep doubling the buffer until the
 /// allocation failed. No real link layer produces frames this large.
-const MAX_BUFFER_SIZE: usize = 64 * 1024 * 1024;
+pub(crate) const MAX_BUFFER_SIZE: usize = 64 * 1024 * 1024;
 
 /// Default timestamp resolution (units per second) when none is known: microseconds.
 const DEFAULT_RESOLUTION: u64 = 1_000_000;
@@ -344,6 +344,12 @@ impl<R: Read> GenericPcapReader<R> {
     }
 
     /// Process up to `max` packets, invoking `f` with borrowed packet data.
+    ///
+    /// Returns the number of packets delivered. An error returned by `f`
+    /// stops the loop and is propagated, but the packet it was called with
+    /// counts as processed (it is consumed and its frame number is spent), so
+    /// a caller that uses an error to pause resumes at the next record with
+    /// no re-delivery.
     #[inline]
     pub fn process_packets<F>(&mut self, max: usize, f: F) -> Result<usize, Error>
     where
@@ -436,9 +442,13 @@ where
                         link_type: *link_type as u16,
                         data: packet.data,
                     };
-                    f(packet_ref)?;
+                    // The packet has been delivered: consume it before
+                    // propagating a callback error, so a caller that stops
+                    // early resumes at the next record (no re-delivery).
+                    let r = f(packet_ref);
                     reader.consume(offset);
                     count += 1;
+                    r?;
                 }
                 PcapBlockOwned::LegacyHeader(header) => {
                     *link_type = header.network.0 as u32;
@@ -538,9 +548,10 @@ where
                                 link_type: lt as u16,
                                 data,
                             };
-                            f(packet_ref)?;
+                            let r = f(packet_ref);
                             reader.consume(offset);
                             count += 1;
+                            r?;
                         }
                         Block::SimplePacket(spb) => {
                             *frame_number += 1;
@@ -557,9 +568,10 @@ where
                                 link_type: lt as u16,
                                 data,
                             };
-                            f(packet_ref)?;
+                            let r = f(packet_ref);
                             reader.consume(offset);
                             count += 1;
+                            r?;
                         }
                         _ => {
                             reader.consume(offset);
@@ -605,6 +617,50 @@ impl<R: Read> Unpin for GenericPcapReader<R> {}
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    /// A callback error stops the loop *after* the packet it was called
+    /// with: that packet is consumed and its frame number spent, so a caller
+    /// that pauses with an error resumes at the next record (no duplicate).
+    #[test]
+    fn callback_error_consumes_the_delivered_packet() {
+        use pcapsql_testgen::{legacy_pcap, GenPacket, LegacyVariant};
+        let packets: Vec<GenPacket> = (0..5u32)
+            .map(|i| GenPacket {
+                ts_sec: 1_700_000_000 + i,
+                ts_frac: 0,
+                data: vec![i as u8; 20],
+                origlen: 20,
+            })
+            .collect();
+        let bytes = legacy_pcap(LegacyVariant::LeMicro, 1, 65535, &packets).bytes;
+        let mut reader =
+            GenericPcapReader::with_format(Cursor::new(bytes), PcapFormat::LegacyLeMicro).unwrap();
+
+        // Stop after the second packet by returning an error from the callback.
+        let mut seen = Vec::new();
+        let err = reader.process_packets(10, |p| {
+            seen.push(p.frame_number);
+            if p.frame_number == 2 {
+                Err(Error::Io(std::io::Error::other("pause")))
+            } else {
+                Ok(())
+            }
+        });
+        assert!(err.is_err());
+        assert_eq!(seen, vec![1, 2]);
+
+        // Resume: frames 3, 4, 5 follow with no re-delivery of frame 2.
+        let mut rest = Vec::new();
+        let n = reader
+            .process_packets(10, |p| {
+                rest.push(p.frame_number);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(n, 3);
+        assert_eq!(rest, vec![3, 4, 5]);
+        assert_eq!(reader.process_packets(10, |_| Ok(())).unwrap(), 0);
+    }
 
     #[test]
     fn test_pcap_format_detect() {

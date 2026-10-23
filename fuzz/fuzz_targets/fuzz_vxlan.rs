@@ -9,7 +9,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use pcapsql_core::{default_registry, parse_packet};
+use pcapsql_core::{default_registry, parse_packet, ParseScope};
 
 fuzz_target!(|data: &[u8]| {
     if data.is_empty() {
@@ -52,5 +52,5 @@ fuzz_target!(|data: &[u8]| {
     frame.extend_from_slice(data);
 
     // Parse - VXLAN parser triggered by dst_port=4789
-    let _ = parse_packet(&registry, 1, &frame);
+    let _ = parse_packet(&registry, 1, &frame, &ParseScope::full());
 });

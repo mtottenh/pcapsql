@@ -436,6 +436,10 @@ fn output_parsed_row(
                     let slice = vector.as_mut_slice::<i64>();
                     slice[row_idx] = *v;
                 }
+                FieldValue::Float64(v) => {
+                    let slice = vector.as_mut_slice::<f64>();
+                    slice[row_idx] = *v;
+                }
                 FieldValue::Str(v) => {
                     if let Ok(cstr) = CString::new(*v) {
                         vector.insert(row_idx, cstr);

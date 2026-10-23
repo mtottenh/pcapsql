@@ -28,6 +28,8 @@ pub enum FieldValue<'data> {
     UInt64(u64),
     /// Signed 64-bit integer
     Int64(i64),
+    /// 64-bit float (fixed-point protocol fields converted to real units)
+    Float64(f64),
     /// Boolean value
     Bool(bool),
 
@@ -173,6 +175,7 @@ impl<'data> FieldValue<'data> {
             FieldValue::UInt32(v) => Some(v.to_string()),
             FieldValue::UInt64(v) => Some(v.to_string()),
             FieldValue::Int64(v) => Some(v.to_string()),
+            FieldValue::Float64(v) => Some(v.to_string()),
             FieldValue::Bool(v) => Some(v.to_string()),
             _ => None,
         }
@@ -203,6 +206,7 @@ impl<'data> FieldValue<'data> {
             FieldValue::UInt32(v) => FieldValue::UInt32(*v),
             FieldValue::UInt64(v) => FieldValue::UInt64(*v),
             FieldValue::Int64(v) => FieldValue::Int64(*v),
+            FieldValue::Float64(v) => FieldValue::Float64(*v),
             FieldValue::Bool(v) => FieldValue::Bool(*v),
             FieldValue::IpAddr(v) => FieldValue::IpAddr(*v),
             FieldValue::MacAddr(v) => FieldValue::MacAddr(*v),
@@ -226,6 +230,7 @@ impl<'data> std::fmt::Display for FieldValue<'data> {
             FieldValue::UInt32(v) => write!(f, "{v}"),
             FieldValue::UInt64(v) => write!(f, "{v}"),
             FieldValue::Int64(v) => write!(f, "{v}"),
+            FieldValue::Float64(v) => write!(f, "{v}"),
             FieldValue::Bool(v) => write!(f, "{v}"),
             FieldValue::Str(s) => write!(f, "{s}"),
             FieldValue::OwnedString(s) => write!(f, "{s}"),

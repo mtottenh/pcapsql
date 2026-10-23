@@ -23,6 +23,9 @@ pub enum DataKind {
     /// Unsigned 64-bit integer
     UInt64,
 
+    /// Signed 8-bit integer
+    Int8,
+
     /// Signed 64-bit integer
     Int64,
 
@@ -51,6 +54,7 @@ impl DataKind {
         match self {
             DataKind::Bool => "bool",
             DataKind::UInt8 => "u8",
+            DataKind::Int8 => "i8",
             DataKind::UInt16 => "u16",
             DataKind::UInt32 => "u32",
             DataKind::UInt64 => "u64",
@@ -73,6 +77,7 @@ impl DataKind {
         match self {
             DataKind::Bool => Some(1),
             DataKind::UInt8 => Some(1),
+            DataKind::Int8 => Some(1),
             DataKind::UInt16 => Some(2),
             DataKind::UInt32 => Some(4),
             DataKind::UInt64 => Some(8),

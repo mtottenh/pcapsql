@@ -49,6 +49,9 @@ fn internet_checksum(data: &[u8]) -> u16 {
 }
 
 /// GRE protocol parser.
+/// GRE protocol type for Transparent Ethernet Bridging (NVGRE).
+pub const ETHERTYPE_TEB: u16 = 0x6558;
+
 #[derive(Debug, Clone, Copy)]
 pub struct GreProtocol;
 
@@ -196,6 +199,13 @@ impl Protocol for GreProtocol {
         // ethertype::IPV6 = IPv6
         // 0x6558 = Transparent Ethernet Bridging (for NVGRE)
         // 0x880B = PPP
+        //
+        // Transparent Ethernet bridging carries a whole Ethernet frame; the
+        // Ethernet parser only runs below the root when told the link type,
+        // exactly as VXLAN does.
+        if protocol_type == ETHERTYPE_TEB {
+            child_hints.push(("link_type", 1u64)); // DLT_EN10MB
+        }
 
         // Signal tunnel boundary for encapsulation tracking
         child_hints.push(("tunnel_type", TunnelType::Gre as u64));
@@ -460,6 +470,51 @@ mod tests {
     }
 
     // Test 8: Too short header
+
+    /// Transparent Ethernet bridging carries a whole Ethernet frame: the
+    /// inner ethernet / ipv4 / udp layers must be reached (NVGRE).
+    #[test]
+    fn test_teb_reaches_inner_ethernet() {
+        use super::super::{default_registry, parse_packet, ParseScope};
+        // Outer Ethernet + IPv4 (proto 47) + GRE (TEB) + inner Ethernet +
+        // IPv4 + UDP.
+        let udp = [0x9C, 0x40, 0x00, 0x35, 0x00, 0x08, 0x00, 0x00];
+        let mut inner_ip = vec![0x45, 0x00, 0x00, 28, 0, 1, 0x40, 0, 64, 17, 0, 0];
+        inner_ip.extend_from_slice(&[10, 0, 0, 1, 8, 8, 8, 8]);
+        inner_ip.extend_from_slice(&udp);
+        let mut inner_eth = vec![0x02, 0, 0, 0, 0, 2, 0x02, 0, 0, 0, 0, 1, 0x08, 0x00];
+        inner_eth.extend_from_slice(&inner_ip);
+        let mut gre = create_gre_header(false, false, false, 0x6558);
+        gre.extend_from_slice(&inner_eth);
+        let total = (20 + gre.len()) as u16;
+        let mut outer_ip = vec![0x45, 0x00];
+        outer_ip.extend_from_slice(&total.to_be_bytes());
+        outer_ip.extend_from_slice(&[0, 2, 0x40, 0, 64, 47, 0, 0]);
+        outer_ip.extend_from_slice(&[192, 168, 0, 1, 192, 168, 0, 2]);
+        outer_ip.extend_from_slice(&gre);
+        let mut frame = vec![0x02, 0, 0, 0, 0, 4, 0x02, 0, 0, 0, 0, 3, 0x08, 0x00];
+        frame.extend_from_slice(&outer_ip);
+
+        let registry = default_registry();
+        let layers: Vec<&str> = parse_packet(&registry, 1, &frame, &ParseScope::full())
+            .iter()
+            .map(|(n, _)| *n)
+            .collect();
+        assert_eq!(
+            layers,
+            ["ethernet", "ipv4", "gre", "ethernet", "ipv4", "udp"]
+        );
+        // Scoped to udp: pruning keeps the tunnel path.
+        let scoped = ParseScope::for_tables(&["udp"], &registry);
+        let layers: Vec<&str> = parse_packet(&registry, 1, &frame, &scoped)
+            .iter()
+            .map(|(n, _)| *n)
+            .collect();
+        assert_eq!(
+            layers,
+            ["ethernet", "ipv4", "gre", "ethernet", "ipv4", "udp"]
+        );
+    }
     #[test]
     fn test_gre_too_short() {
         let short_header = [0x00, 0x00]; // Only 2 bytes

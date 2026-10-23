@@ -10,7 +10,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use pcapsql_core::{default_registry, parse_packet};
+use pcapsql_core::{default_registry, parse_packet, ParseScope};
 
 // Include generated frame wrappers
 include!("../src/frames.rs");
@@ -34,5 +34,5 @@ fuzz_target!(|data: &[u8]| {
     frame.extend_from_slice(data);
 
     // Parse through the full chain - TLS parser triggered by dst_port=443
-    let _ = parse_packet(&registry, 1, &frame);
+    let _ = parse_packet(&registry, 1, &frame, &ParseScope::full());
 });

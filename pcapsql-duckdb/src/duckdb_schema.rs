@@ -15,6 +15,7 @@ pub fn to_duckdb_type(kind: &DataKind) -> LogicalTypeHandle {
         DataKind::UInt32 => LogicalTypeHandle::from(LogicalTypeId::UInteger),
         DataKind::UInt64 => LogicalTypeHandle::from(LogicalTypeId::UBigint),
         DataKind::Int64 => LogicalTypeHandle::from(LogicalTypeId::Bigint),
+        DataKind::Int8 => LogicalTypeHandle::from(LogicalTypeId::Tinyint),
         DataKind::Float64 => LogicalTypeHandle::from(LogicalTypeId::Double),
         DataKind::String => LogicalTypeHandle::from(LogicalTypeId::Varchar),
         DataKind::Binary => LogicalTypeHandle::from(LogicalTypeId::Blob),
