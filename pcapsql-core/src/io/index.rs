@@ -17,7 +17,6 @@
 //! is needed. The checkpoint stride therefore controls partition granularity; it
 //! is configurable (small in tests, large in production).
 
-use std::hash::Hasher;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -118,15 +117,60 @@ impl BoundaryIndex {
     }
 
     /// Validate this index against the current state of a source.
+    ///
+    /// Length and header hash must match. The modification time must match
+    /// when both sides know it; when only one side knows it the index is
+    /// treated as stale (a sidecar written without an mtime must not pass on a
+    /// source that has one, or vice versa). Only when neither side has an
+    /// mtime does the check fall back to length + hash alone.
     pub fn is_valid_for(&self, len: u64, mtime: Option<SystemTime>, header_hash: u64) -> bool {
         if self.source_len != len || self.header_hash != header_hash {
             return false;
         }
-        // mtime: if both known, require equality; if either unknown, don't fail on it.
         match (self.source_mtime, mtime) {
             (Some(a), Some(b)) => a == b,
-            _ => true,
+            (None, None) => true,
+            _ => false,
         }
+    }
+
+    /// Structural sanity checks on a deserialized index.
+    ///
+    /// A sidecar is read before anything else and its offsets become partition
+    /// starts, so a corrupt or hand-edited file must be rejected here rather
+    /// than turn into mid-record reads later.
+    fn validate(&self) -> Result<(), Error> {
+        if self.stride == 0 {
+            return Err(invalid("sidecar: stride must be >= 1"));
+        }
+        if self.checkpoints.is_empty() {
+            return Ok(());
+        }
+        if self.checkpoints[0].frame_number != 1 {
+            return Err(invalid("sidecar: first checkpoint must be frame 1"));
+        }
+        for (i, cp) in self.checkpoints.iter().enumerate() {
+            if cp.frame_number > self.packet_count {
+                return Err(invalid("sidecar: checkpoint frame beyond packet_count"));
+            }
+            if cp.byte_offset >= self.source_len {
+                return Err(invalid("sidecar: checkpoint offset beyond source length"));
+            }
+            if self.format.is_pcapng() != cp.interface_state.is_some() {
+                return Err(invalid(
+                    "sidecar: interface state present iff the capture is PCAPNG",
+                ));
+            }
+            if i > 0 {
+                let prev = &self.checkpoints[i - 1];
+                if cp.frame_number <= prev.frame_number || cp.byte_offset <= prev.byte_offset {
+                    return Err(invalid(
+                        "sidecar: checkpoints must be strictly ascending by frame and offset",
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     // ---- Sidecar (de)serialization: explicit little-endian binary format ----
@@ -214,7 +258,7 @@ impl BoundaryIndex {
                 max_ts,
             });
         }
-        Ok(BoundaryIndex {
+        let idx = BoundaryIndex {
             source_len,
             source_mtime,
             header_hash,
@@ -224,7 +268,9 @@ impl BoundaryIndex {
             packet_count,
             stride,
             checkpoints,
-        })
+        };
+        idx.validate()?;
+        Ok(idx)
     }
 
     /// Write the index to a sidecar path.
@@ -249,14 +295,27 @@ pub fn sidecar_path(capture: &Path) -> PathBuf {
 }
 
 /// Hash the header region of a capture (used as a validity guard).
+///
+/// FNV-1a 64-bit over the first 4 KiB of the file (covers the legacy global
+/// header and a typical PCAPNG SHB + interface descriptions). A fixed,
+/// documented algorithm: the value is persisted in the sidecar, so it must be
+/// identical across Rust releases and platforms (`DefaultHasher` is not).
 pub fn header_hash(header_bytes: &[u8]) -> u64 {
-    // FNV-1a 64-bit over the first chunk of the file (covers legacy global header
-    // and a typical PCAPNG SHB + interface descriptions).
-    let mut h = std::collections::hash_map::DefaultHasher::new();
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
     let n = header_bytes.len().min(4096);
-    h.write(&header_bytes[..n]);
-    h.write_u64(0x9E37_79B9_7F4A_7C15); // salt to distinguish from raw bytes
-    h.finish()
+    let mut h = FNV_OFFSET;
+    for &b in &header_bytes[..n] {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(FNV_PRIME);
+    }
+    // Fold in the hashed length so a short header is distinct from a
+    // zero-padded one.
+    for b in (n as u64).to_le_bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(FNV_PRIME);
+    }
+    h
 }
 
 /// Build a boundary index by a single sequential scan over the (uncompressed)
@@ -558,7 +617,17 @@ impl<'a> Cursor<'a> {
             1 => {
                 let secs = self.u64()?;
                 let nanos = self.u32()?;
-                Some(SystemTime::UNIX_EPOCH + std::time::Duration::new(secs, nanos))
+                // Never panic on a hostile sidecar: `Duration::new` and
+                // `SystemTime + Duration` both panic on overflow.
+                if nanos >= 1_000_000_000 {
+                    return Err(invalid("sidecar: mtime nanos out of range"));
+                }
+                let d = std::time::Duration::new(secs, nanos);
+                Some(
+                    SystemTime::UNIX_EPOCH
+                        .checked_add(d)
+                        .ok_or_else(|| invalid("sidecar: mtime out of range"))?,
+                )
             }
             _ => return Err(invalid("bad opt tag")),
         })
@@ -631,6 +700,96 @@ mod tests {
         assert!(idx.is_valid_for(100, None, 42));
         assert!(!idx.is_valid_for(101, None, 42)); // size mismatch
         assert!(!idx.is_valid_for(100, None, 43)); // hash mismatch
+                                                   // An mtime known on only one side is a mismatch, not a pass.
+        let t = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(5);
+        assert!(!idx.is_valid_for(100, Some(t), 42));
+        let with_mtime = BoundaryIndex {
+            source_mtime: Some(t),
+            ..idx.clone()
+        };
+        assert!(with_mtime.is_valid_for(100, Some(t), 42));
+        assert!(!with_mtime.is_valid_for(100, None, 42));
+        assert!(!with_mtime.is_valid_for(100, Some(t + std::time::Duration::from_secs(1)), 42));
+    }
+
+    #[test]
+    fn header_hash_is_stable_fnv1a() {
+        // Persisted in sidecars: the value must never change across releases.
+        assert_eq!(header_hash(b""), 0xa8c7f832281a39c5);
+        assert_eq!(header_hash(b"abc"), 0xe5f49fafdcdf1048);
+        assert_ne!(header_hash(b"\0\0"), header_hash(b"\0\0\0"));
+    }
+
+    #[test]
+    fn hostile_sidecar_is_rejected_not_panicking() {
+        // Valid prefix up to the mtime, then an mtime that would overflow
+        // `SystemTime + Duration`.
+        let mut w = Vec::new();
+        w.extend_from_slice(SIDECAR_MAGIC);
+        put_u64(&mut w, 10); // source_len
+        w.push(1); // mtime present
+        put_u64(&mut w, u64::MAX); // secs
+        put_u32(&mut w, 0); // nanos
+        assert!(BoundaryIndex::from_bytes(&w).is_err());
+
+        let mut w = Vec::new();
+        w.extend_from_slice(SIDECAR_MAGIC);
+        put_u64(&mut w, 10);
+        w.push(1);
+        put_u64(&mut w, 1);
+        put_u32(&mut w, 2_000_000_000); // nanos >= 1e9
+        assert!(BoundaryIndex::from_bytes(&w).is_err());
+    }
+
+    #[test]
+    fn structurally_invalid_sidecar_is_rejected() {
+        let base = BoundaryIndex {
+            source_len: 1000,
+            source_mtime: None,
+            header_hash: 1,
+            format: PcapFormat::LegacyLeMicro,
+            link_type: 1,
+            snaplen: 65535,
+            packet_count: 10,
+            stride: 4,
+            checkpoints: vec![
+                Checkpoint {
+                    frame_number: 1,
+                    byte_offset: 24,
+                    interface_state: None,
+                    min_ts: None,
+                    max_ts: None,
+                },
+                Checkpoint {
+                    frame_number: 5,
+                    byte_offset: 400,
+                    interface_state: None,
+                    min_ts: None,
+                    max_ts: None,
+                },
+            ],
+        };
+        assert!(BoundaryIndex::from_bytes(&base.to_bytes()).is_ok());
+
+        let mut bad = base.clone();
+        bad.checkpoints[1].byte_offset = 24; // not ascending
+        assert!(BoundaryIndex::from_bytes(&bad.to_bytes()).is_err());
+
+        let mut bad = base.clone();
+        bad.checkpoints[1].byte_offset = 5000; // beyond source_len
+        assert!(BoundaryIndex::from_bytes(&bad.to_bytes()).is_err());
+
+        let mut bad = base.clone();
+        bad.checkpoints[0].frame_number = 2; // must start at frame 1
+        assert!(BoundaryIndex::from_bytes(&bad.to_bytes()).is_err());
+
+        let mut bad = base.clone();
+        bad.stride = 0;
+        assert!(BoundaryIndex::from_bytes(&bad.to_bytes()).is_err());
+
+        let mut bad = base;
+        bad.checkpoints[1].interface_state = Some(InterfaceState::default()); // legacy w/ ifaces
+        assert!(BoundaryIndex::from_bytes(&bad.to_bytes()).is_err());
     }
 
     #[test]
