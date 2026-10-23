@@ -617,7 +617,8 @@ impl CloudPacketSource {
     /// - In-memory decompression and parsing (no additional requests)
     ///
     /// Can be called from both sync and async contexts - handles runtime
-    /// nesting correctly using `block_in_place` when called from async.
+    /// nesting correctly: blocking I/O runs in place on a multi-thread
+    /// runtime and on a dedicated I/O runtime otherwise (see `run_async`).
     pub fn open(location: CloudLocation) -> Result<Self, Error> {
         // Build object store
         let store = location.build_store()?;

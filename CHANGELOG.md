@@ -11,7 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `ntp` table could not be materialized (its `Int8`/`Float64` columns had no
   builder); `poll`/`precision` are now signed, `root_delay`/`root_dispersion`
-  are seconds, and the NTP timestamps are Unix seconds with their fraction
+  are seconds, and the NTP timestamps are Unix seconds with their fraction;
+  the DuckDB extension writes them with the column's width
   ([#116](https://github.com/mtottenh/pcapsql/issues/116)).
 - `process_packets` now consumes a packet before propagating the callback's
   error, so a caller that pauses with an error resumes at the next record;
@@ -20,8 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The fuzz targets compile against the current `parse_packet` signature and
   CI checks the fuzz crate ([#119](https://github.com/mtottenh/pcapsql/issues/119)).
 - The boundary-index scan applies the reader's 64 MiB buffer ceiling instead
-  of growing without bound on a corrupt record header
-  ([#120](https://github.com/mtottenh/pcapsql/issues/120)).
+  of growing without bound on a corrupt record header, and a capture whose
+  index cannot be built is parsed in one partition instead of failing the
+  query ([#120](https://github.com/mtottenh/pcapsql/issues/120)).
 - Cloud sources work from a `current_thread` tokio runtime (blocking I/O runs
   on a dedicated runtime instead of `block_in_place`)
   ([#121](https://github.com/mtottenh/pcapsql/issues/121)).

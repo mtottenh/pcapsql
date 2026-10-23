@@ -197,6 +197,7 @@ impl DynamicBuilder {
             },
             DynamicBuilder::Int64(b) => match value {
                 FieldValue::Int64(v) => b.append_value(*v),
+                FieldValue::Int8(v) => b.append_value(*v as i64),
                 FieldValue::UInt8(v) => b.append_value(*v as i64),
                 FieldValue::UInt16(v) => b.append_value(*v as i64),
                 FieldValue::UInt32(v) => b.append_value(*v as i64),
@@ -205,13 +206,14 @@ impl DynamicBuilder {
                 _ => b.append_null(),
             },
             DynamicBuilder::Int8(b) => match value {
+                FieldValue::Int8(v) => b.append_value(*v),
                 FieldValue::Int64(v) => b.append_value(*v as i8),
-                FieldValue::UInt8(v) => b.append_value(*v as i8),
                 FieldValue::Null => b.append_null(),
                 _ => b.append_null(),
             },
             DynamicBuilder::Float64(b) => match value {
                 FieldValue::Float64(v) => b.append_value(*v),
+                FieldValue::Int8(v) => b.append_value(*v as f64),
                 FieldValue::Int64(v) => b.append_value(*v as f64),
                 FieldValue::UInt8(v) => b.append_value(*v as f64),
                 FieldValue::UInt16(v) => b.append_value(*v as f64),

@@ -63,11 +63,11 @@ impl Protocol for NtpProtocol {
 
         // Third byte: Poll (signed, log2 seconds)
         let poll = data[2] as i8;
-        fields.push(("poll", FieldValue::Int64(poll as i64)));
+        fields.push(("poll", FieldValue::Int8(poll)));
 
         // Fourth byte: Precision (signed, log2 seconds)
         let precision = data[3] as i8;
-        fields.push(("precision", FieldValue::Int64(precision as i64)));
+        fields.push(("precision", FieldValue::Int8(precision)));
 
         // Root Delay (NTP short format: 16.16 signed fixed-point seconds)
         let root_delay = i32::from_be_bytes([data[4], data[5], data[6], data[7]]);
@@ -197,6 +197,57 @@ pub mod stratum {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Signed fields and fixed-point conversions: poll/precision are signed
+    /// log2 seconds, root delay is a signed 16.16 fixed-point second count,
+    /// root dispersion unsigned.
+    #[test]
+    fn test_signed_and_fixed_point_fields() {
+        let mut packet = vec![0u8; 48];
+        packet[0] = 0x24; // LI=0, VN=4, mode 4 (server)
+        packet[1] = 2;
+        packet[2] = 0xFA; // poll = -6
+        packet[3] = 0xEC; // precision = -20
+        packet[4..8].copy_from_slice(&(-0x0000_8000i32).to_be_bytes()); // -0.5 s
+        packet[8..12].copy_from_slice(&0x0001_4000u32.to_be_bytes()); // 1.25 s
+        let result = NtpProtocol.parse(&packet, &ParseContext::new(1));
+        assert!(result.is_ok());
+        assert_eq!(result.get("poll"), Some(&FieldValue::Int8(-6)));
+        assert_eq!(result.get("precision"), Some(&FieldValue::Int8(-20)));
+        assert_eq!(result.get("root_delay"), Some(&FieldValue::Float64(-0.5)));
+        assert_eq!(
+            result.get("root_dispersion"),
+            Some(&FieldValue::Float64(1.25))
+        );
+    }
+
+    /// NTP timestamps become Unix seconds with their fraction; a zero field
+    /// stays 0; era 1 (seconds past 2036-02-07) is folded per RFC 5905 §6.
+    #[test]
+    fn test_ntp_timestamp_conversion() {
+        // 2023-11-14T22:13:20Z + 0.5 s
+        let mut ts = ((1_700_000_000u32).wrapping_add(NTP_UNIX_OFFSET))
+            .to_be_bytes()
+            .to_vec();
+        ts.extend_from_slice(&0x8000_0000u32.to_be_bytes());
+        assert_eq!(read_ntp_timestamp(&ts), 1_700_000_000.5);
+
+        assert_eq!(read_ntp_timestamp(&[0u8; 8]), 0.0);
+
+        // Era 1: wire seconds 10 means 2^32 + 10 seconds after 1900.
+        let mut era1 = 10u32.to_be_bytes().to_vec();
+        era1.extend_from_slice(&[0, 0, 0, 0]);
+        let expected = 4_294_967_296.0 + 10.0 - NTP_UNIX_OFFSET as f64;
+        assert_eq!(read_ntp_timestamp(&era1), expected);
+
+        // Fraction resolution: one 2^-32 tick is below f64 resolution at this
+        // magnitude, so sub-microsecond differences may collapse (documented).
+        let mut t = ((1_700_000_000u32).wrapping_add(NTP_UNIX_OFFSET))
+            .to_be_bytes()
+            .to_vec();
+        t.extend_from_slice(&4_295u32.to_be_bytes()); // ~1 µs
+        assert!((read_ntp_timestamp(&t) - 1_700_000_000.000_001).abs() < 1e-6);
+    }
 
     /// Create an NTP client request packet.
     fn create_ntp_client_request() -> Vec<u8> {

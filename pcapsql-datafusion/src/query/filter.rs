@@ -98,6 +98,7 @@ fn field_as_i64(value: &FieldValue) -> Option<i64> {
         FieldValue::UInt32(v) => Some(*v as i64),
         FieldValue::UInt64(v) => i64::try_from(*v).ok(),
         FieldValue::Int64(v) => Some(*v),
+        FieldValue::Int8(v) => Some(*v as i64),
         FieldValue::Bool(v) => Some(*v as i64),
         FieldValue::IpAddr(std::net::IpAddr::V4(v4)) => Some(u32::from(*v4) as i64),
         _ => None,

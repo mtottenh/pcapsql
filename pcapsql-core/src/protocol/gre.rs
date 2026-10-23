@@ -48,10 +48,10 @@ fn internet_checksum(data: &[u8]) -> u16 {
     !sum as u16
 }
 
-/// GRE protocol parser.
 /// GRE protocol type for Transparent Ethernet Bridging (NVGRE).
 pub const ETHERTYPE_TEB: u16 = 0x6558;
 
+/// GRE protocol parser.
 #[derive(Debug, Clone, Copy)]
 pub struct GreProtocol;
 

@@ -291,6 +291,10 @@ pub fn insert_field_value(vector: &mut FlatVector, row_idx: usize, value: &Field
             let slice = vector.as_mut_slice::<u64>();
             slice[row_idx] = *v;
         }
+        FieldValue::Int8(v) => {
+            let slice = vector.as_mut_slice::<i8>();
+            slice[row_idx] = *v;
+        }
         FieldValue::Int64(v) => {
             let slice = vector.as_mut_slice::<i64>();
             slice[row_idx] = *v;

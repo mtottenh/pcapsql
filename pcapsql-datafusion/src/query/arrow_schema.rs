@@ -135,6 +135,7 @@ pub fn field_value_to_scalar(value: &pcapsql_core::FieldValue) -> datafusion::sc
         FieldValue::UInt16(v) => ScalarValue::UInt16(Some(*v)),
         FieldValue::UInt32(v) => ScalarValue::UInt32(Some(*v)),
         FieldValue::UInt64(v) => ScalarValue::UInt64(Some(*v)),
+        FieldValue::Int8(v) => ScalarValue::Int8(Some(*v)),
         FieldValue::Int64(v) => ScalarValue::Int64(Some(*v)),
         FieldValue::Float64(v) => ScalarValue::Float64(Some(*v)),
         FieldValue::Str(v) => ScalarValue::Utf8(Some(v.to_string())),
