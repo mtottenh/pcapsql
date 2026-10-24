@@ -15,7 +15,7 @@ use crate::query::tables;
 use pcapsql_core::{FieldValue, ParseResult};
 
 /// Dynamic array builder that can hold different builder types.
-enum DynamicBuilder {
+pub(crate) enum DynamicBuilder {
     UInt8(UInt8Builder),
     UInt16(UInt16Builder),
     UInt32(UInt32Builder),
@@ -39,7 +39,7 @@ enum DynamicBuilder {
 
 impl DynamicBuilder {
     /// Create a new builder for the given data type.
-    fn new(data_type: &DataType, capacity: usize) -> Self {
+    pub(crate) fn new(data_type: &DataType, capacity: usize) -> Self {
         match data_type {
             DataType::UInt8 => DynamicBuilder::UInt8(UInt8Builder::with_capacity(capacity)),
             DataType::UInt16 => DynamicBuilder::UInt16(UInt16Builder::with_capacity(capacity)),
@@ -121,7 +121,7 @@ impl DynamicBuilder {
     }
 
     /// Append a null value.
-    fn append_null(&mut self) {
+    pub(crate) fn append_null(&mut self) {
         match self {
             DynamicBuilder::UInt8(b) => b.append_null(),
             DynamicBuilder::UInt16(b) => b.append_null(),
@@ -151,7 +151,7 @@ impl DynamicBuilder {
     /// value. Parser field widths are pinned to the table schemas by a test,
     /// so in practice every value fits; the checks are the safety net for a
     /// parser emitting a wider variant than its descriptor declares.
-    fn append_field_value(&mut self, value: &FieldValue) {
+    pub(crate) fn append_field_value(&mut self, value: &FieldValue) {
         match self {
             DynamicBuilder::UInt8(b) => match value {
                 FieldValue::UInt8(v) => b.append_value(*v),
@@ -364,28 +364,56 @@ impl DynamicBuilder {
     }
 
     /// Append a u64 value (for frame_number).
-    fn append_u64(&mut self, value: u64) {
+    pub(crate) fn append_u64(&mut self, value: u64) {
         if let DynamicBuilder::UInt64(b) = self {
             b.append_value(value);
         }
     }
 
+    /// Append a u32 value (frame lengths).
+    pub(crate) fn append_u32(&mut self, value: u32) {
+        if let DynamicBuilder::UInt32(b) = self {
+            b.append_value(value);
+        }
+    }
+
+    /// Append a u16 value (link type).
+    pub(crate) fn append_u16(&mut self, value: u16) {
+        if let DynamicBuilder::UInt16(b) = self {
+            b.append_value(value);
+        }
+    }
+
+    /// Append a u8 value (encap_depth).
+    pub(crate) fn append_u8(&mut self, value: u8) {
+        if let DynamicBuilder::UInt8(b) = self {
+            b.append_value(value);
+        }
+    }
+
+    /// Append a string (tunnel_type).
+    pub(crate) fn append_str(&mut self, value: &str) {
+        if let DynamicBuilder::Utf8(b) = self {
+            b.append_value(value);
+        }
+    }
+
     /// Append a timestamp value.
-    fn append_timestamp(&mut self, value: i64) {
+    pub(crate) fn append_timestamp(&mut self, value: i64) {
         if let DynamicBuilder::TimestampMicrosecond(b) = self {
             b.append_value(value);
         }
     }
 
     /// Append raw binary data.
-    fn append_binary(&mut self, value: &[u8]) {
+    pub(crate) fn append_binary(&mut self, value: &[u8]) {
         if let DynamicBuilder::Binary(b) = self {
             b.append_value(value);
         }
     }
 
     /// Finish building and return the array.
-    fn finish(&mut self) -> Arc<dyn Array> {
+    pub(crate) fn finish(&mut self) -> Arc<dyn Array> {
         match self {
             DynamicBuilder::UInt8(b) => Arc::new(b.finish()),
             DynamicBuilder::UInt16(b) => Arc::new(b.finish()),

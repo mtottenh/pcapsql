@@ -197,6 +197,15 @@ pub struct Args {
     #[arg(long = "no-mmap")]
     pub no_mmap: bool,
 
+    /// Do not fuse frame joins into the parse.
+    ///
+    /// By default a one-shot query's `*_packets` views (and any join of
+    /// protocol tables on frame_number) are built by the parser as one table;
+    /// with this flag they run as DataFusion joins, as in the REPL. For
+    /// comparing plans, results and timings.
+    #[arg(long = "no-fuse-joins")]
+    pub no_fuse_joins: bool,
+
     /// Path to SSLKEYLOGFILE for TLS decryption.
     ///
     /// Enables decryption of TLS 1.2 and TLS 1.3 traffic when the corresponding

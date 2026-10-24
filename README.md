@@ -270,18 +270,21 @@ tcpdump -U -w - -i eth0 port 53 | pcapsql --continuous \
       FROM hop(frames, INTERVAL '10' SECOND, INTERVAL '1' MINUTE) GROUP BY 1, 2"
 ```
 
-The source of a continuous query is `frames`: the `*_packets` views join protocol tables with
-`frames`, and a join would buffer one side of the stream for ever, so they are rejected
-(filter the capture with tcpdump's own expression instead, as above).
+The source of a continuous query is `frames` or a `*_packets` view (`tumble(dns_packets, …)`).
+A view is a join of protocol tables, and a join over a stream would buffer one side for ever,
+but these joins never reach DataFusion: the parser, which has every layer of a frame in hand,
+emits the view's joined row itself (see "Fused joins" below), so the view streams exactly like
+`frames`. What cannot be fused — the `FULL` joins of the unified `packets` view, a join written
+above the window, a join on other conditions — is rejected.
 
 A continuous query **aggregates over `tumble()` or `hop()` windows and nothing else**:
 `SELECT window_start, …, <aggregates> FROM tumble(source, …) [WHERE …] GROUP BY window_start
 [, window_end, <columns>]`. `WHERE` on source or window columns, several group columns, any
 number of aggregates, `FILTER (WHERE …)` clauses, `HAVING`, `SELECT DISTINCT` and a `LIMIT`
-(the first N windows) are fine; `ORDER BY`, `count(DISTINCT …)`, joins, `session()` windows and
-aggregates without `GROUP BY window_start` need the whole stream first and are rejected at
-planning. Stream tables (`tcp_connections`, …) are not available. `EXPLAIN` shows the
-`StreamingWindowAggregateExec` that will run, or the refusal.
+(the first N windows) are fine; `ORDER BY`, `count(DISTINCT …)`, joins the parser cannot fuse,
+`session()` windows and aggregates without `GROUP BY window_start` need the whole stream first
+and are rejected at planning. Stream tables (`tcp_connections`, …) are not available. `EXPLAIN`
+shows the `StreamingWindowAggregateExec` that will run, or the refusal.
 
 Semantics and knobs:
 
@@ -311,6 +314,27 @@ Semantics and knobs:
 Library callers use `EngineOptions { continuous: true, .. }` with `SourceSpec::Stdin` /
 `SourceSpec::Sequential` and consume `QueryEngine::execute_stream(sql)`, a `Stream` of
 `RecordBatch`es whose `finish()` returns the query's `ParseStats`.
+
+### Fused joins
+
+The parser has every layer of a frame in hand at once, and the `*_packets` views only join
+those layers back together (`frames` ⋈ `tcp` ⋈ `ethernet` ⋈ `ipv4` ⋈ `ipv6`, on `frame_number`
+and `encap_depth`). Under `RetentionPolicy::None` — every one-shot (`-e`/`-f`), `--stdin` and
+`--continuous` run — a tree of inner and left joins of protocol tables on those keys is
+**fused**: the parser emits the joined row itself, as one table of the parse pass, and no join
+operator is left in the plan. The result is exactly what the joins would produce (inner and
+left semantics, every match, nulls for a missing left side); the golden corpus checks it
+against the REPL's join path on every view. `EXPLAIN` shows the fused table
+(`TableScan: fused_frames_tcp_ethernet_ipv4_ipv6_…`) and `--stats` counts its rows.
+
+What fuses: the `*_packets` views, hand-written joins of the same shape, a view joined with a
+protocol table it does not already contain (when the view's selected columns are plain columns),
+`WHERE` filters on inner sides, and the query's `LIMIT`. What does not, and runs as a DataFusion
+join over the fused part instead: `FULL` joins (the unified `packets` view), join conditions
+other than `frame_number` / `encap_depth` equality, the same table under two aliases (which
+includes a view joined with one of its own members, `tcp_packets t JOIN tcp u`), a derived
+table's own `LIMIT` on one side, and a join written above a window (`tumble(frames, …) t JOIN
+udp …`). `--no-fuse-joins` turns fusion off for a run, to compare plans, results and timings.
 
 ## CLI Options
 

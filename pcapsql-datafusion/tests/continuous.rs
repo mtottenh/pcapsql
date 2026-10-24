@@ -204,6 +204,80 @@ fn u64_column(batch: &RecordBatch, column: usize) -> Vec<u64> {
 const TUMBLE_10S: &str = "tumble(frames, INTERVAL '10' SECOND)";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fused_view_emits_per_closed_window() {
+    // `udp_packets` is a join of five tables; the parser fuses it into one
+    // table of the pass, so the view streams exactly like `frames`: windows
+    // close as the watermark passes them, on an IPv4-only feed too (the
+    // `LEFT JOIN ipv6` never sees a row and that costs nothing).
+    let Live { engine, mut feed } = live(|_| {}).await;
+    let mut stream = engine
+        .execute_stream(
+            "SELECT window_start, src_port, count(*) AS n, sum(udp_length) AS bytes \
+             FROM tumble(udp_packets, INTERVAL '10' SECOND) GROUP BY 1, 2",
+        )
+        .await
+        .expect("plan");
+    feed.send(&[
+        record(2, 0, 1000, 10),
+        record(7, 0, 2000, 20),
+        record(1, 0, 1000, 10),
+    ]);
+    expect_quiet(&mut stream, "window [0, 10) is still open").await;
+    feed.send(&[record(12, 0, 1000, 10)]);
+    let batch = expect_batch(&mut stream, "window [0, 10)").await;
+    let expected = "\
++---------------------+----------+---+-------+
+| window_start        | src_port | n | bytes |
++---------------------+----------+---+-------+
+| 2023-11-14T22:13:20 | 1000     | 2 | 36    |
+| 2023-11-14T22:13:20 | 2000     | 1 | 28    |
++---------------------+----------+---+-------+";
+    assert_eq!(pretty(&[batch]), expected);
+    expect_quiet(&mut stream, "window [10, 20) is still open").await;
+    feed.close();
+    let batch = expect_batch(&mut stream, "window [10, 20) at end of input").await;
+    assert_eq!(window_start_secs(&batch, 0), vec![10]);
+    assert_eq!(i64_column(&batch, 2), vec![1]);
+    let stats = stream.finish().await.expect("stats");
+    assert_eq!(stats.packets_scanned, 4);
+    assert_eq!(stats.late_rows, 0);
+    // One table of the pass, named after its members; no `udp` of its own.
+    let fused: Vec<(&String, &usize)> = stats
+        .rows_built
+        .iter()
+        .filter(|(name, _)| name.starts_with("fused_frames_udp_"))
+        .collect();
+    assert_eq!(fused.len(), 1, "{:?}", stats.rows_built);
+    assert_eq!(*fused[0].1, 4);
+    assert!(
+        !stats.rows_built.contains_key("udp"),
+        "{:?}",
+        stats.rows_built
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fused_view_limit_returns_while_the_pipe_stays_open() {
+    // The one-shot path over a fused view: the row cap pushed into the fused
+    // scan delivers the partial batch and releases the producer.
+    let Live { engine, mut feed } = live(|o| {
+        o.continuous = false;
+        o.batch_size = 1000;
+    })
+    .await;
+    feed.send(&[record(1, 0, 1000, 10), record(2, 0, 1001, 10)]);
+    let out = tokio::time::timeout(
+        Duration::from_secs(5),
+        engine.execute("SELECT frame_number, src_port FROM udp_packets LIMIT 2"),
+    )
+    .await
+    .expect("execute() returns while the pipe is open")
+    .expect("query");
+    assert_eq!(u64_column(&out.batches[0], 0), vec![1, 2]);
+    feed.close();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tumble_groups_and_aggregates_emit_per_closed_window() {
     let Live { engine, mut feed } = live(|_| {}).await;
     // Two aggregates and a non-window group column (A1/A2): per 10 s window
@@ -590,23 +664,30 @@ async fn planning_errors_name_the_supported_shape() {
             &["tumble() or hop()"],
         ),
         (
-            "SELECT window_start, src_port, count(*) \
-             FROM tumble(udp_packets, INTERVAL '10' SECOND) GROUP BY 1, 2",
-            &["cannot join", "window `frames`"],
-        ),
-        (
+            // A join *above* the window node is not a view's join tree
+            // (the window projection is not column-only), so it is not
+            // fused, and nothing else can stream it.
             &format!(
                 "SELECT window_start, count(*) FROM {TUMBLE_10S} t JOIN udp USING (frame_number) \
                  GROUP BY 1"
             ),
-            &["cannot join"],
+            &["cannot run this join", "above the window"],
+        ),
+        (
+            // The unified `packets` view is built on FULL joins, which the
+            // parser does not fuse.
+            "SELECT window_start, protocol, count(*) \
+             FROM tumble(packets, INTERVAL '10' SECOND) GROUP BY 1, 2",
+            &["cannot run this join"],
         ),
         (
             "SELECT count(*) FROM tcp_connections",
             &["stream tables", "tcp_connections"],
         ),
         (
-            "SELECT count(*) FROM frames a JOIN frames b USING (frame_number)",
+            // A join the parser cannot fuse (the key is an expression) reads
+            // frames twice, which a stream cannot do.
+            "SELECT count(*) FROM frames a JOIN frames b ON a.frame_number = b.frame_number + 1",
             &["scan one table twice"],
         ),
         (

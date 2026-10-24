@@ -249,6 +249,9 @@ pub struct ProtocolTableProvider {
     /// plan-only ones included, is marked unbounded so plans are checked and
     /// displayed as what will run.
     unbounded: bool,
+    /// Columns the rows are ordered by, in order (the prefix present in a
+    /// scan's projection is declared).
+    ordering: Vec<String>,
 }
 
 impl ProtocolTableProvider {
@@ -258,6 +261,10 @@ impl ProtocolTableProvider {
             schema,
             default_partitions,
             unbounded: false,
+            ordering: ProtocolScanExec::PROTOCOL_ORDERING
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
         }
     }
 
@@ -265,6 +272,18 @@ impl ProtocolTableProvider {
     pub fn with_unbounded(mut self, unbounded: bool) -> Self {
         self.unbounded = unbounded;
         self
+    }
+
+    /// Declare the columns the table's rows are ordered by (a fused join's
+    /// root columns; protocol tables default to `frame_number, encap_depth`).
+    pub fn with_ordering(mut self, ordering: Vec<String>) -> Self {
+        self.ordering = ordering;
+        self
+    }
+
+    /// The table this provider serves.
+    pub fn table_name(&self) -> &str {
+        &self.table_name
     }
 
     fn finish_exec(&self, exec: ProtocolScanExec) -> Arc<dyn ExecutionPlan> {
@@ -320,12 +339,14 @@ impl ProtocolTableProvider {
                 data.schema.clone(),
                 Arc::new(data.partitions.clone()),
                 remapped,
+                &self.ordering,
             ),
             PreparedTable::Stream { schema, receivers } => ProtocolScanExec::streaming(
                 self.table_name.clone(),
                 schema.clone(),
                 receivers.clone(),
                 remapped,
+                &self.ordering,
             ),
         };
         Ok(self.finish_exec(exec))
@@ -384,6 +405,7 @@ impl TableProvider for ProtocolTableProvider {
                 self.schema.clone(),
                 projection.cloned(),
                 self.default_partitions,
+                &self.ordering,
             )));
         };
         // A query context that lacks this table means the engine's harvest

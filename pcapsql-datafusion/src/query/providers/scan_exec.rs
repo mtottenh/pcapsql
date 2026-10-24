@@ -71,18 +71,25 @@ pub struct ProtocolScanExec {
 }
 
 impl ProtocolScanExec {
+    /// The order a protocol table's rows come in: the parser appends a
+    /// frame's rows outer layer first (`frames` has no depth, so only the
+    /// prefix present in the schema is declared).
+    pub const PROTOCOL_ORDERING: &'static [&'static str] = &["frame_number", "encap_depth"];
+
     /// Scan over pre-materialized per-partition batches.
     pub fn batches(
         table_name: String,
         data_schema: SchemaRef,
         partitions: Arc<Vec<Vec<RecordBatch>>>,
         projection: Option<Vec<usize>>,
+        ordering: &[String],
     ) -> Self {
         Self::new(
             table_name,
             data_schema,
             ScanSource::Batches(partitions),
             projection,
+            ordering,
         )
     }
 
@@ -92,12 +99,14 @@ impl ProtocolScanExec {
         data_schema: SchemaRef,
         receivers: Arc<Vec<ReceiverSlot>>,
         projection: Option<Vec<usize>>,
+        ordering: &[String],
     ) -> Self {
         Self::new(
             table_name,
             data_schema,
             ScanSource::Streams(receivers),
             projection,
+            ordering,
         )
     }
 
@@ -124,12 +133,14 @@ impl ProtocolScanExec {
         schema: SchemaRef,
         projection: Option<Vec<usize>>,
         partitions: usize,
+        ordering: &[String],
     ) -> Self {
         Self::new(
             table_name,
             schema,
             ScanSource::Unprepared { partitions },
             projection,
+            ordering,
         )
     }
 
@@ -138,13 +149,14 @@ impl ProtocolScanExec {
         data_schema: SchemaRef,
         source: ScanSource,
         projection: Option<Vec<usize>>,
+        ordering: &[String],
     ) -> Self {
         let projected_schema = match &projection {
             Some(idx) => Arc::new(data_schema.project(idx).expect("valid projection")),
             None => data_schema.clone(),
         };
         let num_partitions = source.num_partitions().max(1);
-        let eq_props = Self::compute_equivalence_properties(&projected_schema);
+        let eq_props = Self::compute_equivalence_properties(&projected_schema, ordering);
         let properties = PlanProperties::new(
             eq_props,
             Partitioning::UnknownPartitioning(num_partitions),
@@ -161,15 +173,19 @@ impl ProtocolScanExec {
         }
     }
 
-    /// The parser appends a frame's rows in layer order, outer first, so a
-    /// protocol table is ordered by `(frame_number, encap_depth)`; `frames`
-    /// has no depth and is ordered by `frame_number`. The views join on both
-    /// columns, and declaring the pair keeps a sort from being planned under
-    /// their sort-merge joins.
-    fn compute_equivalence_properties(schema: &SchemaRef) -> EquivalenceProperties {
+    /// Declare the prefix of `ordering` present in the projected schema as
+    /// the output ordering. For a protocol table that is `(frame_number,
+    /// encap_depth)`: the parser appends a frame's rows in layer order, outer
+    /// first; `frames` has no depth and is ordered by `frame_number`. The
+    /// views join on both columns, and declaring the pair keeps a sort from
+    /// being planned under their sort-merge joins.
+    fn compute_equivalence_properties(
+        schema: &SchemaRef,
+        ordering: &[String],
+    ) -> EquivalenceProperties {
         use datafusion::physical_expr::expressions::col;
         let mut eq_props = EquivalenceProperties::new(schema.clone());
-        let ordering: Vec<PhysicalSortExpr> = ["frame_number", "encap_depth"]
+        let ordering: Vec<PhysicalSortExpr> = ordering
             .iter()
             .map_while(|name| col(name, schema).ok())
             .map(|expr| PhysicalSortExpr {

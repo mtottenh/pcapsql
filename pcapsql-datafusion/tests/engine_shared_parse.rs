@@ -602,10 +602,20 @@ async fn single_partition_parse_keeps_sort_merge_join_and_capture_order() {
             "{retention:?}: {join}"
         );
         let plan = executed_plan(&engine, join).await;
-        assert!(
-            plan.contains("SortMergeJoin"),
-            "{retention:?}: a one-partition parse must still plan a sort-merge join:\n{plan}"
-        );
+        if retention == RetentionPolicy::CacheOnTouch {
+            assert!(
+                plan.contains("SortMergeJoin"),
+                "{retention:?}: a one-partition parse must still plan a sort-merge join:\n{plan}"
+            );
+        } else {
+            // Under RetentionPolicy::None the parser fuses the frame join
+            // into one scan; capture order comes from that scan's declared
+            // ordering, checked above.
+            assert!(
+                plan.contains("fused_frames_udp_") && !plan.contains("Join"),
+                "{retention:?}: the frame join must be fused:\n{plan}"
+            );
+        }
 
         for sql in [
             "SELECT frame_number, dst_port FROM udp WHERE dst_port = 53",

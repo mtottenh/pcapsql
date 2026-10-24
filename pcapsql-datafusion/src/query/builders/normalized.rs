@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 
+use super::fused::FusedBatchBuilder;
 use super::protocol::ProtocolBatchBuilder;
 use crate::error::{Error, QueryError};
 use crate::query::filter::FilterEvaluator;
@@ -39,9 +40,31 @@ impl BatchSink {
     }
 }
 
+/// The rows of one output table: a protocol table's, or a fused join's.
+enum RowBuilder {
+    Protocol(ProtocolBatchBuilder),
+    Fused(FusedBatchBuilder),
+}
+
+impl RowBuilder {
+    fn try_build(&mut self) -> Result<Option<RecordBatch>, Error> {
+        match self {
+            RowBuilder::Protocol(b) => b.try_build(),
+            RowBuilder::Fused(b) => b.try_build(),
+        }
+    }
+
+    fn finish(&mut self) -> Result<Option<RecordBatch>, Error> {
+        match self {
+            RowBuilder::Protocol(b) => b.finish(),
+            RowBuilder::Fused(b) => b.finish(),
+        }
+    }
+}
+
 /// Per-table build state within one parse pass.
 struct TableSlot {
-    builder: ProtocolBatchBuilder,
+    builder: RowBuilder,
     sink: BatchSink,
     predicate: Option<FilterEvaluator>,
     fetch: Option<usize>,
@@ -81,6 +104,8 @@ impl TableSlot {
 /// ```
 pub struct NormalizedBatchSet {
     slots: HashMap<String, TableSlot>,
+    /// The slots that are fused joins, fed after the protocol tables.
+    fused: Vec<String>,
     /// Streaming only: wakes the producer when a consumer takes a batch.
     pacer: Option<Arc<Pacer>>,
 }
@@ -118,7 +143,8 @@ impl NormalizedBatchSet {
         subscription: &ParseSubscription,
         mut sink_for: impl FnMut(&str) -> BatchSink,
     ) -> Result<Self, Error> {
-        let mut slots = HashMap::with_capacity(subscription.tables.len());
+        let mut slots =
+            HashMap::with_capacity(subscription.tables.len() + subscription.fused.len());
         for (name, sub) in &subscription.tables {
             let schema = subscription.table_schema(name).ok_or_else(|| {
                 Error::Query(QueryError::Execution(format!("Unknown table: {name}")))
@@ -126,7 +152,11 @@ impl NormalizedBatchSet {
             slots.insert(
                 name.clone(),
                 TableSlot {
-                    builder: ProtocolBatchBuilder::with_schema(name.clone(), schema, batch_size),
+                    builder: RowBuilder::Protocol(ProtocolBatchBuilder::with_schema(
+                        name.clone(),
+                        schema,
+                        batch_size,
+                    )),
                     sink: sink_for(name),
                     predicate: sub.predicate.clone(),
                     fetch: sub.fetch,
@@ -135,7 +165,30 @@ impl NormalizedBatchSet {
                 },
             );
         }
-        Ok(Self { slots, pacer: None })
+        let mut fused: Vec<String> = subscription.fused.keys().cloned().collect();
+        fused.sort();
+        for name in &fused {
+            let sub = &subscription.fused[name];
+            slots.insert(
+                name.clone(),
+                TableSlot {
+                    builder: RowBuilder::Fused(FusedBatchBuilder::new(
+                        Arc::clone(&sub.spec),
+                        batch_size,
+                    )),
+                    sink: sink_for(name),
+                    predicate: None,
+                    fetch: sub.fetch,
+                    rows_added: 0,
+                    consumer_gone: false,
+                },
+            );
+        }
+        Ok(Self {
+            slots,
+            fused,
+            pacer: None,
+        })
     }
 
     /// Streaming: the producer may proceed with a batch for `name` when that
@@ -189,14 +242,16 @@ impl NormalizedBatchSet {
             // Predicates on frames are never pushed down (metadata fields are
             // not parse fields); only the row cap applies.
             if !slot.done() {
-                slot.builder.add_frame_from_raw(
-                    packet.frame_number,
-                    packet.timestamp_ns,
-                    packet.captured_len,
-                    packet.original_len,
-                    packet.data,
-                    packet.link_type,
-                );
+                if let RowBuilder::Protocol(builder) = &mut slot.builder {
+                    builder.add_frame_from_raw(
+                        packet.frame_number,
+                        packet.timestamp_ns,
+                        packet.captured_len,
+                        packet.original_len,
+                        packet.data,
+                        packet.link_type,
+                    );
+                }
                 slot.rows_added += 1;
                 // A full batch goes out; so does a partial one the moment the
                 // row cap is reached, since nothing will be added to it (a
@@ -226,7 +281,9 @@ impl NormalizedBatchSet {
                         continue;
                     }
                 }
-                slot.builder.add_parsed_row(frame_number, result);
+                if let RowBuilder::Protocol(builder) = &mut slot.builder {
+                    builder.add_parsed_row(frame_number, result);
+                }
                 slot.rows_added += 1;
                 let batch = if slot.capped() {
                     slot.builder.finish()?
@@ -236,6 +293,32 @@ impl NormalizedBatchSet {
                 if let Some(batch) = batch {
                     self.deliver(proto_name, batch);
                 }
+            }
+        }
+
+        // Fused joins: the frame's joined rows, from the same layers.
+        for i in 0..self.fused.len() {
+            let name = &self.fused[i];
+            let slot = self.slots.get_mut(name).expect("fused slot");
+            if slot.done() {
+                continue;
+            }
+            let RowBuilder::Fused(builder) = &mut slot.builder else {
+                continue;
+            };
+            let added = builder.add_packet(&packet, parsed);
+            if added == 0 {
+                continue;
+            }
+            slot.rows_added += added;
+            let batch = if slot.capped() {
+                slot.builder.finish()?
+            } else {
+                slot.builder.try_build()?
+            };
+            if let Some(batch) = batch {
+                let name = self.fused[i].clone();
+                self.deliver(&name, batch);
             }
         }
 

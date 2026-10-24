@@ -1379,6 +1379,53 @@ const CORPUS: &[(Capture, &str, &str)] = &[
     (Capture::Tunnels, "t08_one_header_per_level", ONE_HEADER_PER_LEVEL),
     (Capture::Eth, "q28_one_header_per_level", ONE_HEADER_PER_LEVEL),
     (Capture::Routing, "v09_one_header_per_level", ONE_HEADER_PER_LEVEL),
+    // --- frame-join fusion (RetentionPolicy::None fuses, CacheOnTouch joins;
+    // --- the harness requires both to agree). Shapes the matcher must get
+    // --- right or leave alone: one table under two aliases with filters
+    // --- pushed under each, an ORDER BY on the root's depth without its
+    // --- frame_number, LIMIT with OFFSET over a view, a derived table's own
+    // --- LIMIT on the preserved side of a left join, and a left join under
+    // --- a LIMIT.
+    (
+        Capture::Routing,
+        "f01_same_table_two_aliases",
+        "SELECT u0.src_port AS outer_port, u1.src_port AS inner_port \
+         FROM frames f JOIN udp u0 ON f.frame_number = u0.frame_number \
+         JOIN udp u1 ON u1.frame_number = u0.frame_number \
+         WHERE u0.encap_depth = 0 AND u1.encap_depth = 1 ORDER BY f.frame_number",
+    ),
+    (
+        Capture::Routing,
+        "f02_order_by_root_depth",
+        "SELECT u.encap_depth, f.timestamp FROM udp u \
+         JOIN frames f ON u.frame_number = f.frame_number ORDER BY u.encap_depth, f.timestamp",
+    ),
+    (
+        Capture::Eth,
+        "f03_view_limit_offset",
+        "SELECT frame_number, src_port FROM udp_packets LIMIT 2 OFFSET 1",
+    ),
+    (
+        Capture::Routing,
+        "f04_derived_table_limit_under_left_join",
+        "SELECT d.frame_number, d.src_port, ip4.encap_depth FROM \
+         (SELECT f.frame_number, udp.src_port FROM frames f \
+          JOIN udp ON f.frame_number = udp.frame_number LIMIT 1) d \
+         LEFT JOIN ipv4 ip4 ON ip4.frame_number = d.frame_number \
+         ORDER BY d.frame_number, d.src_port, ip4.encap_depth",
+    ),
+    (
+        Capture::Eth,
+        "f05_left_join_under_limit",
+        "SELECT f.frame_number, tcp.src_port FROM frames f \
+         LEFT JOIN tcp ON f.frame_number = tcp.frame_number LIMIT 3",
+    ),
+    (
+        Capture::Eth,
+        "f06_view_joined_with_member",
+        "SELECT t.frame_number, t.src_port, u.dst_port FROM tcp_packets t \
+         JOIN tcp u ON u.frame_number = t.frame_number ORDER BY t.frame_number",
+    ),
 ];
 
 /// Frames with two network headers or two Ethernet headers at one depth

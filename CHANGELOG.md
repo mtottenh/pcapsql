@@ -193,6 +193,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Fused joins: the parser emits a view's joined row itself.** Under
+  `RetentionPolicy::None` (every one-shot, `--stdin` and `--continuous` run) a
+  tree of inner and left joins of protocol tables on `frame_number` (and
+  `encap_depth`) — every `*_packets` view, hand-written joins of that shape,
+  a view joined with a table it does not already contain, with `WHERE`
+  filters on inner sides and the query's `LIMIT` — is replaced at planning by
+  a scan of a synthetic table
+  that the parse pass builds per packet from the frame's own layers, with
+  exact inner/left semantics and no join operator left in the plan
+  (`fusion::FuseFrameJoins`, `FusedBatchBuilder`). The golden corpus checks
+  every view against the REPL's join path. Consequences: a continuous query
+  can window a view (`tumble(dns_packets, …)`), which a join over a stream
+  could not do; a one-shot view query over 300 000 packets runs in the time
+  of parsing its member tables plus about a third, where the joins it
+  replaces cost more than the parse; and `--stats` reports the fused table
+  (`fused_frames_tcp_ethernet_ipv4_ipv6_…`) instead of its members. Not fused,
+  and still DataFusion joins over the fused part: `FULL` joins (the unified
+  `packets` view), other join conditions, the same table under two aliases
+  (a view joined with one of its own members included), a derived table's
+  own `LIMIT` on one side, a join above a window. The `CacheOnTouch` engine (the
+  REPL) keeps the per-table cache and the joins; `--no-fuse-joins`
+  (`EngineOptions::fuse_frame_joins`) turns fusion off for a run.
 - Parser fields that the DataFusion tables dropped are now columns, and the
   engine agrees with the DuckDB table functions, which already exposed every
   parser field. The new columns sit next to the related existing ones, so

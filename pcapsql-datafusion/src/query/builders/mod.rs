@@ -11,14 +11,19 @@
 //!                        │                  (per-query column subsets,
 //!                        ├─► frames          parse-time predicates and
 //!                        ├─► tcp             row caps applied before any
-//!                        └─► …               Arrow materialization)
+//!                        ├─► …               Arrow materialization)
+//!                        └─► fused joins    (a view's joined row, built from
+//!                                            the frame's own layers; see
+//!                                            `crate::query::fusion`)
 //! ```
 //!
 //! Each protocol table contains only the fields relevant to that protocol,
 //! with `frame_number` as the linking key for JOINs.
 
+mod fused;
 mod normalized;
 mod protocol;
 
+pub use fused::FusedBatchBuilder;
 pub use normalized::NormalizedBatchSet;
 pub use protocol::ProtocolBatchBuilder;
