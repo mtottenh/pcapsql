@@ -202,6 +202,11 @@ impl HopAssignExec {
         })
     }
 
+    /// The input the windows are assigned over.
+    pub fn input(&self) -> &Arc<dyn ExecutionPlan> {
+        &self.input
+    }
+
     /// The hop assigner (slide and size).
     pub fn assigner(&self) -> &HoppingWindowAssigner {
         &self.assigner

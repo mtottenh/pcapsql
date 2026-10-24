@@ -28,6 +28,7 @@ pub mod builders;
 mod filter;
 pub mod providers;
 pub mod stream_tables;
+pub mod streaming;
 pub mod tables;
 pub mod udf;
 pub mod views;
@@ -42,17 +43,23 @@ pub use providers::{
 };
 pub use udf::CaptureTimeRange;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
+use std::task::{Context, Poll};
+use std::time::Duration;
 
 use arrow::array::RecordBatch;
 use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion::config::ConfigOptions;
 use datafusion::execution::session_state::{SessionState, SessionStateBuilder};
 use datafusion::logical_expr::{DdlStatement, Expr, LogicalPlan, Statement};
+use datafusion::physical_optimizer::optimizer::PhysicalOptimizer;
+use datafusion::physical_plan::{ExecutionPlan, SendableRecordBatchStream};
 use datafusion::prelude::*;
+use futures::{Stream, StreamExt};
 use tokio::task::JoinHandle;
 
 use crate::error::{Error, QueryError};
@@ -108,7 +115,10 @@ fn session_target_partitions(partitions: usize, parallelism: usize) -> usize {
 /// `parallelism` is the engine's parse parallelism; each query re-targets its
 /// own session state to the partition count it actually has (see
 /// [`session_target_partitions`]).
-fn create_session_context(parallelism: usize) -> SessionContext {
+fn create_session_context(
+    parallelism: usize,
+    continuous: Option<&streaming::ContinuousConfig>,
+) -> SessionContext {
     let mut config = ConfigOptions::default();
 
     config.execution.target_partitions = session_target_partitions(1, parallelism);
@@ -117,13 +127,36 @@ fn create_session_context(parallelism: usize) -> SessionContext {
     // Prefer SortMergeJoin - works better with our sorted streams
     config.optimizer.prefer_hash_join = false;
     config.optimizer.repartition_joins = true;
+    if continuous.is_some() {
+        // One partition end to end: the stream is one partition, and a
+        // repartition between the partial and final aggregate would be a
+        // pipeline-breaking exchange above it. No batch coalescing either: it
+        // would hold the stream's small batches back until 8192 rows had
+        // accumulated above every filter.
+        config.execution.target_partitions = 1;
+        config.execution.coalesce_batches = false;
+    }
 
-    let state = SessionStateBuilder::new()
+    let mut builder = SessionStateBuilder::new()
         .with_config(config.into())
         .with_default_features()
-        .with_query_planner(Arc::new(windowing::WindowQueryPlanner))
-        .build();
-    SessionContext::new_with_state(state)
+        .with_query_planner(Arc::new(windowing::WindowQueryPlanner));
+    if let Some(continuous) = continuous {
+        // The fused streaming aggregate must replace `AggregateExec` over a
+        // window before `SanityCheckPlan` rejects the plan as pipeline
+        // breaking, so it goes right in front of that rule.
+        let mut rules = PhysicalOptimizer::new().rules;
+        let at = rules
+            .iter()
+            .position(|r| r.name() == streaming::SANITY_CHECK_RULE)
+            .unwrap_or(rules.len());
+        rules.insert(
+            at,
+            Arc::new(streaming::FuseWindowAggregate::new(continuous.clone())),
+        );
+        builder = builder.with_physical_optimizer_rules(rules);
+    }
+    SessionContext::new_with_state(builder.build())
 }
 
 /// Where to read a capture from.
@@ -201,6 +234,26 @@ pub struct EngineOptions {
     pub progress: Option<ProgressFn>,
     /// Cloud-source options (ignored for local paths).
     pub cloud: CloudSourceOptions,
+    /// Treat the source as an unbounded stream (a live capture piped in):
+    /// scans are unbounded, `GROUP BY window_start` over `tumble()` / `hop()`
+    /// runs as a streaming aggregate that emits each window as it closes
+    /// (see [`crate::query::streaming`]), and results are consumed with
+    /// [`QueryEngine::execute_stream`]. Needs a stream source
+    /// ([`SourceSpec::Stdin`] / [`SourceSpec::Sequential`]) and
+    /// [`RetentionPolicy::None`]; the single-use restrictions of a stream
+    /// apply, and queries that need the whole input (stream tables, several
+    /// scans of one table, sorts, joins, aggregates without a window) are
+    /// rejected at planning.
+    pub continuous: bool,
+    /// Continuous only: how far behind the largest timestamp seen a row may
+    /// be and still count — the watermark trails the stream by this much.
+    pub allowed_lateness: Duration,
+    /// Continuous only: a partially filled batch is handed to the query once
+    /// this long has passed since the last one (checked as packets arrive).
+    pub flush_interval: Duration,
+    /// Continuous only: close and emit every open window after this long
+    /// without any input (`None`: windows close on event time only).
+    pub idle_timeout: Option<Duration>,
 }
 
 impl Default for EngineOptions {
@@ -214,6 +267,10 @@ impl Default for EngineOptions {
             index_stride: None,
             progress: None,
             cloud: CloudSourceOptions::default(),
+            continuous: false,
+            allowed_lateness: Duration::from_secs(1),
+            flush_interval: Duration::from_secs(1),
+            idle_timeout: None,
         }
     }
 }
@@ -260,8 +317,9 @@ pub struct QueryEngine {
     /// Runs one scoped parse pass over the engine's source (materialize or
     /// stream).
     parse_source: Arc<dyn ParseSource>,
-    /// Instrumentation for the most recent query.
-    last_stats: RwLock<ParseStats>,
+    /// Instrumentation for the most recent query (shared with in-flight
+    /// [`QueryStream`]s, which write it when they finish).
+    last_stats: Arc<RwLock<ParseStats>>,
     /// Table names this engine registered (the harvest universe).
     known_tables: HashSet<String>,
     /// Parse parallelism (the partition count asked of a seekable source);
@@ -276,6 +334,8 @@ pub struct QueryEngine {
     single_use: bool,
     /// Set when a single-use source's one parse pass has been started.
     consumed: AtomicBool,
+    /// Continuous mode (see [`EngineOptions::continuous`]).
+    continuous: Option<streaming::ContinuousConfig>,
 }
 
 /// Type-erased scoped parse over the engine's source: either materialize the
@@ -347,6 +407,8 @@ struct SequentialParser<S: PacketSource> {
     batch_size: usize,
     progress: Option<providers::ProgressFn>,
     keylog: Option<Arc<KeyLog>>,
+    /// Continuous engines deliver partial batches on this cadence.
+    flush_interval: Option<Duration>,
 }
 
 impl<S: PacketSource> ParseSource for SequentialParser<S> {
@@ -368,6 +430,7 @@ impl<S: PacketSource> ParseSource for SequentialParser<S> {
             self.batch_size,
             self.progress.clone(),
             sub,
+            self.flush_interval,
         )
     }
 
@@ -505,6 +568,206 @@ fn harvest_table_needs(
     })
     .map_err(|e| Error::Query(QueryError::Execution(e.to_string())))?;
     Ok(needs)
+}
+
+/// A statement after logical planning: finished (it parsed nothing), or a
+/// query to prepare and execute.
+enum Planned {
+    Done(Box<QueryOutput>),
+    Query(Box<PlannedQuery>),
+}
+
+/// A query ready to prepare and execute.
+struct PlannedQuery {
+    state: SessionState,
+    optimized: LogicalPlan,
+    bootstrap: ParseStats,
+}
+
+/// Join a streaming pass's producers and fold their statistics (and any
+/// parse error, which fails the query closed) into the query's.
+///
+/// `stats` is what was known before execution (the materialize path, a cache
+/// hit, the fast path); a streaming pass replaces it with the producers'
+/// numbers. `bootstrap` is a time-range bootstrap pass this query paid for.
+async fn fold_producers(
+    producers: Vec<JoinHandle<Result<PartitionStat, Error>>>,
+    mut stats: ParseStats,
+    bootstrap: &ParseStats,
+    time_range: &CaptureTimeRange,
+) -> (ParseStats, Option<Error>) {
+    let mut producer_error = None;
+    if !producers.is_empty() {
+        let outcomes = futures::future::join_all(producers).await;
+        stats = ParseStats {
+            parse_passes: 1,
+            partitions: outcomes.len(),
+            complete_scan: true,
+            ..Default::default()
+        };
+        let mut start = i64::MAX;
+        let mut end = i64::MIN;
+        for outcome in outcomes {
+            match outcome {
+                Ok(Ok(p)) => {
+                    stats.packets_scanned += p.packets;
+                    stats.complete_scan &= !p.capped;
+                    if p.min_us != i64::MAX {
+                        start = start.min(p.min_us);
+                    }
+                    if p.max_us != i64::MIN {
+                        end = end.max(p.max_us);
+                    }
+                    for (t, n) in p.rows_built {
+                        *stats.rows_built.entry(t).or_insert(0) += n;
+                    }
+                    for (t, o) in p.overflow {
+                        if o.total_bytes > 0 {
+                            *stats.overflowed_bytes.entry(t.clone()).or_insert(0) += o.total_bytes;
+                            *stats.overflow_peak_bytes.entry(t).or_insert(0) += o.peak_bytes;
+                        }
+                    }
+                }
+                Ok(Err(e)) => producer_error = producer_error.or(Some(e)),
+                Err(join_err) => {
+                    producer_error = producer_error.or(Some(Error::Query(QueryError::Execution(
+                        format!("parse producer panicked: {join_err}"),
+                    ))))
+                }
+            }
+        }
+        if start != i64::MAX {
+            stats.start_ts_us = start;
+            stats.end_ts_us = end;
+            time_range.record(start, end);
+            if stats.complete_scan {
+                time_range.mark_complete();
+            }
+        }
+    }
+    // A time-range bootstrap pass (source without a boundary index) is part
+    // of what this query cost; fold it in rather than hide it.
+    stats.parse_passes += bootstrap.parse_passes;
+    stats.packets_scanned += bootstrap.packets_scanned;
+    (stats, producer_error)
+}
+
+/// A query's result as a stream of batches (see
+/// [`QueryEngine::execute_stream`]).
+///
+/// Owns the query's session state, prepared tables and parse producers.
+/// Yields `Err` once and ends on an execution error. Dropping the stream
+/// cancels the query: its receivers go away, and the producers stop at their
+/// next batch. [`QueryStream::finish`] drops the same holders *before*
+/// joining the producers, in that order, so a producer waiting on a receiver
+/// the plan never drained is released rather than waited for.
+pub struct QueryStream {
+    inner: Option<SendableRecordBatchStream>,
+    plan: Option<Arc<dyn ExecutionPlan>>,
+    state: Option<SessionState>,
+    prepared: Option<Arc<QueryTables>>,
+    producers: Vec<JoinHandle<Result<PartitionStat, Error>>>,
+    /// Statistics known before execution (see [`fold_producers`]).
+    stats: ParseStats,
+    bootstrap: ParseStats,
+    time_range: Arc<CaptureTimeRange>,
+    last_stats: Arc<RwLock<ParseStats>>,
+    /// Batches of a statement that already ran (DDL, EXPLAIN).
+    ready: VecDeque<RecordBatch>,
+}
+
+impl QueryStream {
+    fn ready(output: QueryOutput) -> Self {
+        Self {
+            inner: None,
+            plan: None,
+            state: None,
+            prepared: None,
+            producers: Vec::new(),
+            stats: output.stats,
+            bootstrap: ParseStats::default(),
+            time_range: Arc::new(CaptureTimeRange::new()),
+            last_stats: Arc::new(RwLock::new(ParseStats::default())),
+            ready: output.batches.into(),
+        }
+    }
+
+    /// The physical plan being executed (`None` for a statement that parsed
+    /// nothing), e.g. to inspect a continuous query's fused aggregate.
+    pub fn plan(&self) -> Option<&Arc<dyn ExecutionPlan>> {
+        self.plan.as_ref()
+    }
+
+    /// Continuous queries: the streaming aggregate's current watermark in
+    /// microseconds since the epoch, once it has one.
+    pub fn watermark_us(&self) -> Option<i64> {
+        self.plan.as_ref().and_then(streaming::watermark_us)
+    }
+
+    /// Continuous queries: rows dropped as late so far.
+    pub fn late_rows(&self) -> u64 {
+        self.plan.as_ref().map(streaming::late_rows).unwrap_or(0)
+    }
+
+    /// Continuous queries: windows emitted so far.
+    pub fn windows_emitted(&self) -> u64 {
+        self.plan
+            .as_ref()
+            .map(streaming::windows_emitted)
+            .unwrap_or(0)
+    }
+
+    /// Release the query's context and join its parse producers, returning
+    /// the query's statistics (what `--stats` prints) or the parse error that
+    /// ended it. Call it after the stream has ended, or earlier to cancel.
+    ///
+    /// A producer blocked in a `read` on an idle pipe only returns when a
+    /// byte arrives or the writer closes, so on a live feed this can wait;
+    /// bound it with a timeout and let the process exit if it matters.
+    pub async fn finish(mut self) -> Result<ParseStats, Error> {
+        let late_rows = self.late_rows();
+        // Order matters: the stream and the plan hold the receivers and the
+        // TaskContext, the state and the tables hold the rest.
+        self.inner = None;
+        self.plan = None;
+        self.state = None;
+        self.prepared = None;
+        let producers = std::mem::take(&mut self.producers);
+        let stats = std::mem::take(&mut self.stats);
+        let (mut stats, error) =
+            fold_producers(producers, stats, &self.bootstrap, &self.time_range).await;
+        stats.late_rows = late_rows;
+        *self.last_stats.write().expect("stats lock poisoned") = stats.clone();
+        match error {
+            Some(e) => Err(e),
+            None => Ok(stats),
+        }
+    }
+}
+
+impl Stream for QueryStream {
+    type Item = Result<RecordBatch, Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if let Some(batch) = self.ready.pop_front() {
+            return Poll::Ready(Some(Ok(batch)));
+        }
+        let Some(inner) = self.inner.as_mut() else {
+            return Poll::Ready(None);
+        };
+        match inner.poll_next_unpin(cx) {
+            Poll::Ready(Some(Ok(batch))) => Poll::Ready(Some(Ok(batch))),
+            Poll::Ready(Some(Err(e))) => {
+                self.inner = None;
+                Poll::Ready(Some(Err(Error::Query(QueryError::from(e)))))
+            }
+            Poll::Ready(None) => {
+                self.inner = None;
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
 }
 
 /// What a statement does with the capture, decided from the top node of the
@@ -688,6 +951,13 @@ impl QueryEngine {
         source: Arc<S>,
         opts: EngineOptions,
     ) -> Result<Self, Error> {
+        if opts.continuous {
+            return Err(Error::Query(QueryError::Execution(
+                "continuous mode reads a live stream: open standard input or a pipe \
+                 (SourceSpec::Stdin / SourceSpec::Sequential, `--stdin`), not a file"
+                    .into(),
+            )));
+        }
         let registry = Arc::new(default_registry());
         // An explicit count is honoured; otherwise small mmap files stay in
         // one partition (see `auto_target_partitions`).
@@ -724,6 +994,7 @@ impl QueryEngine {
             batch_size: opts.batch_size,
             progress: opts.progress.clone(),
             keylog: opts.keylog.clone(),
+            flush_interval: opts.continuous.then_some(opts.flush_interval),
         });
         Self::finish_build(parse_source, registry, 1, opts, true).await
     }
@@ -738,7 +1009,11 @@ impl QueryEngine {
         opts: EngineOptions,
         single_use: bool,
     ) -> Result<Self, Error> {
-        let ctx = create_session_context(parallelism);
+        let continuous = opts.continuous.then_some(streaming::ContinuousConfig {
+            allowed_lateness: opts.allowed_lateness,
+            idle_timeout: opts.idle_timeout,
+        });
+        let ctx = create_session_context(parallelism, continuous.as_ref());
         udf::register_all_udfs(&ctx)?;
 
         // Time UDFs read a shared range that parse passes widen.
@@ -756,7 +1031,8 @@ impl QueryEngine {
                 )))
             })?);
             let provider =
-                providers::ProtocolTableProvider::new(table_name.to_string(), schema, parallelism);
+                providers::ProtocolTableProvider::new(table_name.to_string(), schema, parallelism)
+                    .with_unbounded(continuous.is_some());
             ctx.register_table(table_name, Arc::new(provider))
                 .map_err(|e| Error::Query(QueryError::Execution(e.to_string())))?;
             known_tables.insert(table_name.to_string());
@@ -774,12 +1050,13 @@ impl QueryEngine {
             time_range,
             retention: opts.retention,
             parse_source,
-            last_stats: RwLock::new(ParseStats::default()),
+            last_stats: Arc::new(RwLock::new(ParseStats::default())),
             known_tables,
             parallelism,
             time_range_lock: tokio::sync::Mutex::new(()),
             single_use,
             consumed: AtomicBool::new(false),
+            continuous,
         })
     }
 
@@ -861,9 +1138,134 @@ impl QueryEngine {
     /// runs on the engine; they are also what [`Self::last_parse_stats`]
     /// reports until another query completes.
     pub async fn execute(&self, sql: &str) -> Result<QueryOutput, Error> {
+        let PlannedQuery {
+            mut state,
+            optimized,
+            bootstrap,
+        } = match self.plan_statement(sql).await? {
+            Planned::Done(output) => return Ok(*output),
+            Planned::Query(query) => *query,
+        };
+
+        let needs = harvest_table_needs(&optimized, &self.known_tables)?;
+        self.check_continuous_needs(&needs)?;
+        self.check_plannable(&state, &optimized).await?;
+        let PreparedQuery {
+            tables: prepared,
+            producers,
+            stats,
+        } = self.prepare(needs)?;
+
+        // Hand this query's tables to its providers and execute. The result
+        // is captured, not returned early: the producers below must always be
+        // joined (fail closed on a parse error).
+        self.configure_query_state(&mut state, &prepared);
+        let result = async {
+            let plan = self.physical_plan(&state, &optimized).await?;
+            Self::collect_plan(&state, plan).await
+        }
+        .await;
+
+        // Every holder of the query's tables goes away before the producers
+        // are joined: the physical plan and the TaskContext were owned by
+        // `collect_plan`; `state` carries the extension on its config;
+        // `prepared` is ours. Receivers of partitions the plan never executed
+        // (a LIMIT satisfied early) drop here, so a producer waiting on them
+        // sees its consumers gone rather than waiting forever. Dropping this
+        // future anywhere above has the same effect.
+        drop(state);
+        drop(prepared);
+
+        let (stats, producer_error) =
+            fold_producers(producers, stats, &bootstrap, &self.time_range).await;
+        // Written once, after the producers are folded, so what
+        // `last_parse_stats` reports is always a completed query's.
+        *self.last_stats.write().expect("stats lock poisoned") = stats.clone();
+
+        match producer_error {
+            Some(e) => Err(e),
+            None => Ok(QueryOutput {
+                batches: result?,
+                stats,
+            }),
+        }
+    }
+
+    /// Execute a query and consume its result as a stream of batches.
+    ///
+    /// This is the query path of a continuous engine
+    /// ([`EngineOptions::continuous`]): a windowed aggregate over a live
+    /// capture emits each window as it closes, and the stream runs until the
+    /// input ends (or the stream is dropped). It works on any engine — a file
+    /// query simply streams its batches as they are produced. Statements that
+    /// parse nothing (`EXPLAIN`, DDL) yield their result batches and end.
+    ///
+    /// A continuous query with an idle timeout arms a `tokio::time` timer, so
+    /// such a stream must be polled inside a tokio runtime with time enabled.
+    ///
+    /// The returned [`QueryStream`] owns everything the query holds (its
+    /// session state, prepared tables, parse producers); call
+    /// [`QueryStream::finish`] after the last batch for the query's
+    /// [`ParseStats`] and any parse error, or just drop it to cancel: the
+    /// producers see their consumers gone and stop (one blocked in a `read`
+    /// on an idle pipe stops at the next byte, or when the process exits).
+    pub async fn execute_stream(&self, sql: &str) -> Result<QueryStream, Error> {
+        let PlannedQuery {
+            mut state,
+            optimized,
+            bootstrap,
+        } = match self.plan_statement(sql).await? {
+            Planned::Done(output) => return Ok(QueryStream::ready(*output)),
+            Planned::Query(query) => *query,
+        };
+        let needs = harvest_table_needs(&optimized, &self.known_tables)?;
+        self.check_continuous_needs(&needs)?;
+        self.check_plannable(&state, &optimized).await?;
+        let PreparedQuery {
+            tables: prepared,
+            producers,
+            stats,
+        } = self.prepare(needs)?;
+        self.configure_query_state(&mut state, &prepared);
+        let planned = async {
+            let plan = self.physical_plan(&state, &optimized).await?;
+            let stream =
+                datafusion::physical_plan::execute_stream(Arc::clone(&plan), state.task_ctx())
+                    .map_err(|e| Error::Query(QueryError::from(e)))?;
+            Ok::<_, Error>((plan, stream))
+        }
+        .await;
+        match planned {
+            Ok((plan, stream)) => Ok(QueryStream {
+                inner: Some(stream),
+                plan: Some(plan),
+                state: Some(state),
+                prepared: Some(prepared),
+                producers,
+                stats,
+                bootstrap,
+                time_range: Arc::clone(&self.time_range),
+                last_stats: Arc::clone(&self.last_stats),
+                ready: VecDeque::new(),
+            }),
+            Err(e) => {
+                // Planning failed: release the tables, then join the
+                // producers so a parse error is not lost and nothing leaks.
+                drop(state);
+                drop(prepared);
+                let (_, producer_error) =
+                    fold_producers(producers, stats, &bootstrap, &self.time_range).await;
+                Err(producer_error.unwrap_or(e))
+            }
+        }
+    }
+
+    /// Plan a statement up to the optimized logical plan, running statements
+    /// that parse nothing (DDL, EXPLAIN) to completion on the way.
+    async fn plan_statement(&self, sql: &str) -> Result<Planned, Error> {
         // A per-query copy of the shared session state: the query's prepared
         // tables ride on its config as an extension.
-        let mut state = self.ctx.state();
+        let state = self.ctx.state();
         let plan = state
             .create_logical_plan(sql)
             .await
@@ -878,7 +1280,7 @@ impl QueryEngine {
                 ..Default::default()
             };
             *self.last_stats.write().expect("stats lock poisoned") = stats.clone();
-            return Ok(QueryOutput { batches, stats });
+            return Ok(Planned::Done(Box::new(QueryOutput { batches, stats })));
         }
         // The time UDFs are `Stable`, so the optimizer constant-folds
         // `start_time()` / `end_time()` *during* `optimize`: the range must be
@@ -906,8 +1308,16 @@ impl QueryEngine {
         if kind == StatementKind::PlanOnly {
             // EXPLAIN: build and display the plan on a state without prepared
             // tables (the providers return plan-only scans); no parse, no
-            // execution.
-            let batches = Self::execute_plan(&state, &optimized).await?;
+            // execution. DataFusion's EXPLAIN keeps a physical optimizer
+            // error for EXPLAIN VERBOSE only, so in continuous mode plan the
+            // explained query itself first and report what the query would.
+            if self.continuous.is_some() {
+                if let LogicalPlan::Explain(explain) = &optimized {
+                    self.physical_plan(&state, explain.plan.as_ref()).await?;
+                }
+            }
+            let plan = self.physical_plan(&state, &optimized).await?;
+            let batches = Self::collect_plan(&state, plan).await?;
             // The only parse a plan-only statement can trigger is the
             // time-range bootstrap; report it rather than claim zero.
             let stats = ParseStats {
@@ -915,133 +1325,173 @@ impl QueryEngine {
                 ..bootstrap
             };
             *self.last_stats.write().expect("stats lock poisoned") = stats.clone();
-            return Ok(QueryOutput { batches, stats });
+            return Ok(Planned::Done(Box::new(QueryOutput { batches, stats })));
         }
+        Ok(Planned::Query(Box::new(PlannedQuery {
+            state,
+            optimized,
+            bootstrap,
+        })))
+    }
 
-        let needs = harvest_table_needs(&optimized, &self.known_tables)?;
-        let PreparedQuery {
-            tables: prepared,
-            producers,
-            mut stats,
-        } = self.prepare(needs)?;
+    /// A continuous query runs on what has arrived so far; refuse what needs
+    /// the whole input first, before anything is prepared.
+    fn check_continuous_needs(&self, needs: &HashMap<String, TableNeeds>) -> Result<(), Error> {
+        if self.continuous.is_none() {
+            return Ok(());
+        }
+        let mut stream_tables: Vec<&str> = needs
+            .keys()
+            .filter(|t| tables::is_stream_table(t))
+            .map(String::as_str)
+            .collect();
+        stream_tables.sort_unstable();
+        if !stream_tables.is_empty() {
+            return Err(Error::Query(QueryError::Execution(format!(
+                "continuous queries cannot read stream tables ({}): they are complete only at \
+                 end of input",
+                stream_tables.join(", ")
+            ))));
+        }
+        if needs.values().any(|n| n.scan_count > 1) {
+            return Err(Error::Query(QueryError::Execution(
+                "continuous queries cannot scan one table twice (a self-join, an IN subquery on \
+                 the same table, a view joined with one of its members): the stream is read once"
+                    .into(),
+            )));
+        }
+        Ok(())
+    }
 
+    /// On a single-use source, build the physical plan once *before* the
+    /// stream is touched, over plan-only scans (same shape and properties,
+    /// unboundedness included), so that a plan DataFusion rejects — a
+    /// continuous query that needs the whole stream — fails without starting
+    /// the one parse pass, whose producer could otherwise only be joined once
+    /// the pipe delivers its next byte.
+    async fn check_plannable(
+        &self,
+        state: &SessionState,
+        optimized: &LogicalPlan,
+    ) -> Result<(), Error> {
+        if self.single_use {
+            let mut dry_run = state.clone();
+            if self.continuous.is_some() {
+                dry_run
+                    .config_mut()
+                    .options_mut()
+                    .execution
+                    .target_partitions = 1;
+            }
+            self.physical_plan(&dry_run, optimized).await?;
+        }
+        Ok(())
+    }
+
+    /// Give a query's session state its prepared tables and its partition
+    /// count.
+    fn configure_query_state(&self, state: &mut SessionState, prepared: &Arc<QueryTables>) {
         // Plan for the partition count this query actually has: the boundary
         // index may yield fewer partitions than the engine's parallelism, and a
         // scan with fewer partitions than `target_partitions` would be
         // round-robin repartitioned in a way that loses capture order (#122;
-        // see `session_target_partitions`).
-        state.config_mut().options_mut().execution.target_partitions =
-            session_target_partitions(prepared.partitions(), self.parallelism);
-        // Hand this query's tables to its providers and execute. The result
-        // is captured, not returned early: the producers below must always be
-        // joined (fail closed on a parse error).
-        state.config_mut().set_extension(prepared.clone());
-        let result = Self::execute_plan(&state, &optimized).await;
-
-        // Every holder of the query's tables goes away before the producers
-        // are joined: the physical plan and the TaskContext were owned by
-        // `execute_plan`; `state` carries the extension on its config;
-        // `prepared` is ours. Receivers of partitions the plan never executed
-        // (a LIMIT satisfied early) drop here, so a producer waiting on them
-        // sees its consumers gone rather than waiting forever. Dropping this
-        // future anywhere above has the same effect.
-        drop(state);
-        drop(prepared);
-
-        // Streaming: collect() drove the producers to completion. Await them
-        // to fold statistics and surface any parse error (fail closed).
-        let mut producer_error = None;
-        if !producers.is_empty() {
-            let outcomes = futures::future::join_all(producers).await;
-            stats = ParseStats {
-                parse_passes: 1,
-                partitions: outcomes.len(),
-                complete_scan: true,
-                ..Default::default()
-            };
-            let mut start = i64::MAX;
-            let mut end = i64::MIN;
-            for outcome in outcomes {
-                match outcome {
-                    Ok(Ok(p)) => {
-                        stats.packets_scanned += p.packets;
-                        stats.complete_scan &= !p.capped;
-                        if p.min_us != i64::MAX {
-                            start = start.min(p.min_us);
-                        }
-                        if p.max_us != i64::MIN {
-                            end = end.max(p.max_us);
-                        }
-                        for (t, n) in p.rows_built {
-                            *stats.rows_built.entry(t).or_insert(0) += n;
-                        }
-                        for (t, o) in p.overflow {
-                            if o.total_bytes > 0 {
-                                *stats.overflowed_bytes.entry(t.clone()).or_insert(0) +=
-                                    o.total_bytes;
-                                *stats.overflow_peak_bytes.entry(t).or_insert(0) += o.peak_bytes;
-                            }
-                        }
-                    }
-                    Ok(Err(e)) => producer_error = producer_error.or(Some(e)),
-                    Err(join_err) => {
-                        producer_error = producer_error.or(Some(Error::Query(
-                            QueryError::Execution(format!("parse producer panicked: {join_err}")),
-                        )))
-                    }
-                }
-            }
-            if start != i64::MAX {
-                stats.start_ts_us = start;
-                stats.end_ts_us = end;
-                self.time_range.record(start, end);
-                if stats.complete_scan {
-                    self.time_range.mark_complete();
-                }
-            }
-        }
-
-        // A time-range bootstrap pass (source without a boundary index) is
-        // part of what this query cost; fold it in rather than hide it.
-        stats.parse_passes += bootstrap.parse_passes;
-        stats.packets_scanned += bootstrap.packets_scanned;
-
-        // Written once, after the producers are folded, so what
-        // `last_parse_stats` reports is always a completed query's.
-        *self.last_stats.write().expect("stats lock poisoned") = stats.clone();
-
-        match producer_error {
-            Some(e) => Err(e),
-            None => Ok(QueryOutput {
-                batches: result?,
-                stats,
-            }),
-        }
+        // see `session_target_partitions`). A continuous query stays on one
+        // partition throughout: a repartition between the partial and final
+        // aggregate would put a pipeline-breaking exchange above the stream.
+        state.config_mut().options_mut().execution.target_partitions = if self.continuous.is_some()
+        {
+            1
+        } else {
+            session_target_partitions(prepared.partitions(), self.parallelism)
+        };
+        state.config_mut().set_extension(Arc::clone(prepared));
     }
 
-    /// Plan an already optimized logical plan and run it to completion on
-    /// `state`, whose config carries the query's [`QueryTables`] (or none,
-    /// for a plan-only statement).
+    /// Plan an already optimized logical plan on `state`, whose config
+    /// carries the query's [`QueryTables`] (or none, for a plan-only
+    /// statement).
     ///
     /// The physical planner is called directly: `SessionState::create_physical_plan`
     /// would optimize again, and the plan executed must be exactly the one the
-    /// table needs were harvested from. The physical plan and the
-    /// `TaskContext` are owned here, so nothing of the query's context
-    /// outlives the call.
-    async fn execute_plan(
+    /// table needs were harvested from. Capture order is kept across
+    /// partitions by [`merge_ordered_partitions`].
+    async fn physical_plan(
+        &self,
         state: &SessionState,
         optimized: &LogicalPlan,
-    ) -> Result<Vec<RecordBatch>, Error> {
+    ) -> Result<Arc<dyn ExecutionPlan>, Error> {
         let plan = state
             .query_planner()
             .create_physical_plan(optimized, state)
             .await
-            .map_err(|e| Error::Query(QueryError::from(e)))?;
-        // Keep capture order for un-ORDERed queries over a partitioned parse.
-        let plan = merge_ordered_partitions(plan);
+            .map_err(|e| self.map_planning_error(e))?;
+        if self.continuous.is_some() {
+            // A join buffers one side of an unbounded stream for ever and
+            // DataFusion does not refuse it; a continuous query reads one
+            // table.
+            let mut join = None;
+            let _ = plan.apply(|node| {
+                if node.name().contains("Join") {
+                    join = Some(node.name().to_string());
+                    return Ok(TreeNodeRecursion::Stop);
+                }
+                Ok(TreeNodeRecursion::Continue)
+            });
+            if let Some(join) = join {
+                return Err(Error::Query(QueryError::Execution(format!(
+                    "continuous queries cannot join tables ({join}): a join would buffer one \
+                     side of the stream for ever. The `*_packets` views join protocol tables \
+                     with `frames`; window `frames` instead, or a single table or view with \
+                     its own Timestamp(Microsecond) column"
+                ))));
+            }
+        }
+        Ok(merge_ordered_partitions(plan))
+    }
+
+    /// Run a physical plan to completion; the plan and the `TaskContext` are
+    /// owned here, so nothing of the query's context outlives the call.
+    async fn collect_plan(
+        state: &SessionState,
+        plan: Arc<dyn ExecutionPlan>,
+    ) -> Result<Vec<RecordBatch>, Error> {
         datafusion::physical_plan::collect(plan, state.task_ctx())
             .await
             .map_err(|e| Error::Query(QueryError::from(e)))
+    }
+
+    /// DataFusion's sanity check rejects an operator that needs the whole of
+    /// an unbounded input; in continuous mode say what is supported instead.
+    fn map_planning_error(&self, e: datafusion::error::DataFusionError) -> Error {
+        if self.continuous.is_some() {
+            let text = e.to_string();
+            if text.contains("pipeline breaking") {
+                let what = if text.contains("SessionAssignExec") {
+                    "session() windows need every packet of a key before any session is known, \
+                     so they cannot run continuously; window with tumble() or hop()"
+                } else if text.contains("JoinExec") {
+                    "continuous queries cannot join tables: a join would buffer one side of the \
+                     stream for ever. The `*_packets` views join protocol tables with `frames`; \
+                     window `frames` instead"
+                } else {
+                    "a continuous query aggregates over tumble() or hop() windows and nothing \
+                     else: SELECT window_start, …, <aggregates> FROM tumble(frames, INTERVAL …) \
+                     [WHERE <source columns>] GROUP BY window_start [, window_end, <columns>]. \
+                     Sorts, limits, joins, DISTINCT, window functions and aggregates without \
+                     GROUP BY window_start need the whole stream first"
+                };
+                // Name the operator DataFusion refused, not its Debug dump.
+                let operator = text
+                    .split("operator: ")
+                    .nth(1)
+                    .and_then(|rest| rest.split([' ', '{', '\n']).next())
+                    .unwrap_or("the plan");
+                return Error::Query(QueryError::Execution(format!(
+                    "{what} (DataFusion refused {operator})"
+                )));
+            }
+        }
+        Error::Query(QueryError::from(e))
     }
 
     /// Prepare the tables a query needs into its own [`QueryTables`]: cache

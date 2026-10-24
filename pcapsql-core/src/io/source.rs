@@ -205,6 +205,24 @@ pub trait PacketReader: Send + Unpin {
     /// Current position in the source.
     fn position(&self) -> PacketPosition;
 
+    /// Bound how long a `process_packets` call may block waiting for input.
+    ///
+    /// With a timeout, a read that sees no input for that long fails and
+    /// [`PacketReader::take_read_timeout`] reports it; the reader stays
+    /// usable and the next call resumes where it left off. Returns `false`
+    /// when the reader cannot time out (a file, a compressed stream, a
+    /// reader without a file descriptor): the default, and the timeout is
+    /// then ignored.
+    fn set_read_timeout(&mut self, _timeout: Option<std::time::Duration>) -> bool {
+        false
+    }
+
+    /// Whether the last `process_packets` error was a read timeout (and
+    /// clear it). Never true for a reader that does not support timeouts.
+    fn take_read_timeout(&mut self) -> bool {
+        false
+    }
+
     /// Get the link type for packets from this reader.
     fn link_type(&self) -> u32;
 }

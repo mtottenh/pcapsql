@@ -58,7 +58,7 @@ async fn main() -> Result<()> {
 
     // Input: `--stdin` or `-` read the capture from standard input;
     // otherwise a file path or cloud URL is required.
-    let input_source = if args.stdin {
+    let input_source = if args.stdin || args.continuous {
         InputSource::Stdin
     } else {
         let pcap_file_arg = args.file.as_ref().context(
@@ -167,12 +167,31 @@ async fn main() -> Result<()> {
         pcapsql_datafusion::query::RetentionPolicy::CacheOnTouch
     };
 
+    let seconds = |s: f64, what: &str| -> Result<std::time::Duration> {
+        if !(s.is_finite() && s >= 0.0) {
+            anyhow::bail!("{what} must be a non-negative number of seconds, got {s}");
+        }
+        Ok(std::time::Duration::from_secs_f64(s))
+    };
+    if args.continuous && (args.output.is_some() || args.export_format.is_some()) {
+        anyhow::bail!(
+            "--continuous prints each window as it closes; exporting to a file (-o, \
+             --export-format) is not supported — redirect stdout (--format csv) instead"
+        );
+    }
     let opts = EngineOptions {
         batch_size: args.batch_size,
         retention,
         keylog,
         mmap: !args.no_mmap,
-        progress: progress_cb,
+        progress: if args.continuous { None } else { progress_cb },
+        continuous: args.continuous,
+        allowed_lateness: seconds(args.allowed_lateness, "--allowed-lateness")?,
+        flush_interval: seconds(args.flush_interval, "--flush-interval")?,
+        idle_timeout: args
+            .idle_timeout
+            .map(|s| seconds(s, "--idle-timeout"))
+            .transpose()?,
         #[cfg(feature = "cloud")]
         cloud: pcapsql_datafusion::query::CloudSourceOptions {
             endpoint: args.cloud_endpoint.clone(),
@@ -205,12 +224,29 @@ async fn main() -> Result<()> {
         None
     };
 
+    // Continuous query over a live stream (--continuous).
+    if args.continuous {
+        let query = one_shot_sql.expect("--continuous implies --stdin, which needs -e/-f");
+        let query = apply_bpf_filter(&query, &bpf_filter);
+        return run_continuous(&engine, &query, &formatter, &args, progress_bar).await;
+    }
+
     // One-shot query (-e / -f)
     if let Some(query) = one_shot_sql {
         let query = apply_bpf_filter(&query, &bpf_filter);
         let output = engine.execute(&query).await;
         finish_progress();
-        let QueryOutput { batches, stats } = output?;
+        let QueryOutput { batches, stats } = match output {
+            Ok(output) => output,
+            Err(e) if input_source.is_stdin() => {
+                // The parser may still be blocked reading the pipe, and the
+                // runtime's shutdown would wait for it: report and leave.
+                eprintln!("Error: {e}");
+                let _ = io::Write::flush(&mut io::stderr());
+                std::process::exit(1);
+            }
+            Err(e) => return Err(e.into()),
+        };
 
         // Export if output file specified
         if let Some(output_path) = &args.output {
@@ -246,6 +282,121 @@ async fn main() -> Result<()> {
         },
     )
     .await
+}
+
+/// Run a continuous query: print every emitted window as it arrives, until
+/// the input ends or Ctrl-C.
+///
+/// On Ctrl-C the stream is dropped (its producers see their consumer gone)
+/// and the query's statistics are collected with a short grace period. The
+/// producer thread may be blocked in `read()` on a quiet pipe, and a blocked
+/// read cannot be interrupted from another thread, so when the grace period
+/// runs out the process exits with what it has: output is flushed, the
+/// runtime is not waited for.
+async fn run_continuous(
+    engine: &QueryEngine,
+    query: &str,
+    formatter: &OutputFormatter,
+    args: &Args,
+    progress_bar: Option<indicatif::ProgressBar>,
+) -> Result<()> {
+    use futures::StreamExt;
+
+    let mut stream = engine.execute_stream(query).await?;
+    if let Some(pb) = &progress_bar {
+        pb.set_style(
+            indicatif::ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] {msg}")
+                .expect("valid template")
+                .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈ "),
+        );
+        pb.set_message("waiting for the first window");
+        pb.enable_steady_tick(std::time::Duration::from_millis(200));
+    }
+    let mut stdout = io::stdout();
+    let mut header_written = false;
+    let mut rows: u64 = 0;
+    let mut interrupted = false;
+    // One signal future for the whole loop: a SIGINT that lands while a
+    // batch is being written is remembered, not lost.
+    let ctrl_c = tokio::signal::ctrl_c();
+    tokio::pin!(ctrl_c);
+    loop {
+        tokio::select! {
+            next = stream.next() => match next {
+                Some(Ok(batch)) => {
+                    rows += batch.num_rows() as u64;
+                    if let Some(pb) = &progress_bar {
+                        pb.suspend(|| formatter.write_incremental(&batch, &mut stdout, &mut header_written))?;
+                        let watermark = stream
+                            .watermark_us()
+                            .map(format_timestamp_us)
+                            .unwrap_or_else(|| "-".to_string());
+                        pb.set_message(format!(
+                            "{rows} rows in {} windows, watermark {watermark}, {} late rows",
+                            stream.windows_emitted(),
+                            stream.late_rows()
+                        ));
+                    } else {
+                        formatter.write_incremental(&batch, &mut stdout, &mut header_written)?;
+                    }
+                    io::Write::flush(&mut stdout)?;
+                }
+                Some(Err(e)) => {
+                    if let Some(pb) = &progress_bar {
+                        pb.finish_and_clear();
+                    }
+                    // The parser may be blocked reading the pipe; the
+                    // runtime's shutdown would wait for it.
+                    let _ = io::Write::flush(&mut stdout);
+                    eprintln!("Error: {e}");
+                    let _ = io::Write::flush(&mut io::stderr());
+                    std::process::exit(1);
+                }
+                None => break,
+            },
+            _ = &mut ctrl_c => {
+                interrupted = true;
+                break;
+            }
+        }
+    }
+    if let Some(pb) = &progress_bar {
+        pb.finish_and_clear();
+    }
+    io::Write::flush(&mut stdout)?;
+    let grace = std::time::Duration::from_secs(2);
+    // 130: the conventional status after SIGINT.
+    let exit_status = if interrupted { 130 } else { 0 };
+    match tokio::time::timeout(grace, stream.finish()).await {
+        Ok(Ok(stats)) => {
+            if args.show_stats {
+                print_parse_stats_ext(&stats, interrupted);
+            }
+        }
+        Ok(Err(e)) => {
+            if !interrupted {
+                eprintln!("Error: {e}");
+                let _ = io::Write::flush(&mut io::stderr());
+                std::process::exit(1);
+            }
+            eprintln!("{e}");
+        }
+        Err(_) => {
+            // The parser is still blocked reading the pipe: nothing more will
+            // come without input, so leave with the output flushed.
+            if args.show_stats {
+                eprintln!(
+                    "Parse statistics unavailable: the input is still open and the reader is \
+                     blocked on it ({rows} rows printed)"
+                );
+            }
+            std::process::exit(exit_status);
+        }
+    }
+    if interrupted {
+        std::process::exit(exit_status);
+    }
+    Ok(())
 }
 
 /// Run one REPL statement with the spinner live (when `--progress`), cleared
@@ -300,6 +451,11 @@ fn print_cache_stats(engine: &QueryEngine) {
 }
 
 fn print_parse_stats(stats: &ParseStats) {
+    print_parse_stats_ext(stats, false);
+}
+
+/// `interrupted`: the scan was cut short by Ctrl-C, not by a LIMIT.
+fn print_parse_stats_ext(stats: &ParseStats, interrupted: bool) {
     eprintln!();
     match stats.served_from {
         ServedFrom::PlanOnly => {
@@ -334,6 +490,8 @@ fn print_parse_stats(stats: &ParseStats) {
         stats.packets_scanned,
         if stats.complete_scan {
             ""
+        } else if interrupted {
+            ", stopped by Ctrl-C"
         } else {
             ", stopped early by LIMIT"
         }
@@ -342,6 +500,12 @@ fn print_parse_stats(stats: &ParseStats) {
         eprintln!(
             "Stream analysis (single partition, same pass): {}",
             stats.stream_tables.join(", ")
+        );
+    }
+    if stats.late_rows > 0 {
+        eprintln!(
+            "Late rows dropped (window already emitted): {}",
+            stats.late_rows
         );
     }
     let mut rows: Vec<_> = stats.rows_built.iter().filter(|(_, n)| **n > 0).collect();

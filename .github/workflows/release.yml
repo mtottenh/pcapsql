@@ -41,6 +41,10 @@ jobs:
           DEBIAN_FRONTEND: noninteractive
           TZ: Etc/UTC
         run: |
+          # Debian 11 is EOL; its packages now live on archive.debian.org
+          if [ "${{ matrix.container }}" = "debian:11" ]; then
+            sed -i 's|deb.debian.org|archive.debian.org|g' /etc/apt/sources.list
+          fi
           apt-get update
           apt-get install -y curl build-essential pkg-config libssl-dev
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y

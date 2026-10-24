@@ -59,6 +59,10 @@ tokio = { workspace = true, optional = true }
 thiserror.workspace = true
 anyhow.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+# poll(2) on the stdin fd: timed reads for a continuous engine's flush cadence
+libc = "0.2"
+
 # Logging
 tracing.workspace = true
 

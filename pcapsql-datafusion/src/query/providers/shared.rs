@@ -14,6 +14,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
@@ -234,6 +235,11 @@ pub struct ParseStats {
     /// Where the rows came from; distinguishes a cache hit, the index fast
     /// path and a plan-only statement, which all report `parse_passes == 0`.
     pub served_from: ServedFrom,
+    /// Continuous queries only: rows the streaming window aggregate dropped
+    /// because their window had already been emitted when they arrived
+    /// (later than `allowed_lateness` behind the stream, or after an idle
+    /// timeout closed the window).
+    pub late_rows: u64,
 }
 
 /// Result of one scoped parse pass.
@@ -431,6 +437,7 @@ fn assemble_pass(
     Ok(SharedParseState {
         tables: tables_out,
         stats: ParseStats {
+            late_rows: 0,
             parse_passes: 1,
             packets_scanned,
             partitions: num_partitions,
@@ -614,6 +621,15 @@ impl<S: SeekablePacketSource> OpenReader for RangeOpener<S> {
 
 /// One streaming producer: parse `reader` to completion, sending each
 /// table's batches to its exchange as they form.
+///
+/// With a `flush_interval` (a continuous engine over a live feed) packets
+/// are read one at a time and a partially filled batch is delivered once the
+/// interval has passed since the last flush. On a reader that supports read
+/// timeouts (stdin, a pipe: `poll(2)` on the descriptor) the wait for input
+/// itself times out at the interval, so held packets are delivered on time
+/// even when nothing else arrives; on one that does not (an arbitrary
+/// `Read`, a compressed stream) the check runs when the next packet arrives,
+/// so held packets wait for it.
 #[allow(clippy::too_many_arguments)]
 fn stream_partition<R: PacketReader>(
     mut reader: R,
@@ -624,6 +640,7 @@ fn stream_partition<R: PacketReader>(
     senders: HashMap<String, BatchSender>,
     pacer: Arc<Pacer>,
     progress: Option<(&AtomicU64, &ProgressFn)>,
+    flush_interval: Option<Duration>,
 ) -> Result<PartitionStat, Error> {
     let mut batch_set =
         NormalizedBatchSet::new_streaming(batch_size, subscription, senders, pacer)?;
@@ -631,16 +648,37 @@ fn stream_partition<R: PacketReader>(
     let mut max_us = i64::MIN;
     let mut packets: u64 = 0;
     let mut capped = false;
+    let chunk = if flush_interval.is_some() { 1 } else { 1024 };
+    let mut last_flush = Instant::now();
+    if let Some(interval) = flush_interval {
+        // Best effort: a reader without timeouts keeps blocking in `read()`.
+        reader.set_read_timeout(Some(interval));
+    }
 
     loop {
-        let processed = reader.process_packets(1024, |packet| {
+        let result = reader.process_packets(chunk, |packet| {
             let us = packet.timestamp_ns / 1_000;
             min_us = min_us.min(us);
             max_us = max_us.max(us);
             let parsed = parse_packet(registry, packet.link_type, packet.data, scope);
             batch_set.add_packet_from_ref(packet, &parsed)?;
             Ok(())
-        })?;
+        });
+        let processed = match result {
+            Ok(n) => n,
+            Err(_) if reader.take_read_timeout() => {
+                // Nothing arrived within the interval: hand on what is held
+                // and keep waiting.
+                batch_set.flush_partial()?;
+                last_flush = Instant::now();
+                if batch_set.all_capped() {
+                    capped = true;
+                    break;
+                }
+                continue;
+            }
+            Err(e) => return Err(e.into()),
+        };
         packets += processed as u64;
         if let Some((counter, cb)) = progress {
             let total = counter.fetch_add(processed as u64, Ordering::Relaxed) + processed as u64;
@@ -652,6 +690,12 @@ fn stream_partition<R: PacketReader>(
         if batch_set.all_capped() {
             capped = true;
             break;
+        }
+        if let Some(interval) = flush_interval {
+            if last_flush.elapsed() >= interval {
+                batch_set.flush_partial()?;
+                last_flush = Instant::now();
+            }
         }
     }
 
@@ -683,6 +727,7 @@ fn start_streaming_parse<O: OpenReader>(
     batch_size: usize,
     progress: Option<ProgressFn>,
     subscription: &ParseSubscription,
+    flush_interval: Option<Duration>,
 ) -> Result<StreamingHandle, Error> {
     if !subscription.stream_tables.is_empty() {
         // Stream tables are complete only at end of capture; the engine
@@ -741,6 +786,7 @@ fn start_streaming_parse<O: OpenReader>(
                 senders,
                 pacer,
                 progress.as_ref().map(|cb| (progress_count.as_ref(), cb)),
+                flush_interval,
             )
         }));
     }
@@ -790,6 +836,7 @@ pub fn run_streaming_parse<S: SeekablePacketSource>(
             batch_size,
             progress,
             subscription,
+            None,
         );
     }
     let openers: Vec<RangeOpener<S>> = ranges
@@ -799,19 +846,23 @@ pub fn run_streaming_parse<S: SeekablePacketSource>(
             range,
         })
         .collect();
-    start_streaming_parse(openers, registry, batch_size, progress, subscription)
+    start_streaming_parse(openers, registry, batch_size, progress, subscription, None)
 }
 
 /// [`run_streaming_parse`] for any source as a **single partition**: one
 /// producer over the source's sequential reader. The whole of a streaming
 /// pass over a non-seekable source (a pipe, stdin), and the one-partition
 /// case of the seekable entry point.
+///
+/// `flush_interval` (a continuous engine) delivers partially filled batches
+/// on a time basis; see `stream_partition`.
 pub fn run_streaming_parse_sequential<S: PacketSource>(
     source: &Arc<S>,
     registry: &Arc<ProtocolRegistry>,
     batch_size: usize,
     progress: Option<ProgressFn>,
     subscription: &ParseSubscription,
+    flush_interval: Option<Duration>,
 ) -> Result<StreamingHandle, Error> {
     start_streaming_parse(
         vec![SequentialOpener(source.clone())],
@@ -819,5 +870,6 @@ pub fn run_streaming_parse_sequential<S: PacketSource>(
         batch_size,
         progress,
         subscription,
+        flush_interval,
     )
 }
