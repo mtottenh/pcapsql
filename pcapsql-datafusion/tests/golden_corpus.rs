@@ -445,8 +445,8 @@ fn http_frames() -> Vec<Vec<u8>> {
 }
 
 // ---------------------------------------------------------------------------
-// Routing / tunnel capture: BGP, OSPF (GTP and IPv6 extension headers follow
-// in their own frames). Each table's `SELECT *` snapshot pins every column.
+// Routing / tunnel capture: BGP, OSPF, GTP (IPv6 extension headers follow in
+// their own frames). Each table's `SELECT *` snapshot pins every column.
 // ---------------------------------------------------------------------------
 
 /// A BGP message: 16-byte marker, length, type, body.
@@ -598,12 +598,57 @@ fn ospf_lsack(router_id: [u8; 4]) -> Vec<u8> {
     ospf_packet(5, router_id, &body)
 }
 
+/// GTPv1-U G-PDU with sequence number, N-PDU number and two extension
+/// headers (PDU Session Container, UDP Port) in front of `inner`.
+fn gtpv1_gpdu(teid: u32, inner: &[u8]) -> Vec<u8> {
+    let ext: &[u8] = &[
+        1, 0x10, 0x00, 0x40, // PDU Session Container (4 bytes), next: UDP Port
+        1, 0x1f, 0x90, 0x00, // UDP Port 8080, next: none
+    ];
+    let mut p = vec![0x37, 0xff]; // v1, PT=1, E, S, PN; G-PDU
+    p.extend_from_slice(&((4 + ext.len() + inner.len()) as u16).to_be_bytes());
+    p.extend_from_slice(&teid.to_be_bytes());
+    p.extend_from_slice(&7u16.to_be_bytes()); // sequence
+    p.push(42); // N-PDU number
+    p.push(0x85); // next extension header: PDU Session Container
+    p.extend_from_slice(ext);
+    p.extend_from_slice(inner);
+    p
+}
+
+/// GTPv2-C header with no IEs: T flag set, P flag as given.
+fn gtpv2(piggyback: bool, msg_type: u8, teid: u32, seq: u32) -> Vec<u8> {
+    let mut p = vec![0x48 | if piggyback { 0x10 } else { 0 }, msg_type];
+    p.extend_from_slice(&8u16.to_be_bytes()); // length: TEID + sequence/spare
+    p.extend_from_slice(&teid.to_be_bytes());
+    p.extend_from_slice(&seq.to_be_bytes()[1..]); // 24-bit sequence
+    p.push(0); // spare
+    p
+}
+
 /// Routing and tunnelling protocols on an Ethernet link. Frames are grouped
 /// by protocol, each group appended after the previous ones, so a table's
 /// `SELECT *` snapshot does not move when another protocol's frames are added.
 fn routing_capture() -> Vec<u8> {
     let a = [10, 1, 0, 1];
     let b = [10, 1, 0, 2];
+    let g1 = [10, 3, 0, 1];
+    let g2 = [10, 3, 0, 2];
+    let inner = ipv4(
+        [192, 168, 1, 1],
+        [192, 168, 1, 2],
+        17,
+        7,
+        &udp(5000, 6000, &[0x44; 4]),
+    );
+    let gtp = |id: u16, sp: u16, dp: u16, msg: &[u8]| {
+        eth(
+            MAC_B,
+            MAC_A,
+            ETH_IP4,
+            &ipv4(g1, g2, 17, id, &udp(sp, dp, msg)),
+        )
+    };
     let r1 = [10, 2, 0, 1];
     let ospf = |id: u16, pkt: &[u8]| {
         eth(
@@ -634,6 +679,12 @@ fn routing_capture() -> Vec<u8> {
         ospf(7, &ospf_dd(r1)),
         ospf(8, &ospf_lsu(r1)),
         ospf(9, &ospf_lsack(r1)),
+        // 10: GTPv1-U G-PDU (sequence, N-PDU, extension headers) carrying an
+        // IPv4/UDP packet; 11-12: GTPv2-C Create Session Request / Response,
+        // the response flagged as piggybacked.
+        gtp(10, 2152, 2152, &gtpv1_gpdu(0x1001, &inner)),
+        gtp(11, 2123, 2123, &gtpv2(false, 32, 0, 1)),
+        gtp(12, 2123, 2123, &gtpv2(true, 33, 0x2000, 1)),
     ];
     to_capture(frames, LINKTYPE_ETHERNET)
 }
@@ -1095,6 +1146,11 @@ const CORPUS: &[(Capture, &str, &str)] = &[
         Capture::Routing,
         "v02_ospf",
         "SELECT * FROM ospf ORDER BY frame_number",
+    ),
+    (
+        Capture::Routing,
+        "v03_gtp",
+        "SELECT * FROM gtp ORDER BY frame_number",
     ),
 ];
 

@@ -149,7 +149,7 @@ SELECT window_start, count(*) FROM tumble(frames, INTERVAL '10' SECOND) GROUP BY
 | `tls` | TLS records and handshakes |
 | `tcp_connections`, `tls_sessions`, `http_messages` | Reassembled TCP streams: one row per connection, TLS handshake, HTTP/1.x message |
 | `http2` | HTTP/2 frames (requires TLS decryption) |
-| `vxlan`, `gre`, `gtp`, `ipsec` | Tunnel headers (inner layers get `encap_depth` > 0 and a `tunnel_type`) |
+| `vxlan`, `gre`, `gtp`, `ipsec` | Tunnel headers (inner layers get `encap_depth` > 0 and a `tunnel_type`); `gtp` includes the GTPv1 N-PDU number and extension header chain and the GTPv2-C flags |
 | `mpls` | Label stacks (label switching, not counted as a tunnel) |
 | `bgp`, `ospf` | Routing protocols: BGP OPEN capabilities, UPDATE path attributes (AS path, next hop, MED, local pref, aggregator) and withdrawn/announced prefixes, NOTIFICATION codes, ROUTE-REFRESH address family; OSPFv2 Hello (neighbour count), Database Description and the first LSA header of DD/LSU/LSAck packets |
 

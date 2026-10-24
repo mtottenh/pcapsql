@@ -159,6 +159,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `dd_sequence`, `dd_lsa_count`, `lsu_lsa_count`, `lsa_ack_count`, and the
     first LSA header of a DD, LSU or LSAck packet: `lsa_age`, `lsa_type`,
     `lsa_type_name`, `lsa_id`, `lsa_advertising_router`, `lsa_sequence`.
+  - `gtp`: `npdu`, `extension_headers` (the GTPv1 chain as comma-separated
+    `Name(0xNN)` entries), `extension_header_count`, and the GTPv2-C
+    `piggyback` and `teid_present` flags.
 - The capture can be piped in: `pcapsql --stdin` (or `-` as the capture
   argument) reads pcap or pcapng, optionally gzip/zstd compressed, from
   standard input, e.g. `tcpdump -U -w - -i eth0 port 53 | pcapsql --stdin -e

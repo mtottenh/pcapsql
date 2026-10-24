@@ -253,11 +253,6 @@ mod tests {
         "vxlan.i_flag_valid",
         "vxlan.flags_valid",
         "vxlan.inner_frame_length",
-        "gtp.npdu",
-        "gtp.extension_headers",
-        "gtp.extension_header_count",
-        "gtp.piggyback",
-        "gtp.teid_present",
     ];
 
     /// Every parser field descriptor (`proto.field`) with a column in its
