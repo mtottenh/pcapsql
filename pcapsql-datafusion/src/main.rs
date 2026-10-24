@@ -184,6 +184,7 @@ async fn main() -> Result<()> {
         retention,
         keylog,
         mmap: !args.no_mmap,
+        fuse_frame_joins: !args.no_fuse_joins,
         progress: if args.continuous { None } else { progress_cb },
         continuous: args.continuous,
         allowed_lateness: seconds(args.allowed_lateness, "--allowed-lateness")?,

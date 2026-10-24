@@ -207,8 +207,22 @@ async fn multi_table_join_shares_the_one_pass() {
     assert_eq!(first_i64(&out.batches), N as i64);
     assert_eq!(out.stats.parse_passes, 1, "{:?}", out.stats);
     assert_eq!(out.stats.partitions, 1);
-    assert_eq!(out.stats.rows_built.get("udp"), Some(&N));
-    assert_eq!(out.stats.rows_built.get("ipv4"), Some(&N));
+    // The joins are fused into one table of the pass (one row per frame
+    // here), built from the udp and ipv4 layers; neither is a table of its
+    // own in this pass.
+    let fused: Vec<(&String, &usize)> = out
+        .stats
+        .rows_built
+        .iter()
+        .filter(|(name, _)| name.starts_with("fused_frames_udp_ipv4_"))
+        .collect();
+    assert_eq!(fused.len(), 1, "{:?}", out.stats.rows_built);
+    assert_eq!(*fused[0].1, N);
+    assert!(
+        !out.stats.rows_built.contains_key("udp"),
+        "{:?}",
+        out.stats.rows_built
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

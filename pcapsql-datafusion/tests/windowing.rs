@@ -535,20 +535,17 @@ async fn explain_shows_the_rewrite_and_scans_are_pruned() {
         "{plan}"
     );
     assert!(plan.contains("SessionAssignExec"), "{plan}");
-    // The join behind the view is pruned to the join keys (frame_number and,
-    // for the layers, encap_depth) plus timestamp and the selected column.
+    // Under RetentionPolicy::None the view's joins are fused into one scan
+    // the parser builds (see `fusion`); its columns are the ones the query
+    // needs, flattened as `<alias>__<column>`.
     assert!(
-        plan.contains("TableScan: frames projection=[frame_number, timestamp]"),
+        plan.contains("TableScan: fused_frames_udp_ethernet_ipv4_ipv6_"),
         "{plan}"
     );
-    assert!(
-        plan.contains("TableScan: udp projection=[frame_number, src_port, encap_depth]"),
-        "{plan}"
-    );
-    assert!(
-        plan.contains("TableScan: ipv4 projection=[frame_number, encap_depth]"),
-        "{plan}"
-    );
+    assert!(plan.contains("f__timestamp"), "{plan}");
+    assert!(plan.contains("udp__src_port"), "{plan}");
+    assert!(!plan.contains("TableScan: udp "), "{plan}");
+    assert!(!plan.contains("Join"), "{plan}");
 
     // Under RetentionPolicy::None the pruned column set is what gets parsed
     // and streamed; the query only works because the projection reached the

@@ -26,6 +26,7 @@ pub mod arrow_schema;
 pub mod bpf;
 pub mod builders;
 mod filter;
+pub mod fusion;
 pub mod providers;
 pub mod stream_tables;
 pub mod streaming;
@@ -118,6 +119,7 @@ fn session_target_partitions(partitions: usize, parallelism: usize) -> usize {
 fn create_session_context(
     parallelism: usize,
     continuous: Option<&streaming::ContinuousConfig>,
+    fuse_frame_joins: bool,
 ) -> SessionContext {
     let mut config = ConfigOptions::default();
 
@@ -141,6 +143,19 @@ fn create_session_context(
         .with_config(config.into())
         .with_default_features()
         .with_query_planner(Arc::new(windowing::WindowQueryPlanner));
+    if fuse_frame_joins {
+        // Last, over the optimized plan: the view joins it replaces must
+        // already have had their projections and filters pushed down.
+        let mut rules = datafusion::optimizer::Optimizer::new().rules;
+        // The fused scan's nominal partition count is the parse parallelism,
+        // as for every protocol table (a plan-only scan must report what
+        // will run: a continuous plan is checked on it).
+        rules.push(Arc::new(fusion::FuseFrameJoins::new(
+            parallelism,
+            continuous.is_some(),
+        )));
+        builder = builder.with_optimizer_rules(rules);
+    }
     if let Some(continuous) = continuous {
         // The fused streaming aggregate must replace `AggregateExec` over a
         // window before `SanityCheckPlan` rejects the plan as pipeline
@@ -254,6 +269,12 @@ pub struct EngineOptions {
     /// Continuous only: close and emit every open window after this long
     /// without any input (`None`: windows close on event time only).
     pub idle_timeout: Option<Duration>,
+    /// Fuse frame joins into the parse (see [`fusion`]): the `*_packets`
+    /// views and hand-written joins of protocol tables on `frame_number` are
+    /// built by the parser instead of DataFusion's join operators. Applies
+    /// under [`RetentionPolicy::None`] only; on by default. Off is for
+    /// comparing plans and results against the join path.
+    pub fuse_frame_joins: bool,
 }
 
 impl Default for EngineOptions {
@@ -271,6 +292,7 @@ impl Default for EngineOptions {
             allowed_lateness: Duration::from_secs(1),
             flush_interval: Duration::from_secs(1),
             idle_timeout: None,
+            fuse_frame_joins: true,
         }
     }
 }
@@ -519,6 +541,9 @@ struct TableNeeds {
     /// Number of scans of this table in the plan (self-joins disable
     /// per-scan scoping so one materialization can serve every scan).
     scan_count: usize,
+    /// A fused join (see [`fusion`]) rather than a protocol table: the parse
+    /// builds it from the spec.
+    fused: Option<Arc<fusion::FrameJoinSpec>>,
 }
 
 /// A query's prepared tables plus what is still in flight.
@@ -541,6 +566,19 @@ fn harvest_table_needs(
 ) -> Result<HashMap<String, TableNeeds>, Error> {
     let mut needs: HashMap<String, TableNeeds> = HashMap::new();
     plan.apply_with_subqueries(|node| {
+        if let Some(spec) = fusion::fused_spec_of(node) {
+            // The parse builds the whole fused table (its projection is
+            // applied by the scan); a LIMIT pushed into the scan caps it.
+            let fetch = match node {
+                LogicalPlan::TableScan(scan) => scan.fetch,
+                _ => None,
+            };
+            let entry = needs.entry(spec.name.clone()).or_default();
+            entry.scan_count += 1;
+            entry.fetch = if entry.scan_count == 1 { fetch } else { None };
+            entry.fused = Some(spec);
+            return Ok(TreeNodeRecursion::Continue);
+        }
         if let LogicalPlan::TableScan(scan) = node {
             let name = scan.table_name.table();
             if known_tables.contains(name) {
@@ -1050,7 +1088,13 @@ impl QueryEngine {
             allowed_lateness: opts.allowed_lateness,
             idle_timeout: opts.idle_timeout,
         });
-        let ctx = create_session_context(parallelism, continuous.as_ref());
+        // Fusion needs the parse to serve the joined table directly; under
+        // CacheOnTouch the per-table cache and DataFusion's joins stay.
+        let ctx = create_session_context(
+            parallelism,
+            continuous.as_ref(),
+            opts.retention == RetentionPolicy::None && opts.fuse_frame_joins,
+        );
         udf::register_all_udfs(&ctx)?;
 
         // Time UDFs read a shared range that parse passes widen.
@@ -1406,8 +1450,8 @@ impl QueryEngine {
         }
         if needs.values().any(|n| n.scan_count > 1) {
             return Err(Error::Query(QueryError::Execution(
-                "continuous queries cannot scan one table twice (a self-join, an IN subquery on \
-                 the same table, a view joined with one of its members): the stream is read once"
+                "continuous queries cannot scan one table twice (a self-join the parser cannot \
+                 fuse, an IN subquery on the same table): the stream is read once"
                     .into(),
             )));
         }
@@ -1478,8 +1522,11 @@ impl QueryEngine {
             .map_err(|e| self.map_planning_error(e))?;
         if self.continuous.is_some() {
             // A join buffers one side of an unbounded stream for ever and
-            // DataFusion does not refuse it; a continuous query reads one
-            // table.
+            // DataFusion does not refuse it. The joins a continuous query can
+            // use are the ones the parser fuses (see `fusion`): the
+            // `*_packets` views, and any tree of inner/left joins on
+            // frame_number (and encap_depth) between protocol tables, below
+            // the window.
             let mut join = None;
             let _ = plan.apply(|node| {
                 if node.name().contains("Join") {
@@ -1490,10 +1537,12 @@ impl QueryEngine {
             });
             if let Some(join) = join {
                 return Err(Error::Query(QueryError::Execution(format!(
-                    "continuous queries cannot join tables ({join}): a join would buffer one \
-                     side of the stream for ever. The `*_packets` views join protocol tables \
-                     with `frames`; window `frames` instead, or a single table or view with \
-                     its own Timestamp(Microsecond) column"
+                    "continuous queries cannot run this join ({join}): it would buffer one \
+                     side of the stream for ever. Joins the parser can fuse run: the \
+                     `*_packets` views, and inner or left joins of protocol tables on \
+                     frame_number (and encap_depth) placed below the window, as in \
+                     tumble(tcp_packets, …). Not fusible: FULL joins (the `packets` view), \
+                     other join conditions, and a join above the window"
                 ))));
             }
         }
@@ -1521,9 +1570,10 @@ impl QueryEngine {
                     "session() windows need every packet of a key before any session is known, \
                      so they cannot run continuously; window with tumble() or hop()"
                 } else if text.contains("JoinExec") {
-                    "continuous queries cannot join tables: a join would buffer one side of the \
-                     stream for ever. The `*_packets` views join protocol tables with `frames`; \
-                     window `frames` instead"
+                    "continuous queries cannot run this join: it would buffer one side of the \
+                     stream for ever. Joins the parser can fuse run (the `*_packets` views, \
+                     inner or left joins of protocol tables on frame_number below the window); \
+                     FULL joins, other join conditions and a join above the window do not"
                 } else {
                     "a continuous query aggregates over tumble() or hop() windows and nothing \
                      else: SELECT window_start, …, <aggregates> FROM tumble(frames, INTERVAL …) \
@@ -1611,10 +1661,10 @@ impl QueryEngine {
             }
         }
 
-        // A table scanned twice in one plan (self-join, IN-subquery on the same
-        // table, a view joined with one of its members) needs two consumers,
-        // but a stream can be consumed once. Such queries take the materialize
-        // path for this one query — still a single parse pass.
+        // A table scanned twice in one plan (a self-join the parser did not
+        // fuse, an IN-subquery on the same table) needs two consumers, but a
+        // stream can be consumed once. Such queries take the materialize path
+        // for this one query — still a single parse pass.
         let any_multi_scan = needs.values().any(|n| n.scan_count > 1);
         let (mut subscription, hits) = self.build_subscription(needs);
         for (name, data) in hits {
@@ -1629,7 +1679,7 @@ impl QueryEngine {
         // subscription means every referenced table is served from the cache
         // or the fast path — nothing to parse.
         let streaming = self.retention == RetentionPolicy::None
-            && !subscription.tables.is_empty()
+            && (!subscription.tables.is_empty() || !subscription.fused.is_empty())
             && subscription.stream_tables.is_empty()
             && !any_multi_scan;
 
@@ -1731,6 +1781,16 @@ impl QueryEngine {
             }
             RetentionPolicy::None => {
                 for (name, table_needs) in needs {
+                    if let Some(spec) = table_needs.fused {
+                        subscription.fused.insert(
+                            name,
+                            providers::FusedSubscription {
+                                spec,
+                                fetch: table_needs.fetch,
+                            },
+                        );
+                        continue;
+                    }
                     let multi_scan = table_needs.scan_count > 1;
                     let predicate = if multi_scan || name == "frames" {
                         None
