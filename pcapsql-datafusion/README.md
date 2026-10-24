@@ -74,6 +74,10 @@ Query:
   -e, --execute <SQL>       Execute query and exit
   -o, --output <FILE>       Export results (.parquet, .csv, .json)
 
+Input:
+  --stdin                   Read the capture from standard input (`-` as <PCAP> means the same;
+                            one-shot query only)
+
 TLS Decryption:
   --keylog <FILE>           SSLKEYLOGFILE for TLS decryption
 

@@ -10,9 +10,10 @@
 //! `packets` view.
 //!
 //! [`QueryEngine::open`] is the single entry point: local files (mmap by
-//! default) and cloud URLs funnel into one shared parse pass, parallel across
-//! partitions for seekable sources, fanned out to every protocol table. JOINs
-//! use sort-merge since all tables emit rows sorted by `frame_number`.
+//! default), cloud URLs and standard input funnel into one shared parse pass,
+//! parallel across partitions for seekable sources and sequential for a
+//! stream, fanned out to every protocol table. JOINs use sort-merge since all
+//! tables emit rows sorted by `frame_number`.
 //! The `tumble` / `hop` / `session` table functions (`windowing`) add time
 //! windows over `frames` and the `*_packets` views.
 //!
@@ -43,6 +44,7 @@ pub use udf::CaptureTimeRange;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use arrow::array::RecordBatch;
@@ -55,12 +57,12 @@ use tokio::task::JoinHandle;
 
 use crate::error::{Error, QueryError};
 use crate::query::providers::{
-    run_shared_parse, CachedTable, PartitionStat, QueryTables, SharedParseState, StreamingHandle,
-    TableCache, TableData,
+    run_shared_parse, run_shared_parse_sequential, run_streaming_parse_sequential, CachedTable,
+    PartitionStat, QueryTables, SharedParseState, StreamingHandle, TableCache, TableData,
 };
 use pcapsql_core::{
-    default_registry, FilePacketSource, KeyLog, MmapPacketSource, ProtocolRegistry,
-    SeekablePacketSource,
+    default_registry, FilePacketSource, KeyLog, MmapPacketSource, PacketSource, ProtocolRegistry,
+    SeekablePacketSource, StdinPacketSource,
 };
 
 #[cfg(feature = "cloud")]
@@ -125,12 +127,27 @@ fn create_session_context(parallelism: usize) -> SessionContext {
 }
 
 /// Where to read a capture from.
+///
+/// A file or cloud object is seekable and can be read any number of times;
+/// the engine partitions it for parallel parsing and, under
+/// [`RetentionPolicy::CacheOnTouch`], re-reads it as queries need. Standard
+/// input (or any other stream) can be read **once**, sequentially: such an
+/// engine runs exactly one parse pass, with the restrictions documented on
+/// [`QueryEngine::open`].
 #[derive(Clone, Debug)]
 pub enum SourceSpec {
     /// Local file path (pcap/pcapng, optionally compressed).
     Path(PathBuf),
     /// Cloud object URL (`s3://…`, `gs://…`, `az://…`); needs the `cloud` feature.
     Url(String),
+    /// The process's standard input (pcap/pcapng, optionally compressed),
+    /// read sequentially to end of input. The capture header is read when
+    /// the engine is opened.
+    Stdin,
+    /// An already-opened non-seekable stream (a pipe, a socket, an in-memory
+    /// buffer): the library form of [`SourceSpec::Stdin`], built with
+    /// [`StdinPacketSource::from_reader`].
+    Sequential(StdinPacketSource),
 }
 
 /// Options for cloud sources (ignored for local paths).
@@ -253,6 +270,12 @@ pub struct QueryEngine {
     /// Serializes the one-time capture time-range bootstrap
     /// ([`Self::ensure_time_range`]) between concurrent first queries.
     time_range_lock: tokio::sync::Mutex<()>,
+    /// The source can be read exactly once (stdin, a pipe): the engine runs
+    /// one parse pass, and anything that would need a second one is refused
+    /// up front (see [`Self::open`]).
+    single_use: bool,
+    /// Set when a single-use source's one parse pass has been started.
+    consumed: AtomicBool,
 }
 
 /// Type-erased scoped parse over the engine's source: either materialize the
@@ -312,6 +335,57 @@ impl<S: SeekablePacketSource> ParseSource for SourceParser<S> {
     fn frame_count(&self) -> Option<u64> {
         self.source.frame_count()
     }
+}
+
+/// Binds a non-seekable source (stdin, a pipe) to the parse parameters: one
+/// partition through the source's sequential reader; no boundary index, so
+/// the time range and the frame count are never known up front (the
+/// `count(*)` fast path is off and a time-range UDF cannot be bootstrapped).
+struct SequentialParser<S: PacketSource> {
+    source: Arc<S>,
+    registry: Arc<ProtocolRegistry>,
+    batch_size: usize,
+    progress: Option<providers::ProgressFn>,
+    keylog: Option<Arc<KeyLog>>,
+}
+
+impl<S: PacketSource> ParseSource for SequentialParser<S> {
+    fn materialize(&self, sub: &ParseSubscription) -> Result<SharedParseState, Error> {
+        run_shared_parse_sequential(
+            self.source.as_ref(),
+            &self.registry,
+            self.batch_size,
+            self.progress.clone(),
+            sub,
+            self.keylog.clone(),
+        )
+    }
+
+    fn stream(&self, sub: &ParseSubscription) -> Result<StreamingHandle, Error> {
+        run_streaming_parse_sequential(
+            &self.source,
+            &self.registry,
+            self.batch_size,
+            self.progress.clone(),
+            sub,
+        )
+    }
+
+    fn time_range_us(&self) -> Option<(i64, i64)> {
+        None
+    }
+
+    fn frame_count(&self) -> Option<u64> {
+        None
+    }
+}
+
+/// The error for anything that would need a second read of a single-use
+/// source.
+fn single_use_error(what: &str) -> Error {
+    Error::Query(QueryError::Execution(format!(
+        "{what}: stdin can be read once, so an engine over it runs exactly one parse pass"
+    )))
 }
 
 /// Names of the UDFs whose result depends on the capture's full time range.
@@ -522,12 +596,43 @@ impl QueryEngine {
     /// Open a capture and build the engine.
     ///
     /// The single constructor: local files (memory-mapped by default, with a
-    /// buffered-file fallback) and cloud URLs are served by the same scoped
-    /// parse machinery. **No parsing happens here** — each query parses
-    /// exactly the tables (and columns/predicates/limits) it references, per
-    /// the engine's [`RetentionPolicy`].
+    /// buffered-file fallback), cloud URLs and standard input are served by
+    /// the same scoped parse machinery. **No parsing happens here** — each
+    /// query parses exactly the tables (and columns/predicates/limits) it
+    /// references, per the engine's [`RetentionPolicy`]. (Opening stdin does
+    /// read the capture *header*, to learn the format and link type.)
+    ///
+    /// # Standard input and other single-use sources
+    ///
+    /// A stream ([`SourceSpec::Stdin`], [`SourceSpec::Sequential`]) can be
+    /// read once, so the engine runs **one** parse pass, as a single
+    /// partition, and refuses what would need another:
+    ///
+    /// - `opts.retention` must be [`RetentionPolicy::None`]; `CacheOnTouch`
+    ///   is rejected here, since a cache that is filled per query would need
+    ///   a pass per first-touched table set.
+    /// - `opts.target_partitions` is ignored: the pass is one partition.
+    /// - One query may parse. A query over capture tables after that pass
+    ///   fails with "stdin was already consumed". Statements that parse
+    ///   nothing (`EXPLAIN`, DDL, `SELECT 1`) are fine before and after.
+    /// - Any one query may touch any number of tables, including stream
+    ///   tables (`tcp_connections`, …): they share the one pass.
+    /// - The time-range functions `start_time()`, `end_time()` and
+    ///   `relative_time()` are not available before the pass: they need the
+    ///   whole capture read first. Such a query is rejected without
+    ///   consuming the stream. After a complete pass the range is known, so
+    ///   a later scan-free query (`SELECT start_time()`) is answered from it.
+    /// - The `count(*)` index fast path is off (no boundary index): a count
+    ///   parses, like any other query.
+    ///
+    /// The stream is read to end of input, like a file.
     pub async fn open(spec: SourceSpec, opts: EngineOptions) -> Result<Self, Error> {
         match spec {
+            SourceSpec::Stdin => {
+                let source = StdinPacketSource::stdin()?;
+                Self::build_sequential(Arc::new(source), opts).await
+            }
+            SourceSpec::Sequential(source) => Self::build_sequential(Arc::new(source), opts).await,
             SourceSpec::Path(path) => {
                 if opts.mmap {
                     if let Ok(source) = MmapPacketSource::open(&path) {
@@ -577,8 +682,8 @@ impl QueryEngine {
         }
     }
 
-    /// Build the engine over an opened source: register providers, UDFs and
-    /// views, and capture the scoped-parse closure queries will drive.
+    /// Build the engine over an opened seekable source: the scoped parse is
+    /// partitioned across the engine's parallelism.
     async fn build<S: SeekablePacketSource>(
         source: Arc<S>,
         opts: EngineOptions,
@@ -589,6 +694,50 @@ impl QueryEngine {
         let parallelism = opts.target_partitions.unwrap_or_else(|| {
             auto_target_partitions(source.as_ref(), default_target_partitions())
         });
+        let parse_source: Arc<dyn ParseSource> = Arc::new(SourceParser {
+            source,
+            registry: registry.clone(),
+            batch_size: opts.batch_size,
+            partitions: parallelism,
+            progress: opts.progress.clone(),
+            keylog: opts.keylog.clone(),
+        });
+        Self::finish_build(parse_source, registry, parallelism, opts, false).await
+    }
+
+    /// Build the engine over a single-use sequential source (stdin, a pipe):
+    /// one partition, no partition auto-tuning, `RetentionPolicy::None`
+    /// required (see [`Self::open`]).
+    async fn build_sequential<S: PacketSource>(
+        source: Arc<S>,
+        opts: EngineOptions,
+    ) -> Result<Self, Error> {
+        if opts.retention != RetentionPolicy::None {
+            return Err(single_use_error(
+                "RetentionPolicy::CacheOnTouch is not available on stdin (use RetentionPolicy::None)",
+            ));
+        }
+        let registry = Arc::new(default_registry());
+        let parse_source: Arc<dyn ParseSource> = Arc::new(SequentialParser {
+            source,
+            registry: registry.clone(),
+            batch_size: opts.batch_size,
+            progress: opts.progress.clone(),
+            keylog: opts.keylog.clone(),
+        });
+        Self::finish_build(parse_source, registry, 1, opts, true).await
+    }
+
+    /// Register providers, UDFs and views on a session context sized for
+    /// `parallelism` parse partitions, and bind the scoped-parse source
+    /// queries will drive.
+    async fn finish_build(
+        parse_source: Arc<dyn ParseSource>,
+        registry: Arc<ProtocolRegistry>,
+        parallelism: usize,
+        opts: EngineOptions,
+        single_use: bool,
+    ) -> Result<Self, Error> {
         let ctx = create_session_context(parallelism);
         udf::register_all_udfs(&ctx)?;
 
@@ -618,15 +767,6 @@ impl QueryEngine {
         // catalog (tables and views alike) and expand into its scan.
         windowing::register_window_functions(&ctx);
 
-        let parse_source: Arc<dyn ParseSource> = Arc::new(SourceParser {
-            source,
-            registry: registry.clone(),
-            batch_size: opts.batch_size,
-            partitions: parallelism,
-            progress: opts.progress.clone(),
-            keylog: opts.keylog.clone(),
-        });
-
         Ok(Self {
             ctx,
             registry,
@@ -638,6 +778,8 @@ impl QueryEngine {
             known_tables,
             parallelism,
             time_range_lock: tokio::sync::Mutex::new(()),
+            single_use,
+            consumed: AtomicBool::new(false),
         })
     }
 
@@ -744,6 +886,16 @@ impl QueryEngine {
         // (Also for EXPLAIN, so the displayed constant is the real one; the
         // range comes from the boundary index without a packet parse.)
         let bootstrap = if uses_time_range_udfs(&plan) {
+            if self.single_use && !self.time_range.is_complete() {
+                // The bootstrap is a header-only pass over the whole capture,
+                // which would consume the stream before the query runs. Once
+                // the one pass has read the whole stream the range is known
+                // and `ensure_time_range` answers from it without reading.
+                return Err(single_use_error(
+                    "time-range functions (start_time, end_time, relative_time) are not \
+                     available on stdin",
+                ));
+            }
             self.ensure_time_range().await?
         } else {
             ParseStats::default()
@@ -983,6 +1135,11 @@ impl QueryEngine {
         let mut producers: Vec<JoinHandle<Result<PartitionStat, Error>>> = Vec::new();
         if subscription.is_empty() {
             // Nothing to parse.
+        } else if self.single_use && self.consumed.swap(true, Ordering::AcqRel) {
+            // The one pass a stream affords has been started by an earlier
+            // query (the source itself would refuse a second reader; this
+            // says why before any producer is spawned).
+            return Err(single_use_error("stdin was already consumed"));
         } else if streaming {
             let mut handle = self.parse_source.stream(&subscription)?;
             tables.insert_streams(&mut handle);

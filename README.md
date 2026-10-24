@@ -65,6 +65,9 @@ pcapsql capture.pcap -e "SELECT * FROM dns" -o dns.parquet
 
 # Query directly from S3 (requires cloud feature)
 pcapsql s3://bucket/capture.pcap.gz -e "SELECT * FROM tcp LIMIT 10"
+
+# Pipe a live capture in (one query; -U keeps tcpdump from buffering)
+tcpdump -U -w - -i eth0 port 53 | pcapsql --stdin -e "SELECT * FROM dns_packets"
 ```
 
 ## Features
@@ -252,11 +255,17 @@ bounds depend on every packet of its key; `hop` emits each row once per covering
 
 ```
 pcapsql <PCAP> [OPTIONS]
+pcapsql --stdin -e <SQL> [OPTIONS]
 
 Query:
   -e, --execute <SQL>       Execute query and exit
+  -f, --file <FILE>         Execute the query in FILE and exit
   -o, --output <FILE>       Export results (.parquet, .csv, .json)
   --filter <EXPR>           BPF filter (tcpdump syntax)
+  --stats                   Print parse statistics after the query
+
+Input:
+  --stdin                   Read the capture from standard input (`-` as <PCAP> means the same)
 
 TLS Decryption:
   --keylog <FILE>           SSLKEYLOGFILE for TLS decryption
@@ -270,6 +279,35 @@ Cloud Storage:
   --cloud-anonymous         Use unsigned requests (public buckets)
   --cloud-chunk-size <N>    Download chunk size (default: 8M)
 ```
+
+### Reading from standard input
+
+`--stdin` (or `-` in place of the capture path) reads a pcap or pcapng
+capture, optionally gzip- or zstd-compressed, from standard input (a file
+literally named `-` is `./-`):
+
+```bash
+# Live DNS from an interface; -U makes tcpdump flush per packet
+tcpdump -U -w - -i eth0 port 53 | pcapsql --stdin -e "SELECT * FROM dns_packets"
+
+# dumpcap writes pcapng; "any" is a Linux cooked (SLL) capture
+dumpcap -w - -i any | pcapsql --stdin -e "SELECT packet_type_name, count(*) FROM linux_sll GROUP BY 1"
+
+# A compressed file without a temporary copy
+zcat capture.pcap.gz | pcapsql - -e "SELECT count(*) FROM frames" --stats
+```
+
+Stdin is read sequentially to end of input in a single parse pass, so:
+
+- it takes a one-shot query, `-e` or `-f` with exactly one statement; the
+  interactive REPL is not available (it would read its SQL from the same
+  stdin). `-o`, `--export-format`, `--format`, `--filter`, `--stats` and
+  `--progress` work as for a file;
+- the one query may touch any tables, including the stream-analysis tables
+  (`tcp_connections`, `tls_sessions`, …): they share the pass;
+- `start_time()`, `end_time()` and `relative_time()` are not available: they
+  need a pass over the whole capture before the query runs. Use
+  `min(timestamp)` / `max(timestamp)` from `frames` in the query instead.
 
 ## REPL Commands
 
