@@ -29,12 +29,14 @@ SELECT
     udp.src_port,
     udp.dst_port,
     udp.length AS udp_length,
-    udp.checksum
+    udp.checksum,
+    udp.encap_depth,
+    udp.tunnel_type
 FROM frames f
-LEFT JOIN ethernet e ON f.frame_number = e.frame_number
-LEFT JOIN ipv4 ip4 ON f.frame_number = ip4.frame_number
-LEFT JOIN ipv6 ip6 ON f.frame_number = ip6.frame_number
 JOIN udp ON f.frame_number = udp.frame_number
+LEFT JOIN ethernet e ON e.frame_number = udp.frame_number AND e.encap_depth = udp.encap_depth
+LEFT JOIN ipv4 ip4 ON ip4.frame_number = udp.frame_number AND ip4.encap_depth = udp.encap_depth
+LEFT JOIN ipv6 ip6 ON ip6.frame_number = udp.frame_number AND ip6.encap_depth = udp.encap_depth
 "#,
     }
 }
@@ -46,6 +48,8 @@ mod tests {
     #[test]
     fn test_udp_packets_view() {
         let view = udp_packets_view();
+        // Layers join their anchor at the same encapsulation level.
+        assert!(view.sql.contains("ip4.encap_depth = udp.encap_depth"));
         assert_eq!(view.name, "udp_packets");
         assert!(view.sql.contains("JOIN udp"));
         assert!(view.sql.contains("FROM frames"));

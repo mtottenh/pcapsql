@@ -25,10 +25,12 @@ SELECT
     mpls.bottom,
     mpls.ttl,
     mpls.stack_depth,
-    mpls.labels
+    mpls.labels,
+    mpls.encap_depth,
+    mpls.tunnel_type
 FROM frames f
-JOIN ethernet eth ON f.frame_number = eth.frame_number
 JOIN mpls ON f.frame_number = mpls.frame_number
+JOIN ethernet eth ON eth.frame_number = mpls.frame_number AND eth.encap_depth = mpls.encap_depth
 "#,
     }
 }
@@ -40,6 +42,8 @@ mod tests {
     #[test]
     fn test_mpls_packets_view() {
         let view = mpls_packets_view();
+        // Layers join their anchor at the same encapsulation level.
+        assert!(view.sql.contains("eth.encap_depth = mpls.encap_depth"));
         assert_eq!(view.name, "mpls_packets");
         assert!(view.sql.contains("JOIN mpls"));
         assert!(view.sql.contains("label"));

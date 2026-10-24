@@ -3,9 +3,9 @@
 //! Serves a table either from pre-materialized per-partition batches
 //! (`CacheOnTouch` cache, stream-pass tables) or from per-partition streaming
 //! receivers fed by a concurrent parse (`RetentionPolicy::None`). Either way
-//! it reports the real partition count and declares `frame_number` output
-//! ordering so cross-partition sort-merge joins reassemble global order
-//! without extra sorting.
+//! it reports the real partition count and declares `frame_number` (and,
+//! for protocol tables, `encap_depth`) output ordering so cross-partition
+//! sort-merge joins reassemble global order without extra sorting.
 //!
 //! A table that was not prepared for the query being planned (EXPLAIN, a
 //! query issued directly on the session context) gets a *plan-only* scan: it
@@ -161,20 +161,27 @@ impl ProtocolScanExec {
         }
     }
 
+    /// The parser appends a frame's rows in layer order, outer first, so a
+    /// protocol table is ordered by `(frame_number, encap_depth)`; `frames`
+    /// has no depth and is ordered by `frame_number`. The views join on both
+    /// columns, and declaring the pair keeps a sort from being planned under
+    /// their sort-merge joins.
     fn compute_equivalence_properties(schema: &SchemaRef) -> EquivalenceProperties {
         use datafusion::physical_expr::expressions::col;
         let mut eq_props = EquivalenceProperties::new(schema.clone());
-        if schema.index_of("frame_number").is_ok() {
-            if let Ok(col_expr) = col("frame_number", schema) {
-                let sort_expr = PhysicalSortExpr {
-                    expr: col_expr,
-                    options: SortOptions {
-                        descending: false,
-                        nulls_first: false,
-                    },
-                };
-                eq_props.add_orderings(vec![vec![sort_expr]]);
-            }
+        let ordering: Vec<PhysicalSortExpr> = ["frame_number", "encap_depth"]
+            .iter()
+            .map_while(|name| col(name, schema).ok())
+            .map(|expr| PhysicalSortExpr {
+                expr,
+                options: SortOptions {
+                    descending: false,
+                    nulls_first: false,
+                },
+            })
+            .collect();
+        if !ordering.is_empty() {
+            eq_props.add_orderings(vec![ordering]);
         }
         eq_props
     }

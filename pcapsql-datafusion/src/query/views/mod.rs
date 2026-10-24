@@ -6,6 +6,32 @@
 //!
 //! Example: The `tcp_packets` view joins frames + ethernet + ipv4/ipv6 + tcp
 //! so you can query TCP traffic with timestamps and IP addresses directly.
+//!
+//! # One row per header, layers at the same depth
+//!
+//! Every `*_packets` view is anchored on its protocol table (`tcp` for
+//! `tcp_packets`, `dns` for `dns_packets`): one output row per row of that
+//! table, so one per TCP segment, DNS message, and so on. The other layers
+//! (`ethernet`, `ipv4`/`ipv6`, the transport under an application table) are
+//! joined on `(frame_number, encap_depth)`, so a row only ever combines
+//! headers of the **same encapsulation level**. For a TCP segment inside an
+//! IP-in-IP or VXLAN tunnel the row carries the inner addresses, the ones the
+//! segment actually travels between; the outer header is in `tunneled_packets`
+//! and the protocol tables themselves. Joining on `frame_number` alone would
+//! pair the outer IP header with the inner TCP header and emit a row for a
+//! segment that does not exist. Each view exposes its anchor's `encap_depth`
+//! and `tunnel_type`. A level without a link-layer header (the inside of an
+//! IP-in-IP or GRE tunnel) has NULL MAC columns; the outer frame's MACs
+//! belong to the outer level.
+//!
+//! The unified `packets` view has no single anchor: it is one row per
+//! **encapsulation level** of the frame (each depth at which an IPv4, IPv6
+//! or ARP header sits; a frame without one is a single row at depth 0), and
+//! every layer in the row, transports included, is the one at that level. A
+//! VXLAN frame carrying TCP is two rows: the outer UDP/4789 level and the
+//! inner TCP level. The level set is a derived table, so unlike the anchored
+//! views its joins sort their inputs; prefer a `*_packets` view on a large
+//! capture.
 
 mod arp;
 mod bgp;

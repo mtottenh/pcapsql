@@ -31,12 +31,14 @@ SELECT
     tls.handshake_type,
     tls.sni,
     tls.cipher_suites,
-    tls.selected_cipher
+    tls.selected_cipher,
+    tls.encap_depth,
+    tls.tunnel_type
 FROM frames f
-LEFT JOIN ipv4 ip4 ON f.frame_number = ip4.frame_number
-LEFT JOIN ipv6 ip6 ON f.frame_number = ip6.frame_number
-JOIN tcp ON f.frame_number = tcp.frame_number
 JOIN tls ON f.frame_number = tls.frame_number
+LEFT JOIN ipv4 ip4 ON ip4.frame_number = tls.frame_number AND ip4.encap_depth = tls.encap_depth
+LEFT JOIN ipv6 ip6 ON ip6.frame_number = tls.frame_number AND ip6.encap_depth = tls.encap_depth
+JOIN tcp ON tcp.frame_number = tls.frame_number AND tcp.encap_depth = tls.encap_depth
 "#,
     }
 }
@@ -48,6 +50,8 @@ mod tests {
     #[test]
     fn test_tls_packets_view() {
         let view = tls_packets_view();
+        // Layers join their anchor at the same encapsulation level.
+        assert!(view.sql.contains("tcp.encap_depth = tls.encap_depth"));
         assert_eq!(view.name, "tls_packets");
         assert!(view.sql.contains("JOIN tls"));
         assert!(view.sql.contains("sni"));

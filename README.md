@@ -152,6 +152,8 @@ SELECT window_start, count(*) FROM tumble(frames, INTERVAL '10' SECOND) GROUP BY
 | `vxlan`, `gre`, `gtp`, `ipsec` | Tunnel headers (inner layers get `encap_depth` > 0 and a `tunnel_type`); `gtp` includes the GTPv1 N-PDU number and extension header chain and the GTPv2-C flags |
 | `mpls` | Label stacks (label switching, not counted as a tunnel) |
 | `bgp`, `ospf` | Routing protocols: BGP OPEN capabilities, UPDATE path attributes (AS path, next hop, MED, local pref, aggregator) and withdrawn/announced prefixes, NOTIFICATION codes, ROUTE-REFRESH address family; OSPFv2 Hello (neighbour count), Database Description and the first LSA header of DD/LSU/LSAck packets |
+| `tcp_packets`, `udp_packets`, `dns_packets`, … | Views: one row per header of the named protocol with `frames.timestamp`, the layers under it **from the same encapsulation level** (a tunnelled segment shows its inner addresses; the outer header is in `tunneled_packets`) and that header's `encap_depth` / `tunnel_type` |
+| `packets` | View: one row per encapsulation level of every frame, with the common columns of each layer at that level |
 
 ## SQL Functions (UDFs)
 

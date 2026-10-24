@@ -44,10 +44,12 @@ SELECT
     icmpv6.ndp_source_mac,
     icmpv6.ndp_target_mac,
     icmpv6.ndp_prefix,
-    icmpv6.ndp_prefix_length
+    icmpv6.ndp_prefix_length,
+    icmpv6.encap_depth,
+    icmpv6.tunnel_type
 FROM frames f
-JOIN ipv6 ip6 ON f.frame_number = ip6.frame_number
 JOIN icmpv6 ON f.frame_number = icmpv6.frame_number
+JOIN ipv6 ip6 ON ip6.frame_number = icmpv6.frame_number AND ip6.encap_depth = icmpv6.encap_depth
 WHERE icmpv6.type IN (133, 134, 135, 136, 137)
 "#,
     }
@@ -60,6 +62,8 @@ mod tests {
     #[test]
     fn test_ndp_packets_view() {
         let view = ndp_packets_view();
+        // Layers join their anchor at the same encapsulation level.
+        assert!(view.sql.contains("ip6.encap_depth = icmpv6.encap_depth"));
         assert_eq!(view.name, "ndp_packets");
         assert!(view.sql.contains("JOIN icmpv6"));
         assert!(view

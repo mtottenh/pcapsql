@@ -131,6 +131,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The `*_packets` views join layers of the same encapsulation level.** Each
+  view is anchored on its protocol table (`tcp` for `tcp_packets`, `dns` for
+  `dns_packets`, …) and joins `ethernet`, `ipv4`/`ipv6` and the transport on
+  `(frame_number, encap_depth)` instead of `frame_number` alone. Before, a TCP
+  segment inside an IP-in-IP, VXLAN or GTP tunnel produced one row per IP
+  header in the frame, pairing the outer tunnel addresses with the inner
+  ports — a segment that does not exist — and so double-counted tunnelled
+  traffic in every `count(*)` and `sum()` over a view (the GTP-U frame of the
+  golden corpus was four rows). Now it is one row carrying the addresses the
+  segment travels between; the outer header remains in `tunneled_packets` and
+  the protocol tables, and a level with no link-layer header (inside IP-in-IP
+  or GRE) has NULL `src_mac`/`dst_mac`. Untunnelled captures are unchanged.
+  The unified `packets` view is one row per encapsulation level of the frame
+  (each depth with an IPv4, IPv6, ARP or Ethernet header), every layer in the
+  row taken from that level: a VXLAN frame carrying TCP is an outer UDP row
+  and an inner TCP row, and the outer level of an IP-in-IP or GRE frame has
+  `protocol` NULL (`ip_protocol` names the tunnel). Every `*_packets` view and
+  `packets` gain trailing `encap_depth` and `tunnel_type` columns.
+
 - One-shot (streaming) queries now run the parse behind a bounded exchange
   with backpressure: a producer waits for a slow consumer instead of
   buffering, and only queues batches of a table while DataFusion is parked

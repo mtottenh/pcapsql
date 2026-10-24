@@ -28,10 +28,12 @@ SELECT
     arp.sender_mac,
     arp.sender_ip,
     arp.target_mac,
-    arp.target_ip
+    arp.target_ip,
+    arp.encap_depth,
+    arp.tunnel_type
 FROM frames f
-LEFT JOIN ethernet e ON f.frame_number = e.frame_number
 JOIN arp ON f.frame_number = arp.frame_number
+LEFT JOIN ethernet e ON e.frame_number = arp.frame_number AND e.encap_depth = arp.encap_depth
 "#,
     }
 }
@@ -43,6 +45,8 @@ mod tests {
     #[test]
     fn test_arp_packets_view() {
         let view = arp_packets_view();
+        // Layers join their anchor at the same encapsulation level.
+        assert!(view.sql.contains("e.encap_depth = arp.encap_depth"));
         assert_eq!(view.name, "arp_packets");
         assert!(view.sql.contains("JOIN arp"));
         assert!(view.sql.contains("sender_ip"));

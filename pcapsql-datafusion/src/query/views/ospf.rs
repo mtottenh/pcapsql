@@ -44,10 +44,12 @@ SELECT
     ospf.lsa_type_name,
     ospf.lsa_id,
     ospf.lsa_advertising_router,
-    ospf.lsa_sequence
+    ospf.lsa_sequence,
+    ospf.encap_depth,
+    ospf.tunnel_type
 FROM frames f
-JOIN ipv4 ip4 ON f.frame_number = ip4.frame_number
 JOIN ospf ON f.frame_number = ospf.frame_number
+JOIN ipv4 ip4 ON ip4.frame_number = ospf.frame_number AND ip4.encap_depth = ospf.encap_depth
 "#,
     }
 }
@@ -59,6 +61,8 @@ mod tests {
     #[test]
     fn test_ospf_packets_view() {
         let view = ospf_packets_view();
+        // Layers join their anchor at the same encapsulation level.
+        assert!(view.sql.contains("ip4.encap_depth = ospf.encap_depth"));
         assert_eq!(view.name, "ospf_packets");
         assert!(view.sql.contains("JOIN ospf"));
         assert!(view.sql.contains("router_id"));

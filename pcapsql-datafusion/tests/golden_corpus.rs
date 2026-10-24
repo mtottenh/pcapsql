@@ -721,6 +721,104 @@ fn routing_capture() -> Vec<u8> {
     to_capture(frames, LINKTYPE_ETHERNET)
 }
 
+/// Tunnelled traffic whose inner and outer transports differ, so a view that
+/// paired layers across encapsulation levels would show: VXLAN carrying TCP,
+/// GTP-U carrying ICMP, IP-in-IP carrying UDP, VXLAN carrying ARP, and one
+/// untunnelled TCP frame as the control.
+fn tunnels_capture() -> Vec<u8> {
+    let a = [10, 5, 0, 1];
+    let b = [10, 5, 0, 2];
+    let in_a = [192, 168, 7, 1];
+    let in_b = [192, 168, 7, 2];
+    let inner_eth = |ethertype: u16, payload: &[u8]| {
+        eth(
+            [0x02, 0, 0, 0, 0, 0x77],
+            [0x02, 0, 0, 0, 0, 0x88],
+            ethertype,
+            payload,
+        )
+    };
+    let frames: Vec<Vec<u8>> = vec![
+        // 1: VXLAN (VNI 7) a:49152 -> b:4789 carrying Ethernet/IPv4/TCP
+        //    192.168.7.1:40000 -> 192.168.7.2:443 SYN
+        eth(
+            MAC_B,
+            MAC_A,
+            ETH_IP4,
+            &ipv4(
+                a,
+                b,
+                17,
+                1,
+                &udp(
+                    49152,
+                    4789,
+                    &vxlan(
+                        7,
+                        &inner_eth(
+                            ETH_IP4,
+                            &ipv4(in_a, in_b, 6, 1, &tcp(40000, 443, 500, 0, 0x02, &[])),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+        // 2: GTP-U (TEID 0x1001) a:2152 -> b:2152 carrying IPv4/ICMP echo
+        //    192.168.7.1 -> 192.168.7.2
+        eth(
+            MAC_B,
+            MAC_A,
+            ETH_IP4,
+            &ipv4(
+                a,
+                b,
+                17,
+                2,
+                &udp(
+                    2152,
+                    2152,
+                    &gtpv1_gpdu(0x1001, &ipv4(in_a, in_b, 1, 2, &icmp_echo())),
+                ),
+            ),
+        ),
+        // 3: IP-in-IP (protocol 4) a -> b carrying IPv4/UDP
+        //    192.168.7.1:5000 -> 192.168.7.2:6000
+        eth(
+            MAC_B,
+            MAC_A,
+            ETH_IP4,
+            &ipv4(
+                a,
+                b,
+                4,
+                3,
+                &ipv4(in_a, in_b, 17, 3, &udp(5000, 6000, &[0x55; 4])),
+            ),
+        ),
+        // 4: VXLAN (VNI 8) a:49153 -> b:4789 carrying Ethernet/ARP request
+        eth(
+            MAC_B,
+            MAC_A,
+            ETH_IP4,
+            &ipv4(
+                a,
+                b,
+                17,
+                4,
+                &udp(49153, 4789, &vxlan(8, &inner_eth(ETH_ARP, &arp_request()))),
+            ),
+        ),
+        // 5: plain TCP a:40001 -> b:80 SYN (control: one level)
+        eth(
+            MAC_B,
+            MAC_A,
+            ETH_IP4,
+            &ipv4(a, b, 6, 5, &tcp(40001, 80, 900, 0, 0x02, &[])),
+        ),
+    ];
+    to_capture(frames, LINKTYPE_ETHERNET)
+}
+
 /// The fixed Ethernet corpus capture: 11 frames covering
 /// tcp/udp/dns/arp/icmp/ipv6 plus one VLAN-tagged and one VXLAN-encapsulated
 /// frame (the latter carries an inner Ethernet/IPv4/UDP frame).
@@ -848,6 +946,8 @@ enum Capture {
     Http,
     /// `routing_capture()`: BGP, OSPF, GTP, IPv6 extension headers.
     Routing,
+    /// `tunnels_capture()`: tunnels whose inner and outer transports differ.
+    Tunnels,
 }
 
 /// (capture, snapshot name, SQL). Every query is fully ordered so output is
@@ -960,6 +1060,20 @@ const CORPUS: &[(Capture, &str, &str)] = &[
         "q19_vlan",
         "SELECT frame_number, vlan_id, priority, inner_ethertype \
          FROM vlan ORDER BY frame_number",
+    ),
+    // Views pair layers of one encapsulation level: the VXLAN frame is two
+    // UDP rows (outer tunnel, inner payload), each with its own addresses.
+    (
+        Capture::Eth,
+        "q26_udp_packets_vxlan_levels",
+        "SELECT frame_number, src_mac, src_ip_v4, dst_ip_v4, src_port, dst_port, \
+         encap_depth, tunnel_type FROM udp_packets WHERE frame_number = 11 ORDER BY encap_depth",
+    ),
+    (
+        Capture::Eth,
+        "q27_packets_view_vxlan_levels",
+        "SELECT frame_number, protocol, eth_src, src_ip_v4, dst_ip_v4, src_port, dst_port, \
+         encap_depth, tunnel_type FROM packets WHERE frame_number = 11 ORDER BY encap_depth",
     ),
     (
         Capture::Eth,
@@ -1200,14 +1314,85 @@ const CORPUS: &[(Capture, &str, &str)] = &[
         "v06_ospf_packets_view",
         "SELECT * FROM ospf_packets ORDER BY frame_number",
     ),
-    // The G-PDU frame carries an inner IPv4/UDP packet, so its ipv4 and udp
-    // joins each match twice (outer and inner rows): order by them as well.
+    // The G-PDU frame carries an inner IPv4/UDP packet; the view's layers join
+    // at the GTP header's depth, so the frame is one row with the outer
+    // addresses and ports, not the product of both IP and both UDP headers.
     (
         Capture::Routing,
         "v07_gtp_packets_view",
-        "SELECT * FROM gtp_packets ORDER BY frame_number, src_ip_v4, src_port",
+        "SELECT * FROM gtp_packets ORDER BY frame_number",
     ),
+    (
+        Capture::Routing,
+        "v08_gtp_frame_levels",
+        "SELECT frame_number, src_ip_v4, dst_ip_v4, src_port, dst_port, encap_depth, tunnel_type \
+         FROM udp_packets WHERE frame_number = 10 ORDER BY encap_depth",
+    ),
+    // --- tunnels whose inner and outer transports differ: every view row
+    // --- combines headers of one encapsulation level only.
+    (
+        Capture::Tunnels,
+        "t01_tcp_packets_levels",
+        "SELECT frame_number, src_mac, src_ip_v4, dst_ip_v4, src_port, dst_port, encap_depth, \
+         tunnel_type FROM tcp_packets ORDER BY frame_number, encap_depth",
+    ),
+    (
+        Capture::Tunnels,
+        "t02_udp_packets_levels",
+        "SELECT frame_number, src_mac, src_ip_v4, dst_ip_v4, src_port, dst_port, encap_depth, \
+         tunnel_type FROM udp_packets ORDER BY frame_number, encap_depth",
+    ),
+    (
+        Capture::Tunnels,
+        "t03_icmp_packets_levels",
+        "SELECT frame_number, src_ip_v4, dst_ip_v4, type, encap_depth, tunnel_type \
+         FROM icmp_packets ORDER BY frame_number, encap_depth",
+    ),
+    (
+        Capture::Tunnels,
+        "t04_arp_packets_levels",
+        "SELECT frame_number, src_mac, operation, sender_ip, encap_depth, tunnel_type \
+         FROM arp_packets ORDER BY frame_number, encap_depth",
+    ),
+    (
+        Capture::Tunnels,
+        "t05_packets_levels",
+        "SELECT frame_number, encap_depth, tunnel_type, protocol, eth_src, src_ip_v4, dst_ip_v4, \
+         ip_protocol, src_port, dst_port, icmp_type, arp_operation \
+         FROM packets ORDER BY frame_number, encap_depth",
+    ),
+    (
+        Capture::Tunnels,
+        "t06_packets_one_row_per_level",
+        "SELECT count(*) AS rows, count(DISTINCT frame_number) AS frames FROM packets",
+    ),
+    (
+        Capture::Tunnels,
+        "t07_tunneled_packets",
+        "SELECT frame_number, outer_src_ipv4, outer_dst_ipv4, inner_src_ipv4, inner_dst_ipv4 \
+         FROM tunneled_packets ORDER BY frame_number",
+    ),
+    // The `packets` view lists a frame's levels with a full join of the
+    // network and link-layer tables, which is one row per level only while
+    // the parser emits at most one network header and one Ethernet header
+    // per (frame, depth). Pin that invariant: the result must be empty.
+    (Capture::Tunnels, "t08_one_header_per_level", ONE_HEADER_PER_LEVEL),
+    (Capture::Eth, "q28_one_header_per_level", ONE_HEADER_PER_LEVEL),
+    (Capture::Routing, "v09_one_header_per_level", ONE_HEADER_PER_LEVEL),
 ];
+
+/// Frames with two network headers or two Ethernet headers at one depth
+/// (see `t08_one_header_per_level`).
+const ONE_HEADER_PER_LEVEL: &str = "\
+    SELECT 'network' AS header, frame_number, encap_depth, count(*) AS n FROM ( \
+        SELECT frame_number, encap_depth FROM ipv4 \
+        UNION ALL SELECT frame_number, encap_depth FROM ipv6 \
+        UNION ALL SELECT frame_number, encap_depth FROM arp) \
+    GROUP BY 1, 2, 3 HAVING count(*) > 1 \
+    UNION ALL \
+    SELECT 'ethernet', frame_number, encap_depth, count(*) FROM ethernet \
+    GROUP BY 1, 2, 3 HAVING count(*) > 1 \
+    ORDER BY 1, 2, 3";
 
 /// Queries that must be the *first* query a fresh engine runs: their result
 /// depends on engine-wide state (the capture time range) that any earlier
@@ -1256,6 +1441,8 @@ async fn golden_corpus_matches_snapshots() {
     std::fs::write(&http_path, http_capture()).unwrap();
     let routing_path = dir.path().join("corpus_routing.pcap");
     std::fs::write(&routing_path, routing_capture()).unwrap();
+    let tunnels_path = dir.path().join("corpus_tunnels.pcap");
+    std::fs::write(&tunnels_path, tunnels_capture()).unwrap();
 
     let update = std::env::var("PCAPSQL_GOLDEN_UPDATE").is_ok();
     if update {
@@ -1269,6 +1456,10 @@ async fn golden_corpus_matches_snapshots() {
     let routing = (
         engine(&routing_path, 2).await,
         engine(&routing_path, 1).await,
+    );
+    let tunnels = (
+        engine(&tunnels_path, 2).await,
+        engine(&tunnels_path, 1).await,
     );
     // One-shot CLI path: RetentionPolicy::None streams rather than
     // materializes. Its results must be identical.
@@ -1291,6 +1482,9 @@ async fn golden_corpus_matches_snapshots() {
     let routing_streamed = streaming(&routing_path)
         .await
         .expect("build streaming engine");
+    let tunnels_streamed = streaming(&tunnels_path)
+        .await
+        .expect("build streaming engine");
 
     let mut failures = Vec::new();
     for (capture, name, sql) in CORPUS {
@@ -1300,6 +1494,7 @@ async fn golden_corpus_matches_snapshots() {
             Capture::Sll2 => &sll2_path,
             Capture::Http => &http_path,
             Capture::Routing => &routing_path,
+            Capture::Tunnels => &tunnels_path,
         };
         // Fresh engines (materialized and streaming) for queries whose result
         // depends on engine-wide state no earlier query may have established.
@@ -1319,6 +1514,7 @@ async fn golden_corpus_matches_snapshots() {
             (None, Capture::Sll2) => (&sll2.0, &sll2.1, &sll2_streamed),
             (None, Capture::Http) => (&http.0, &http.1, &http_streamed),
             (None, Capture::Routing) => (&routing.0, &routing.1, &routing_streamed),
+            (None, Capture::Tunnels) => (&tunnels.0, &tunnels.1, &tunnels_streamed),
         };
         let got = run(e2, sql).await;
 
@@ -1364,6 +1560,7 @@ async fn golden_corpus_matches_snapshots() {
             (Capture::Sll2, &sll2_path),
             (Capture::Http, &http_path),
             (Capture::Routing, &routing_path),
+            (Capture::Tunnels, &tunnels_path),
         ];
         for (capture, path) in captures {
             for retention in [RetentionPolicy::CacheOnTouch, RetentionPolicy::None] {

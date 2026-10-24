@@ -40,12 +40,14 @@ SELECT
     ssh.auth_service,
     ssh.auth_method,
     ssh.channel_type,
-    ssh.channel_id
+    ssh.channel_id,
+    ssh.encap_depth,
+    ssh.tunnel_type
 FROM frames f
-LEFT JOIN ipv4 ip4 ON f.frame_number = ip4.frame_number
-LEFT JOIN ipv6 ip6 ON f.frame_number = ip6.frame_number
-JOIN tcp ON f.frame_number = tcp.frame_number
 JOIN ssh ON f.frame_number = ssh.frame_number
+LEFT JOIN ipv4 ip4 ON ip4.frame_number = ssh.frame_number AND ip4.encap_depth = ssh.encap_depth
+LEFT JOIN ipv6 ip6 ON ip6.frame_number = ssh.frame_number AND ip6.encap_depth = ssh.encap_depth
+JOIN tcp ON tcp.frame_number = ssh.frame_number AND tcp.encap_depth = ssh.encap_depth
 "#,
     }
 }
@@ -57,6 +59,8 @@ mod tests {
     #[test]
     fn test_ssh_packets_view() {
         let view = ssh_packets_view();
+        // Layers join their anchor at the same encapsulation level.
+        assert!(view.sql.contains("tcp.encap_depth = ssh.encap_depth"));
         assert_eq!(view.name, "ssh_packets");
         assert!(view.sql.contains("JOIN ssh"));
         assert!(view.sql.contains("software_version"));

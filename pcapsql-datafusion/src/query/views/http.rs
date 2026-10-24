@@ -35,12 +35,14 @@ SELECT
     http.content_type,
     http.content_length,
     http.user_agent,
-    http.server
+    http.server,
+    http.encap_depth,
+    http.tunnel_type
 FROM frames f
-LEFT JOIN ipv4 ip4 ON f.frame_number = ip4.frame_number
-LEFT JOIN ipv6 ip6 ON f.frame_number = ip6.frame_number
-JOIN tcp ON f.frame_number = tcp.frame_number
 JOIN http ON f.frame_number = http.frame_number
+LEFT JOIN ipv4 ip4 ON ip4.frame_number = http.frame_number AND ip4.encap_depth = http.encap_depth
+LEFT JOIN ipv6 ip6 ON ip6.frame_number = http.frame_number AND ip6.encap_depth = http.encap_depth
+JOIN tcp ON tcp.frame_number = http.frame_number AND tcp.encap_depth = http.encap_depth
 "#,
     }
 }
@@ -52,6 +54,8 @@ mod tests {
     #[test]
     fn test_http_packets_view() {
         let view = http_packets_view();
+        // Layers join their anchor at the same encapsulation level.
+        assert!(view.sql.contains("tcp.encap_depth = http.encap_depth"));
         assert_eq!(view.name, "http_packets");
         assert!(view.sql.contains("JOIN http"));
         assert!(view.sql.contains("method"));
