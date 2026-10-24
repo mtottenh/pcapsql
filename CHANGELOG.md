@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-24
+
+The three limitations listed with continuous mode in 0.4.0 are gone: the
+`*_packets` views join layers of the same encapsulation level and are fused
+into the parse (so a continuous query can window a view), a query over a quiet
+pipe releases its parser when it is done, and the streaming aggregate accounts
+its state to a memory limit with hop windows aggregated per slice. The parser's
+hot path is about three times faster on one core. Design and measurements:
+`docs/streaming_windows/08-continuous-limitations.md`.
+
 ### Fixed
 
 - A query over uncompressed standard input (or any uncompressed
@@ -148,6 +158,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shadow) ([#134](https://github.com/mtottenh/pcapsql/issues/134)).
 
 ### Changed
+
+- **Parser hot path, about 3× faster on one core** (2M-packet `udp` query:
+  1.72 s → 0.58 s; `udp_packets` 1.87 s → 0.68 s; 8 cores 0.46 s → 0.20 s).
+  Each parser declares the hints it needs and emits, so a layer asks only the
+  parsers that can follow it instead of all 27; the parse scope resolves once
+  per registry; protocol table columns resolve their source once and look
+  fields up by their position in the previous row (`ParseResult::get_hinted`);
+  list cells append straight into the values builder; the batch set indexes
+  its table slots. Debug builds compare every dispatch with a full scan.
+  `Protocol::parse_projected` takes a `FieldSet` instead of `HashSet<String>`,
+  and layers returned by `parse_packet` carry empty `child_hints`.
 
 - **The `*_packets` views join layers of the same encapsulation level.** Each
   view is anchored on its protocol table (`tcp` for `tcp_packets`, `dns` for
@@ -454,7 +475,8 @@ scope it to what each query needs.
 - **CLI**: Interactive REPL with tab completion and history
 - **Packaging**: .deb (Debian/Ubuntu), .rpm (Fedora/Rocky), AUR (Arch Linux)
 
-[Unreleased]: https://github.com/mtottenh/pcapsql/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/mtottenh/pcapsql/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/mtottenh/pcapsql/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/mtottenh/pcapsql/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/mtottenh/pcapsql/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/mtottenh/pcapsql/compare/v0.2.0...v0.3.0
