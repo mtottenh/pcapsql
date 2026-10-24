@@ -203,6 +203,25 @@ impl ParseContext {
     }
 }
 
+/// Where [`ParseResult::get_hinted`] last found a field.
+///
+/// Starts empty (no position matches, the first lookup scans). One per
+/// column of a table, kept across rows.
+#[derive(Debug, Clone, Copy)]
+pub struct FieldHint {
+    position: usize,
+    key: &'static str,
+}
+
+impl Default for FieldHint {
+    fn default() -> Self {
+        Self {
+            position: usize::MAX,
+            key: "",
+        }
+    }
+}
+
 /// Result of parsing a protocol layer.
 ///
 /// Uses SmallVec for inline storage to avoid HashMap allocation overhead.
@@ -296,6 +315,39 @@ impl<'data> ParseResult<'data> {
     /// Get a field value by name (linear search, but N is small).
     pub fn get(&self, name: &str) -> Option<&FieldValue<'data>> {
         self.fields.iter().find(|(k, _)| *k == name).map(|(_, v)| v)
+    }
+
+    /// [`get`](Self::get) with a guess at where the field is.
+    ///
+    /// A parser emits its fields in a fixed order, so a column's field is
+    /// almost always where it was in the previous row. `hint` remembers that
+    /// position and the parser's own `&'static str` for the name: when the
+    /// entry there is the same string (same pointer and length) it is the
+    /// answer, in one compare; otherwise the lookup scans as `get` does and
+    /// moves the hint to what it found.
+    ///
+    /// The hint only ever stores a position found by that scan, i.e. a first
+    /// occurrence of the name. A hit at that position is the same answer as
+    /// `get` unless a row repeats a key *and* its first occurrence moved to
+    /// where a later one sat in the previous row. The parsers that repeat a
+    /// key (TLS, one `handshake_type` per message of a record) emit it after
+    /// a fixed prefix, so the first occurrence does not move; debug builds
+    /// check every hit against `get`.
+    #[inline]
+    pub fn get_hinted(&self, name: &str, hint: &mut FieldHint) -> Option<&FieldValue<'data>> {
+        if let Some((key, value)) = self.fields.get(hint.position) {
+            if std::ptr::eq(key.as_ptr(), hint.key.as_ptr()) && key.len() == hint.key.len() {
+                debug_assert!(
+                    self.get(name).is_some_and(|v| std::ptr::eq(v, value)),
+                    "hinted lookup of {name} disagrees with get"
+                );
+                return Some(value);
+            }
+        }
+        let position = self.fields.iter().position(|(k, _)| *k == name)?;
+        let (key, value) = &self.fields[position];
+        *hint = FieldHint { position, key };
+        Some(value)
     }
 
     /// Get a child hint value by name.
@@ -446,6 +498,44 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.get("src_port"), Some(&FieldValue::UInt16(80)));
         assert_eq!(result.hint("transport"), Some(6));
+    }
+
+    #[test]
+    fn hinted_get_follows_the_field() {
+        let row = |names: &[&'static str]| {
+            let fields = names
+                .iter()
+                .enumerate()
+                .map(|(i, n)| (*n, FieldValue::UInt16(i as u16)))
+                .collect();
+            ParseResult::success(fields, &[], SmallVec::new())
+        };
+        let mut hint = FieldHint::default();
+        let a = row(&["src_port", "dst_port", "length"]);
+        assert_eq!(
+            a.get_hinted("dst_port", &mut hint),
+            Some(&FieldValue::UInt16(1))
+        );
+        assert_eq!(hint.position, 1);
+        assert_eq!(
+            a.get_hinted("dst_port", &mut hint),
+            Some(&FieldValue::UInt16(1))
+        );
+        // The field moved (a projected parse, or another parser's layout).
+        let b = row(&["dst_port", "length"]);
+        assert_eq!(
+            b.get_hinted("dst_port", &mut hint),
+            Some(&FieldValue::UInt16(0))
+        );
+        assert_eq!(hint.position, 0);
+        // Absent: None, and the hint stays.
+        let c = row(&["length"]);
+        assert_eq!(c.get_hinted("dst_port", &mut hint), None);
+        assert_eq!(hint.position, 0);
+        assert_eq!(
+            b.get_hinted("dst_port", &mut hint),
+            Some(&FieldValue::UInt16(0))
+        );
     }
 
     #[test]

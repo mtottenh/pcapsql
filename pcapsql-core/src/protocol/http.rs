@@ -18,7 +18,9 @@ use compact_str::CompactString;
 use httparse::{Request, Response, Status, EMPTY_HEADER};
 use smallvec::SmallVec;
 
-use super::{FieldEntry, FieldValue, ParseContext, ParseResult, Protocol, CONTENT_PRIORITY};
+use super::{
+    FieldEntry, FieldValue, ParseContext, ParseGate, ParseResult, Protocol, CONTENT_PRIORITY,
+};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// Ports the stream layer treats as HTTP when a connection's first bytes
@@ -249,6 +251,14 @@ impl Protocol for HttpProtocol {
     /// parser that claims the segment from a well-known port alone (TLS on
     /// 8443, DNS from source port 53, ...). Without the hint HTTP never
     /// matches, so a port's own protocol keeps non-HTTP segments.
+    fn parse_gates(&self) -> &'static [ParseGate] {
+        &[ParseGate::Hint("transport")]
+    }
+
+    fn child_hint_keys(&self) -> Option<&'static [&'static str]> {
+        Some(&[])
+    }
+
     fn can_parse(&self, context: &ParseContext) -> Option<u32> {
         // TCP sets the hint only when the payload starts an HTTP/1.x message.
         // That is a positive content signal, so it outranks every parser that

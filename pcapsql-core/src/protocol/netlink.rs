@@ -6,7 +6,7 @@
 
 use smallvec::SmallVec;
 
-use super::{FieldValue, ParseContext, ParseResult, Protocol};
+use super::{FieldValue, ParseContext, ParseGate, ParseResult, Protocol};
 use crate::schema::{DataKind, FieldDescriptor};
 
 // Re-export constants from netlink-packet-core for use elsewhere
@@ -98,6 +98,14 @@ impl Protocol for NetlinkProtocol {
 
     fn display_name(&self) -> &'static str {
         "Netlink"
+    }
+
+    fn parse_gates(&self) -> &'static [ParseGate] {
+        &[ParseGate::Root, ParseGate::Hint("is_netlink")]
+    }
+
+    fn child_hint_keys(&self) -> Option<&'static [&'static str]> {
+        Some(&["netlink_family", "netlink_msg_type"])
     }
 
     fn can_parse(&self, context: &ParseContext) -> Option<u32> {

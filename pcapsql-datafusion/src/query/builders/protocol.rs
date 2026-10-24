@@ -2,7 +2,6 @@
 //!
 //! Builds Arrow RecordBatches for a single protocol table from parsed packet data.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow::array::*;
@@ -12,7 +11,7 @@ use arrow::record_batch::{RecordBatch, RecordBatchOptions};
 
 use crate::error::{Error, QueryError};
 use crate::query::tables;
-use pcapsql_core::{FieldValue, ParseResult};
+use pcapsql_core::{FieldHint, FieldValue, ParseResult};
 
 /// Dynamic array builder that can hold different builder types.
 pub(crate) enum DynamicBuilder {
@@ -280,58 +279,62 @@ impl DynamicBuilder {
                 FieldValue::Null => b.append_null(),
                 _ => b.append_null(),
             },
-            // List builders
+            // List builders: each item goes straight into the values
+            // builder, then the list entry is closed (no per-cell Vec).
             DynamicBuilder::ListOfUInt16(b) => match value {
                 FieldValue::List(items) => {
-                    let values: Vec<Option<u16>> = items
-                        .iter()
-                        .map(|v| match v {
+                    for item in items {
+                        b.values().append_option(match item {
                             FieldValue::UInt16(n) => Some(*n),
                             FieldValue::UInt8(n) => Some(*n as u16),
                             _ => None,
-                        })
-                        .collect();
-                    b.append_value(values);
+                        });
+                    }
+                    b.append(true);
                 }
                 FieldValue::Null => b.append_null(),
                 _ => b.append_null(),
             },
             DynamicBuilder::ListOfUInt32(b) => match value {
                 FieldValue::List(items) => {
-                    let values: Vec<Option<u32>> = items
-                        .iter()
-                        .map(|v| match v {
+                    for item in items {
+                        b.values().append_option(match item {
                             FieldValue::UInt32(n) => Some(*n),
                             FieldValue::UInt16(n) => Some(*n as u32),
                             FieldValue::UInt8(n) => Some(*n as u32),
                             FieldValue::IpAddr(std::net::IpAddr::V4(v4)) => Some(u32::from(*v4)),
                             _ => None,
-                        })
-                        .collect();
-                    b.append_value(values);
+                        });
+                    }
+                    b.append(true);
                 }
                 FieldValue::Null => b.append_null(),
                 _ => b.append_null(),
             },
             DynamicBuilder::ListOfUtf8(b) => match value {
                 FieldValue::List(items) => {
-                    let values: Vec<Option<String>> = items.iter().map(|v| v.as_string()).collect();
-                    b.append_value(values);
+                    for item in items {
+                        match item {
+                            FieldValue::Str(s) => b.values().append_value(s),
+                            FieldValue::OwnedString(s) => b.values().append_value(s),
+                            other => b.values().append_option(other.as_string()),
+                        }
+                    }
+                    b.append(true);
                 }
                 FieldValue::Null => b.append_null(),
                 _ => b.append_null(),
             },
             DynamicBuilder::ListOfBinary(b) => match value {
                 FieldValue::List(items) => {
-                    let values: Vec<Option<Vec<u8>>> = items
-                        .iter()
-                        .map(|v| match v {
-                            FieldValue::Bytes(data) => Some(data.to_vec()),
-                            FieldValue::OwnedBytes(data) => Some(data.clone()),
-                            _ => None,
-                        })
-                        .collect();
-                    b.append_value(values);
+                    for item in items {
+                        match item {
+                            FieldValue::Bytes(data) => b.values().append_value(data),
+                            FieldValue::OwnedBytes(data) => b.values().append_value(data),
+                            _ => b.values().append_null(),
+                        }
+                    }
+                    b.append(true);
                 }
                 FieldValue::Null => b.append_null(),
                 _ => b.append_null(),
@@ -462,6 +465,30 @@ impl DynamicBuilder {
     }
 }
 
+/// Where a protocol table column's value comes from in
+/// [`ProtocolBatchBuilder::add_parsed_row`], resolved once from the schema.
+enum ParsedSource {
+    FrameNumber,
+    EncapDepth,
+    TunnelType,
+    TunnelId,
+    /// A field the parser extracted, by name, with where it was found in
+    /// the previous row.
+    Field(String, FieldHint),
+}
+
+/// Where a `frames` column's value comes from in
+/// [`ProtocolBatchBuilder::add_frame_from_raw`].
+enum FrameSource {
+    FrameNumber,
+    Timestamp,
+    Length,
+    OriginalLength,
+    LinkType,
+    RawData,
+    Null,
+}
+
 /// Builds Arrow RecordBatches for a single protocol table.
 ///
 /// Unlike PacketBatchBuilder which creates a flat table with all protocols,
@@ -478,8 +505,11 @@ pub struct ProtocolBatchBuilder {
     rows: usize,
     /// Dynamic builders for each field in schema order
     builders: Vec<DynamicBuilder>,
-    /// Map from field name to index in builders vec
-    field_index: HashMap<String, usize>,
+    /// Per column, in schema order: its source for a parsed row and for a
+    /// `frames` row. Resolved from the column names once, so that adding a
+    /// row does no string work beyond the field lookup.
+    parsed_sources: Vec<ParsedSource>,
+    frame_sources: Vec<FrameSource>,
 }
 
 impl ProtocolBatchBuilder {
@@ -495,13 +525,33 @@ impl ProtocolBatchBuilder {
 
     /// Create a new builder with a specific schema.
     pub fn with_schema(protocol_name: String, schema: Arc<Schema>, batch_size: usize) -> Self {
-        let mut builders = Vec::with_capacity(schema.fields().len());
-        let mut field_index = HashMap::with_capacity(schema.fields().len());
-
-        for (idx, field) in schema.fields().iter().enumerate() {
-            builders.push(DynamicBuilder::new(field.data_type(), batch_size));
-            field_index.insert(field.name().to_string(), idx);
-        }
+        let fields = schema.fields();
+        let builders = fields
+            .iter()
+            .map(|f| DynamicBuilder::new(f.data_type(), batch_size))
+            .collect();
+        let parsed_sources = fields
+            .iter()
+            .map(|f| match f.name().as_str() {
+                "frame_number" => ParsedSource::FrameNumber,
+                "encap_depth" => ParsedSource::EncapDepth,
+                "tunnel_type" => ParsedSource::TunnelType,
+                "tunnel_id" => ParsedSource::TunnelId,
+                name => ParsedSource::Field(name.to_string(), FieldHint::default()),
+            })
+            .collect();
+        let frame_sources = fields
+            .iter()
+            .map(|f| match f.name().as_str() {
+                "frame_number" => FrameSource::FrameNumber,
+                "timestamp" => FrameSource::Timestamp,
+                "length" => FrameSource::Length,
+                "original_length" => FrameSource::OriginalLength,
+                "link_type" => FrameSource::LinkType,
+                "raw_data" => FrameSource::RawData,
+                _ => FrameSource::Null,
+            })
+            .collect();
 
         Self {
             protocol_name,
@@ -509,7 +559,8 @@ impl ProtocolBatchBuilder {
             batch_size,
             rows: 0,
             builders,
-            field_index,
+            parsed_sources,
+            frame_sources,
         }
     }
 
@@ -549,29 +600,16 @@ impl ProtocolBatchBuilder {
 
         self.rows += 1;
 
-        for (field_name, idx) in &self.field_index {
-            let builder = &mut self.builders[*idx];
-            match field_name.as_str() {
-                "frame_number" => builder.append_u64(frame_number),
+        for (source, builder) in self.frame_sources.iter().zip(self.builders.iter_mut()) {
+            match source {
+                FrameSource::FrameNumber => builder.append_u64(frame_number),
                 // Arrow timestamp column is microseconds; reader timestamps are ns.
-                "timestamp" => builder.append_timestamp(timestamp_ns / 1_000),
-                "length" => {
-                    if let DynamicBuilder::UInt32(b) = builder {
-                        b.append_value(captured_len);
-                    }
-                }
-                "original_length" => {
-                    if let DynamicBuilder::UInt32(b) = builder {
-                        b.append_value(original_len);
-                    }
-                }
-                "link_type" => {
-                    if let DynamicBuilder::UInt16(b) = builder {
-                        b.append_value(link_type);
-                    }
-                }
-                "raw_data" => builder.append_binary(data),
-                _ => builder.append_null(),
+                FrameSource::Timestamp => builder.append_timestamp(timestamp_ns / 1_000),
+                FrameSource::Length => builder.append_u32(captured_len),
+                FrameSource::OriginalLength => builder.append_u32(original_len),
+                FrameSource::LinkType => builder.append_u16(link_type),
+                FrameSource::RawData => builder.append_binary(data),
+                FrameSource::Null => builder.append_null(),
             }
         }
     }
@@ -588,38 +626,26 @@ impl ProtocolBatchBuilder {
     pub fn add_parsed_row(&mut self, frame_number: u64, parsed: &ParseResult<'_>) {
         self.rows += 1;
 
-        for (field_name, idx) in &self.field_index {
-            let builder = &mut self.builders[*idx];
-
-            if field_name == "frame_number" {
-                builder.append_u64(frame_number);
-            } else if field_name == "encap_depth" {
-                // Special handling for encap_depth from ParseResult
-                if let DynamicBuilder::UInt8(b) = builder {
-                    b.append_value(parsed.encap_depth);
-                }
-            } else if field_name == "tunnel_type" {
-                // Special handling for tunnel_type from ParseResult
-                if let DynamicBuilder::Utf8(b) = builder {
-                    if let Some(type_str) = parsed.tunnel_type.as_str() {
-                        b.append_value(type_str);
-                    } else {
-                        b.append_null();
+        for (source, builder) in self.parsed_sources.iter_mut().zip(self.builders.iter_mut()) {
+            match source {
+                ParsedSource::FrameNumber => builder.append_u64(frame_number),
+                // The encapsulation columns come from the ParseResult's
+                // context, not from its fields.
+                ParsedSource::EncapDepth => builder.append_u8(parsed.encap_depth),
+                ParsedSource::TunnelType => {
+                    if let DynamicBuilder::Utf8(b) = builder {
+                        b.append_option(parsed.tunnel_type.as_str());
                     }
                 }
-            } else if field_name == "tunnel_id" {
-                // Special handling for tunnel_id from ParseResult
-                if let DynamicBuilder::UInt64(b) = builder {
-                    if let Some(id) = parsed.tunnel_id {
-                        b.append_value(id);
-                    } else {
-                        b.append_null();
+                ParsedSource::TunnelId => {
+                    if let DynamicBuilder::UInt64(b) = builder {
+                        b.append_option(parsed.tunnel_id);
                     }
                 }
-            } else if let Some(value) = parsed.get(field_name) {
-                builder.append_field_value(value);
-            } else {
-                builder.append_null();
+                ParsedSource::Field(name, hint) => match parsed.get_hinted(name, hint) {
+                    Some(value) => builder.append_field_value(value),
+                    None => builder.append_null(),
+                },
             }
         }
     }
@@ -719,6 +745,69 @@ mod tests {
         let a = a.as_any().downcast_ref::<UInt16Array>().unwrap();
         assert_eq!(a.value(0), 65_535);
         assert!(a.is_null(1));
+    }
+
+    /// List cells: each item converted (or NULL when it has the wrong
+    /// type), a NULL cell for a non-list value, and an empty list for an
+    /// empty one.
+    #[test]
+    fn list_cells_keep_items_and_nulls() {
+        use arrow::datatypes::Field;
+        let list = |inner: DataType| DataType::List(Arc::new(Field::new("item", inner, true)));
+        let cells = [
+            FieldValue::List(vec![
+                FieldValue::UInt16(7),
+                FieldValue::UInt8(3),
+                FieldValue::Str("a.example"),
+                FieldValue::OwnedString("b".into()),
+                FieldValue::Bytes(b"xy"),
+                FieldValue::OwnedBytes(vec![1, 2]),
+                FieldValue::IpAddr("10.0.0.1".parse().unwrap()),
+                FieldValue::Bool(true),
+            ]),
+            FieldValue::Null,
+            FieldValue::List(vec![]),
+            FieldValue::UInt16(1),
+        ];
+        let render = |data_type: DataType| -> Vec<String> {
+            let mut b = DynamicBuilder::new(&data_type, 4);
+            for cell in &cells {
+                b.append_field_value(cell);
+            }
+            let array = b.finish();
+            let array = array.as_any().downcast_ref::<ListArray>().unwrap();
+            (0..array.len())
+                .map(|i| {
+                    if array.is_null(i) {
+                        return "NULL".to_string();
+                    }
+                    let options = arrow::util::display::FormatOptions::default().with_null("∅");
+                    let values = array.value(i);
+                    let f =
+                        arrow::util::display::ArrayFormatter::try_new(&values, &options).unwrap();
+                    (0..values.len())
+                        .map(|j| f.value(j).to_string())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .collect()
+        };
+        assert_eq!(
+            render(list(DataType::UInt16)),
+            ["7,3,∅,∅,∅,∅,∅,∅", "NULL", "", "NULL"]
+        );
+        assert_eq!(
+            render(list(DataType::UInt32)),
+            ["7,3,∅,∅,∅,∅,167772161,∅", "NULL", "", "NULL"]
+        );
+        assert_eq!(
+            render(list(DataType::Utf8)),
+            ["7,3,a.example,b,∅,∅,10.0.0.1,true", "NULL", "", "NULL"]
+        );
+        assert_eq!(
+            render(list(DataType::Binary)),
+            ["∅,∅,∅,∅,7879,0102,∅,∅", "NULL", "", "NULL"]
+        );
     }
 
     #[test]

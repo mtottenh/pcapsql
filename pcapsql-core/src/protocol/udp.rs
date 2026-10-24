@@ -1,12 +1,10 @@
 //! UDP protocol parser.
 
-use std::collections::HashSet;
-
 use smallvec::SmallVec;
 
 use etherparse::UdpHeaderSlice;
 
-use super::{FieldValue, ParseContext, ParseResult, Protocol};
+use super::{FieldSet, FieldValue, ParseContext, ParseGate, ParseResult, Protocol};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// IP protocol number for UDP.
@@ -23,6 +21,14 @@ impl Protocol for UdpProtocol {
 
     fn display_name(&self) -> &'static str {
         "UDP"
+    }
+
+    fn parse_gates(&self) -> &'static [ParseGate] {
+        &[ParseGate::Hint("ip_protocol")]
+    }
+
+    fn child_hint_keys(&self) -> Option<&'static [&'static str]> {
+        Some(&["src_port", "dst_port", "transport"])
     }
 
     fn can_parse(&self, context: &ParseContext) -> Option<u32> {
@@ -75,7 +81,7 @@ impl Protocol for UdpProtocol {
         &self,
         data: &'a [u8],
         _context: &ParseContext,
-        fields: Option<&HashSet<String>>,
+        fields: Option<&FieldSet>,
     ) -> ParseResult<'a> {
         // If no projection, use full parse
         let fields = match fields {
@@ -290,7 +296,7 @@ mod tests {
         context.insert_hint("ip_protocol", 17);
 
         // Project to only ports
-        let fields: HashSet<String> = ["src_port", "dst_port"]
+        let fields: FieldSet = ["src_port", "dst_port"]
             .iter()
             .map(|s| s.to_string())
             .collect();

@@ -6,7 +6,7 @@
 use compact_str::CompactString;
 use smallvec::SmallVec;
 
-use super::{FieldValue, ParseContext, ParseResult, Protocol};
+use super::{FieldValue, ParseContext, ParseGate, ParseResult, Protocol};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// SSH default port.
@@ -52,6 +52,14 @@ impl Protocol for SshProtocol {
 
     fn display_name(&self) -> &'static str {
         "SSH"
+    }
+
+    fn parse_gates(&self) -> &'static [ParseGate] {
+        &[ParseGate::Hint("transport")]
+    }
+
+    fn child_hint_keys(&self) -> Option<&'static [&'static str]> {
+        Some(&[])
     }
 
     fn can_parse(&self, context: &ParseContext) -> Option<u32> {

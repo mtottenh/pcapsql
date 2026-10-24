@@ -79,12 +79,17 @@ mod vxlan;
 #[cfg(test)]
 pub mod test_utils;
 
-pub use context::{FieldEntry, HintEntry, ParseContext, ParseResult, TunnelLayer, TunnelType};
+pub use context::{
+    FieldEntry, FieldHint, HintEntry, ParseContext, ParseResult, TunnelLayer, TunnelType,
+};
 pub use field::{FieldValue, OwnedFieldValue};
-pub use projection::{chain_fields_for_protocol, merge_with_chain_fields, ProjectionConfig};
+pub use projection::{
+    chain_fields_for_protocol, merge_with_chain_fields, FieldSet, ProjectionConfig,
+};
 pub use pruning::{compute_required_protocols, should_run_parser};
 pub use registry::{
-    BuiltinProtocol, PayloadMode, Protocol, ProtocolRegistry, CONTENT_PRIORITY, PORT_PRIORITY_MAX,
+    BuiltinProtocol, ParseGate, PayloadMode, Protocol, ProtocolRegistry, CONTENT_PRIORITY,
+    PORT_PRIORITY_MAX,
 };
 
 // Re-export protocol implementations
@@ -188,7 +193,9 @@ pub fn default_registry() -> ProtocolRegistry {
     registry
 }
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
 
 /// What a parse pass should extract: which protocols to run and which
 /// fields to materialize per protocol.
@@ -205,6 +212,27 @@ pub struct ParseScope {
     /// Per-protocol field projections. Protocols absent from the map are
     /// parsed with all fields.
     projections: HashMap<String, HashSet<String>>,
+    /// The above, looked up for every parser of the registry the scope is
+    /// used with, so that a packet's walk does no hashing. Built by the first
+    /// [`parse_packet`] call.
+    resolved: OnceLock<ResolvedScope>,
+}
+
+/// A [`ParseScope`] resolved against one registry: per parser index, whether
+/// it runs and the fields it extracts.
+#[derive(Clone, Debug)]
+struct ResolvedScope {
+    /// [`ProtocolRegistry::id`] of the registry this was resolved against.
+    registry_id: u64,
+    /// The scope requires no protocol at all (`frames` only).
+    parses_nothing: bool,
+    /// Per parser: may it run (as [`should_run_parser`] decides)? `None`
+    /// when nothing is pruned.
+    runs: Option<Box<[bool]>>,
+    /// Per parser: its field projection (`None`: all fields). `None` for the
+    /// whole when the scope projects nothing, in which case parsers run
+    /// `parse` rather than `parse_projected`.
+    projections: Option<Box<[Option<FieldSet>]>>,
 }
 
 impl ParseScope {
@@ -220,18 +248,54 @@ impl ParseScope {
         Self {
             required: Some(compute_required_protocols(queried_tables, registry)),
             projections: HashMap::new(),
+            resolved: OnceLock::new(),
         }
     }
 
     /// Restrict the fields extracted for one protocol.
     pub fn with_projection(mut self, protocol: impl Into<String>, fields: HashSet<String>) -> Self {
         self.projections.insert(protocol.into(), fields);
+        self.resolved = OnceLock::new();
         self
     }
 
     /// True when nothing is pruned or projected.
     pub fn is_full(&self) -> bool {
         self.required.is_none() && self.projections.is_empty()
+    }
+
+    fn resolve(&self, registry: &ProtocolRegistry) -> ResolvedScope {
+        ResolvedScope {
+            registry_id: registry.id(),
+            parses_nothing: self
+                .required
+                .as_ref()
+                .is_some_and(|required| required.iter().all(|r| r == "frames")),
+            runs: self.required.as_ref().map(|required| {
+                registry
+                    .all_parsers()
+                    .map(|p| should_run_parser(p.name(), required, registry))
+                    .collect()
+            }),
+            projections: (!self.projections.is_empty()).then(|| {
+                registry
+                    .all_parsers()
+                    .map(|p| self.projections.get(p.name()).map(FieldSet::from))
+                    .collect()
+            }),
+        }
+    }
+
+    /// The scope resolved against `registry`: cached on first use. A scope
+    /// used with a registry other than the one it was first resolved against
+    /// is resolved again on every call (correct, only slower).
+    fn resolved_for(&self, registry: &ProtocolRegistry) -> Cow<'_, ResolvedScope> {
+        let resolved = self.resolved.get_or_init(|| self.resolve(registry));
+        if resolved.registry_id == registry.id() {
+            Cow::Borrowed(resolved)
+        } else {
+            Cow::Owned(self.resolve(registry))
+        }
     }
 }
 
@@ -259,6 +323,9 @@ impl ParseScope {
 /// extracted some fields before failing (`ParseResult::partial`) is kept with
 /// those fields and ends the walk as well. The outer layers that were parsed
 /// successfully are always returned.
+///
+/// A returned layer's `child_hints` are empty: the walk moves them into the
+/// context of the layer that follows rather than copying them.
 pub fn parse_packet<'a>(
     registry: &ProtocolRegistry,
     link_type: u16,
@@ -268,24 +335,26 @@ pub fn parse_packet<'a>(
     // Typical packet has 3-4 protocol layers (Eth/IP/TCP/App);
     // tunneled packets may have more (up to ~8 for deep encapsulation).
     let mut results = Vec::with_capacity(8);
-    let mut context = ParseContext::new(link_type);
-    let mut remaining = data;
+    let scope = scope.resolved_for(registry);
 
     // A scope that needs no protocol table at all (`frames` only) parses
     // nothing: the frame columns come from the record header.
-    if let Some(required) = &scope.required {
-        if !required.iter().any(|r| r != "frames") {
-            return results;
-        }
+    if scope.parses_nothing {
+        return results;
     }
 
+    let mut context = ParseContext::new(link_type);
+    let mut remaining = data;
+    // Index of the parser that produced the previous layer.
+    let mut parent: Option<usize> = None;
+
     while !remaining.is_empty() {
-        let Some(parser) = registry.find_parser(&context) else {
+        let Some((index, parser)) = registry.find_next(parent, &context) else {
             break;
         };
         let name = parser.name();
 
-        if let Some(required) = &scope.required {
+        if let Some(runs) = &scope.runs {
             // Protocol pruning: stop at the first parser that cannot lead to a
             // required protocol. The link-layer root (Ethernet, Linux SLL,
             // netlink, ...) always runs: it is the only way into the frame,
@@ -294,16 +363,24 @@ pub fn parse_packet<'a>(
             // down the chain (VXLAN, GRE, IP-in-IP) can carry another instance
             // of an already-seen protocol, and those inner rows belong in the
             // result.
-            if !context.is_root() && !should_run_parser(name, required, registry) {
+            if !context.is_root() && !runs[index] {
                 break;
             }
         }
 
-        let mut result = if scope.projections.is_empty() {
-            parser.parse(remaining, &context)
-        } else {
-            parser.parse_projected(remaining, &context, scope.projections.get(name))
+        let mut result = match &scope.projections {
+            None => parser.parse(remaining, &context),
+            Some(projections) => {
+                parser.parse_projected(remaining, &context, projections[index].as_ref())
+            }
         };
+        debug_assert!(
+            parser
+                .child_hint_keys()
+                .is_none_or(|keys| result.child_hints.iter().all(|(key, _)| keys.contains(key))),
+            "{name} emitted a hint missing from its child_hint_keys: {:?}",
+            result.child_hints
+        );
 
         // Set encapsulation context on the result BEFORE updating context;
         // this captures the encap state when this protocol was parsed.
@@ -317,7 +394,8 @@ pub fn parse_packet<'a>(
 
         // Update context for the next layer.
         context.parent_protocol = Some(name);
-        context.hints = result.child_hints.clone();
+        parent = Some(index);
+        context.hints = std::mem::take(&mut result.child_hints);
         context.offset += remaining.len() - result.remaining.len();
 
         let should_stop = result.error.is_some();

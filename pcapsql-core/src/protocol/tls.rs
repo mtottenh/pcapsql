@@ -24,7 +24,7 @@ use tls_parser::{
     TlsMessageHandshake, TlsVersion,
 };
 
-use super::{FieldValue, ParseContext, ParseResult, Protocol};
+use super::{FieldValue, ParseContext, ParseGate, ParseResult, Protocol};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// TLS/HTTPS port.
@@ -123,6 +123,14 @@ impl Protocol for TlsProtocol {
 
     fn display_name(&self) -> &'static str {
         "TLS"
+    }
+
+    fn parse_gates(&self) -> &'static [ParseGate] {
+        &[ParseGate::Hint("transport")]
+    }
+
+    fn child_hint_keys(&self) -> Option<&'static [&'static str]> {
+        Some(&[])
     }
 
     fn can_parse(&self, context: &ParseContext) -> Option<u32> {

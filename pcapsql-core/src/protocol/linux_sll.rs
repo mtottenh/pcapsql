@@ -6,7 +6,7 @@
 
 use smallvec::SmallVec;
 
-use super::{FieldValue, ParseContext, ParseResult, Protocol};
+use super::{FieldValue, ParseContext, ParseGate, ParseResult, Protocol};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// PCAP link type for Linux SLL captures.
@@ -75,6 +75,20 @@ impl Protocol for LinuxSllProtocol {
 
     fn display_name(&self) -> &'static str {
         "Linux SLL"
+    }
+
+    fn parse_gates(&self) -> &'static [ParseGate] {
+        &[ParseGate::Root]
+    }
+
+    fn child_hint_keys(&self) -> Option<&'static [&'static str]> {
+        Some(&[
+            "ethertype",
+            "is_netlink",
+            "netlink_family",
+            "sll_arphrd",
+            "sll_protocol",
+        ])
     }
 
     fn can_parse(&self, context: &ParseContext) -> Option<u32> {

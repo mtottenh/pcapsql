@@ -10,7 +10,7 @@ use super::protocol::DynamicBuilder;
 use crate::error::{Error, QueryError};
 use crate::query::fusion::{FrameJoinSpec, JoinKind};
 use pcapsql_core::io::PacketRef;
-use pcapsql_core::ParseResult;
+use pcapsql_core::{FieldHint, ParseResult};
 
 /// Where an output column's value comes from, resolved once from the spec.
 enum Source {
@@ -23,7 +23,8 @@ enum Source {
     EncapDepth,
     TunnelType,
     TunnelId,
-    Field(String),
+    /// A field by name, with where it was found in the previous row.
+    Field(String, FieldHint),
 }
 
 /// A member's row for the current frame, as an index into the frame's
@@ -65,7 +66,7 @@ impl FusedBatchBuilder {
                     (false, "encap_depth") => Source::EncapDepth,
                     (false, "tunnel_type") => Source::TunnelType,
                     (false, "tunnel_id") => Source::TunnelId,
-                    (_, name) => Source::Field(name.to_string()),
+                    (_, name) => Source::Field(name.to_string(), FieldHint::default()),
                 };
                 (c.member, source)
             })
@@ -154,7 +155,8 @@ impl FusedBatchBuilder {
         let added = self.tuples.len() / width;
         for tuple in self.tuples.chunks_exact(width) {
             self.rows += 1;
-            for ((member, source), builder) in self.sources.iter().zip(self.builders.iter_mut()) {
+            for ((member, source), builder) in self.sources.iter_mut().zip(self.builders.iter_mut())
+            {
                 match tuple[*member] {
                     NULL => builder.append_null(),
                     FRAME => match source {
@@ -177,7 +179,7 @@ impl FusedBatchBuilder {
                             Some(id) => builder.append_u64(id),
                             None => builder.append_null(),
                         },
-                        Source::Field(name) => match parsed[row].1.get(name) {
+                        Source::Field(name, hint) => match parsed[row].1.get_hinted(name, hint) {
                             Some(value) => builder.append_field_value(value),
                             None => builder.append_null(),
                         },

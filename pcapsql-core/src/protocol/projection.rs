@@ -133,6 +133,80 @@ impl ProjectionConfig {
     }
 }
 
+/// The fields one parser is asked to extract, as handed to
+/// [`Protocol::parse_projected`](super::Protocol::parse_projected).
+///
+/// Parsers ask `contains("name")` once per field of every packet, so this is
+/// a short list with a bitmask of the names' lengths in front of it rather
+/// than a `HashSet` (which would hash the name on every call): most names a
+/// parser asks about have a length no requested field has, and the rest
+/// compare against the few names of that length.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FieldSet {
+    names: Box<[Box<str>]>,
+    /// Bit `n` is set when some name is `n` bytes long (names of 64 bytes or
+    /// more set bit 63).
+    lengths: u64,
+}
+
+impl FieldSet {
+    fn length_bit(len: usize) -> u64 {
+        1u64 << len.min(63)
+    }
+
+    /// Whether `name` is one of the fields.
+    #[inline]
+    pub fn contains(&self, name: &str) -> bool {
+        self.lengths & Self::length_bit(name.len()) != 0 && self.names.iter().any(|n| **n == *name)
+    }
+
+    /// The field names, in no particular order.
+    pub fn iter(&self) -> impl Iterator<Item = &str> {
+        self.names.iter().map(|n| &**n)
+    }
+
+    /// The number of fields.
+    pub fn len(&self) -> usize {
+        self.names.len()
+    }
+
+    /// Whether there are no fields.
+    pub fn is_empty(&self) -> bool {
+        self.names.is_empty()
+    }
+}
+
+impl<S: AsRef<str>> FromIterator<S> for FieldSet {
+    fn from_iter<I: IntoIterator<Item = S>>(iter: I) -> Self {
+        let mut names: Vec<Box<str>> = Vec::new();
+        for name in iter {
+            let name = name.as_ref();
+            if !names.iter().any(|n| **n == *name) {
+                names.push(name.into());
+            }
+        }
+        let lengths = names
+            .iter()
+            .fold(0, |mask, n| mask | Self::length_bit(n.len()));
+        Self {
+            names: names.into_boxed_slice(),
+            lengths,
+        }
+    }
+}
+
+impl From<&HashSet<String>> for FieldSet {
+    fn from(fields: &HashSet<String>) -> Self {
+        fields.iter().collect()
+    }
+}
+
+impl From<HashSet<String>> for FieldSet {
+    fn from(fields: HashSet<String>) -> Self {
+        Self::from(&fields)
+    }
+}
+
 /// Fields required for protocol chaining.
 ///
 /// These fields must be extracted even if not in the projection,
@@ -242,6 +316,35 @@ mod tests {
         let merged = merged.unwrap();
         assert!(merged.contains("src_port"));
         assert!(!merged.contains("dst_port")); // Chain field NOT added
+    }
+
+    #[test]
+    fn field_set_matches_hash_set() {
+        let names = [
+            "src_port",
+            "dst_port",
+            "ttl",
+            "a_very_long_field_name_that_is_longer_than_64_bytes_in_total_xx",
+        ];
+        let set: FieldSet = names.iter().collect();
+        assert_eq!(set.len(), names.len());
+        for name in names {
+            assert!(set.contains(name), "{name}");
+        }
+        for name in [
+            "src_por",
+            "src_portx",
+            "dst_porT",
+            "",
+            "tos",
+            "a_very_long_field_name_that_is_longer_than_64_bytes_in_total_xy",
+        ] {
+            assert!(!set.contains(name), "{name}");
+        }
+        assert!(FieldSet::default().is_empty());
+        assert!(!FieldSet::default().contains(""));
+        let dup: FieldSet = ["x", "x"].iter().collect();
+        assert_eq!(dup.len(), 1);
     }
 
     #[test]

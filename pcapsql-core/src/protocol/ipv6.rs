@@ -4,7 +4,7 @@ use etherparse::Ipv6HeaderSlice;
 use smallvec::SmallVec;
 
 use super::ethernet::ethertype;
-use super::{FieldValue, ParseContext, ParseResult, Protocol, TunnelType};
+use super::{FieldValue, ParseContext, ParseGate, ParseResult, Protocol, TunnelType};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// IPv6 Next Header values for extension headers and encapsulation.
@@ -55,6 +55,14 @@ impl Protocol for Ipv6Protocol {
 
     fn display_name(&self) -> &'static str {
         "IPv6"
+    }
+
+    fn parse_gates(&self) -> &'static [ParseGate] {
+        &[ParseGate::Hint("ethertype")]
+    }
+
+    fn child_hint_keys(&self) -> Option<&'static [&'static str]> {
+        Some(&["ethertype", "ip_protocol", "ip_version", "tunnel_type"])
     }
 
     fn can_parse(&self, context: &ParseContext) -> Option<u32> {
