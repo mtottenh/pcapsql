@@ -30,7 +30,12 @@ SELECT
     gtp.message_type,
     gtp.length,
     gtp.teid,
-    gtp.sequence
+    gtp.sequence,
+    gtp.npdu,
+    gtp.extension_headers,
+    gtp.extension_header_count,
+    gtp.piggyback,
+    gtp.teid_present
 FROM frames f
 LEFT JOIN ipv4 ip4 ON f.frame_number = ip4.frame_number
 LEFT JOIN ipv6 ip6 ON f.frame_number = ip6.frame_number
@@ -50,5 +55,6 @@ mod tests {
         assert_eq!(view.name, "gtp_packets");
         assert!(view.sql.contains("JOIN gtp"));
         assert!(view.sql.contains("teid"));
+        assert!(view.sql.contains("gtp.extension_headers,"));
     }
 }

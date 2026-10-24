@@ -57,13 +57,13 @@ SELECT window_start, COUNT(*) FROM tumble(frames, INTERVAL '10' SECOND) GROUP BY
 
 | Table | Description |
 |-------|-------------|
-| `ethernet`, `ipv4`, `ipv6`, `tcp`, `udp` | Layer 2-4 protocols |
+| `ethernet`, `ipv4`, `ipv6`, `tcp`, `udp` | Layer 2-4 protocols (`ipv6` includes the extension header chain: Hop-by-Hop/Routing/Fragment/Destination presence, fragment and routing header fields) |
 | `dns`, `dhcp`, `ntp`, `http` | Application protocols |
 | `tls` | TLS records and handshakes |
 | `http2` | HTTP/2 frames (requires TLS decryption) |
-| `vxlan`, `gre`, `gtp`, `ipsec` | Tunnel headers (inner layers get `encap_depth` > 0 and a `tunnel_type`) |
+| `vxlan`, `gre`, `gtp`, `ipsec` | Tunnel headers (inner layers get `encap_depth` > 0 and a `tunnel_type`); `gtp` includes the GTPv1 N-PDU number and extension header chain and the GTPv2-C flags |
 | `mpls` | Label stacks (label switching, not counted as a tunnel) |
-| `bgp`, `ospf` | Routing protocols |
+| `bgp`, `ospf` | Routing protocols: BGP OPEN capabilities, UPDATE path attributes (AS path, next hop, MED, local pref, aggregator) and withdrawn/announced prefixes, NOTIFICATION codes, ROUTE-REFRESH address family; OSPFv2 Hello (neighbour count), Database Description and the first LSA header of DD/LSU/LSAck packets |
 
 ## CLI Options
 

@@ -1,11 +1,12 @@
 //! Golden query corpus: cross-phase result-identity guard.
 //!
-//! Two fixed, hand-crafted captures are queried with a corpus covering every
+//! Fixed, hand-crafted captures are queried with a corpus covering every
 //! populated protocol table plus joins, aggregates, LIMIT, views, list
 //! columns, `raw_data`, VLAN and VXLAN encapsulation, the time UDFs, and
 //! queries that reference the same table twice. The second capture uses the
 //! Linux "cooked" (SLL) link type, as `tcpdump -i any` writes, so the
-//! non-Ethernet link-layer path is guarded too. Results are compared
+//! non-Ethernet link-layer path is guarded too; the routing capture pins the
+//! full `SELECT *` column set of the routing and tunnel tables. Results are compared
 //! byte-for-byte against checked-in snapshots, so any refactor that changes
 //! query results — row content, order, types, or formatting — fails loudly.
 //!
@@ -443,6 +444,283 @@ fn http_frames() -> Vec<Vec<u8>> {
     frames
 }
 
+// ---------------------------------------------------------------------------
+// Routing / tunnel capture: BGP, OSPF, GTP and IPv6 extension headers. Each
+// table's `SELECT *` snapshot pins every column.
+// ---------------------------------------------------------------------------
+
+/// A BGP message: 16-byte marker, length, type, body.
+fn bgp_message(msg_type: u8, body: &[u8]) -> Vec<u8> {
+    let mut m = vec![0xff; 16];
+    m.extend_from_slice(&((19 + body.len()) as u16).to_be_bytes());
+    m.push(msg_type);
+    m.extend_from_slice(body);
+    m
+}
+
+/// OPEN from AS 4200000001 (AS_TRANS in the 2-byte field, the real AS in the
+/// 4-byte-AS capability) with MULTIPROTOCOL and ROUTE_REFRESH capabilities.
+fn bgp_open() -> Vec<u8> {
+    let caps: &[u8] = &[
+        1, 4, 0, 1, 0, 1, // MULTIPROTOCOL: AFI 1 (IPv4), SAFI 1 (unicast)
+        2, 0, // ROUTE_REFRESH
+        65, 4, 0xfa, 0x56, 0xea, 0x01, // 4-BYTE-AS: 4200000001
+    ];
+    let mut body = vec![4]; // version
+    body.extend_from_slice(&23456u16.to_be_bytes()); // my AS: AS_TRANS
+    body.extend_from_slice(&90u16.to_be_bytes()); // hold time
+    body.extend_from_slice(&[10, 1, 0, 1]); // BGP identifier
+    body.push((caps.len() + 2) as u8); // optional parameters length
+    body.push(2); // parameter type: capabilities
+    body.push(caps.len() as u8);
+    body.extend_from_slice(caps);
+    bgp_message(1, &body)
+}
+
+fn bgp_path_attr(flags: u8, type_code: u8, value: &[u8]) -> Vec<u8> {
+    let mut a = vec![flags, type_code, value.len() as u8];
+    a.extend_from_slice(value);
+    a
+}
+
+/// UPDATE withdrawing two prefixes and announcing two with every path
+/// attribute the parser decodes.
+fn bgp_update() -> Vec<u8> {
+    let withdrawn: &[u8] = &[24, 192, 0, 2, 16, 198, 51]; // 192.0.2.0/24, 198.51.0.0/16
+    let mut attrs = Vec::new();
+    attrs.extend(bgp_path_attr(0x40, 1, &[0])); // ORIGIN: IGP
+                                                // AS_PATH: AS_SEQUENCE of 65002 65003 65004 (2-byte ASNs)
+    attrs.extend(bgp_path_attr(
+        0x40,
+        2,
+        &[2, 3, 0xfd, 0xea, 0xfd, 0xeb, 0xfd, 0xec],
+    ));
+    attrs.extend(bgp_path_attr(0x40, 3, &[10, 1, 0, 2])); // NEXT_HOP
+    attrs.extend(bgp_path_attr(0x80, 4, &100u32.to_be_bytes())); // MULTI_EXIT_DISC
+    attrs.extend(bgp_path_attr(0x40, 5, &200u32.to_be_bytes())); // LOCAL_PREF
+    attrs.extend(bgp_path_attr(0x40, 6, &[])); // ATOMIC_AGGREGATE
+    attrs.extend(bgp_path_attr(0xc0, 7, &[0xfd, 0xea, 10, 1, 0, 2])); // AGGREGATOR: AS 65002, 10.1.0.2
+    let nlri: &[u8] = &[24, 203, 0, 113, 25, 198, 51, 100, 0]; // 203.0.113.0/24, 198.51.100.0/25
+    let mut body = Vec::new();
+    body.extend_from_slice(&(withdrawn.len() as u16).to_be_bytes());
+    body.extend_from_slice(withdrawn);
+    body.extend_from_slice(&(attrs.len() as u16).to_be_bytes());
+    body.extend_from_slice(&attrs);
+    body.extend_from_slice(nlri);
+    bgp_message(2, &body)
+}
+
+/// An OSPFv2 packet: 24-byte header (checksum left zero, null authentication)
+/// and the type-specific body.
+fn ospf_packet(ptype: u8, router_id: [u8; 4], body: &[u8]) -> Vec<u8> {
+    let mut p = vec![2, ptype];
+    p.extend_from_slice(&((24 + body.len()) as u16).to_be_bytes());
+    p.extend_from_slice(&router_id);
+    p.extend_from_slice(&[0, 0, 0, 1]); // area 0.0.0.1
+    p.extend_from_slice(&[0, 0]); // checksum
+    p.extend_from_slice(&[0, 0]); // AuType: null
+    p.extend_from_slice(&[0; 8]); // authentication
+    p.extend_from_slice(body);
+    p
+}
+
+/// A 20-byte LSA header.
+fn ospf_lsa_header(
+    age: u16,
+    ls_type: u8,
+    ls_id: [u8; 4],
+    adv: [u8; 4],
+    seq: u32,
+    len: u16,
+) -> Vec<u8> {
+    let mut h = age.to_be_bytes().to_vec();
+    h.push(0x02); // options: E
+    h.push(ls_type);
+    h.extend_from_slice(&ls_id);
+    h.extend_from_slice(&adv);
+    h.extend_from_slice(&seq.to_be_bytes());
+    h.extend_from_slice(&[0, 0]); // checksum
+    h.extend_from_slice(&len.to_be_bytes());
+    h
+}
+
+/// Hello with two neighbours.
+fn ospf_hello(router_id: [u8; 4]) -> Vec<u8> {
+    let mut body = vec![255, 255, 255, 0]; // network mask
+    body.extend_from_slice(&10u16.to_be_bytes()); // hello interval
+    body.push(0x02); // options: E
+    body.push(1); // router priority
+    body.extend_from_slice(&40u32.to_be_bytes()); // dead interval
+    body.extend_from_slice(&[10, 2, 0, 1]); // DR
+    body.extend_from_slice(&[10, 2, 0, 2]); // BDR
+    body.extend_from_slice(&[10, 2, 0, 2]); // neighbour
+    body.extend_from_slice(&[10, 2, 0, 3]); // neighbour
+    ospf_packet(1, router_id, &body)
+}
+
+/// Database Description carrying one LSA header.
+fn ospf_dd(router_id: [u8; 4]) -> Vec<u8> {
+    let mut body = 1500u16.to_be_bytes().to_vec(); // interface MTU
+    body.push(0x42); // options: O, E
+    body.push(0x07); // flags: I, M, MS
+    body.extend_from_slice(&0x0000_1234u32.to_be_bytes()); // DD sequence
+    body.extend(ospf_lsa_header(
+        1,
+        1,
+        [10, 2, 0, 2],
+        [10, 2, 0, 2],
+        0x8000_0001,
+        36,
+    ));
+    ospf_packet(2, router_id, &body)
+}
+
+/// Link State Update with one Router-LSA (header plus a minimal body).
+fn ospf_lsu(router_id: [u8; 4]) -> Vec<u8> {
+    let mut body = 1u32.to_be_bytes().to_vec(); // number of LSAs
+    body.extend(ospf_lsa_header(5, 1, router_id, router_id, 0x8000_0002, 36));
+    body.extend_from_slice(&[0x02, 0x00, 0x00, 0x01]); // flags, 1 link
+    body.extend_from_slice(&[10, 2, 0, 0, 255, 255, 255, 0, 3, 0, 0, 10]); // stub link
+    ospf_packet(4, router_id, &body)
+}
+
+/// Link State Acknowledgment of two LSA headers.
+fn ospf_lsack(router_id: [u8; 4]) -> Vec<u8> {
+    let mut body = ospf_lsa_header(5, 1, [10, 2, 0, 1], [10, 2, 0, 1], 0x8000_0002, 36);
+    body.extend(ospf_lsa_header(
+        7,
+        2,
+        [10, 2, 0, 1],
+        [10, 2, 0, 1],
+        0x8000_0003,
+        32,
+    ));
+    ospf_packet(5, router_id, &body)
+}
+
+/// GTPv1-U G-PDU with sequence number, N-PDU number and two extension
+/// headers (PDU Session Container, UDP Port) in front of `inner`.
+fn gtpv1_gpdu(teid: u32, inner: &[u8]) -> Vec<u8> {
+    let ext: &[u8] = &[
+        1, 0x10, 0x00, 0x40, // PDU Session Container (4 bytes), next: UDP Port
+        1, 0x1f, 0x90, 0x00, // UDP Port 8080, next: none
+    ];
+    let mut p = vec![0x37, 0xff]; // v1, PT=1, E, S, PN; G-PDU
+    p.extend_from_slice(&((4 + ext.len() + inner.len()) as u16).to_be_bytes());
+    p.extend_from_slice(&teid.to_be_bytes());
+    p.extend_from_slice(&7u16.to_be_bytes()); // sequence
+    p.push(42); // N-PDU number
+    p.push(0x85); // next extension header: PDU Session Container
+    p.extend_from_slice(ext);
+    p.extend_from_slice(inner);
+    p
+}
+
+/// GTPv2-C header with no IEs: T flag set, P flag as given.
+fn gtpv2(piggyback: bool, msg_type: u8, teid: u32, seq: u32) -> Vec<u8> {
+    let mut p = vec![0x48 | if piggyback { 0x10 } else { 0 }, msg_type];
+    p.extend_from_slice(&8u16.to_be_bytes()); // length: TEID + sequence/spare
+    p.extend_from_slice(&teid.to_be_bytes());
+    p.extend_from_slice(&seq.to_be_bytes()[1..]); // 24-bit sequence
+    p.push(0); // spare
+    p
+}
+
+/// Hop-by-Hop (PadN), Type 2 Routing (RFC 6275: Hdr Ext Len 2, one segment
+/// left, a 16-byte home address) and Fragment (first fragment, more to
+/// follow) extension headers in front of a UDP payload.
+fn ipv6_ext_chain(udp_payload: &[u8]) -> Vec<u8> {
+    let mut p = vec![43, 0, 1, 4, 0, 0, 0, 0]; // Hop-by-Hop -> Routing
+    p.extend_from_slice(&[44, 2, 2, 1, 0, 0, 0, 0]); // Routing type 2, 1 left -> Fragment
+    p.extend_from_slice(&IP6_A); // home address
+    p.extend_from_slice(&[17, 0, 0x00, 0x01]); // Fragment -> UDP; offset 0, M=1
+    p.extend_from_slice(&0xbeefu32.to_be_bytes()); // identification
+    p.extend_from_slice(udp_payload);
+    p
+}
+
+/// Routing and tunnelling protocols on an Ethernet link. Frames are grouped
+/// by protocol, each group appended after the previous ones, so a table's
+/// `SELECT *` snapshot does not move when another protocol's frames are added.
+fn routing_capture() -> Vec<u8> {
+    let a = [10, 1, 0, 1];
+    let b = [10, 1, 0, 2];
+    let g1 = [10, 3, 0, 1];
+    let g2 = [10, 3, 0, 2];
+    let inner = ipv4(
+        [192, 168, 1, 1],
+        [192, 168, 1, 2],
+        17,
+        7,
+        &udp(5000, 6000, &[0x44; 4]),
+    );
+    let gtp = |id: u16, sp: u16, dp: u16, msg: &[u8]| {
+        eth(
+            MAC_B,
+            MAC_A,
+            ETH_IP4,
+            &ipv4(g1, g2, 17, id, &udp(sp, dp, msg)),
+        )
+    };
+    let r1 = [10, 2, 0, 1];
+    let ospf = |id: u16, pkt: &[u8]| {
+        eth(
+            [0x01, 0x00, 0x5e, 0x00, 0x00, 0x05],
+            MAC_A,
+            ETH_IP4,
+            &ipv4(r1, [224, 0, 0, 5], 89, id, pkt),
+        )
+    };
+    let bgp = |src: [u8; 4], dst: [u8; 4], id: u16, sp: u16, dp: u16, msg: &[u8]| {
+        let seg = tcp(sp, dp, 1000 + u32::from(id), 1, 0x18, msg);
+        eth(MAC_B, MAC_A, ETH_IP4, &ipv4(src, dst, 6, id, &seg))
+    };
+    let frames: Vec<Vec<u8>> = vec![
+        // 1: BGP OPEN a -> b
+        bgp(a, b, 1, 40179, 179, &bgp_open()),
+        // 2: BGP KEEPALIVE b -> a
+        bgp(b, a, 2, 179, 40179, &bgp_message(4, &[])),
+        // 3: BGP UPDATE b -> a
+        bgp(b, a, 3, 179, 40179, &bgp_update()),
+        // 4: BGP NOTIFICATION a -> b: Cease / Administrative Shutdown
+        bgp(a, b, 4, 40179, 179, &bgp_message(3, &[6, 2])),
+        // 5: BGP ROUTE-REFRESH a -> b: IPv4 unicast
+        bgp(a, b, 5, 40179, 179, &bgp_message(5, &[0, 1, 0, 1])),
+        // 6-9: OSPF Hello, Database Description, Link State Update and
+        // Acknowledgment from router 10.2.0.1 to AllSPFRouters.
+        ospf(6, &ospf_hello(r1)),
+        ospf(7, &ospf_dd(r1)),
+        ospf(8, &ospf_lsu(r1)),
+        ospf(9, &ospf_lsack(r1)),
+        // 10: GTPv1-U G-PDU (sequence, N-PDU, extension headers) carrying an
+        // IPv4/UDP packet; 11-12: GTPv2-C Create Session Request / Response,
+        // the response flagged as piggybacked.
+        gtp(10, 2152, 2152, &gtpv1_gpdu(0x1001, &inner)),
+        gtp(11, 2123, 2123, &gtpv2(false, 32, 0, 1)),
+        gtp(12, 2123, 2123, &gtpv2(true, 33, 0x2000, 1)),
+        // 13: IPv6 with Hop-by-Hop, Routing and Fragment extension headers;
+        // 14: IPv6 without extension headers.
+        eth(
+            MAC_B,
+            MAC_A,
+            ETH_IP6,
+            &ipv6(
+                IP6_A,
+                IP6_B,
+                0,
+                &ipv6_ext_chain(&udp(1024, 2048, &[0x66; 4])),
+            ),
+        ),
+        eth(
+            MAC_A,
+            MAC_B,
+            ETH_IP6,
+            &ipv6(IP6_B, IP6_A, 17, &udp(2048, 1024, &[0x77; 4])),
+        ),
+    ];
+    to_capture(frames, LINKTYPE_ETHERNET)
+}
+
 /// The fixed Ethernet corpus capture: 11 frames covering
 /// tcp/udp/dns/arp/icmp/ipv6 plus one VLAN-tagged and one VXLAN-encapsulated
 /// frame (the latter carries an inner Ethernet/IPv4/UDP frame).
@@ -568,6 +846,8 @@ enum Capture {
     Sll2,
     /// `http_capture()`: reassembled HTTP/1.1 and TLS streams.
     Http,
+    /// `routing_capture()`: BGP, OSPF, GTP, IPv6 extension headers.
+    Routing,
 }
 
 /// (capture, snapshot name, SQL). Every query is fully ordered so output is
@@ -887,6 +1167,46 @@ const CORPUS: &[(Capture, &str, &str)] = &[
          (SELECT count(*) FROM tcp WHERE dst_port = 80 OR src_port = 80) AS port_80_segments \
          FROM http",
     ),
+    // `SELECT *` pins the full column set of each routing / tunnel table
+    // (#138): adding a column changes the snapshot, on purpose.
+    (
+        Capture::Routing,
+        "v01_bgp",
+        "SELECT * FROM bgp ORDER BY frame_number",
+    ),
+    (
+        Capture::Routing,
+        "v02_ospf",
+        "SELECT * FROM ospf ORDER BY frame_number",
+    ),
+    (
+        Capture::Routing,
+        "v03_gtp",
+        "SELECT * FROM gtp ORDER BY frame_number",
+    ),
+    (
+        Capture::Routing,
+        "v04_ipv6",
+        "SELECT * FROM ipv6 ORDER BY frame_number",
+    ),
+    // The convenience views project the new columns too.
+    (
+        Capture::Routing,
+        "v05_bgp_packets_view",
+        "SELECT * FROM bgp_packets ORDER BY frame_number",
+    ),
+    (
+        Capture::Routing,
+        "v06_ospf_packets_view",
+        "SELECT * FROM ospf_packets ORDER BY frame_number",
+    ),
+    // The G-PDU frame carries an inner IPv4/UDP packet, so its ipv4 and udp
+    // joins each match twice (outer and inner rows): order by them as well.
+    (
+        Capture::Routing,
+        "v07_gtp_packets_view",
+        "SELECT * FROM gtp_packets ORDER BY frame_number, src_ip_v4, src_port",
+    ),
 ];
 
 /// Queries that must be the *first* query a fresh engine runs: their result
@@ -934,6 +1254,8 @@ async fn golden_corpus_matches_snapshots() {
     std::fs::write(&sll2_path, sll2_capture()).unwrap();
     let http_path = dir.path().join("corpus_http.pcap");
     std::fs::write(&http_path, http_capture()).unwrap();
+    let routing_path = dir.path().join("corpus_routing.pcap");
+    std::fs::write(&routing_path, routing_capture()).unwrap();
 
     let update = std::env::var("PCAPSQL_GOLDEN_UPDATE").is_ok();
     if update {
@@ -944,6 +1266,10 @@ async fn golden_corpus_matches_snapshots() {
     let sll = (engine(&sll_path, 2).await, engine(&sll_path, 1).await);
     let sll2 = (engine(&sll2_path, 2).await, engine(&sll2_path, 1).await);
     let http = (engine(&http_path, 2).await, engine(&http_path, 1).await);
+    let routing = (
+        engine(&routing_path, 2).await,
+        engine(&routing_path, 1).await,
+    );
     // One-shot CLI path: RetentionPolicy::None streams rather than
     // materializes. Its results must be identical.
     let streaming = |path: &Path| {
@@ -962,6 +1288,9 @@ async fn golden_corpus_matches_snapshots() {
     let sll_streamed = streaming(&sll_path).await.expect("build streaming engine");
     let sll2_streamed = streaming(&sll2_path).await.expect("build streaming engine");
     let http_streamed = streaming(&http_path).await.expect("build streaming engine");
+    let routing_streamed = streaming(&routing_path)
+        .await
+        .expect("build streaming engine");
 
     let mut failures = Vec::new();
     for (capture, name, sql) in CORPUS {
@@ -970,6 +1299,7 @@ async fn golden_corpus_matches_snapshots() {
             Capture::Sll => &sll_path,
             Capture::Sll2 => &sll2_path,
             Capture::Http => &http_path,
+            Capture::Routing => &routing_path,
         };
         // Fresh engines (materialized and streaming) for queries whose result
         // depends on engine-wide state no earlier query may have established.
@@ -988,6 +1318,7 @@ async fn golden_corpus_matches_snapshots() {
             (None, Capture::Sll) => (&sll.0, &sll.1, &sll_streamed),
             (None, Capture::Sll2) => (&sll2.0, &sll2.1, &sll2_streamed),
             (None, Capture::Http) => (&http.0, &http.1, &http_streamed),
+            (None, Capture::Routing) => (&routing.0, &routing.1, &routing_streamed),
         };
         let got = run(e2, sql).await;
 
@@ -1032,6 +1363,7 @@ async fn golden_corpus_matches_snapshots() {
             (Capture::Sll, &sll_path),
             (Capture::Sll2, &sll2_path),
             (Capture::Http, &http_path),
+            (Capture::Routing, &routing_path),
         ];
         for (capture, path) in captures {
             for retention in [RetentionPolicy::CacheOnTouch, RetentionPolicy::None] {

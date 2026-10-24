@@ -156,6 +156,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Parser fields that the DataFusion tables dropped are now columns, and the
+  engine agrees with the DuckDB table functions, which already exposed every
+  parser field. The new columns sit next to the related existing ones, so
+  `SELECT *` on these tables returns more columns *and* the existing columns
+  move position (name the columns you rely on). The `bgp_packets`,
+  `ospf_packets` and `gtp_packets` views append the same columns after their
+  existing ones ([#138](https://github.com/mtottenh/pcapsql/issues/138)):
+  - `bgp`: `my_as_4byte`, `capabilities`, `withdrawn_routes`,
+    `withdrawn_count`, `origin`, `origin_name`, `as_path`, `as_path_length`,
+    `next_hop`, `med`, `local_pref`, `atomic_aggregate`, `aggregator_as`,
+    `aggregator_ip`, `nlri`, `nlri_count`, `error_code`, `error_code_name`,
+    `error_subcode`, `afi`, `safi`. The list-valued attributes
+    (`capabilities`, `withdrawn_routes`, `as_path`, `nlri`) are strings as the
+    parser formats them: comma-separated names and prefixes, space-separated
+    AS numbers with an AS_SET in braces.
+  - `ospf`: `neighbor_count`, `dd_interface_mtu`, `dd_options`, `dd_flags`,
+    `dd_sequence`, `dd_lsa_count`, `lsu_lsa_count`, `lsa_ack_count`, and the
+    first LSA header of a DD, LSU or LSAck packet: `lsa_age`, `lsa_type`,
+    `lsa_type_name`, `lsa_id`, `lsa_advertising_router`, `lsa_sequence`.
+  - `gtp`: `npdu`, `extension_headers` (the GTPv1 chain as comma-separated
+    `Name(0xNN)` entries), `extension_header_count`, and the GTPv2-C
+    `piggyback` and `teid_present` flags.
+  - `ipv6`: `ext_hop_by_hop`, `ext_routing`, `ext_fragment`,
+    `ext_destination`, `frag_offset`, `frag_more`, `frag_id`, `routing_type`,
+    `segments_left`.
+  The `mpls`, `gre` and `vxlan` validity, derived-length and name fields stay
+  out of the DataFusion tables (see `NOT_EXPOSED_AS_COLUMNS`).
 - The capture can be piped in: `pcapsql --stdin` (or `-` as the capture
   argument) reads pcap or pcapng, optionally gzip/zstd compressed, from
   standard input, e.g. `tcpdump -U -w - -i eth0 port 53 | pcapsql --stdin -e
