@@ -302,9 +302,12 @@ Semantics and knobs:
   packet for such a window arriving later is late.
 - State is one accumulator set per open window and group. A `hop()` whose size is a multiple
   of its slide is aggregated per **slice** (one slide's worth) and the slices are merged when a
-  window closes, so a 1-minute window sliding every 10 seconds costs one sixth of the state and
-  work of one accumulator per window. (Aggregates whose result depends on input order, such as
-  `array_agg` without `ORDER BY`, may list a sliced window's elements in slice order.)
+  window closes, so a 1-minute window sliding every 10 seconds updates one accumulator per row
+  instead of six, and holds one accumulator set plus one frozen state per slice. Slicing is
+  used only when nothing but `GROUP BY window_start` / `window_end` reads the window columns
+  (a `WHERE` on `window_start`, or `max(window_end)`, keeps the per-window path). Aggregates
+  whose result depends on input order, such as `array_agg` without `ORDER BY`, may list a
+  sliced window's elements in slice order.
 - `--memory-limit SIZE` (e.g. `512MiB`) caps what DataFusion may hold for the run, the window
   state included; the aggregate accounts its state to the pool after every batch. When the state
   does not fit, `--on-memory-limit error` (the default) fails the query naming the open windows

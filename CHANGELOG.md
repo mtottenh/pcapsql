@@ -205,9 +205,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--progress`; a row for such a window arriving later is late. Independently
   of the limit, a `hop()` whose size is a multiple of its slide is now
   aggregated per slice (one slide's worth of rows) and the slices are merged
-  through the accumulators' intermediate state when a window closes, so the
-  state and the per-row work no longer grow with `size / slide`; the
-  per-window path remains for other hops and for `tumble()`.
+  through the accumulators' intermediate state when a window closes, so each
+  row updates one accumulator instead of `size / slide` and a slice holds
+  one accumulator set plus one frozen state; the per-window path remains for
+  other hops, for `tumble()`, and when anything other than the window group
+  columns reads `window_start` / `window_end`.
 - **Fused joins: the parser emits a view's joined row itself.** Under
   `RetentionPolicy::None` (every one-shot, `--stdin` and `--continuous` run) a
   tree of inner and left joins of protocol tables on `frame_number` (and

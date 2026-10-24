@@ -338,17 +338,42 @@ What landed, on top of the fusion branch:
   slice's live accumulators are frozen into `state()` (which consumes them,
   so a fresh live set takes later rows), the frozen pieces are kept until the
   slice's last window (the one starting at it) is emitted, and the window's
-  fresh accumulators `merge_batch` every piece of every covered slice. A row
-  is counted late once per already-closed window containing its slice, as the
-  per-window expansion did. Exact for every DataFusion aggregate (the
+  fresh accumulators `merge_batch` every piece of every covered slice. A live
+  set that took no rows since its last freeze is not frozen again, so an
+  in-order slice holds one piece however many windows it is in (state per
+  slice: one accumulator set plus one frozen state; per-row work 1 / k). A
+  row is counted late once per already-closed window containing its slice,
+  as the per-window expansion did. Exact for every DataFusion aggregate (the
   Partial/Final contract); order-sensitive ones without `ORDER BY` may list
   elements in slice order. Hops with a non-multiple size, and tumble, keep the
   per-window path.
+- Slicing is decided by the rule, not the spec: the sliced rows carry slice
+  bounds in `window_start` / `window_end`, so `WindowChain::window_bound_columns`
+  follows those two columns up the chain and slicing is off when a filter or
+  projection computes from them, or an aggregate argument / filter / non-window
+  group expression reads them (`WHERE window_start >= …`, `max(window_end)`).
+- The pending window of a sliced hop is derived, not stored: the later of the
+  first window containing the oldest slice and the first slide-aligned start
+  after `closed_through - size`, where `closed_through` advances with every
+  emission *and* with the watermark (a window the watermark passed while
+  empty is closed too). The review round found the stored `next_window`
+  skipped a window when an older slice arrived within lateness (its rows
+  vanished uncounted) and re-emitted closed windows after the slice map had
+  emptied (idle timeout); both are covered by tests now.
 
-Tests: exact `sum/min/max/avg` through slice merging; the non-multiple hop
-still expands; both policies, with the limit set between one and two windows
-of state measured on an unlimited engine (`state_bytes()`), so the tests do
-not hard-code accumulator sizes.
+Tests: exact `sum/min/max/avg` through slice merging; an older slice arriving
+within lateness; idle timeout followed by more rows; a row late for some of
+its windows only, with groups present in one slice but not another, over a
+fused view; window columns read elsewhere keep the per-window path; the
+non-multiple hop still expands; both policies on tumble and `close-oldest` on
+a sliced hop, with the limit set from state measured on an unlimited engine
+(`state_bytes()`), so the tests do not hard-code accumulator sizes.
+
+Follow-up (not done): `state_bytes()` walks the whole state after every input
+batch (`ScalarValue::size` over every frozen piece included). At batch cadence
+it has not shown up, but with hundreds of thousands of group entries it should
+become incremental (delta on insert / freeze / remove) or sampled every N
+batches.
 
 The design as planned before implementation follows.
 

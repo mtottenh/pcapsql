@@ -464,7 +464,6 @@ fn print_parse_stats(stats: &ParseStats) {
     print_parse_stats_ext(stats, false);
 }
 
-/// `interrupted`: the scan was cut short by Ctrl-C, not by a LIMIT.
 /// `--memory-limit`: a byte count with an optional unit, `512MiB`, `2GB`,
 /// `1G`, `1073741824`. Binary and decimal units are both accepted and mean
 /// what they say.
@@ -497,6 +496,7 @@ fn parse_memory_size(s: &str) -> Result<usize> {
     Ok(bytes as usize)
 }
 
+/// `interrupted`: the scan was cut short by Ctrl-C, not by a LIMIT.
 fn print_parse_stats_ext(stats: &ParseStats, interrupted: bool) {
     eprintln!();
     match stats.served_from {
