@@ -3,7 +3,7 @@
 use smallvec::SmallVec;
 
 use super::ethernet::ethertype;
-use super::{FieldValue, ParseContext, ParseResult, Protocol};
+use super::{FieldValue, ParseContext, ParseGate, ParseResult, Protocol};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// 802.1Q VLAN tag parser.
@@ -17,6 +17,14 @@ impl Protocol for VlanProtocol {
 
     fn display_name(&self) -> &'static str {
         "802.1Q VLAN"
+    }
+
+    fn parse_gates(&self) -> &'static [ParseGate] {
+        &[ParseGate::Hint("ethertype")]
+    }
+
+    fn child_hint_keys(&self) -> Option<&'static [&'static str]> {
+        Some(&["ethertype", "vlan_id"])
     }
 
     fn can_parse(&self, context: &ParseContext) -> Option<u32> {

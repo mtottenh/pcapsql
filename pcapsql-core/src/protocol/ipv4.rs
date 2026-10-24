@@ -5,7 +5,7 @@ use smallvec::SmallVec;
 use etherparse::Ipv4HeaderSlice;
 
 use super::ethernet::ethertype;
-use super::{FieldValue, ParseContext, ParseResult, Protocol, TunnelType};
+use super::{FieldValue, ParseContext, ParseGate, ParseResult, Protocol, TunnelType};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// IP protocol numbers for IP-in-IP encapsulation.
@@ -143,6 +143,14 @@ impl Protocol for Ipv4Protocol {
 
     fn display_name(&self) -> &'static str {
         "IPv4"
+    }
+
+    fn parse_gates(&self) -> &'static [ParseGate] {
+        &[ParseGate::Hint("ethertype")]
+    }
+
+    fn child_hint_keys(&self) -> Option<&'static [&'static str]> {
+        Some(&["ethertype", "ip_protocol", "ip_version", "tunnel_type"])
     }
 
     fn can_parse(&self, context: &ParseContext) -> Option<u32> {

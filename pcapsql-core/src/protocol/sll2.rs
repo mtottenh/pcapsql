@@ -21,7 +21,7 @@
 use smallvec::SmallVec;
 
 use super::linux_sll::{arphrd, arphrd_name, packet_type_name};
-use super::{FieldValue, ParseContext, ParseResult, Protocol};
+use super::{FieldValue, ParseContext, ParseGate, ParseResult, Protocol};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// PCAP link type for Linux SLL2 captures.
@@ -45,6 +45,20 @@ impl Protocol for Sll2Protocol {
 
     fn display_name(&self) -> &'static str {
         "Linux SLL2"
+    }
+
+    fn parse_gates(&self) -> &'static [ParseGate] {
+        &[ParseGate::Root]
+    }
+
+    fn child_hint_keys(&self) -> Option<&'static [&'static str]> {
+        Some(&[
+            "ethertype",
+            "is_netlink",
+            "netlink_family",
+            "sll_arphrd",
+            "sll_protocol",
+        ])
     }
 
     fn can_parse(&self, context: &ParseContext) -> Option<u32> {

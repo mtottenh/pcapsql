@@ -7,7 +7,7 @@ use compact_str::CompactString;
 use smallvec::SmallVec;
 
 use super::netlink::family as netlink_family;
-use super::{FieldValue, ParseContext, ParseResult, Protocol};
+use super::{FieldValue, ParseContext, ParseGate, ParseResult, Protocol};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// RTNetlink message type constants.
@@ -60,6 +60,14 @@ impl Protocol for RtnetlinkProtocol {
 
     fn display_name(&self) -> &'static str {
         "RTNetlink"
+    }
+
+    fn parse_gates(&self) -> &'static [ParseGate] {
+        &[ParseGate::Hint("netlink_family")]
+    }
+
+    fn child_hint_keys(&self) -> Option<&'static [&'static str]> {
+        Some(&[])
     }
 
     fn can_parse(&self, context: &ParseContext) -> Option<u32> {

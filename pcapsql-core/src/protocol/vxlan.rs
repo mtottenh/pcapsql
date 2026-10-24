@@ -7,7 +7,7 @@
 
 use smallvec::SmallVec;
 
-use super::{FieldValue, ParseContext, ParseResult, Protocol, TunnelType};
+use super::{FieldValue, ParseContext, ParseGate, ParseResult, Protocol, TunnelType};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// Standard VXLAN UDP destination port.
@@ -24,6 +24,14 @@ impl Protocol for VxlanProtocol {
 
     fn display_name(&self) -> &'static str {
         "VXLAN"
+    }
+
+    fn parse_gates(&self) -> &'static [ParseGate] {
+        &[ParseGate::Hint("transport")]
+    }
+
+    fn child_hint_keys(&self) -> Option<&'static [&'static str]> {
+        Some(&["link_type", "tunnel_id", "tunnel_type"])
     }
 
     fn can_parse(&self, context: &ParseContext) -> Option<u32> {

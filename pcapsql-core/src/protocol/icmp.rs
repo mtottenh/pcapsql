@@ -2,7 +2,7 @@
 
 use smallvec::SmallVec;
 
-use super::{FieldValue, ParseContext, ParseResult, Protocol};
+use super::{FieldValue, ParseContext, ParseGate, ParseResult, Protocol};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// IP protocol number for ICMP.
@@ -79,6 +79,14 @@ impl Protocol for IcmpProtocol {
 
     fn display_name(&self) -> &'static str {
         "ICMP"
+    }
+
+    fn parse_gates(&self) -> &'static [ParseGate] {
+        &[ParseGate::Hint("ip_protocol")]
+    }
+
+    fn child_hint_keys(&self) -> Option<&'static [&'static str]> {
+        Some(&[])
     }
 
     fn can_parse(&self, context: &ParseContext) -> Option<u32> {

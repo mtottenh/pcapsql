@@ -1,12 +1,13 @@
 //! TCP protocol parser.
 
-use std::collections::HashSet;
-
 use smallvec::SmallVec;
 
 use etherparse::{TcpHeaderSlice, TcpOptionElement};
 
-use super::{http, FieldValue, HintEntry, ParseContext, ParseResult, PayloadMode, Protocol};
+use super::{
+    http, FieldSet, FieldValue, HintEntry, ParseContext, ParseGate, ParseResult, PayloadMode,
+    Protocol,
+};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// IP protocol number for TCP.
@@ -170,6 +171,14 @@ impl Protocol for TcpProtocol {
 
     fn display_name(&self) -> &'static str {
         "TCP"
+    }
+
+    fn parse_gates(&self) -> &'static [ParseGate] {
+        &[ParseGate::Hint("ip_protocol")]
+    }
+
+    fn child_hint_keys(&self) -> Option<&'static [&'static str]> {
+        Some(&["src_port", "dst_port", "transport", http::PAYLOAD_HINT])
     }
 
     fn can_parse(&self, context: &ParseContext) -> Option<u32> {
@@ -394,7 +403,7 @@ impl Protocol for TcpProtocol {
         &self,
         data: &'a [u8],
         _context: &ParseContext,
-        fields: Option<&HashSet<String>>,
+        fields: Option<&FieldSet>,
     ) -> ParseResult<'a> {
         // If no projection, use full parse
         let fields = match fields {
@@ -921,7 +930,7 @@ mod tests {
         context.insert_hint("ip_protocol", 6);
 
         // Project to only ports
-        let fields: HashSet<String> = ["src_port", "dst_port"]
+        let fields: FieldSet = ["src_port", "dst_port"]
             .iter()
             .map(|s| s.to_string())
             .collect();
@@ -960,7 +969,7 @@ mod tests {
         context.insert_hint("ip_protocol", 6);
 
         // Project to ports and specific flags
-        let fields: HashSet<String> = ["src_port", "flag_syn", "flag_ack"]
+        let fields: FieldSet = ["src_port", "flag_syn", "flag_ack"]
             .iter()
             .map(|s| s.to_string())
             .collect();
@@ -1303,7 +1312,7 @@ mod tests {
         context.insert_hint("ip_protocol", 6);
 
         // Project to only timestamp fields
-        let fields: HashSet<String> = ["ts_val", "ts_ecr"].iter().map(|s| s.to_string()).collect();
+        let fields: FieldSet = ["ts_val", "ts_ecr"].iter().map(|s| s.to_string()).collect();
         let result = parser.parse_projected(&header, &context, Some(&fields));
 
         assert!(result.is_ok());

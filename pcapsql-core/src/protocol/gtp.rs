@@ -11,7 +11,7 @@ use compact_str::CompactString;
 use smallvec::SmallVec;
 
 use super::ethernet::ethertype;
-use super::{FieldValue, ParseContext, ParseResult, Protocol, TunnelType};
+use super::{FieldValue, ParseContext, ParseGate, ParseResult, Protocol, TunnelType};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// GTP-U (User Plane) UDP port.
@@ -114,6 +114,20 @@ impl Protocol for GtpProtocol {
 
     fn display_name(&self) -> &'static str {
         "GTP"
+    }
+
+    fn parse_gates(&self) -> &'static [ParseGate] {
+        &[ParseGate::Hint("transport")]
+    }
+
+    fn child_hint_keys(&self) -> Option<&'static [&'static str]> {
+        Some(&[
+            "ethertype",
+            "gtp_plane",
+            "ip_version",
+            "tunnel_id",
+            "tunnel_type",
+        ])
     }
 
     fn can_parse(&self, context: &ParseContext) -> Option<u32> {

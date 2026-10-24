@@ -1,11 +1,11 @@
 //! Protocol registry for managing parsers.
 
-use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::schema::FieldDescriptor;
 
 use super::{
-    ArpProtocol, BgpProtocol, DhcpProtocol, DnsProtocol, EthernetProtocol, GreProtocol,
+    ArpProtocol, BgpProtocol, DhcpProtocol, DnsProtocol, EthernetProtocol, FieldSet, GreProtocol,
     GtpProtocol, HttpProtocol, IcmpProtocol, Icmpv6Protocol, IpsecProtocol, Ipv4Protocol,
     Ipv6Protocol, LinuxSllProtocol, MplsProtocol, NetlinkProtocol, NtpProtocol, OspfProtocol,
     ParseContext, ParseResult, QuicProtocol, RtnetlinkProtocol, Sll2Protocol, SshProtocol,
@@ -50,6 +50,19 @@ pub const CONTENT_PRIORITY: u32 = 200;
 
 const _: () = assert!(CONTENT_PRIORITY > PORT_PRIORITY_MAX);
 
+/// A condition [`Protocol::can_parse`] needs before it can return `Some`.
+///
+/// The registry uses a parser's gates to skip it where it cannot match: a
+/// parser gated on `Hint("ethertype")` is only asked after a layer that can
+/// emit an `ethertype` hint (see [`Protocol::child_hint_keys`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParseGate {
+    /// The context is the packet's first layer (`ParseContext::is_root`).
+    Root,
+    /// The context carries this hint key.
+    Hint(&'static str),
+}
+
 /// Core trait all protocol parsers must implement.
 pub trait Protocol: Send + Sync {
     /// Unique identifier for this protocol (e.g., "tcp", "dns").
@@ -67,6 +80,21 @@ pub trait Protocol: Send + Sync {
     /// confirmed by looking at the payload returns [`CONTENT_PRIORITY`].
     /// Returns `None` if this parser cannot handle the context.
     fn can_parse(&self, context: &ParseContext) -> Option<u32>;
+
+    /// The conditions `can_parse` needs: it returns `None` unless at least
+    /// one of them holds. Empty (the default) promises nothing, and the
+    /// parser is asked after every layer.
+    fn parse_gates(&self) -> &'static [ParseGate] {
+        &[]
+    }
+
+    /// Every hint key this parser may put in `ParseResult::child_hints`.
+    /// `None` (the default) means unknown: every parser is asked after this
+    /// one. A key missing from the list hides the parsers gated on it, so the
+    /// list must be complete (debug builds check each result against it).
+    fn child_hint_keys(&self) -> Option<&'static [&'static str]> {
+        None
+    }
 
     /// Parse bytes into structured fields.
     fn parse<'a>(&self, data: &'a [u8], context: &ParseContext) -> ParseResult<'a>;
@@ -114,7 +142,7 @@ pub trait Protocol: Send + Sync {
         &self,
         data: &'a [u8],
         context: &ParseContext,
-        _fields: Option<&HashSet<String>>,
+        _fields: Option<&FieldSet>,
     ) -> ParseResult<'a> {
         // Default: ignore projection, parse everything
         self.parse(data, context)
@@ -224,6 +252,16 @@ impl Protocol for BuiltinProtocol {
     }
 
     #[inline]
+    fn parse_gates(&self) -> &'static [ParseGate] {
+        delegate_protocol!(self, parse_gates)
+    }
+
+    #[inline]
+    fn child_hint_keys(&self) -> Option<&'static [&'static str]> {
+        delegate_protocol!(self, child_hint_keys)
+    }
+
+    #[inline]
     fn parse<'a>(&self, data: &'a [u8], context: &ParseContext) -> ParseResult<'a> {
         delegate_protocol!(self, parse, data, context)
     }
@@ -253,7 +291,7 @@ impl Protocol for BuiltinProtocol {
         &self,
         data: &'a [u8],
         context: &ParseContext,
-        fields: Option<&HashSet<String>>,
+        fields: Option<&FieldSet>,
     ) -> ParseResult<'a> {
         delegate_protocol!(self, parse_projected, data, context, fields)
     }
@@ -436,9 +474,30 @@ impl From<RtnetlinkProtocol> for BuiltinProtocol {
 ///
 /// Uses static dispatch via enum for all built-in protocols,
 /// avoiding vtable overhead and enabling compiler optimizations.
+///
+/// Besides the parsers, the registry keeps, per parser, the candidates for
+/// the layer that follows it: the parsers whose [`Protocol::parse_gates`] the
+/// hints it emits ([`Protocol::child_hint_keys`]) can satisfy. The parse loop
+/// asks only those (a handful) instead of every registered parser.
 #[derive(Debug, Clone)]
 pub struct ProtocolRegistry {
     parsers: Vec<BuiltinProtocol>,
+    /// Indices into `parsers` of the parsers that can match a packet's first
+    /// layer, ascending.
+    root_candidates: Vec<usize>,
+    /// For each parser (by index), the indices of the parsers that can match
+    /// the layer after it, ascending.
+    child_candidates: Vec<Vec<usize>>,
+    /// Changes whenever the parser list does, so that a [`ParseScope`]
+    /// resolved against one registry can tell it is being used with another.
+    ///
+    /// [`ParseScope`]: super::ParseScope
+    id: u64,
+}
+
+fn next_registry_id() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
 impl ProtocolRegistry {
@@ -446,22 +505,102 @@ impl ProtocolRegistry {
     pub fn new() -> Self {
         Self {
             parsers: Vec::new(),
+            root_candidates: Vec::new(),
+            child_candidates: Vec::new(),
+            id: next_registry_id(),
         }
     }
 
     /// Register a protocol parser.
     pub fn register<P: Into<BuiltinProtocol>>(&mut self, parser: P) {
         self.parsers.push(parser.into());
+        self.index_candidates();
+        self.id = next_registry_id();
+    }
+
+    /// Recompute the candidate lists from the parsers' gates and hint keys.
+    fn index_candidates(&mut self) {
+        let can_follow = |parser: &BuiltinProtocol, parent: Option<&BuiltinProtocol>| {
+            let gates = parser.parse_gates();
+            if gates.is_empty() {
+                return true;
+            }
+            gates.iter().any(|gate| match (gate, parent) {
+                (ParseGate::Root, None) => true,
+                (ParseGate::Root, Some(_)) => false,
+                // The first layer's context carries no hints.
+                (ParseGate::Hint(_), None) => false,
+                (ParseGate::Hint(key), Some(parent)) => match parent.child_hint_keys() {
+                    None => true,
+                    Some(keys) => keys.contains(key),
+                },
+            })
+        };
+        let candidates = |parent: Option<&BuiltinProtocol>| -> Vec<usize> {
+            (0..self.parsers.len())
+                .filter(|&i| can_follow(&self.parsers[i], parent))
+                .collect()
+        };
+        self.root_candidates = candidates(None);
+        self.child_candidates = self.parsers.iter().map(|p| candidates(Some(p))).collect();
     }
 
     /// Find the best parser for the given context.
+    ///
+    /// Asks every registered parser; the parse loop uses the candidate lists
+    /// instead (`find_next`), which make the same choice.
     #[inline]
     pub fn find_parser(&self, context: &ParseContext) -> Option<&BuiltinProtocol> {
+        self.find_index(context).map(|i| &self.parsers[i])
+    }
+
+    fn find_index(&self, context: &ParseContext) -> Option<usize> {
         self.parsers
             .iter()
-            .filter_map(|p| p.can_parse(context).map(|priority| (p, priority)))
+            .enumerate()
+            .filter_map(|(i, p)| p.can_parse(context).map(|priority| (i, priority)))
             .max_by_key(|(_, priority)| *priority)
-            .map(|(parser, _)| parser)
+            .map(|(i, _)| i)
+    }
+
+    /// The parser for the layer after the parser at index `parent` (`None`:
+    /// the packet's first layer), with its index.
+    ///
+    /// The same choice as [`find_parser`](Self::find_parser): the highest
+    /// priority wins and, on a tie, the parser registered last (the
+    /// candidates are in registration order, and `>=` keeps the later one,
+    /// as `max_by_key` does).
+    #[inline]
+    pub(crate) fn find_next(
+        &self,
+        parent: Option<usize>,
+        context: &ParseContext,
+    ) -> Option<(usize, &BuiltinProtocol)> {
+        let candidates = match parent {
+            None => &self.root_candidates,
+            Some(i) => &self.child_candidates[i],
+        };
+        let mut best: Option<(usize, u32)> = None;
+        for &i in candidates {
+            if let Some(priority) = self.parsers[i].can_parse(context) {
+                match best {
+                    Some((_, best_priority)) if priority < best_priority => {}
+                    _ => best = Some((i, priority)),
+                }
+            }
+        }
+        debug_assert_eq!(
+            best.map(|(i, _)| i),
+            self.find_index(context),
+            "candidate lists disagree with a full scan after {:?}",
+            parent.map(|i| self.parsers[i].name())
+        );
+        best.map(|(i, _)| (i, &self.parsers[i]))
+    }
+
+    /// Identifies this registry's parser list (see the `id` field).
+    pub(crate) fn id(&self) -> u64 {
+        self.id
     }
 
     /// Get all registered parsers.
@@ -541,6 +680,58 @@ mod tests {
         assert!(registry.get_parser("tcp").is_some());
         assert!(registry.get_parser("udp").is_some());
         assert!(registry.get_parser("unknown").is_none());
+    }
+
+    /// The candidate lists choose what a scan of every parser chooses, for
+    /// contexts built from each parent's hint keys with values that select
+    /// the various children (ethertypes, IP protocols, well-known ports).
+    #[test]
+    fn candidate_lists_match_a_full_scan() {
+        let registry = crate::protocol::default_registry();
+        let values: [u64; 24] = [
+            0, 1, 2, 4, 6, 17, 41, 47, 50, 51, 58, 89, 22, 53, 67, 68, 123, 179, 443, 2152, 4789,
+            0x0800, 0x86dd, 0x8100,
+        ];
+        let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut matched = 0;
+        for (parent_index, parent) in registry.all_parsers().enumerate() {
+            let keys = parent
+                .child_hint_keys()
+                .expect("built-ins declare their hints");
+            for _ in 0..2000 {
+                let mut ctx = ParseContext::new(1);
+                ctx.parent_protocol = Some(parent.name());
+                for key in keys {
+                    if next() % 4 != 0 {
+                        let value = values[(next() % values.len() as u64) as usize];
+                        ctx.insert_hint(key, value);
+                    }
+                }
+                let indexed = registry.find_next(Some(parent_index), &ctx).map(|(i, _)| i);
+                assert_eq!(
+                    indexed,
+                    registry.find_index(&ctx),
+                    "after {}",
+                    parent.name()
+                );
+                matched += indexed.is_some() as usize;
+            }
+        }
+        assert!(matched > 1000, "the contexts should select children");
+        for link_type in [0u16, 1, 113, 253, 276] {
+            let ctx = ParseContext::new(link_type);
+            let indexed = registry.find_next(None, &ctx).map(|(i, _)| i);
+            assert_eq!(indexed, registry.find_index(&ctx), "link type {link_type}");
+        }
+        // The point of the lists: few candidates per layer.
+        let after_ethernet = &registry.child_candidates[0];
+        assert!(after_ethernet.len() < registry.len() / 2);
     }
 
     /// No parser claims a transport payload from its ports alone with a

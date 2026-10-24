@@ -17,7 +17,7 @@ use compact_str::CompactString;
 use smallvec::SmallVec;
 
 use super::ethernet::ethertype;
-use super::{FieldValue, ParseContext, ParseResult, Protocol};
+use super::{FieldValue, ParseContext, ParseGate, ParseResult, Protocol};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// EtherType for MPLS Unicast.
@@ -76,6 +76,14 @@ impl Protocol for MplsProtocol {
 
     fn display_name(&self) -> &'static str {
         "MPLS"
+    }
+
+    fn parse_gates(&self) -> &'static [ParseGate] {
+        &[ParseGate::Hint("ethertype")]
+    }
+
+    fn child_hint_keys(&self) -> Option<&'static [&'static str]> {
+        Some(&["ethertype", "ip_version"])
     }
 
     fn can_parse(&self, context: &ParseContext) -> Option<u32> {

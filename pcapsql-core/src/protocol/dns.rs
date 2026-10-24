@@ -1,12 +1,10 @@
 //! DNS protocol parser using simple-dns library.
 
-use std::collections::HashSet;
-
 use compact_str::CompactString;
 use simple_dns::{rdata::RData, Packet, PacketFlag, OPCODE, RCODE};
 use smallvec::SmallVec;
 
-use super::{FieldValue, ParseContext, ParseResult, Protocol};
+use super::{FieldSet, FieldValue, ParseContext, ParseGate, ParseResult, Protocol};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// DNS well-known port.
@@ -45,6 +43,14 @@ impl Protocol for DnsProtocol {
 
     fn display_name(&self) -> &'static str {
         "DNS"
+    }
+
+    fn parse_gates(&self) -> &'static [ParseGate] {
+        &[ParseGate::Hint("transport")]
+    }
+
+    fn child_hint_keys(&self) -> Option<&'static [&'static str]> {
+        Some(&[])
     }
 
     fn can_parse(&self, context: &ParseContext) -> Option<u32> {
@@ -153,7 +159,7 @@ impl Protocol for DnsProtocol {
         &self,
         data: &'a [u8],
         context: &ParseContext,
-        requested_fields: Option<&HashSet<String>>,
+        requested_fields: Option<&FieldSet>,
     ) -> ParseResult<'a> {
         // If no projection, use full parse
         let requested = match requested_fields {
@@ -175,10 +181,10 @@ impl Protocol for DnsProtocol {
         let mut fields = SmallVec::new();
 
         // Check which field categories are needed
-        let need_header = requested.iter().any(|f| is_header_field(f));
-        let need_question = requested.iter().any(|f| is_question_field(f));
-        let need_answers = requested.iter().any(|f| is_answer_field(f));
-        let need_edns = requested.iter().any(|f| is_edns_field(f));
+        let need_header = requested.iter().any(is_header_field);
+        let need_question = requested.iter().any(is_question_field);
+        let need_answers = requested.iter().any(is_answer_field);
+        let need_edns = requested.iter().any(is_edns_field);
 
         if need_header {
             extract_header_fields_projected(&packet, &mut fields, requested);
@@ -352,7 +358,7 @@ fn extract_header_fields(packet: &Packet, fields: &mut SmallVec<[(&'static str, 
 fn extract_header_fields_projected(
     packet: &Packet,
     fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
-    requested: &HashSet<String>,
+    requested: &FieldSet,
 ) {
     if requested.contains("transaction_id") {
         fields.push(("transaction_id", FieldValue::UInt16(packet.id())));
@@ -445,7 +451,7 @@ fn extract_question_fields(
 fn extract_question_fields_projected(
     packet: &Packet,
     fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
-    requested: &HashSet<String>,
+    requested: &FieldSet,
 ) {
     if let Some(question) = packet.questions.first() {
         if requested.contains("query_name") {
@@ -521,7 +527,7 @@ fn extract_answer_fields(packet: &Packet, fields: &mut SmallVec<[(&'static str, 
 fn extract_answer_fields_projected(
     packet: &Packet,
     fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
-    requested: &HashSet<String>,
+    requested: &FieldSet,
 ) {
     let need_ip4s = requested.contains("answer_ip4s");
     let need_ip6s = requested.contains("answer_ip6s");
@@ -596,7 +602,7 @@ fn extract_edns_fields(packet: &Packet, fields: &mut SmallVec<[(&'static str, Fi
 fn extract_edns_fields_projected(
     packet: &Packet,
     fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
-    requested: &HashSet<String>,
+    requested: &FieldSet,
 ) {
     let has_edns = packet.opt().is_some();
 
@@ -891,7 +897,7 @@ mod tests {
         );
 
         // Projection goes through the same prefix handling.
-        let fields: HashSet<String> = ["transaction_id"].iter().map(|s| s.to_string()).collect();
+        let fields: FieldSet = ["transaction_id"].iter().map(|s| s.to_string()).collect();
         let projected = parser.parse_projected(&segment, &tcp, Some(&fields));
         assert!(projected.is_ok(), "{:?}", projected.error);
         assert_eq!(
@@ -957,7 +963,7 @@ mod tests {
         context.insert_hint("dst_port", 53);
 
         // Only request header fields - skip expensive parsing
-        let fields: HashSet<String> = ["transaction_id", "is_query", "response_code"]
+        let fields: FieldSet = ["transaction_id", "is_query", "response_code"]
             .iter()
             .map(|s| s.to_string())
             .collect();
