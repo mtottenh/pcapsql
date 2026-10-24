@@ -64,6 +64,7 @@ impl RowBuilder {
 
 /// Per-table build state within one parse pass.
 struct TableSlot {
+    name: String,
     builder: RowBuilder,
     sink: BatchSink,
     predicate: Option<FilterEvaluator>,
@@ -103,9 +104,18 @@ impl TableSlot {
 /// let batches = batch_set.finish()?;
 /// ```
 pub struct NormalizedBatchSet {
-    slots: HashMap<String, TableSlot>,
-    /// The slots that are fused joins, fed after the protocol tables.
-    fused: Vec<String>,
+    /// Every subscribed table. Indexed rather than keyed by name: a packet
+    /// touches several of them, and resolving names per packet showed up
+    /// in profiles.
+    slots: Vec<TableSlot>,
+    /// Index of the `frames` slot, if subscribed.
+    frames: Option<usize>,
+    /// Indices of the slots that are fused joins (in name order), fed after
+    /// the protocol tables.
+    fused: Vec<usize>,
+    /// The slot (if any) for each layer name seen so far. Layer names are
+    /// the parsers' `&'static str`s, so a pointer compare finds the entry.
+    layer_slots: Vec<(&'static str, Option<usize>)>,
     /// Streaming only: wakes the producer when a consumer takes a batch.
     pacer: Option<Arc<Pacer>>,
 }
@@ -143,52 +153,67 @@ impl NormalizedBatchSet {
         subscription: &ParseSubscription,
         mut sink_for: impl FnMut(&str) -> BatchSink,
     ) -> Result<Self, Error> {
-        let mut slots =
-            HashMap::with_capacity(subscription.tables.len() + subscription.fused.len());
+        let mut slots = Vec::with_capacity(subscription.tables.len() + subscription.fused.len());
         for (name, sub) in &subscription.tables {
             let schema = subscription.table_schema(name).ok_or_else(|| {
                 Error::Query(QueryError::Execution(format!("Unknown table: {name}")))
             })?;
-            slots.insert(
-                name.clone(),
-                TableSlot {
-                    builder: RowBuilder::Protocol(ProtocolBatchBuilder::with_schema(
-                        name.clone(),
-                        schema,
-                        batch_size,
-                    )),
-                    sink: sink_for(name),
-                    predicate: sub.predicate.clone(),
-                    fetch: sub.fetch,
-                    rows_added: 0,
-                    consumer_gone: false,
-                },
-            );
+            slots.push(TableSlot {
+                name: name.clone(),
+                builder: RowBuilder::Protocol(ProtocolBatchBuilder::with_schema(
+                    name.clone(),
+                    schema,
+                    batch_size,
+                )),
+                sink: sink_for(name),
+                predicate: sub.predicate.clone(),
+                fetch: sub.fetch,
+                rows_added: 0,
+                consumer_gone: false,
+            });
         }
-        let mut fused: Vec<String> = subscription.fused.keys().cloned().collect();
-        fused.sort();
-        for name in &fused {
+        let mut fused_names: Vec<&String> = subscription.fused.keys().collect();
+        fused_names.sort();
+        let mut fused = Vec::with_capacity(fused_names.len());
+        for name in fused_names {
             let sub = &subscription.fused[name];
-            slots.insert(
-                name.clone(),
-                TableSlot {
-                    builder: RowBuilder::Fused(FusedBatchBuilder::new(
-                        Arc::clone(&sub.spec),
-                        batch_size,
-                    )),
-                    sink: sink_for(name),
-                    predicate: None,
-                    fetch: sub.fetch,
-                    rows_added: 0,
-                    consumer_gone: false,
-                },
-            );
+            fused.push(slots.len());
+            slots.push(TableSlot {
+                name: name.clone(),
+                builder: RowBuilder::Fused(FusedBatchBuilder::new(
+                    Arc::clone(&sub.spec),
+                    batch_size,
+                )),
+                sink: sink_for(name),
+                predicate: None,
+                fetch: sub.fetch,
+                rows_added: 0,
+                consumer_gone: false,
+            });
         }
+        let frames = slots.iter().position(|s| s.name == "frames");
         Ok(Self {
             slots,
+            frames,
             fused,
+            layer_slots: Vec::new(),
             pacer: None,
         })
+    }
+
+    /// The slot of the table a parsed layer named `layer` goes to.
+    #[inline]
+    fn slot_for_layer(&mut self, layer: &'static str) -> Option<usize> {
+        if let Some((_, slot)) = self
+            .layer_slots
+            .iter()
+            .find(|(name, _)| std::ptr::eq(*name, layer))
+        {
+            return *slot;
+        }
+        let slot = self.slots.iter().position(|s| s.name == layer);
+        self.layer_slots.push((layer, slot));
+        slot
     }
 
     /// Streaming: the producer may proceed with a batch for `name` when that
@@ -196,16 +221,16 @@ impl NormalizedBatchSet {
     /// consumer is parked waiting on some *other* live streamed table — it
     /// will not poll this one until that table is complete (hash-join build
     /// side, sort input), so waiting here would deadlock.
-    fn may_proceed(slots: &HashMap<String, TableSlot>, name: &str) -> bool {
-        let this = match &slots[name].sink {
+    fn may_proceed(slots: &[TableSlot], index: usize) -> bool {
+        let this = match &slots[index].sink {
             BatchSink::Stream(tx) => tx,
             BatchSink::Accumulate(_) => return true,
         };
         if this.consumer_gone() || !this.is_backlogged() {
             return true;
         }
-        slots.iter().any(|(other, slot)| {
-            other != name
+        slots.iter().enumerate().any(|(other, slot)| {
+            other != index
                 && matches!(&slot.sink, BatchSink::Stream(tx) if !tx.consumer_gone() && tx.consumer_waiting())
         })
     }
@@ -216,14 +241,14 @@ impl NormalizedBatchSet {
     /// for it. Otherwise the batch is offered and, if the channel is still
     /// full, goes to the table's accounted overflow queue rather than
     /// stalling the pass.
-    fn deliver(&mut self, name: &str, batch: RecordBatch) {
+    fn deliver(&mut self, index: usize, batch: RecordBatch) {
         if let Some(pacer) = &self.pacer {
-            if !Self::may_proceed(&self.slots, name) {
+            if !Self::may_proceed(&self.slots, index) {
                 let slots = &self.slots;
-                pacer.wait_until(|| Self::may_proceed(slots, name));
+                pacer.wait_until(|| Self::may_proceed(slots, index));
             }
         }
-        self.slots.get_mut(name).expect("table slot").emit(batch);
+        self.slots[index].emit(batch);
     }
 
     /// Add a packet to the subscribed tables.
@@ -238,7 +263,8 @@ impl NormalizedBatchSet {
         let frame_number = packet.frame_number;
 
         // The frames table is fed from packet metadata, not parse results.
-        if let Some(slot) = self.slots.get_mut("frames") {
+        if let Some(index) = self.frames {
+            let slot = &mut self.slots[index];
             // Predicates on frames are never pushed down (metadata fields are
             // not parse fields); only the row cap applies.
             if !slot.done() {
@@ -263,14 +289,15 @@ impl NormalizedBatchSet {
                     slot.builder.try_build()?
                 };
                 if let Some(batch) = batch {
-                    self.deliver("frames", batch);
+                    self.deliver(index, batch);
                 }
             }
         }
 
         // Route each parsed protocol layer to its table, if subscribed.
         for (proto_name, result) in parsed {
-            if let Some(slot) = self.slots.get_mut(*proto_name) {
+            if let Some(index) = self.slot_for_layer(proto_name) {
+                let slot = &mut self.slots[index];
                 if slot.done() {
                     continue;
                 }
@@ -291,15 +318,15 @@ impl NormalizedBatchSet {
                     slot.builder.try_build()?
                 };
                 if let Some(batch) = batch {
-                    self.deliver(proto_name, batch);
+                    self.deliver(index, batch);
                 }
             }
         }
 
         // Fused joins: the frame's joined rows, from the same layers.
         for i in 0..self.fused.len() {
-            let name = &self.fused[i];
-            let slot = self.slots.get_mut(name).expect("fused slot");
+            let index = self.fused[i];
+            let slot = &mut self.slots[index];
             if slot.done() {
                 continue;
             }
@@ -317,8 +344,7 @@ impl NormalizedBatchSet {
                 slot.builder.try_build()?
             };
             if let Some(batch) = batch {
-                let name = self.fused[i].clone();
-                self.deliver(&name, batch);
+                self.deliver(index, batch);
             }
         }
 
@@ -329,16 +355,16 @@ impl NormalizedBatchSet {
     /// continuous engine's time-based flush), leaving the builders empty.
     pub fn flush_partial(&mut self) -> Result<(), Error> {
         let mut pending = Vec::new();
-        for (name, slot) in self.slots.iter_mut() {
+        for (index, slot) in self.slots.iter_mut().enumerate() {
             if slot.done() {
                 continue;
             }
             if let Some(batch) = slot.builder.finish()? {
-                pending.push((name.clone(), batch));
+                pending.push((index, batch));
             }
         }
-        for (name, batch) in pending {
-            self.deliver(&name, batch);
+        for (index, batch) in pending {
+            self.deliver(index, batch);
         }
         Ok(())
     }
@@ -349,7 +375,7 @@ impl NormalizedBatchSet {
     /// above a filter that could not be pushed to the scan — or was cancelled.
     /// The parse loop can stop reading the source.
     pub fn all_capped(&self) -> bool {
-        !self.slots.is_empty() && self.slots.values().all(TableSlot::done)
+        !self.slots.is_empty() && self.slots.iter().all(TableSlot::done)
     }
 
     /// Finish building. Flushes each table's final partial batch into its
@@ -381,18 +407,18 @@ impl NormalizedBatchSet {
     > {
         let mut out = HashMap::with_capacity(self.slots.len());
         let mut overflowed = HashMap::new();
-        for (name, mut slot) in self.slots {
+        for mut slot in self.slots {
             if let Some(batch) = slot.builder.finish()? {
                 slot.emit(batch);
             }
             let batches = match slot.sink {
                 BatchSink::Accumulate(v) => v,
                 BatchSink::Stream(tx) => {
-                    overflowed.insert(name.clone(), tx.finish());
+                    overflowed.insert(slot.name.clone(), tx.finish());
                     Vec::new()
                 }
             };
-            out.insert(name, batches);
+            out.insert(slot.name, batches);
         }
         Ok((out, overflowed))
     }
@@ -400,7 +426,8 @@ impl NormalizedBatchSet {
     /// Rows added to a table so far (pending and built).
     pub fn row_count(&self, table_name: &str) -> usize {
         self.slots
-            .get(table_name)
+            .iter()
+            .find(|s| s.name == table_name)
             .map(|s| s.rows_added)
             .unwrap_or(0)
     }
