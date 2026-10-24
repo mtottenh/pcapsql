@@ -90,10 +90,7 @@ impl ScalarUDFImpl for StrftimeUdf {
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
         let args = ColumnarValue::values_to_arrays(&args.args)?;
 
-        let format_array = args[0]
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .expect("strftime: expected string format");
+        let format_array = super::string_arg(&args[0], "strftime")?;
 
         let timestamps = args[1]
             .as_any()

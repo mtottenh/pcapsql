@@ -140,7 +140,7 @@ fn index_cache_path(location: &CloudLocation) -> Option<PathBuf> {
     index_cache_dir().map(|d| d.join(format!("{:016x}.idx", index::header_hash(key.as_bytes()))))
 }
 use super::index::{self, BoundaryIndex};
-use super::source::synth_header_for;
+use super::source::{starts_at_header, synth_header_for};
 use crate::io::{
     decompress_header, Compression, DecompressReader, GenericPcapReader, PacketPosition,
     PacketRange, PacketReader, PacketRef, PacketSource, PacketSourceMetadata, PcapFormat, SeekCost,
@@ -394,7 +394,7 @@ impl ObjectStoreReader {
         let store = location.build_store()?;
         let path = location.object_path();
         let handle = saveable_handle();
-        let (object_size, _) = head_object(&store, &path, handle.as_ref())?;
+        let object_size = head_object(&store, &path, handle.as_ref())?.size;
         Ok(Self::new(
             store,
             path,
@@ -527,12 +527,21 @@ impl ObjectStoreReader {
     }
 }
 
-/// HEAD an object: `(size, last_modified)`.
+/// What a HEAD request tells us about an object.
+struct ObjectHead {
+    size: u64,
+    last_modified: Option<SystemTime>,
+    /// Entity tag, when the store reports one. Together with `last_modified`
+    /// (one-second granularity) it guards the cached boundary index.
+    e_tag: Option<String>,
+}
+
+/// HEAD an object.
 fn head_object(
     store: &Arc<dyn ObjectStore>,
     path: &ObjectPath,
     handle: Option<&Handle>,
-) -> Result<(u64, Option<SystemTime>), Error> {
+) -> Result<ObjectHead, Error> {
     let store = Arc::clone(store);
     let path = path.clone();
     run_async(handle, async move {
@@ -542,10 +551,11 @@ fn head_object(
                 format!("Failed to HEAD cloud object: {e}"),
             ))
         })?;
-        Ok::<(u64, Option<SystemTime>), Error>((
-            meta.size as u64,
-            Some(SystemTime::from(meta.last_modified)),
-        ))
+        Ok::<ObjectHead, Error>(ObjectHead {
+            size: meta.size as u64,
+            last_modified: Some(SystemTime::from(meta.last_modified)),
+            e_tag: meta.e_tag,
+        })
     })
 }
 
@@ -595,6 +605,8 @@ pub struct CloudPacketSource {
     object_size: u64,
     /// Object last-modified time from HEAD (validity guard for the cached index).
     last_modified: Option<SystemTime>,
+    /// Object entity tag from HEAD (validity guard for the cached index).
+    e_tag: Option<String>,
     metadata: PacketSourceMetadata,
     compression: Compression,
     pcap_format: PcapFormat,
@@ -627,8 +639,16 @@ impl CloudPacketSource {
         let handle = saveable_handle();
         let fetched = Arc::new(AtomicU64::new(0));
 
-        // 1. HEAD request to get object size (and last-modified for the index cache)
-        let (object_size, last_modified) = head_object(&store, &path, handle.as_ref())?;
+        // 1. HEAD request: object size, plus last-modified and e-tag for the
+        //    index cache's validity guard.
+        let ObjectHead {
+            size: object_size,
+            last_modified,
+            e_tag,
+        } = head_object(&store, &path, handle.as_ref())?;
+        // The index cache stores e-tags up to a fixed length; an absurd one
+        // is dropped here so the guard compares absent with absent.
+        let e_tag = e_tag.filter(|t| t.len() <= index::MAX_ETAG_BYTES);
 
         if object_size < 24 {
             return Err(Error::Io(io::Error::new(
@@ -668,10 +688,10 @@ impl CloudPacketSource {
         // 3. Detect compression from header bytes (in-memory, no HTTP)
         let compression = Compression::detect(&header_bytes);
 
-        // 4. Get decompressed header for PCAP parsing (in-memory, no HTTP)
-        // Need at least 24 bytes for PCAP header, add margin for safety
-        const PCAP_HEADER_SIZE: usize = 256;
-        let decompressed_header = decompress_header(&header_bytes, compression, PCAP_HEADER_SIZE)
+        // 4. Get decompressed header for PCAP parsing (in-memory, no HTTP).
+        //    The whole fetched prefix is decompressed so the pcapng IDB walk
+        //    below sees as far as the fetch did.
+        let decompressed_header = decompress_header(&header_bytes, compression, HEADER_READ_SIZE)
             .map_err(|e| {
             Error::Io(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -713,6 +733,7 @@ impl CloudPacketSource {
             path,
             object_size,
             last_modified,
+            e_tag,
             metadata,
             compression,
             pcap_format,
@@ -753,7 +774,7 @@ impl CloudPacketSource {
     ///
     /// Building needs one full sequential read of the object, so the result is
     /// cached on local disk (see the module docs) and validated against the
-    /// object's size, last-modified time and header hash before reuse.
+    /// object's size, last-modified time, e-tag and header hash before reuse.
     /// Subsequent partition reads use exact offsets from the index.
     fn ensure_index(&self) -> Result<Arc<BoundaryIndex>, Error> {
         if self.compression.is_compressed() {
@@ -773,7 +794,12 @@ impl CloudPacketSource {
             .and_then(|p| BoundaryIndex::read_sidecar(p).ok())
         {
             if cached.stride == self.index_stride
-                && cached.is_valid_for(self.object_size, self.last_modified, self.header_hash)
+                && cached.matches_source(
+                    self.object_size,
+                    self.last_modified,
+                    self.header_hash,
+                    self.e_tag.as_deref(),
+                )
             {
                 let idx = Arc::new(cached);
                 *guard = Some(idx.clone());
@@ -782,7 +808,7 @@ impl CloudPacketSource {
         }
 
         let reader = self.raw_reader(0, None);
-        let idx = index::build_boundary_index(
+        let mut idx = index::build_boundary_index(
             reader,
             self.pcap_format,
             self.index_stride,
@@ -790,6 +816,9 @@ impl CloudPacketSource {
             self.last_modified,
             self.header_hash,
         )?;
+        idx.source_etag = self.e_tag.clone();
+        // Always persisted (unlike local files): rebuilding means another
+        // full read of the object over the network.
         if let Some(p) = cache_path.as_deref() {
             // Best effort: a missing or read-only cache dir just means no reuse.
             if let Some(dir) = p.parent() {
@@ -840,104 +869,68 @@ impl CloudPacketSource {
         }
     }
 
-    /// Parse link type from PCAPNG header bytes.
+    /// Parse the first interface's link type from the leading PCAPNG bytes.
     ///
-    /// PCAPNG structure:
-    /// - Section Header Block (SHB): 28+ bytes
-    /// - Interface Description Block (IDB): contains link type at offset 8
+    /// Walks the blocks after the Section Header Block until the first
+    /// Interface Description Block, skipping anything else (comments, name
+    /// resolution, custom blocks). When no IDB lies within the fetched prefix
+    /// (`HEADER_READ_SIZE`), the link type defaults to Ethernet like a local
+    /// pcapng source: the per-packet link type the readers report comes from
+    /// the real IDBs anyway, this value is only the source-level hint.
     fn parse_pcapng_link_type(header: &[u8]) -> Result<u32, Error> {
-        // Minimum size: SHB (28 bytes) + IDB header (12 bytes) = 40 bytes
-        if header.len() < 40 {
+        // Minimum size: SHB (28 bytes) up to and including its byte-order magic.
+        if header.len() < 12 {
             return Err(Error::Io(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "Header too small for PCAPNG link type",
+                "Header too small for PCAPNG section header",
             )));
         }
-
-        // SHB structure:
-        // - Block Type (4): 0x0A0D0D0A
-        // - Block Total Length (4)
-        // - Byte-Order Magic (4): 0x1A2B3C4D
-        // - Major Version (2)
-        // - Minor Version (2)
-        // - Section Length (8)
-        // - Options (variable)
-        // - Block Total Length (4)
 
         // Detect endianness from the Byte-Order Magic at offset 8 by matching
         // the raw on-disk byte pattern (host byte order must not matter).
         let bom = [header[8], header[9], header[10], header[11]];
         let is_le = bom == [0x4D, 0x3C, 0x2B, 0x1A];
         let is_be = bom == [0x1A, 0x2B, 0x3C, 0x4D];
-
         if !is_le && !is_be {
             return Err(Error::Io(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("Invalid PCAPNG byte-order magic: {bom:02x?}"),
             )));
         }
-
-        // Read SHB block total length to find where IDB starts
-        let shb_len = if is_le {
-            u32::from_le_bytes([header[4], header[5], header[6], header[7]])
-        } else {
-            u32::from_be_bytes([header[4], header[5], header[6], header[7]])
-        } as usize;
-
-        // IDB starts after SHB
-        let idb_start = shb_len;
-        if header.len() < idb_start + 12 {
-            return Err(Error::Io(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "Header too small for IDB: {} bytes (need {})",
-                    header.len(),
-                    idb_start + 12
-                ),
-            )));
-        }
-
-        // Verify IDB block type (0x00000001)
-        let idb_type = if is_le {
-            u32::from_le_bytes([
-                header[idb_start],
-                header[idb_start + 1],
-                header[idb_start + 2],
-                header[idb_start + 3],
-            ])
-        } else {
-            u32::from_be_bytes([
-                header[idb_start],
-                header[idb_start + 1],
-                header[idb_start + 2],
-                header[idb_start + 3],
-            ])
+        let u32_at = |off: usize| -> Option<u32> {
+            let b = header.get(off..off + 4)?;
+            let b = [b[0], b[1], b[2], b[3]];
+            Some(if is_le {
+                u32::from_le_bytes(b)
+            } else {
+                u32::from_be_bytes(b)
+            })
         };
 
-        if idb_type != 1 {
-            return Err(Error::Io(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("Expected IDB block type 1, got {idb_type} at offset {idb_start}"),
-            )));
+        // Walk block by block: type (4), total length (4), body, length (4).
+        let mut off = 0usize;
+        while let (Some(block_type), Some(total_len)) = (u32_at(off), u32_at(off + 4)) {
+            let total_len = total_len as usize;
+            if total_len < 12 || !total_len.is_multiple_of(4) {
+                return Err(Error::Io(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Invalid PCAPNG block length {total_len} at offset {off}"),
+                )));
+            }
+            if block_type == 1 {
+                // IDB: link type is the u16 at offset 8 within the block.
+                return match header.get(off + 8..off + 10) {
+                    Some(b) => Ok(u32::from(if is_le {
+                        u16::from_le_bytes([b[0], b[1]])
+                    } else {
+                        u16::from_be_bytes([b[0], b[1]])
+                    })),
+                    None => Ok(1),
+                };
+            }
+            off += total_len;
         }
-
-        // IDB structure:
-        // - Block Type (4): 0x00000001
-        // - Block Total Length (4)
-        // - Link Type (2) <-- what we need
-        // - Reserved (2)
-        // - SnapLen (4)
-        // - Options (variable)
-        // - Block Total Length (4)
-
-        // Link type is at offset 8 within IDB (2 bytes)
-        let link_type = if is_le {
-            u16::from_le_bytes([header[idb_start + 8], header[idb_start + 9]]) as u32
-        } else {
-            u16::from_be_bytes([header[idb_start + 8], header[idb_start + 9]]) as u32
-        };
-
-        Ok(link_type)
+        Ok(1)
     }
 
     /// Get the cloud location.
@@ -978,12 +971,16 @@ impl SeekablePacketSource for CloudPacketSource {
     }
 
     fn reader_at(&self, range: &PacketRange) -> Result<Self::Reader, Error> {
-        if self.compression.is_compressed() {
-            return self.sequential_reader();
+        let end_frame = range.end.as_ref().map(|e| e.frame_number);
+        // Compressed input is not splittable, and a range from byte 0 starts
+        // with the real header: both are a sequential read (see `source.rs`).
+        if self.compression.is_compressed() || starts_at_header(range) {
+            let mut reader = self.sequential_reader()?;
+            reader.end_frame = end_frame;
+            return Ok(reader);
         }
         let idx = self.ensure_index()?;
         let header = synth_header_for(&idx, range.start.frame_number, self.pcap_format)?;
-        let end_frame = range.end.as_ref().map(|e| e.frame_number);
         // Fetch only this partition's bytes: [start offset, next partition start).
         let end_offset = range.end.as_ref().map(|e| e.byte_offset);
         CloudPacketReader::at(
@@ -1316,6 +1313,40 @@ mod tests {
 
         let link_type = CloudPacketSource::parse_pcapng_link_type(&header).unwrap();
         assert_eq!(link_type, 1);
+    }
+
+    /// The IDB need not follow the SHB directly: other blocks in between are
+    /// skipped, and a prefix without any IDB yields the Ethernet default.
+    #[test]
+    fn test_parse_pcapng_link_type_skips_other_blocks() {
+        fn block(block_type: u32, body: &[u8]) -> Vec<u8> {
+            let total = (12 + body.len()) as u32;
+            let mut v = block_type.to_le_bytes().to_vec();
+            v.extend_from_slice(&total.to_le_bytes());
+            v.extend_from_slice(body);
+            v.extend_from_slice(&total.to_le_bytes());
+            v
+        }
+        let mut shb_body = vec![0x4d, 0x3c, 0x2b, 0x1a, 1, 0, 0, 0];
+        shb_body.extend_from_slice(&[0xff; 8]);
+        let mut header = block(0x0A0D_0D0A, &shb_body);
+        header.extend(block(0x0BAD, &[0; 16])); // a custom block
+        header.extend(block(4, &[0; 8])); // a name resolution block
+        let mut idb_body = 113u16.to_le_bytes().to_vec(); // LINKTYPE_LINUX_SLL
+        idb_body.extend_from_slice(&[0, 0]);
+        idb_body.extend_from_slice(&65535u32.to_le_bytes());
+        header.extend(block(1, &idb_body));
+        assert_eq!(
+            CloudPacketSource::parse_pcapng_link_type(&header).unwrap(),
+            113
+        );
+
+        // SHB only (IDB beyond the fetched prefix): default, not an error.
+        let shb_only = block(0x0A0D_0D0A, &shb_body);
+        assert_eq!(
+            CloudPacketSource::parse_pcapng_link_type(&shb_only).unwrap(),
+            1
+        );
     }
 
     #[test]

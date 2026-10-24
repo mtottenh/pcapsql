@@ -57,7 +57,7 @@ struct DnsTypeNameUdf {
 impl DnsTypeNameUdf {
     fn new() -> Self {
         Self {
-            signature: Signature::exact(vec![DataType::UInt16], Volatility::Immutable),
+            signature: super::coercible_signature(&[DataType::UInt16], Volatility::Immutable),
         }
     }
 }
@@ -165,7 +165,7 @@ struct DnsRcodeNameUdf {
 impl DnsRcodeNameUdf {
     fn new() -> Self {
         Self {
-            signature: Signature::exact(vec![DataType::UInt8], Volatility::Immutable),
+            signature: super::coercible_signature(&[DataType::UInt8], Volatility::Immutable),
         }
     }
 }
@@ -242,7 +242,7 @@ struct DnsClassNameUdf {
 impl DnsClassNameUdf {
     fn new() -> Self {
         Self {
-            signature: Signature::exact(vec![DataType::UInt16], Volatility::Immutable),
+            signature: super::coercible_signature(&[DataType::UInt16], Volatility::Immutable),
         }
     }
 }

@@ -23,9 +23,10 @@ pub enum ReplCommand {
     /// Export query results to file
     /// First String is filename, second is optional SQL query
     Export(String, Option<String>),
-    /// Show cache statistics
+    /// Show the table cache (tables held, columns, rows) and the last
+    /// query's parse statistics
     CacheStats,
-    /// Reset cache statistics counters
+    /// Clear the table cache
     CacheStatsReset,
     /// Show capture time information
     TimeInfo,

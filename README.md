@@ -143,7 +143,8 @@ SELECT * FROM ipv4 WHERE tunnel_type = 'vxlan';
 | `tls` | TLS records and handshakes |
 | `tcp_connections`, `tls_sessions`, `http_messages` | Reassembled TCP streams: one row per connection, TLS handshake, HTTP/1.x message |
 | `http2` | HTTP/2 frames (requires TLS decryption) |
-| `vxlan`, `gre`, `mpls`, `gtp` | Tunnel headers |
+| `vxlan`, `gre`, `gtp`, `ipsec` | Tunnel headers (inner layers get `encap_depth` > 0 and a `tunnel_type`) |
+| `mpls` | Label stacks (label switching, not counted as a tunnel) |
 | `bgp`, `ospf` | Routing protocols |
 
 ## SQL Functions (UDFs)
@@ -174,6 +175,10 @@ pcapsql provides specialized functions for network analysis. Run `pcapsql --list
 | `icmp_type_name(type)` | ICMP type to name |
 | `ip_proto_name(proto)` | IP protocol number to name (TCP, UDP, etc.) |
 | `ethertype_name(type)` | EtherType to name (IPv4, ARP, etc.) |
+
+Integer parameters take any integer column or literal (`dscp_name(46)`); a
+value outside the parameter's range (`dscp_name(300)`) is a cast error, not a
+wrapped lookup. String parameters take any string type.
 
 ### DateTime Functions
 

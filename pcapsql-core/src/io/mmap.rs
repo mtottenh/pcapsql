@@ -27,7 +27,7 @@ use crate::error::{Error, PcapError};
 use super::decompress::{Compression, DecompressReader, MmapSlice};
 use super::index::{self, BoundaryIndex};
 use super::pcap_stream::{GenericPcapReader, PcapFormat};
-use super::source::synth_header_for;
+use super::source::{starts_at_header, synth_header_for};
 use super::{
     PacketPosition, PacketRange, PacketReader, PacketRef, PacketSource, PacketSourceMetadata,
     SeekCost, SeekablePacketSource,
@@ -222,7 +222,13 @@ impl MmapPacketSource {
             self.source_mtime,
             self.header_hash,
         )?;
-        let _ = idx.write_sidecar(&sidecar);
+        if idx.worth_persisting() {
+            let _ = idx.write_sidecar(&sidecar);
+        } else {
+            // See `FilePacketSource::ensure_index`: no sidecar for small
+            // files, and a stale one is cleaned up.
+            let _ = std::fs::remove_file(&sidecar);
+        }
         let idx = Arc::new(idx);
         *guard = Some(idx.clone());
         Ok(idx)
@@ -268,12 +274,16 @@ impl SeekablePacketSource for MmapPacketSource {
     }
 
     fn reader_at(&self, range: &PacketRange) -> Result<Self::Reader, Error> {
-        if self.compression.is_compressed() {
-            return self.sequential_reader();
+        let end_frame = range.end.as_ref().map(|e| e.frame_number);
+        // Compressed input is not splittable, and a range from byte 0 starts
+        // with the real header: both are a sequential read (see `source.rs`).
+        if self.compression.is_compressed() || starts_at_header(range) {
+            let mut reader = self.sequential_reader()?;
+            reader.end_frame = end_frame;
+            return Ok(reader);
         }
         let idx = self.ensure_index()?;
         let header = synth_header_for(&idx, range.start.frame_number, self.pcap_format)?;
-        let end_frame = range.end.as_ref().map(|e| e.frame_number);
         MmapPacketReader::at(
             self.mmap.clone(),
             self.pcap_format,

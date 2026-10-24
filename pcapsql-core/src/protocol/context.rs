@@ -25,7 +25,8 @@ pub enum TunnelType {
     Gre = 2,
     /// GTP (GPRS Tunneling Protocol) encapsulation.
     Gtp = 3,
-    /// MPLS encapsulation.
+    /// MPLS. Kept for the numbering and `as_str()`, but never produced: an
+    /// MPLS label stack is not treated as a tunnel (see the `mpls` module).
     Mpls = 4,
     /// IPv4-in-IPv4 encapsulation (IP protocol 4 in IPv4).
     IpInIp = 5,

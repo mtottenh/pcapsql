@@ -243,7 +243,20 @@ impl ParseScope {
 /// returned — they may be needed for joins.
 ///
 /// For tunneled traffic, encapsulation depth and tunnel context are tracked;
-/// each ParseResult carries encap_depth, tunnel_type, and tunnel_id.
+/// each ParseResult carries encap_depth, tunnel_type, and tunnel_id. A tunnel
+/// is a protocol that carries a whole inner packet (VXLAN, GRE, GTP, IPsec,
+/// IP-in-IP); MPLS label switching is not one, so an MPLS stack neither
+/// increments `encap_depth` nor sets `tunnel_type` on the layers below it.
+///
+/// # Parse errors
+///
+/// A parser that fails outright (`ParseResult::error`: a truncated or
+/// malformed header, no fields extracted) ends the walk and is *not* part of
+/// the returned layers: a table row with every column NULL would say nothing
+/// about the packet and would still be counted by `count(*)`. A parser that
+/// extracted some fields before failing (`ParseResult::partial`) is kept with
+/// those fields and ends the walk as well. The outer layers that were parsed
+/// successfully are always returned.
 pub fn parse_packet<'a>(
     registry: &ProtocolRegistry,
     link_type: u16,
@@ -308,7 +321,11 @@ pub fn parse_packet<'a>(
         let should_stop = result.error.is_some();
         remaining = result.remaining;
 
-        results.push((name, result));
+        // An error with no fields is not a layer of the packet (see the
+        // function docs); a partial result keeps the fields it got.
+        if result.error.is_none() || !result.fields.is_empty() {
+            results.push((name, result));
+        }
 
         if should_stop {
             break;
@@ -316,6 +333,63 @@ pub fn parse_packet<'a>(
     }
 
     results
+}
+
+#[cfg(test)]
+mod parse_packet_tests {
+    use super::test_utils::{EthernetBuilder, Ipv4Builder, UdpBuilder};
+    use super::*;
+
+    fn udp_frame(dst_port: u16, payload: Vec<u8>) -> Vec<u8> {
+        let udp = UdpBuilder::new()
+            .src_port(40_000)
+            .dst_port(dst_port)
+            .payload(payload)
+            .build();
+        let ip = Ipv4Builder::new().udp().payload(udp).build();
+        EthernetBuilder::new().ipv4().payload(ip).build()
+    }
+
+    /// A parser that fails without extracting anything is not a layer: the
+    /// row it would produce would be all NULL. The layers above it stay.
+    #[test]
+    fn error_only_layer_produces_no_entry() {
+        let registry = default_registry();
+        // Four bytes to the GTP-U port: "GTP header too short".
+        let frame = udp_frame(2152, vec![0x30, 0xff, 0x00, 0x00]);
+        let results = parse_packet(&registry, 1, &frame, &ParseScope::full());
+        let layers: Vec<&str> = results.iter().map(|(n, _)| *n).collect();
+        assert_eq!(layers, ["ethernet", "ipv4", "udp"]);
+        assert!(results.iter().all(|(_, r)| r.error.is_none()));
+
+        // The same packet with a complete header is a gtp layer.
+        let mut gtp = vec![0x30, 0x01, 0x00, 0x00]; // v1, PT=1, Echo Request, len 0
+        gtp.extend_from_slice(&[0, 0, 0, 1]); // TEID
+        let frame = udp_frame(2152, gtp);
+        let results = parse_packet(&registry, 1, &frame, &ParseScope::full());
+        let layers: Vec<&str> = results.iter().map(|(n, _)| *n).collect();
+        assert_eq!(layers, ["ethernet", "ipv4", "udp", "gtp"]);
+    }
+
+    /// A partial result (fields extracted before the failure) is kept, with
+    /// its fields and its error, and ends the walk.
+    #[test]
+    fn partial_layer_is_kept_with_its_fields() {
+        let registry = default_registry();
+        // A DNS header whose question section is truncated: the header
+        // fields are extracted, the question is not.
+        let mut dns = vec![0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0];
+        dns.extend_from_slice(&[0x03, b'w', b'w']); // truncated label
+        let frame = udp_frame(53, dns);
+        let results = parse_packet(&registry, 1, &frame, &ParseScope::full());
+        let (name, dns_layer) = results.last().expect("layers");
+        if *name == "dns" {
+            assert!(!dns_layer.fields.is_empty(), "partial results keep fields");
+        } else {
+            // The DNS parser rejected the packet outright: then no dns layer.
+            assert_eq!(*name, "udp");
+        }
+    }
 }
 
 #[cfg(test)]

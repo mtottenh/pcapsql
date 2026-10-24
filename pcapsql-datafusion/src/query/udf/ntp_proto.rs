@@ -47,7 +47,7 @@ struct NtpModeNameUdf {
 impl NtpModeNameUdf {
     fn new() -> Self {
         Self {
-            signature: Signature::exact(vec![DataType::UInt8], Volatility::Immutable),
+            signature: super::coercible_signature(&[DataType::UInt8], Volatility::Immutable),
         }
     }
 }
@@ -107,7 +107,7 @@ struct NtpStratumNameUdf {
 impl NtpStratumNameUdf {
     fn new() -> Self {
         Self {
-            signature: Signature::exact(vec![DataType::UInt8], Volatility::Immutable),
+            signature: super::coercible_signature(&[DataType::UInt8], Volatility::Immutable),
         }
     }
 }

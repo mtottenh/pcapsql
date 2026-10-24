@@ -4,7 +4,9 @@
 //! - Table providers for all protocol tables
 //! - Cross-layer SQL views
 //! - Network-focused UDFs
-//! - Query engine with streaming support
+//! - Query engine: each query runs one scoped parse pass (parallel across
+//!   partitions for seekable sources), materialized or streamed into the plan
+//!   according to its [`query::RetentionPolicy`]
 //!
 //! ## Quick Start
 //!
@@ -44,7 +46,7 @@
 //! +---------------------------------------------------------------------+
 //! |                        pcapsql-core                                 |
 //! +---------------------------------------------------------------------+
-//! |  Protocol parsing, PCAP reading, TCP reassembly, caching            |
+//! |  Protocol parsing, PCAP reading, boundary index, TCP reassembly     |
 //! +---------------------------------------------------------------------+
 //! ```
 

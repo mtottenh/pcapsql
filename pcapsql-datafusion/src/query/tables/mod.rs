@@ -229,6 +229,153 @@ pub fn normalize_field(field: &Field) -> Field {
 mod tests {
     use super::*;
 
+    /// Parser fields (`proto.field` descriptors) that the protocol's table
+    /// does not expose as a column yet. The builders drop these values; the
+    /// list pins the gap so that a parser field silently falling out of a
+    /// table is caught, and shrinks as columns are added (which changes
+    /// `SELECT *` and therefore the golden snapshots).
+    const NOT_EXPOSED_AS_COLUMNS: &[&str] = &[
+        "mpls.is_reserved_label",
+        "mpls.special_label_name",
+        "ipv6.ext_hop_by_hop",
+        "ipv6.ext_routing",
+        "ipv6.ext_fragment",
+        "ipv6.ext_destination",
+        "ipv6.frag_offset",
+        "ipv6.frag_more",
+        "ipv6.frag_id",
+        "ipv6.routing_type",
+        "ipv6.segments_left",
+        "gre.version_valid",
+        "gre.version_name",
+        "gre.checksum_valid",
+        "gre.header_length",
+        "vxlan.i_flag_valid",
+        "vxlan.flags_valid",
+        "vxlan.inner_frame_length",
+        "gtp.npdu",
+        "gtp.extension_headers",
+        "gtp.extension_header_count",
+        "gtp.piggyback",
+        "gtp.teid_present",
+        "bgp.my_as_4byte",
+        "bgp.capabilities",
+        "bgp.withdrawn_routes",
+        "bgp.withdrawn_count",
+        "bgp.origin",
+        "bgp.origin_name",
+        "bgp.as_path",
+        "bgp.as_path_length",
+        "bgp.next_hop",
+        "bgp.med",
+        "bgp.local_pref",
+        "bgp.atomic_aggregate",
+        "bgp.aggregator_as",
+        "bgp.aggregator_ip",
+        "bgp.nlri",
+        "bgp.nlri_count",
+        "bgp.error_code",
+        "bgp.error_code_name",
+        "bgp.error_subcode",
+        "bgp.afi",
+        "bgp.safi",
+        "ospf.neighbor_count",
+        "ospf.dd_interface_mtu",
+        "ospf.dd_options",
+        "ospf.dd_flags",
+        "ospf.dd_sequence",
+        "ospf.dd_lsa_count",
+        "ospf.lsu_lsa_count",
+        "ospf.lsa_age",
+        "ospf.lsa_type",
+        "ospf.lsa_type_name",
+        "ospf.lsa_id",
+        "ospf.lsa_advertising_router",
+        "ospf.lsa_sequence",
+        "ospf.lsa_ack_count",
+    ];
+
+    /// Every parser field descriptor (`proto.field`) with a column in its
+    /// protocol's table must agree with that column's Arrow type: the
+    /// builders convert each `FieldValue` into the column's type, so a width
+    /// mismatch here is where a parser value would be narrowed (or a pushed
+    /// filter compared at a different width than the stored column). The one
+    /// sanctioned difference is an address: descriptors call it `String`
+    /// (engine-agnostic), the tables store it typed (IPv4 `UInt32`, IPv6
+    /// `FixedSizeBinary(16)`, MAC `FixedSizeBinary(6)`). Fields with no
+    /// column must be listed in `NOT_EXPOSED_AS_COLUMNS`; columns with no
+    /// descriptor (never populated) are errors too.
+    #[test]
+    fn parser_field_descriptors_match_table_schemas() {
+        use crate::query::arrow_schema::to_arrow_type;
+        use pcapsql_core::{default_registry, DataKind, Protocol};
+
+        let registry = default_registry();
+        let mut problems = Vec::new();
+        for parser in registry.all_parsers() {
+            let name = parser.name();
+            let Some(schema) = get_table_schema(name) else {
+                problems.push(format!("{name}: parser has no table schema"));
+                continue;
+            };
+            let descriptors = parser.schema_fields();
+            for fd in &descriptors {
+                let column = strip_protocol_prefix(fd.name);
+                match schema.field_with_name(column) {
+                    Err(_) => {
+                        if !NOT_EXPOSED_AS_COLUMNS.contains(&fd.name) {
+                            problems.push(format!(
+                                "{name}.{column}: no such table column (add it, or list it \
+                                 in NOT_EXPOSED_AS_COLUMNS)"
+                            ));
+                        }
+                    }
+                    Ok(field) => {
+                        if NOT_EXPOSED_AS_COLUMNS.contains(&fd.name) {
+                            problems.push(format!(
+                                "{name}.{column}: listed in NOT_EXPOSED_AS_COLUMNS but exposed"
+                            ));
+                        }
+                        let want = to_arrow_type(&fd.kind);
+                        let typed_address = fd.kind == DataKind::String
+                            && matches!(
+                                field.data_type(),
+                                DataType::UInt32
+                                    | DataType::FixedSizeBinary(16)
+                                    | DataType::FixedSizeBinary(6)
+                            );
+                        if field.data_type() != &want && !typed_address {
+                            problems.push(format!(
+                                "{name}.{column}: descriptor {want} vs table column {}",
+                                field.data_type()
+                            ));
+                        }
+                    }
+                }
+            }
+            // Columns the builders fill from the frame or the parse context,
+            // not from a parser field.
+            let engine_columns = ["frame_number", "encap_depth", "tunnel_type", "tunnel_id"];
+            for field in schema.fields() {
+                let column = field.name().as_str();
+                if engine_columns.contains(&column) {
+                    continue;
+                }
+                if !descriptors
+                    .iter()
+                    .any(|fd| strip_protocol_prefix(fd.name) == column)
+                {
+                    problems.push(format!("{name}.{column}: table column has no parser field"));
+                }
+            }
+        }
+        assert!(
+            problems.is_empty(),
+            "descriptor / table schema drift:\n  {}",
+            problems.join("\n  ")
+        );
+    }
+
     #[test]
     fn test_strip_protocol_prefix() {
         assert_eq!(strip_protocol_prefix("dns.query_name"), "query_name");

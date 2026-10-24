@@ -1,11 +1,11 @@
 //! Deterministic PCAP / PCAPNG test-data generator.
 //!
 //! This crate produces byte-exact `.pcap` and `.pcapng` files together with a
-//! *ground-truth* model of every frame they contain. It is foundational test
-//! infrastructure for the parallel-parsing refactor: given the same inputs the
-//! output is byte-identical, and the bytes are guaranteed (by the crate's own
-//! tests) to be parseable by `pcap_parser` 0.15 — the same crate the rest of
-//! the project relies on.
+//! *ground-truth* model of every frame they contain. It is the test
+//! infrastructure behind the reader, boundary-index and partition-equivalence
+//! tests: given the same inputs the output is byte-identical, and the bytes
+//! are guaranteed (by the crate's own tests) to be parseable by `pcap-parser`
+//! — the same crate the rest of the project relies on.
 //!
 //! # Layout responsibilities
 //!
@@ -275,6 +275,7 @@ const EPB_TYPE: u32 = 0x0000_0006;
 const BOM_MAGIC: u32 = 0x1A2B_3C4D;
 /// Option code for `if_tsresol`.
 const OPT_IF_TSRESOL: u16 = 9;
+const OPT_IF_TSOFFSET: u16 = 14;
 /// Option code for `opt_endofopt`.
 const OPT_ENDOFOPT: u16 = 0;
 
@@ -288,6 +289,9 @@ pub struct PcapngInterface {
     /// must implement.
     pub tsresol: u8,
     pub snaplen: u32,
+    /// `if_tsoffset` option (seconds added to every timestamp of this
+    /// interface), written as option 14 when non-zero and absent otherwise.
+    pub if_tsoffset: i64,
 }
 
 /// One packet (Enhanced Packet Block) within a section.
@@ -333,28 +337,46 @@ pub struct PcapngOrderedSection {
     pub blocks: Vec<PcapngBlock>,
 }
 
-/// `10^exp` as a u64 (exp expected to be one of {3,6,9}).
-#[inline]
 /// Decode a PCAPNG `if_tsresol` byte into units per second (decimal or binary).
 ///
 /// Mirrors the pcapng specification: bit 7 clear ⇒ `10^low7`, bit 7 set ⇒
 /// `2^low7`. This is the ground-truth definition the reader is checked against.
-pub fn tsresol_units(tsresol: u8) -> u64 {
+/// `None` for an exponent that does not fit a `u64` (decimal > 19, binary >
+/// 63); such a byte cannot be written by the generator, since no tick count
+/// could be computed for it.
+pub fn try_tsresol_units(tsresol: u8) -> Option<u64> {
     let exp = u32::from(tsresol & 0x7F);
     if tsresol & 0x80 == 0 {
-        10u64.pow(exp)
+        10u64.checked_pow(exp)
     } else {
-        1u64 << exp
+        1u64.checked_shl(exp).filter(|_| exp <= 63)
     }
 }
 
-/// PCAPNG nanosecond formula for a decimal resolution.
+/// [`try_tsresol_units`] for a resolution the generator is about to write.
 ///
-/// `ticks = (ts_high<<32)|ts_low`; `ns = ticks * 1e9 / resolution`.
-/// `ts_offset` is always 0.
+/// # Panics
+///
+/// On an unrepresentable `if_tsresol` byte, with a message naming it: a test
+/// spec asking for one is a bug in the test, not a capture to produce.
+pub fn tsresol_units(tsresol: u8) -> u64 {
+    try_tsresol_units(tsresol).unwrap_or_else(|| {
+        panic!(
+            "if_tsresol {tsresol:#04x} is not representable as units per second \
+             (decimal exponent > 19 or binary exponent > 63)"
+        )
+    })
+}
+
+/// PCAPNG nanosecond formula for an interface.
+///
+/// `ticks = (ts_high<<32)|ts_low`; `ns = ticks * 1e9 / resolution +
+/// if_tsoffset * 1e9`, saturating at the `i64` bounds like the reader does.
 #[inline]
-fn pcapng_ts_ns(ticks: u64, resolution: u64) -> i64 {
-    ((ticks as u128 * 1_000_000_000u128) / resolution as u128) as i64
+fn pcapng_ts_ns(ticks: u64, resolution: u64, if_tsoffset: i64) -> i64 {
+    let ns = ((ticks as u128 * 1_000_000_000u128) / resolution as u128) as i128
+        + i128::from(if_tsoffset) * 1_000_000_000;
+    ns.clamp(i64::MIN as i128, i64::MAX as i128) as i64
 }
 
 /// PCAPNG byte sink with block helpers; writes every multi-byte field in the
@@ -421,7 +443,8 @@ impl NgWriter {
     /// Total length = 4(type) + 4(len) + 8(body: linktype/reserved/snaplen)
     /// + 8(tsresol option, padded) + 4(endofopt) + 4(len) = 32 bytes.
     fn idb(&mut self, iface: &PcapngInterface) {
-        let total: u32 = 32;
+        // 32 bytes with the if_tsresol option; 12 more for if_tsoffset.
+        let total: u32 = if iface.if_tsoffset != 0 { 44 } else { 32 };
         self.u32(IDB_TYPE);
         self.u32(total);
         self.u16(iface.link_type);
@@ -431,6 +454,13 @@ impl NgWriter {
         self.u16(OPT_IF_TSRESOL);
         self.u16(1);
         self.bytes(&[iface.tsresol, 0, 0, 0]);
+        if iface.if_tsoffset != 0 {
+            // if_tsoffset option: code=14, len=8, i64 seconds in the
+            // section's byte order (like every other multi-byte field).
+            self.u16(OPT_IF_TSOFFSET);
+            self.u16(8);
+            self.i64(iface.if_tsoffset);
+        }
         // opt_endofopt: code=0, len=0.
         self.u16(OPT_ENDOFOPT);
         self.u16(0);
@@ -543,7 +573,7 @@ pub fn pcapng_ordered_with_byte_order(
                     frame_number += 1;
                     expected.push(ExpectedFrame {
                         frame_number,
-                        timestamp_ns: pcapng_ts_ns(ticks, resolution),
+                        timestamp_ns: pcapng_ts_ns(ticks, resolution, iface.if_tsoffset),
                         caplen: p.data.len() as u32,
                         origlen: p.origlen,
                         link_type: iface.link_type as u32,
@@ -601,6 +631,9 @@ pub struct CaptureSpec {
     /// pcapng-only: if true, after half a section's packets add another IDB
     /// (tsresol 9) and route later packets to it.
     pub add_interface_midstream: bool,
+    /// pcapng-only: `if_tsoffset` (seconds) written on every interface,
+    /// including the midstream one; 0 writes no option.
+    pub if_tsoffset: i64,
 }
 
 impl Default for CaptureSpec {
@@ -615,6 +648,7 @@ impl Default for CaptureSpec {
             interfaces: vec![6],
             sections: 1,
             add_interface_midstream: false,
+            if_tsoffset: 0,
         }
     }
 }
@@ -715,6 +749,16 @@ fn generate_pcapng(spec: &CaptureSpec, big_endian: bool) -> GeneratedCapture {
     let base = spec.packet_count / spec.sections;
     let extra = spec.packet_count % spec.sections;
 
+    // Frame spacing: see the timestamp comment in the packet loop. The
+    // midstream interface (tsresol 9) is never the coarsest.
+    let min_resolution = spec
+        .interfaces
+        .iter()
+        .map(|&t| tsresol_units(t))
+        .min()
+        .expect("at least one interface");
+    let step_ns: u64 = 1_000_000u64.max(1_000_000_000u64.div_ceil(min_resolution));
+
     let mut sections = Vec::with_capacity(spec.sections);
     let mut global_frame: u64 = 0;
 
@@ -729,6 +773,7 @@ fn generate_pcapng(spec: &CaptureSpec, big_endian: bool) -> GeneratedCapture {
                 link_type: spec.link_type,
                 tsresol,
                 snaplen,
+                if_tsoffset: spec.if_tsoffset,
             })
             .collect();
         let base_len = base_ifaces.len();
@@ -764,6 +809,7 @@ fn generate_pcapng(spec: &CaptureSpec, big_endian: bool) -> GeneratedCapture {
                     link_type: spec.link_type,
                     tsresol: 9,
                     snaplen,
+                    if_tsoffset: spec.if_tsoffset,
                 }));
                 tsresol_by_id.push(9);
                 midstream_declared = true;
@@ -782,16 +828,21 @@ fn generate_pcapng(spec: &CaptureSpec, big_endian: bool) -> GeneratedCapture {
 
             let resolution = tsresol_units(tsresol_by_id[interface_id as usize]);
 
-            // Monotonic timestamps across the whole file: one frame per ~ms.
+            // Monotonic timestamps across the whole file, also across
+            // interfaces of different resolutions: frames are `step_ns`
+            // apart, where the step is one millisecond or one tick of the
+            // coarsest interface in the spec, whichever is longer. Each
+            // interface then truncates the instant to its own resolution
+            // (ticks = floor(t * resolution)), so a frame never decodes to an
+            // earlier time than the frame before it, and consecutive frames
+            // on the same interface differ by at least one tick. The ground
+            // truth is computed from the ticks actually written, so it stays
+            // exact for every resolution.
             let idx = global_frame - 1;
-            let ts_sec = BASE_SEC + idx / 1000;
-            let within_ms = idx % 1000;
-            // fractional units = within_ms milliseconds expressed in this
-            // interface's resolution: ms * (resolution / 1000). For coarse or
-            // binary resolutions this is only approximately a millisecond; the
-            // ground truth is computed from the ticks actually written, so it
-            // stays exact regardless.
-            let ts_frac_units = within_ms * (resolution / 1000);
+            let t_ns = u128::from(BASE_SEC) * 1_000_000_000 + u128::from(idx) * u128::from(step_ns);
+            let ts_sec = (t_ns / 1_000_000_000) as u64;
+            let frac_ns = t_ns % 1_000_000_000;
+            let ts_frac_units = (frac_ns * u128::from(resolution) / 1_000_000_000) as u64;
 
             let origlen = data.len() as u32;
             blocks.push(PcapngBlock::Packet(PcapngPacket {
@@ -1063,28 +1114,36 @@ mod tests {
     fn parse_ng(bytes: &[u8]) -> Vec<ParsedFrame> {
         use pcap_parser::pcapng::Block;
         let mut out = Vec::new();
-        // Per-section interface table: (link_type, resolution).
-        let mut ifaces: Vec<(u32, u64)> = Vec::new();
+        // Per-section interface table: (link_type, resolution, if_tsoffset).
+        let mut ifaces: Vec<(u32, u64, i64)> = Vec::new();
+        let mut big_endian = false;
         let mut reader = PcapNGReader::new(65536, Cursor::new(bytes)).expect("reader");
         loop {
             match reader.next() {
                 Ok((offset, block)) => {
                     if let PcapBlockOwned::NG(ng) = block {
                         match ng {
-                            Block::SectionHeader(_) => {
+                            Block::SectionHeader(shb) => {
                                 ifaces.clear();
+                                big_endian = shb.big_endian();
                             }
                             Block::InterfaceDescription(idb) => {
                                 // Decoded locally: pcap_parser's `ts_resolution()`
-                                // rejects every binary (bit-7) exponent.
+                                // rejects every binary (bit-7) exponent, and it
+                                // reads if_tsoffset little-endian whatever the
+                                // section's byte order.
                                 let res = tsresol_units(idb.if_tsresol);
-                                ifaces.push((idb.linktype.0 as u32, res));
+                                let off = if big_endian {
+                                    idb.if_tsoffset.swap_bytes()
+                                } else {
+                                    idb.if_tsoffset
+                                };
+                                ifaces.push((idb.linktype.0 as u32, res, off));
                             }
                             Block::EnhancedPacket(epb) => {
-                                let (lt, res) = ifaces[epb.if_id as usize];
+                                let (lt, res, off) = ifaces[epb.if_id as usize];
                                 let ticks = ((epb.ts_high as u64) << 32) | (epb.ts_low as u64);
-                                let ts_ns =
-                                    ((ticks as u128 * 1_000_000_000u128) / res as u128) as i64;
+                                let ts_ns = pcapng_ts_ns(ticks, res, off);
                                 out.push(ParsedFrame {
                                     caplen: epb.caplen,
                                     origlen: epb.origlen,
@@ -1181,6 +1240,78 @@ mod tests {
         legacy_pcap(variant, 1, 65535, &packets)
     }
 
+    /// `if_tsoffset` is written in the section's byte order and folded into
+    /// the ground truth; pcap-parser reads it back (with the byte-order
+    /// correction) to the same timestamps, little- and big-endian.
+    #[test]
+    fn pcapng_if_tsoffset_roundtrip_both_byte_orders() {
+        for big_endian in [false, true] {
+            for offset in [1_000i64, -86_400, 1i64 << 40] {
+                let gc = pcapng_with_byte_order(
+                    &[PcapngSection {
+                        interfaces: vec![PcapngInterface {
+                            link_type: 1,
+                            tsresol: 6,
+                            snaplen: 65535,
+                            if_tsoffset: offset,
+                        }],
+                        packets: vec![PcapngPacket {
+                            interface_id: 0,
+                            ts_sec: 100_000,
+                            ts_frac_units: 5,
+                            data: vec![0xAB; 20],
+                            origlen: 20,
+                        }],
+                    }],
+                    big_endian,
+                );
+                let want =
+                    (100_000i128 * 1_000_000_000 + 5_000 + i128::from(offset) * 1_000_000_000)
+                        .clamp(i64::MIN as i128, i64::MAX as i128) as i64;
+                assert_eq!(
+                    gc.expected[0].timestamp_ns, want,
+                    "be={big_endian} off={offset}"
+                );
+                assert_roundtrip(&gc, true);
+            }
+        }
+    }
+
+    #[test]
+    fn tsresol_units_rejects_unrepresentable_exponents() {
+        assert_eq!(try_tsresol_units(6), Some(1_000_000));
+        assert_eq!(try_tsresol_units(19), Some(10u64.pow(19)));
+        assert_eq!(try_tsresol_units(20), None);
+        assert_eq!(try_tsresol_units(0x8A), Some(1024));
+        assert_eq!(try_tsresol_units(0x80 | 63), Some(1u64 << 63));
+        assert_eq!(try_tsresol_units(0xC0), None); // binary exponent 64
+        assert_eq!(try_tsresol_units(0xFF), None);
+        assert!(std::panic::catch_unwind(|| tsresol_units(0xC0)).is_err());
+    }
+
+    /// Coarse resolutions (coarser than a millisecond) and binary
+    /// resolutions still produce strictly increasing ticks within a section,
+    /// and the ground truth matches what the reader decodes from them.
+    #[test]
+    fn coarse_and_binary_resolutions_stay_monotonic() {
+        for tsresol in [0u8, 1, 2, 3, 0x80, 0x83, 0x8A, 0x9E] {
+            let gc = generate(&CaptureSpec {
+                format: Format::Pcapng,
+                packet_count: 40,
+                interfaces: vec![tsresol, 9],
+                ..CaptureSpec::default()
+            });
+            let ts: Vec<i64> = gc.expected.iter().map(|e| e.timestamp_ns).collect();
+            for w in ts.windows(2) {
+                assert!(w[0] <= w[1], "tsresol {tsresol:#04x}: {ts:?}");
+            }
+            // Successive frames on the coarse interface still differ once
+            // they are a resolution unit apart.
+            assert!(ts.last() > ts.first(), "tsresol {tsresol:#04x}");
+            assert_roundtrip(&gc, true);
+        }
+    }
+
     #[test]
     fn legacy_le_micro_roundtrip() {
         let gc = sample_legacy(LegacyVariant::LeMicro);
@@ -1230,6 +1361,7 @@ mod tests {
                 link_type: 1,
                 tsresol: 6,
                 snaplen: 65535,
+                if_tsoffset: 0,
             }],
             packets: vec![
                 PcapngPacket {
@@ -1260,11 +1392,13 @@ mod tests {
                     link_type: 1,
                     tsresol: 6,
                     snaplen: 65535,
+                    if_tsoffset: 0,
                 },
                 PcapngInterface {
                     link_type: 1,
                     tsresol: 9,
                     snaplen: 65535,
+                    if_tsoffset: 0,
                 },
             ],
             packets: vec![
@@ -1294,6 +1428,7 @@ mod tests {
                 link_type: lt,
                 tsresol,
                 snaplen: 65535,
+                if_tsoffset: 0,
             }],
             packets: (0..n)
                 .map(|i| PcapngPacket {
@@ -1355,6 +1490,7 @@ mod tests {
                 interfaces: vec![6],
                 sections: 1,
                 add_interface_midstream: false,
+                if_tsoffset: 0,
             });
             // multi-iface differing tsresol
             v.push(CaptureSpec {
@@ -1367,6 +1503,7 @@ mod tests {
                 interfaces: vec![6, 9],
                 sections: 1,
                 add_interface_midstream: false,
+                if_tsoffset: 0,
             });
             // binary (power-of-two) tsresol next to a decimal one
             v.push(CaptureSpec {
@@ -1379,6 +1516,7 @@ mod tests {
                 interfaces: vec![0x8A, 6],
                 sections: 1,
                 add_interface_midstream: false,
+                if_tsoffset: 0,
             });
             // big-endian sections, multi-section with a midstream IDB
             v.push(CaptureSpec {
@@ -1391,6 +1529,7 @@ mod tests {
                 interfaces: vec![6, 9],
                 sections: 2,
                 add_interface_midstream: true,
+                if_tsoffset: 0,
             });
             // multi-section
             v.push(CaptureSpec {
@@ -1403,6 +1542,7 @@ mod tests {
                 interfaces: vec![3],
                 sections: 3,
                 add_interface_midstream: false,
+                if_tsoffset: 0,
             });
             // midstream interface
             v.push(CaptureSpec {
@@ -1415,6 +1555,7 @@ mod tests {
                 interfaces: vec![6],
                 sections: 1,
                 add_interface_midstream: true,
+                if_tsoffset: 0,
             });
             // multi-section + midstream combined
             v.push(CaptureSpec {
@@ -1427,6 +1568,7 @@ mod tests {
                 interfaces: vec![6, 9],
                 sections: 2,
                 add_interface_midstream: true,
+                if_tsoffset: 0,
             });
         }
         v
@@ -1484,6 +1626,7 @@ mod tests {
             interfaces: vec![6],
             sections: 1,
             add_interface_midstream: true,
+            if_tsoffset: 0,
         };
         let gc = generate(&spec);
         assert_roundtrip(&gc, true);

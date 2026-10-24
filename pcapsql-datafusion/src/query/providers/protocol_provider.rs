@@ -189,6 +189,42 @@ impl TableCache {
     pub fn cached_columns(&self, name: &str) -> Option<HashSet<String>> {
         self.get(name).map(|data| column_names(&data))
     }
+
+    /// One entry per cached table, sorted by name: what the REPL's
+    /// `.cachestats` reports.
+    pub fn summary(&self) -> Vec<CachedTable> {
+        let entries = self.entries.read().expect("TableCache lock poisoned");
+        let mut out: Vec<CachedTable> = entries
+            .iter()
+            .map(|(name, data)| CachedTable {
+                name: name.clone(),
+                columns: data.schema.fields().len(),
+                rows: data.total_rows(),
+            })
+            .collect();
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        out
+    }
+
+    /// Drop every cached table. Running queries keep the snapshot they took
+    /// at preparation; later queries re-parse on first touch.
+    pub fn clear(&self) {
+        self.entries
+            .write()
+            .expect("TableCache lock poisoned")
+            .clear();
+    }
+}
+
+/// A cached table as reported by [`TableCache::summary`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CachedTable {
+    /// Table name.
+    pub name: String,
+    /// Columns materialized for it (the cache is column-aware).
+    pub columns: usize,
+    /// Rows cached.
+    pub rows: usize,
 }
 
 /// The column names of a materialized table.

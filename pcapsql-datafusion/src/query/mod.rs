@@ -52,8 +52,8 @@ use tokio::task::JoinHandle;
 
 use crate::error::{Error, QueryError};
 use crate::query::providers::{
-    run_shared_parse, PartitionStat, QueryTables, SharedParseState, StreamingHandle, TableCache,
-    TableData,
+    run_shared_parse, CachedTable, PartitionStat, QueryTables, SharedParseState, StreamingHandle,
+    TableCache, TableData,
 };
 use pcapsql_core::{
     default_registry, FilePacketSource, KeyLog, MmapPacketSource, ProtocolRegistry,
@@ -142,10 +142,12 @@ pub enum RetentionPolicy {
     /// parse-time predicates, row caps) and the result is dropped after
     /// execution. The right policy for one-shot queries.
     None,
-    /// Cache each touched table (full columns, unfiltered) on first use, so
-    /// later queries over the same tables parse nothing. The right policy
-    /// for the REPL. Caching full columns keeps reuse sound for any later
-    /// query shape.
+    /// Cache each touched table on first use, so later queries over the same
+    /// tables parse nothing. The right policy for the REPL. The cache is
+    /// column-aware: a table is cached with the columns the first query
+    /// needed (unfiltered, uncapped), a later query needing more columns
+    /// re-parses the union and widens the entry, and the entry never
+    /// narrows, so reuse stays sound for any later query shape.
     CacheOnTouch,
 }
 
@@ -156,14 +158,16 @@ pub struct EngineOptions {
     pub batch_size: usize,
     /// What to retain between queries (see [`RetentionPolicy`]).
     pub retention: RetentionPolicy,
-    /// Partition count for the parallel parse pass
-    /// (`None` = available parallelism, clamped to 1..=16).
+    /// Partition count for the parallel parse pass. `None` = available
+    /// parallelism clamped to 1..=16, except that a memory-mapped file under
+    /// 1 MiB is parsed in a single partition (see
+    /// [`auto_target_partitions`]); an explicit count is always honoured.
     pub target_partitions: Option<usize>,
     /// TLS keylog enabling the decrypted `http2` table.
     pub keylog: Option<Arc<KeyLog>>,
-    /// Memory-map local files (compressed captures included: they are
-    /// decompressed from the map and parsed as a single partition); falls
-    /// back to buffered file I/O only when mapping the file fails.
+    /// Memory-map local files. Compressed captures are mapped too: they are
+    /// decompressed from the map and parsed as a single partition. Falls
+    /// back to buffered file I/O only when mapping the file itself fails.
     pub mmap: bool,
     /// Boundary-index checkpoint stride override (mainly tests/benchmarks).
     pub index_stride: Option<u64>,
@@ -304,10 +308,26 @@ impl<S: SeekablePacketSource> ParseSource for SourceParser<S> {
 /// Names of the UDFs whose result depends on the capture's full time range.
 const TIME_RANGE_UDFS: &[&str] = &["start_time", "end_time", "relative_time"];
 
-/// Does any expression in the (optimized) plan call a time-range UDF?
+/// Does any expression in the plan call a time-range UDF?
+///
+/// Runs on the *unoptimized* plan (see [`QueryEngine::execute`]). A user view
+/// is normally already inlined there: DataFusion's `LogicalPlanBuilder::scan`
+/// expands a view's plan at SQL planning, so `CREATE VIEW v AS SELECT
+/// relative_time(…) …` followed by `SELECT * FROM v` is detected like a
+/// direct call. A `TableScan` that still carries a view plan
+/// (`TableSource::get_logical_plan`) is searched too, so the detection does
+/// not depend on that planner detail.
 fn uses_time_range_udfs(plan: &LogicalPlan) -> bool {
     let mut found = false;
     let _ = plan.apply_with_subqueries(|node| {
+        if let LogicalPlan::TableScan(scan) = node {
+            if let Some(view_plan) = scan.source.get_logical_plan() {
+                if uses_time_range_udfs(&view_plan) {
+                    found = true;
+                    return Ok(TreeNodeRecursion::Stop);
+                }
+            }
+        }
         let _ = node.apply_expressions(|expr| {
             let _ = expr.apply(|e| {
                 if let Expr::ScalarFunction(f) = e {
@@ -1074,6 +1094,24 @@ impl QueryEngine {
     /// query's own statistics.
     pub fn last_parse_stats(&self) -> ParseStats {
         self.last_stats.read().expect("stats lock poisoned").clone()
+    }
+
+    /// The retention policy this engine was opened with.
+    pub fn retention(&self) -> RetentionPolicy {
+        self.retention
+    }
+
+    /// The tables currently held by the [`RetentionPolicy::CacheOnTouch`]
+    /// cache (name, columns, rows), sorted by name. Always empty under
+    /// [`RetentionPolicy::None`].
+    pub fn cached_tables(&self) -> Vec<CachedTable> {
+        self.cache.summary()
+    }
+
+    /// Drop every cached table, so the next query over each table parses it
+    /// again. Queries already running keep the data they were prepared with.
+    pub fn clear_cache(&self) {
+        self.cache.clear();
     }
 
     /// Get the protocol registry.

@@ -101,10 +101,7 @@ impl ScalarUDFImpl for Ip6Udf {
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
         let args = ColumnarValue::values_to_arrays(&args.args)?;
-        let ip_strings = args[0]
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .expect("ip6: expected string array");
+        let ip_strings = super::string_arg(&args[0], "ip6")?;
 
         let values: Vec<Option<[u8; 16]>> = ip_strings
             .iter()
@@ -221,10 +218,7 @@ impl ScalarUDFImpl for Ip6InCidrUdf {
             .as_any()
             .downcast_ref::<FixedSizeBinaryArray>()
             .expect("ip6_in_cidr: expected FixedSizeBinary(16) array for IP");
-        let cidr_values = args[1]
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .expect("ip6_in_cidr: expected string array for CIDR");
+        let cidr_values = super::string_arg(&args[1], "ip6_in_cidr")?;
 
         let result: BooleanArray = (0..ip_values.len())
             .zip(cidr_values.iter())

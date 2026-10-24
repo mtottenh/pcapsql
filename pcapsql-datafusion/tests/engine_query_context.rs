@@ -408,6 +408,53 @@ async fn explain_time_udf_without_index_reports_the_bootstrap_pass() {
     }
 }
 
+/// A time-range UDF called inside a user view is detected before the plan is
+/// optimized (where the view is still a `TableScan`), so the capture range
+/// is bootstrapped and the view's `relative_time()` / `start_time()` match a
+/// direct call. Both the indexed and the compressed (header-pass) source.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn time_udfs_inside_views_bootstrap_the_capture_range() {
+    let dir = TempDir::new().unwrap();
+    let raw = write_capture(&dir, 300);
+    let gz = gzip_copy(&dir, &raw);
+    const DIRECT: &str = "SELECT frame_number, relative_time(timestamp) AS rel, \
+                          start_time() AS t0, end_time() AS t1 \
+                          FROM frames ORDER BY frame_number LIMIT 5";
+    for path in [&raw, &gz] {
+        for retention in [RetentionPolicy::None, RetentionPolicy::CacheOnTouch] {
+            let expected = pretty(&fresh(path, retention).await.query(DIRECT).await.unwrap());
+
+            let engine = fresh(path, retention).await;
+            engine
+                .query(
+                    "CREATE VIEW rel AS SELECT frame_number, relative_time(timestamp) AS rel, \
+                     start_time() AS t0, end_time() AS t1 FROM frames",
+                )
+                .await
+                .expect("create view");
+            let via_view = pretty(
+                &engine
+                    .query("SELECT * FROM rel ORDER BY frame_number LIMIT 5")
+                    .await
+                    .expect("query view"),
+            );
+            assert_eq!(via_view, expected, "{retention:?} {}", path.display());
+            // A view over a view, and a view referenced in a subquery.
+            engine
+                .query("CREATE VIEW rel2 AS SELECT * FROM rel")
+                .await
+                .unwrap();
+            let nested = pretty(
+                &engine
+                    .query("SELECT * FROM (SELECT * FROM rel2) ORDER BY frame_number LIMIT 5")
+                    .await
+                    .unwrap(),
+            );
+            assert_eq!(nested, expected, "{retention:?} nested {}", path.display());
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ddl_and_statements_do_not_parse() {
     let dir = TempDir::new().unwrap();

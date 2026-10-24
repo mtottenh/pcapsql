@@ -5,12 +5,19 @@
 //!
 //! RFC 3031: Multiprotocol Label Switching Architecture
 //! RFC 3032: MPLS Label Stack Encoding
+//!
+//! An MPLS label stack is forwarding state, not a tunnel carrying an inner
+//! packet: the layers below it (IPv4/IPv6) are the packet itself. The parser
+//! therefore does not signal a tunnel boundary, so `encap_depth` stays 0 and
+//! `tunnel_type` stays NULL for the inner layers (unlike VXLAN, GRE, GTP or
+//! IP-in-IP). The labels themselves are in the `mpls` table (`label`,
+//! `labels`, `stack_depth`), joinable on `frame_number`.
 
 use compact_str::CompactString;
 use smallvec::SmallVec;
 
 use super::ethernet::ethertype;
-use super::{FieldValue, ParseContext, ParseResult, Protocol, TunnelType};
+use super::{FieldValue, ParseContext, ParseResult, Protocol};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// EtherType for MPLS Unicast.
@@ -194,10 +201,8 @@ impl Protocol for MplsProtocol {
             }
         }
 
-        // Signal tunnel boundary for encapsulation tracking
-        child_hints.push(("tunnel_type", TunnelType::Mpls as u64));
-        child_hints.push(("tunnel_id", top_label as u64)); // Top label as tunnel ID
-
+        // No tunnel boundary: label switching is not encapsulation (see the
+        // module docs), so the inner IP layer keeps encap_depth 0.
         ParseResult::success(fields, &data[offset..], child_hints)
     }
 
@@ -412,6 +417,31 @@ mod tests {
         assert!(result_ipv6.is_ok());
         assert_eq!(result_ipv6.hint("ethertype"), Some(ethertype::IPV6 as u64));
         assert_eq!(result_ipv6.hint("ip_version"), Some(6u64));
+    }
+
+    /// MPLS is not a tunnel: the IP layer under a label stack is at
+    /// encapsulation depth 0 with no tunnel type, while the labels are still
+    /// reported as an `mpls` layer.
+    #[test]
+    fn mpls_does_not_count_as_encapsulation() {
+        use crate::protocol::{default_registry, parse_packet, ParseScope, TunnelType};
+        let mut frame = vec![0x02, 0, 0, 0, 0, 2, 0x02, 0, 0, 0, 0, 1, 0x88, 0x47];
+        frame.extend_from_slice(&create_mpls_label(100, 0, false, 64));
+        frame.extend_from_slice(&create_mpls_label(200, 0, true, 64));
+        // Minimal IPv4 header (20 bytes, protocol 17, no payload).
+        frame.extend_from_slice(&[0x45, 0x00, 0x00, 0x14, 0, 1, 0x40, 0, 64, 17, 0, 0]);
+        frame.extend_from_slice(&[10, 0, 0, 1, 10, 0, 0, 2]);
+
+        let registry = default_registry();
+        let results = parse_packet(&registry, 1, &frame, &ParseScope::full());
+        let layers: Vec<&str> = results.iter().map(|(n, _)| *n).collect();
+        assert_eq!(&layers[..3], ["ethernet", "mpls", "ipv4"]);
+        let (_, ipv4) = &results[2];
+        assert_eq!(ipv4.encap_depth, 0);
+        assert_eq!(ipv4.tunnel_type, TunnelType::None);
+        assert_eq!(ipv4.tunnel_id, None);
+        let (_, mpls) = &results[1];
+        assert_eq!(mpls.get("stack_depth"), Some(&FieldValue::UInt8(2)));
     }
 
     // Test 8: Too short data

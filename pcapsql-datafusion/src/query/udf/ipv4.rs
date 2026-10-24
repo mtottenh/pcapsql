@@ -112,10 +112,7 @@ impl ScalarUDFImpl for Ip4Udf {
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
         let args = ColumnarValue::values_to_arrays(&args.args)?;
-        let ip_strings = args[0]
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .expect("ip4: expected string array");
+        let ip_strings = super::string_arg(&args[0], "ip4")?;
 
         let result: UInt32Array = ip_strings
             .iter()
@@ -144,7 +141,7 @@ struct Ip4ToStringUdf {
 impl Ip4ToStringUdf {
     fn new() -> Self {
         Self {
-            signature: Signature::exact(vec![DataType::UInt32], Volatility::Immutable),
+            signature: super::coercible_signature(&[DataType::UInt32], Volatility::Immutable),
         }
     }
 }
@@ -199,8 +196,8 @@ struct IpInCidrUdf {
 impl IpInCidrUdf {
     fn new() -> Self {
         Self {
-            signature: Signature::exact(
-                vec![DataType::UInt32, DataType::Utf8],
+            signature: super::coercible_signature(
+                &[DataType::UInt32, DataType::Utf8],
                 Volatility::Immutable,
             ),
         }
@@ -230,10 +227,7 @@ impl ScalarUDFImpl for IpInCidrUdf {
             .as_any()
             .downcast_ref::<UInt32Array>()
             .expect("ip_in_cidr: expected uint32 array for IP");
-        let cidr_values = args[1]
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .expect("ip_in_cidr: expected string array for CIDR");
+        let cidr_values = super::string_arg(&args[1], "ip_in_cidr")?;
 
         let result: BooleanArray = ip_values
             .iter()
@@ -319,7 +313,7 @@ struct IsPrivateIpUdf {
 impl IsPrivateIpUdf {
     fn new() -> Self {
         Self {
-            signature: Signature::exact(vec![DataType::UInt32], Volatility::Immutable),
+            signature: super::coercible_signature(&[DataType::UInt32], Volatility::Immutable),
         }
     }
 }
@@ -369,7 +363,7 @@ struct IsMulticastIpUdf {
 impl IsMulticastIpUdf {
     fn new() -> Self {
         Self {
-            signature: Signature::exact(vec![DataType::UInt32], Volatility::Immutable),
+            signature: super::coercible_signature(&[DataType::UInt32], Volatility::Immutable),
         }
     }
 }
@@ -419,7 +413,7 @@ struct IsLoopbackIpUdf {
 impl IsLoopbackIpUdf {
     fn new() -> Self {
         Self {
-            signature: Signature::exact(vec![DataType::UInt32], Volatility::Immutable),
+            signature: super::coercible_signature(&[DataType::UInt32], Volatility::Immutable),
         }
     }
 }

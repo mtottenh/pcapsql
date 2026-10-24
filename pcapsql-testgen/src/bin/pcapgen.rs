@@ -81,6 +81,7 @@ fn build(kind: &str, seed: u64, count: usize) -> Option<GeneratedCapture> {
             interfaces: vec![6],
             sections: 1,
             add_interface_midstream: false,
+            if_tsoffset: 0,
         }),
         "pcapng-multi-iface" => generate(&CaptureSpec {
             format: Format::Pcapng,
@@ -92,6 +93,7 @@ fn build(kind: &str, seed: u64, count: usize) -> Option<GeneratedCapture> {
             interfaces: vec![6, 9],
             sections: 1,
             add_interface_midstream: false,
+            if_tsoffset: 0,
         }),
         "pcapng-multi-section" => generate(&CaptureSpec {
             format: Format::Pcapng,
@@ -103,6 +105,7 @@ fn build(kind: &str, seed: u64, count: usize) -> Option<GeneratedCapture> {
             interfaces: vec![6],
             sections: 3,
             add_interface_midstream: false,
+            if_tsoffset: 0,
         }),
         "pcapng-midstream-iface" => generate(&CaptureSpec {
             format: Format::Pcapng,
@@ -114,6 +117,7 @@ fn build(kind: &str, seed: u64, count: usize) -> Option<GeneratedCapture> {
             interfaces: vec![6],
             sections: 1,
             add_interface_midstream: true,
+            if_tsoffset: 0,
         }),
         // A frame larger than the 262_144-byte read buffer.
         "oversized" => oversized_frame_capture(300_000),

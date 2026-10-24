@@ -7,10 +7,20 @@
 //!
 //! Packet timestamps are decoded to **nanoseconds since the Unix epoch** (`i64`).
 //! For legacy PCAP the sub-second field is interpreted per the magic (microseconds
-//! or nanoseconds). For PCAPNG the per-interface `if_tsresol` is honored, so a
-//! capture mixing microsecond- and nanosecond-resolution interfaces decodes
-//! correctly. This per-interface state is exactly what a mid-file partition needs,
-//! and is what the boundary index persists in each checkpoint.
+//! or nanoseconds). For PCAPNG the per-interface `if_tsresol` and `if_tsoffset`
+//! are honored, so a capture mixing microsecond- and nanosecond-resolution
+//! interfaces decodes correctly; a value outside the `i64` nanosecond range
+//! saturates instead of wrapping. This per-interface state is exactly what a
+//! mid-file partition needs, and is what the boundary index persists in each
+//! checkpoint.
+//!
+//! ## Lenient decoding
+//!
+//! An `if_tsresol` that does not fit a `u64` is replaced by microseconds (the
+//! pcapng default) and an Enhanced Packet Block whose interface id has no IDB
+//! falls back to the most recent interface; both are logged once per reader.
+//! A Simple Packet Block's captured length is `min(original length, snaplen)`
+//! of interface 0, never including the block's 32-bit padding.
 //!
 //! ## Mid-file / headerless starts
 //!
@@ -72,9 +82,14 @@ pub struct InterfaceInfo {
     /// Link-layer type for packets on this interface.
     pub link_type: u32,
     /// `if_tsresol` raw byte (decimal exponent, or binary if high bit set).
+    /// Always decodable: a reader replaces an undecodable byte with `6`
+    /// (microseconds) when it records the interface.
     pub if_tsresol: u8,
     /// Snapshot length declared for this interface.
     pub snaplen: u32,
+    /// `if_tsoffset` option: seconds added to every timestamp of this
+    /// interface (0 when absent, the common case).
+    pub if_tsoffset: i64,
 }
 
 impl InterfaceInfo {
@@ -82,6 +97,41 @@ impl InterfaceInfo {
     #[inline]
     pub fn resolution(&self) -> u64 {
         tsresol_units(self.if_tsresol).unwrap_or(DEFAULT_RESOLUTION)
+    }
+
+    /// Build the interface record for an IDB, normalizing an undecodable
+    /// `if_tsresol` to microseconds (returns whether that happened, so the
+    /// caller can log it with its own context).
+    ///
+    /// `big_endian` is the section's byte order: pcap-parser 0.17 decodes
+    /// the `if_tsoffset` option as little-endian regardless of the section,
+    /// so in a big-endian section the value arrives byte-swapped and is
+    /// swapped back here. (The synthesized mid-file IDB writes the option in
+    /// the section's order, so a partition reader goes through the same
+    /// correction and agrees with the sequential reader.)
+    pub(crate) fn from_idb(
+        idb: &pcap_parser::pcapng::InterfaceDescriptionBlock<'_>,
+        big_endian: bool,
+    ) -> (Self, bool) {
+        let invalid_tsresol = tsresol_units(idb.if_tsresol).is_none();
+        let if_tsoffset = if big_endian {
+            idb.if_tsoffset.swap_bytes()
+        } else {
+            idb.if_tsoffset
+        };
+        let info = InterfaceInfo {
+            link_type: idb.linktype.0 as u32,
+            if_tsresol: if invalid_tsresol { 6 } else { idb.if_tsresol },
+            snaplen: idb.snaplen,
+            if_tsoffset,
+        };
+        (info, invalid_tsresol)
+    }
+
+    /// Decode an EPB timestamp (`ts_high`/`ts_low` ticks) on this interface.
+    #[inline]
+    pub fn timestamp_ns(&self, ts_high: u32, ts_low: u32) -> i64 {
+        ns_from_ticks(ts_high, ts_low, self.resolution(), self.if_tsoffset)
     }
 }
 
@@ -111,16 +161,24 @@ pub(crate) fn ns_from_legacy(ts_sec: u32, ts_frac: u32, nano: bool) -> i64 {
     (ts_sec as i64) * 1_000_000_000 + sub_ns
 }
 
-/// Convert PCAPNG timestamp ticks to nanoseconds given the interface resolution.
+/// Convert PCAPNG timestamp ticks to nanoseconds given the interface
+/// resolution (units per second) and `if_tsoffset` (seconds).
+///
+/// Saturates at `i64::MAX` / `i64::MIN`: a 64-bit tick count at microsecond
+/// resolution exceeds the `i64` nanosecond range once `ticks > i64::MAX /
+/// 1000` (that is from `ts_high >= 0x0020_C49C`, timestamps past the year
+/// 2262), and an `as` cast would wrap into a negative timestamp. A large
+/// `if_tsoffset` can push the sum past either bound as well.
 #[inline]
-pub(crate) fn ns_from_ticks(ts_high: u32, ts_low: u32, resolution: u64) -> i64 {
+pub(crate) fn ns_from_ticks(ts_high: u32, ts_low: u32, resolution: u64, offset_s: i64) -> i64 {
     let ticks = ((ts_high as u128) << 32) | (ts_low as u128);
     let res = if resolution == 0 {
         DEFAULT_RESOLUTION
     } else {
         resolution
     } as u128;
-    (ticks * 1_000_000_000u128 / res) as i64
+    let ns = (ticks * 1_000_000_000u128 / res) as i128 + (offset_s as i128) * 1_000_000_000;
+    ns.clamp(i64::MIN as i128, i64::MAX as i128) as i64
 }
 
 /// Format of the PCAP file.
@@ -213,6 +271,9 @@ pub struct GenericPcapReader<R: Read> {
     big_endian: bool,
     /// Current buffer capacity, grown on demand for oversized frames.
     capacity: usize,
+    /// Set once an EPB with an interface id beyond the IDB table has been
+    /// logged, so a malformed capture warns once rather than per packet.
+    warned_bad_if_id: bool,
 }
 
 /// Inner reader using enum dispatch for format-specific handling.
@@ -272,6 +333,7 @@ impl<R: Read> GenericPcapReader<R> {
             interfaces: Vec::new(),
             big_endian: false,
             capacity: BUFFER_SIZE,
+            warned_bad_if_id: false,
         })
     }
 
@@ -374,6 +436,7 @@ impl<R: Read> GenericPcapReader<R> {
                 &mut self.interfaces,
                 &mut self.big_endian,
                 &mut self.capacity,
+                &mut self.warned_bad_if_id,
                 f,
             ),
         }
@@ -496,6 +559,7 @@ fn process_pcapng_packets<S: Read, F>(
     interfaces: &mut Vec<InterfaceInfo>,
     big_endian: &mut bool,
     capacity: &mut usize,
+    warned_bad_if_id: &mut bool,
     mut f: F,
 ) -> Result<usize, Error>
 where
@@ -515,14 +579,11 @@ where
                             reader.consume(offset);
                         }
                         Block::InterfaceDescription(idb) => {
-                            let info = InterfaceInfo {
-                                link_type: idb.linktype.0 as u32,
-                                if_tsresol: idb.if_tsresol,
-                                snaplen: idb.snaplen,
-                            };
-                            if tsresol_units(info.if_tsresol).is_none() {
+                            let (info, invalid_tsresol) =
+                                InterfaceInfo::from_idb(&idb, *big_endian);
+                            if invalid_tsresol {
                                 tracing::warn!(
-                                    if_tsresol = info.if_tsresol,
+                                    if_tsresol = idb.if_tsresol,
                                     interface = interfaces.len(),
                                     "PCAPNG: invalid if_tsresol; assuming microseconds"
                                 );
@@ -533,11 +594,33 @@ where
                         }
                         Block::EnhancedPacket(epb) => {
                             *frame_number += 1;
-                            let (lt, resolution) = interfaces
-                                .get(epb.if_id as usize)
-                                .map(|i| (i.link_type, i.resolution()))
-                                .unwrap_or((*link_type, DEFAULT_RESOLUTION));
-                            let timestamp_ns = ns_from_ticks(epb.ts_high, epb.ts_low, resolution);
+                            let (lt, timestamp_ns) = match interfaces.get(epb.if_id as usize) {
+                                Some(i) => (i.link_type, i.timestamp_ns(epb.ts_high, epb.ts_low)),
+                                None => {
+                                    // Malformed: no IDB for this id. Fall back to
+                                    // the most recent interface (or the section
+                                    // default) and say so once.
+                                    if !*warned_bad_if_id {
+                                        *warned_bad_if_id = true;
+                                        tracing::warn!(
+                                            interface_id = epb.if_id,
+                                            interfaces = interfaces.len(),
+                                            frame = *frame_number,
+                                            "PCAPNG: EPB interface id has no IDB; using the \
+                                             last interface's link type and microseconds"
+                                        );
+                                    }
+                                    (
+                                        *link_type,
+                                        ns_from_ticks(
+                                            epb.ts_high,
+                                            epb.ts_low,
+                                            DEFAULT_RESOLUTION,
+                                            0,
+                                        ),
+                                    )
+                                }
+                            };
                             // `packet_data()` strips the on-disk 32-bit padding.
                             let data = epb.packet_data();
                             let packet_ref = PacketRef {
@@ -555,15 +638,24 @@ where
                         }
                         Block::SimplePacket(spb) => {
                             *frame_number += 1;
-                            let lt = interfaces
+                            // An SPB belongs to interface 0; its captured
+                            // length is min(origlen, snaplen) and the block's
+                            // 32-bit padding is not packet data.
+                            let (lt, snaplen) = interfaces
                                 .first()
-                                .map(|i| i.link_type)
-                                .unwrap_or(*link_type);
+                                .map(|i| (i.link_type, i.snaplen))
+                                .unwrap_or((*link_type, 0));
                             let data = spb.packet_data();
+                            let mut caplen = spb.origlen as usize;
+                            if snaplen != 0 {
+                                caplen = caplen.min(snaplen as usize);
+                            }
+                            let caplen = caplen.min(data.len());
+                            let data = &data[..caplen];
                             let packet_ref = PacketRef {
                                 frame_number: *frame_number,
                                 timestamp_ns: 0,
-                                captured_len: data.len() as u32,
+                                captured_len: caplen as u32,
                                 original_len: spb.origlen,
                                 link_type: lt as u16,
                                 data,
@@ -712,6 +804,7 @@ mod tests {
             link_type: 1,
             if_tsresol: 0x80 | 64,
             snaplen: 0,
+            if_tsoffset: 0,
         };
         assert_eq!(info.resolution(), DEFAULT_RESOLUTION);
     }
@@ -733,12 +826,209 @@ mod tests {
         // nano: 1.5s -> 500_000_000 ns
         assert_eq!(ns_from_legacy(1, 500_000_000, true), 1_500_000_000);
         // ticks at microsecond resolution
-        assert_eq!(ns_from_ticks(0, 1_500_000, 1_000_000), 1_500_000_000);
+        assert_eq!(ns_from_ticks(0, 1_500_000, 1_000_000, 0), 1_500_000_000);
         // ticks at nanosecond resolution
         assert_eq!(
-            ns_from_ticks(0, 1_500_000_000, 1_000_000_000),
+            ns_from_ticks(0, 1_500_000_000, 1_000_000_000, 0),
             1_500_000_000
         );
+        // if_tsoffset is added in seconds (negative offsets included).
+        assert_eq!(ns_from_ticks(0, 1_500_000, 1_000_000, 10), 11_500_000_000);
+        assert_eq!(ns_from_ticks(0, 1_500_000, 1_000_000, -2), -500_000_000);
+    }
+
+    /// A 64-bit tick count at microsecond resolution exceeds the i64
+    /// nanosecond range once `ticks > i64::MAX / 1000` (`ts_high >= 0x20C49C`);
+    /// the conversion must saturate, not wrap into a negative timestamp.
+    #[test]
+    fn ns_from_ticks_saturates_instead_of_wrapping() {
+        assert_eq!(ns_from_ticks(0x0020_C49C, 0, 1_000_000, 0), i64::MAX);
+        assert_eq!(ns_from_ticks(0x7FFF_FFFF, 0, 1_000_000, 0), i64::MAX);
+        assert_eq!(ns_from_ticks(u32::MAX, u32::MAX, 1_000_000, 0), i64::MAX);
+        assert_eq!(ns_from_ticks(u32::MAX, u32::MAX, 1, 0), i64::MAX);
+        assert_eq!(ns_from_ticks(0, 0, 1_000_000, i64::MIN), i64::MIN);
+        // The largest tick count that does fit is converted exactly.
+        let max_ticks = (i64::MAX / 1_000) as u64;
+        assert_eq!(
+            ns_from_ticks((max_ticks >> 32) as u32, max_ticks as u32, 1_000_000, 0),
+            (max_ticks * 1_000) as i64
+        );
+    }
+
+    /// Hand-rolled pcapng writer (either byte order) for the block shapes the
+    /// generator does not produce (interface options, SPBs, bad EPB ids).
+    mod ng {
+        fn u16(v: &mut Vec<u8>, x: u16, be: bool) {
+            v.extend_from_slice(&if be { x.to_be_bytes() } else { x.to_le_bytes() });
+        }
+        fn u32(v: &mut Vec<u8>, x: u32, be: bool) {
+            v.extend_from_slice(&if be { x.to_be_bytes() } else { x.to_le_bytes() });
+        }
+        fn u64(v: &mut Vec<u8>, x: u64, be: bool) {
+            v.extend_from_slice(&if be { x.to_be_bytes() } else { x.to_le_bytes() });
+        }
+
+        pub fn shb(be: bool) -> Vec<u8> {
+            let mut v = Vec::new();
+            u32(&mut v, 0x0A0D_0D0A, be);
+            u32(&mut v, 28, be);
+            u32(&mut v, 0x1A2B_3C4D, be);
+            u16(&mut v, 1, be);
+            u16(&mut v, 0, be);
+            u64(&mut v, u64::MAX, be);
+            u32(&mut v, 28, be);
+            v
+        }
+
+        /// IDB with `if_tsresol` and, when non-zero, `if_tsoffset`.
+        pub fn idb(be: bool, link_type: u16, snaplen: u32, tsresol: u8, tsoffset: i64) -> Vec<u8> {
+            let mut body = Vec::new();
+            u16(&mut body, link_type, be);
+            u16(&mut body, 0, be);
+            u32(&mut body, snaplen, be);
+            u16(&mut body, 9, be); // if_tsresol
+            u16(&mut body, 1, be);
+            body.push(tsresol);
+            body.extend_from_slice(&[0, 0, 0]);
+            if tsoffset != 0 {
+                u16(&mut body, 14, be); // if_tsoffset, in the section's order
+                u16(&mut body, 8, be);
+                u64(&mut body, tsoffset as u64, be);
+            }
+            body.extend_from_slice(&[0, 0, 0, 0]); // opt_endofopt
+            block(be, 1, &body)
+        }
+
+        pub fn epb(be: bool, if_id: u32, ticks: u64, data: &[u8]) -> Vec<u8> {
+            let mut body = Vec::new();
+            u32(&mut body, if_id, be);
+            u32(&mut body, (ticks >> 32) as u32, be);
+            u32(&mut body, ticks as u32, be);
+            u32(&mut body, data.len() as u32, be);
+            u32(&mut body, data.len() as u32, be);
+            body.extend_from_slice(data);
+            while body.len() % 4 != 0 {
+                body.push(0);
+            }
+            block(be, 6, &body)
+        }
+
+        /// SPB: `origlen` as declared, `data` as stored (already truncated to
+        /// the snaplen by the writer), padded to 32 bits.
+        pub fn spb(be: bool, origlen: u32, data: &[u8]) -> Vec<u8> {
+            let mut body = Vec::new();
+            u32(&mut body, origlen, be);
+            body.extend_from_slice(data);
+            while body.len() % 4 != 0 {
+                body.push(0);
+            }
+            block(be, 3, &body)
+        }
+
+        fn block(be: bool, block_type: u32, body: &[u8]) -> Vec<u8> {
+            let total = (12 + body.len()) as u32;
+            let mut v = Vec::new();
+            u32(&mut v, block_type, be);
+            u32(&mut v, total, be);
+            v.extend_from_slice(body);
+            u32(&mut v, total, be);
+            v
+        }
+    }
+
+    fn read_all(bytes: Vec<u8>) -> Vec<(u64, i64, u32, u32, u16, Vec<u8>)> {
+        let mut reader =
+            GenericPcapReader::with_format(Cursor::new(bytes), PcapFormat::PcapNg).unwrap();
+        let mut seen = Vec::new();
+        loop {
+            let n = reader
+                .process_packets(16, |p| {
+                    seen.push((
+                        p.frame_number,
+                        p.timestamp_ns,
+                        p.captured_len,
+                        p.original_len,
+                        p.link_type,
+                        p.data.to_vec(),
+                    ));
+                    Ok(())
+                })
+                .unwrap();
+            if n == 0 {
+                break;
+            }
+        }
+        seen
+    }
+
+    /// `if_tsoffset` is added to every timestamp of its interface only, in
+    /// a little-endian and in a big-endian section alike (pcap-parser decodes
+    /// the option little-endian; the reader corrects for the section order).
+    #[test]
+    fn pcapng_if_tsoffset_is_applied_per_interface() {
+        for be in [false, true] {
+            let mut bytes = ng::shb(be);
+            bytes.extend(ng::idb(be, 1, 65535, 6, 1_000)); // interface 0: +1000 s
+            bytes.extend(ng::idb(be, 1, 65535, 9, 0)); // interface 1: no offset
+            bytes.extend(ng::idb(be, 1, 65535, 6, -86_400)); // interface 2: -1 day
+            bytes.extend(ng::epb(be, 0, 5_000_000, &[1; 20])); // 5 s in µs
+            bytes.extend(ng::epb(be, 1, 5_000_000_000, &[2; 20])); // 5 s in ns
+            bytes.extend(ng::epb(be, 2, 90_000_000_000, &[3; 20])); // 90000 s in µs
+            let seen = read_all(bytes);
+            assert_eq!(seen.len(), 3, "big_endian={be}");
+            assert_eq!(seen[0].1, 1_005 * 1_000_000_000, "big_endian={be}");
+            assert_eq!(seen[1].1, 5 * 1_000_000_000, "big_endian={be}");
+            assert_eq!(seen[2].1, 3_600 * 1_000_000_000, "big_endian={be}");
+        }
+    }
+
+    /// An EPB whose interface id has no IDB is still delivered (with the
+    /// last interface's link type and microseconds) rather than dropped.
+    #[test]
+    fn pcapng_epb_with_unknown_interface_id_falls_back() {
+        let mut bytes = ng::shb(false);
+        bytes.extend(ng::idb(false, 113, 65535, 9, 0));
+        bytes.extend(ng::epb(false, 7, 3_000_000, &[1; 20]));
+        let seen = read_all(bytes);
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].4, 113);
+        assert_eq!(seen[0].1, 3 * 1_000_000_000); // µs, not the IDB's ns
+    }
+
+    /// An undecodable `if_tsresol` is recorded as microseconds, so the
+    /// interface state the index persists is always decodable.
+    #[test]
+    fn pcapng_invalid_tsresol_is_normalized_to_microseconds() {
+        let mut bytes = ng::shb(false);
+        bytes.extend(ng::idb(false, 1, 65535, 20, 0));
+        bytes.extend(ng::epb(false, 0, 2_000_000, &[1; 20]));
+        let mut reader =
+            GenericPcapReader::with_format(Cursor::new(bytes), PcapFormat::PcapNg).unwrap();
+        let mut ts = None;
+        reader
+            .process_packets(1, |p| {
+                ts = Some(p.timestamp_ns);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(ts, Some(2 * 1_000_000_000));
+        assert_eq!(reader.interface_state().interfaces[0].if_tsresol, 6);
+    }
+
+    /// SPB captured length is min(origlen, snaplen) without the block's
+    /// 32-bit padding, and the data is cut to match.
+    #[test]
+    fn pcapng_spb_caplen_excludes_padding_when_truncated() {
+        let mut bytes = ng::shb(false);
+        bytes.extend(ng::idb(false, 1, 21, 6, 0)); // snaplen 21: not a multiple of 4
+        bytes.extend(ng::spb(false, 100, &[0xAB; 21])); // origlen 100 > snaplen
+        bytes.extend(ng::spb(false, 18, &[0xCD; 18])); // origlen 18 < snaplen, 2 pad bytes
+        let seen = read_all(bytes);
+        assert_eq!(seen.len(), 2);
+        assert_eq!((seen[0].2, seen[0].3), (21, 100));
+        assert_eq!(seen[0].5, vec![0xAB; 21]);
+        assert_eq!((seen[1].2, seen[1].3), (18, 18));
+        assert_eq!(seen[1].5, vec![0xCD; 18]);
     }
 
     /// Create a minimal valid legacy PCAP (LE micro) with one packet.

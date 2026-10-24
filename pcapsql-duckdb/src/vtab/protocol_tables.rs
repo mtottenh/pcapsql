@@ -423,6 +423,10 @@ macro_rules! define_protocol_vtab {
 // Define VTabs for all protocols
 // Layer 2
 define_protocol_vtab!(ReadEthernetVTab, "ethernet");
+define_protocol_vtab!(ReadLinuxSllVTab, "linux_sll");
+define_protocol_vtab!(ReadSll2VTab, "sll2");
+define_protocol_vtab!(ReadNetlinkVTab, "netlink");
+define_protocol_vtab!(ReadRtnetlinkVTab, "rtnetlink");
 define_protocol_vtab!(ReadVlanVTab, "vlan");
 define_protocol_vtab!(ReadArpVTab, "arp");
 define_protocol_vtab!(ReadMplsVTab, "mpls");
@@ -460,6 +464,10 @@ define_protocol_vtab!(ReadOspfVTab, "ospf");
 pub fn register(con: &duckdb::Connection) -> DuckResult<(), Box<dyn std::error::Error>> {
     // Layer 2
     con.register_table_function::<ReadEthernetVTab>("read_ethernet")?;
+    con.register_table_function::<ReadLinuxSllVTab>("read_linux_sll")?;
+    con.register_table_function::<ReadSll2VTab>("read_sll2")?;
+    con.register_table_function::<ReadNetlinkVTab>("read_netlink")?;
+    con.register_table_function::<ReadRtnetlinkVTab>("read_rtnetlink")?;
     con.register_table_function::<ReadVlanVTab>("read_vlan")?;
     con.register_table_function::<ReadArpVTab>("read_arp")?;
     con.register_table_function::<ReadMplsVTab>("read_mpls")?;
@@ -505,9 +513,33 @@ mod tests {
         // Verify all protocols exist in the registry
         let registry = default_registry();
         let protocols = [
-            "ethernet", "vlan", "arp", "mpls", "ipv4", "ipv6", "icmp", "icmpv6", "tcp", "udp",
-            "dns", "dhcp", "ntp", "http", "tls", "ssh", "quic", "vxlan", "gre", "gtp", "ipsec",
-            "bgp", "ospf",
+            "ethernet",
+            "linux_sll",
+            "sll2",
+            "netlink",
+            "rtnetlink",
+            "vlan",
+            "arp",
+            "mpls",
+            "ipv4",
+            "ipv6",
+            "icmp",
+            "icmpv6",
+            "tcp",
+            "udp",
+            "dns",
+            "dhcp",
+            "ntp",
+            "http",
+            "tls",
+            "ssh",
+            "quic",
+            "vxlan",
+            "gre",
+            "gtp",
+            "ipsec",
+            "bgp",
+            "ospf",
         ];
 
         for proto in protocols {

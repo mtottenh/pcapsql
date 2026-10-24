@@ -168,6 +168,7 @@ fn pcapng_single_interface() {
             link_type: 1,
             tsresol: 6,
             snaplen: 65535,
+            if_tsoffset: 0,
         }],
         packets: (0..25)
             .map(|i| PcapngPacket {
@@ -192,11 +193,13 @@ fn pcapng_multi_interface_differing_tsresol() {
                 link_type: 1,
                 tsresol: 6,
                 snaplen: 65535,
+                if_tsoffset: 0,
             },
             PcapngInterface {
                 link_type: 1,
                 tsresol: 9,
                 snaplen: 262144,
+                if_tsoffset: 0,
             },
         ],
         packets: (0..40)
@@ -230,6 +233,7 @@ fn pcapng_binary_tsresol_power_of_two() {
             link_type: 1,
             tsresol: 0x8A, // 2^10 = 1024 units per second
             snaplen: 65535,
+            if_tsoffset: 0,
         }],
         packets: vec![PcapngPacket {
             interface_id: 0,
@@ -249,11 +253,13 @@ fn pcapng_binary_tsresol_power_of_two() {
                 link_type: 1,
                 tsresol: 0x8A,
                 snaplen: 65535,
+                if_tsoffset: 0,
             },
             PcapngInterface {
                 link_type: 1,
                 tsresol: 6,
                 snaplen: 65535,
+                if_tsoffset: 0,
             },
         ],
         packets: (0..24)
@@ -280,6 +286,7 @@ fn pcapng_multi_section() {
             link_type: 1,
             tsresol,
             snaplen: 65535,
+            if_tsoffset: 0,
         }],
         packets: (0..15)
             .map(|i| PcapngPacket {
@@ -344,11 +351,13 @@ fn pcapng_big_endian_sections() {
                     link_type: 1,
                     tsresol: 6,
                     snaplen: 65535,
+                    if_tsoffset: 0,
                 },
                 PcapngInterface {
                     link_type: 113,
                     tsresol: 9,
                     snaplen: 262144,
+                    if_tsoffset: 0,
                 },
             ],
             packets: (0..40)
@@ -382,6 +391,7 @@ fn pcapng_big_endian_sections() {
         interfaces: vec![6, 3],
         sections: 2,
         add_interface_midstream: true,
+        if_tsoffset: 0,
     };
     assert_equivalent(&generate(&spec), 2);
 }
@@ -398,6 +408,7 @@ fn pcapng_interface_added_midstream() {
         interfaces: vec![6],
         sections: 1,
         add_interface_midstream: true,
+        if_tsoffset: 0,
     };
     let gc = generate(&spec);
     // The capture must use a *literal* mid-stream IDB: at least one packet block
@@ -437,6 +448,86 @@ fn truncated_capture_reads_complete_prefix() {
     assert_eq!(seq, expected, "truncated capture: complete prefix only");
 }
 
+/// `reader_at(&PacketRange::whole())` on an uncompressed seekable source reads
+/// from the file's own header: the same frames as the sequential reader, for
+/// both backends, and an `end` on a byte-0 range is honoured.
+#[test]
+fn reader_at_whole_range_equals_sequential() {
+    use pcapsql_core::io::{PacketPosition, PacketRange};
+    for format in [Format::LegacyLeMicro, Format::Pcapng] {
+        let gc = generate(&CaptureSpec {
+            format,
+            packet_count: 12,
+            ..CaptureSpec::default()
+        });
+        let dir = TempDir::new().unwrap();
+        let path = write_capture(dir.path(), "whole", &gc.bytes);
+        let expected = expected_frames(&gc);
+
+        let mmap = MmapPacketSource::open(&path).unwrap().with_index_stride(4);
+        let mut r = mmap.reader_at(&PacketRange::whole()).unwrap();
+        assert_eq!(drain(&mut r), expected, "mmap whole range ({format:?})");
+
+        let file = FilePacketSource::open(&path).unwrap().with_index_stride(4);
+        let mut r = file.reader_at(&PacketRange::whole()).unwrap();
+        assert_eq!(drain(&mut r), expected, "file whole range ({format:?})");
+
+        // A byte-0 range with an end: frames 1..5 only.
+        let head = PacketRange {
+            start: PacketPosition::START,
+            end: Some(PacketPosition {
+                byte_offset: 0,
+                frame_number: 6,
+            }),
+        };
+        let mut r = mmap.reader_at(&head).unwrap();
+        assert_eq!(
+            drain(&mut r),
+            expected[..5].to_vec(),
+            "mmap capped ({format:?})"
+        );
+        let mut r = file.reader_at(&head).unwrap();
+        assert_eq!(
+            drain(&mut r),
+            expected[..5].to_vec(),
+            "file capped ({format:?})"
+        );
+    }
+}
+
+/// Small captures are indexed in memory but no `.idx` sidecar is written
+/// next to them; a capture past the threshold gets one.
+#[test]
+fn sidecar_is_only_persisted_for_large_captures() {
+    use pcapsql_core::io::{sidecar_path, SIDECAR_MIN_SOURCE_BYTES};
+    let dir = TempDir::new().unwrap();
+
+    let small = generate(&CaptureSpec {
+        packet_count: 20,
+        ..CaptureSpec::default()
+    });
+    let path = write_capture(dir.path(), "small.pcap", &small.bytes);
+    let source = MmapPacketSource::open(&path).unwrap().with_index_stride(4);
+    assert_eq!(source.frame_count(), Some(20));
+    assert!(source.partitions(3).unwrap().len() > 1);
+    assert!(
+        !sidecar_path(&path).exists(),
+        "no sidecar for a small capture"
+    );
+
+    let large = generate(&CaptureSpec {
+        packet_count: 4_200,
+        min_size: 256,
+        max_size: 256,
+        ..CaptureSpec::default()
+    });
+    assert!(large.bytes.len() as u64 >= SIDECAR_MIN_SOURCE_BYTES);
+    let path = write_capture(dir.path(), "large.pcap", &large.bytes);
+    let source = FilePacketSource::open(&path).unwrap().with_index_stride(64);
+    assert_eq!(source.frame_count(), Some(4_200));
+    assert!(sidecar_path(&path).exists(), "sidecar for a large capture");
+}
+
 // ----------------------------------------------------------------------------
 // Property: partition equivalence across the generated edge-case space
 // ----------------------------------------------------------------------------
@@ -452,6 +543,36 @@ fn format_strategy() -> impl Strategy<Value = Format> {
     ]
 }
 
+/// Link types a capture may carry: Ethernet, Linux SLL/SLL2, raw IP,
+/// netlink, 802.11, and the largest 16-bit value (the synthesized header
+/// writes link types as 16-bit fields).
+fn link_type_strategy() -> impl Strategy<Value = u16> {
+    prop_oneof![
+        Just(1u16),
+        Just(113u16),
+        Just(276u16),
+        Just(101u16),
+        Just(253u16),
+        Just(105u16),
+        Just(u16::MAX),
+    ]
+}
+
+/// `if_tsresol` bytes: coarse (seconds, milliseconds), the common decimal
+/// exponents, and binary exponents from 2^-1 to 2^-30.
+fn tsresol_strategy() -> impl Strategy<Value = u8> {
+    prop_oneof![
+        Just(0u8),
+        Just(3u8),
+        Just(6u8),
+        Just(9u8),
+        Just(0x81u8),
+        Just(0x8Au8),
+        Just(0x94u8),
+        Just(0x9Eu8),
+    ]
+}
+
 prop_compose! {
     fn capture_spec_strategy()(
         format in format_strategy(),
@@ -459,10 +580,14 @@ prop_compose! {
         packet_count in 1usize..40,
         min_size in 14usize..30,
         extra in 0usize..120,
-        // Decimal exponents plus one binary (power-of-two) exponent, 2^-10 s.
-        tsresols in proptest::collection::vec(prop_oneof![Just(3u8), Just(6u8), Just(9u8), Just(0x8Au8)], 1..3),
-        sections in 1usize..3,
+        link_type in link_type_strategy(),
+        // Up to four interfaces per section, each with its own resolution.
+        tsresols in proptest::collection::vec(tsresol_strategy(), 1..5),
+        sections in 1usize..4,
         midstream in any::<bool>(),
+        // if_tsoffset: none, a positive and a negative offset, and one that
+        // pushes the sum past the i64 nanosecond range (saturation).
+        if_tsoffset in prop_oneof![Just(0i64), Just(1_000i64), Just(-86_400i64), Just(1i64 << 40)],
     ) -> CaptureSpec {
         CaptureSpec {
             format,
@@ -470,10 +595,11 @@ prop_compose! {
             packet_count,
             min_size,
             max_size: min_size + extra,
-            link_type: 1,
+            link_type,
             interfaces: tsresols,
             sections,
             add_interface_midstream: midstream,
+            if_tsoffset,
         }
     }
 }

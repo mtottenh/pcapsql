@@ -30,7 +30,7 @@ pub use decompress::{decompress_header, Compression, DecompressReader, FileDecod
 pub use decompress::{AnyDecoder, MmapSlice};
 pub use index::{
     build_boundary_index, header_hash, sidecar_path, BoundaryIndex, Checkpoint,
-    DEFAULT_CHECKPOINT_STRIDE,
+    DEFAULT_CHECKPOINT_STRIDE, SIDECAR_MIN_SOURCE_BYTES,
 };
 #[cfg(feature = "mmap")]
 pub use mmap::{MmapPacketReader, MmapPacketSource};

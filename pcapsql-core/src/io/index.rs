@@ -16,6 +16,16 @@
 //! a record boundary and its interface state is known precisely — no forward walk
 //! is needed. The checkpoint stride therefore controls partition granularity; it
 //! is configurable (small in tests, large in production).
+//!
+//! ## Sidecar format
+//!
+//! The sidecar is an explicit little-endian binary file: an 8-byte magic that
+//! carries the format version, the index body, and a trailing 64-bit FNV-1a
+//! checksum of everything before it. A sidecar with another version, a bad
+//! checksum or a structurally invalid body (see `BoundaryIndex::validate`) is
+//! rejected on read and the index is rebuilt — never misread. Version history:
+//! v2 added the section byte order to PCAPNG checkpoints; v3 added the
+//! checksum, `if_tsoffset` per interface and the object e-tag guard.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -26,16 +36,24 @@ use pcap_parser::traits::PcapReaderIterator;
 use pcap_parser::{LegacyPcapReader, PcapBlockOwned, PcapError as PcapParserError, PcapNGReader};
 
 use crate::error::{Error, PcapError};
-use crate::io::pcap_stream::{ns_from_legacy, ns_from_ticks, InterfaceInfo, InterfaceState};
+use crate::io::pcap_stream::{
+    ns_from_legacy, ns_from_ticks, tsresol_units, InterfaceInfo, InterfaceState,
+};
 use crate::io::{PacketPosition, PacketRange, PcapFormat};
 
 /// Default checkpoint stride: one checkpoint every 65536 frames.
 pub const DEFAULT_CHECKPOINT_STRIDE: u64 = 65536;
 
-/// Sidecar file format magic + version.
-/// Sidecar magic + format version. v2 adds the section byte order to each
-/// PCAPNG checkpoint; v1 sidecars fail the magic check and are rebuilt.
-const SIDECAR_MAGIC: &[u8; 8] = b"PCSQIDX\x02";
+/// Sidecar magic + format version (see the module docs). A sidecar of any
+/// other version fails the magic check and is rebuilt.
+const SIDECAR_MAGIC: &[u8; 8] = b"PCSQIDX\x03";
+
+/// Sources smaller than this are not worth a sidecar: their index is rebuilt
+/// from a header-only scan in well under a millisecond, and a `.idx` next to
+/// every tiny fixture or sample is clutter. The index is still built and used
+/// in memory; only the persistence is skipped (`write_sidecar` callers check
+/// [`BoundaryIndex::worth_persisting`]).
+pub const SIDECAR_MIN_SOURCE_BYTES: u64 = 1024 * 1024;
 
 /// A sparse checkpoint into the capture.
 #[derive(Clone, Debug, PartialEq)]
@@ -61,6 +79,10 @@ pub struct BoundaryIndex {
     pub source_mtime: Option<SystemTime>,
     /// Hash of the header region (validity guard).
     pub header_hash: u64,
+    /// Entity tag of the source object (cloud sources; validity guard). Object
+    /// stores report `last_modified` at one-second granularity, so the e-tag
+    /// is what tells two uploads within the same second apart.
+    pub source_etag: Option<String>,
 
     /// Capture format.
     pub format: PcapFormat,
@@ -127,22 +149,48 @@ impl BoundaryIndex {
         self.checkpoints.iter().find(|c| c.frame_number == frame)
     }
 
-    /// Validate this index against the current state of a source.
+    /// Validate this index against the current state of a local source.
     ///
     /// Length and header hash must match. The modification time must match
     /// when both sides know it; when only one side knows it the index is
     /// treated as stale (a sidecar written without an mtime must not pass on a
     /// source that has one, or vice versa). Only when neither side has an
-    /// mtime does the check fall back to length + hash alone.
+    /// mtime does the check fall back to length + hash alone. An index that
+    /// carries an object e-tag never validates a local file.
     pub fn is_valid_for(&self, len: u64, mtime: Option<SystemTime>, header_hash: u64) -> bool {
+        self.matches_source(len, mtime, header_hash, None)
+    }
+
+    /// [`Self::is_valid_for`] for a source that also has an entity tag (a
+    /// cloud object): the e-tag follows the same both-or-neither rule as the
+    /// modification time.
+    pub fn matches_source(
+        &self,
+        len: u64,
+        mtime: Option<SystemTime>,
+        header_hash: u64,
+        e_tag: Option<&str>,
+    ) -> bool {
         if self.source_len != len || self.header_hash != header_hash {
             return false;
         }
-        match (self.source_mtime, mtime) {
+        let mtime_ok = match (self.source_mtime, mtime) {
             (Some(a), Some(b)) => a == b,
             (None, None) => true,
             _ => false,
-        }
+        };
+        let etag_ok = match (self.source_etag.as_deref(), e_tag) {
+            (Some(a), Some(b)) => a == b,
+            (None, None) => true,
+            _ => false,
+        };
+        mtime_ok && etag_ok
+    }
+
+    /// Whether persisting this index as a sidecar pays off
+    /// (see [`SIDECAR_MIN_SOURCE_BYTES`]).
+    pub fn worth_persisting(&self) -> bool {
+        self.source_len >= SIDECAR_MIN_SOURCE_BYTES
     }
 
     /// Structural sanity checks on a deserialized index.
@@ -153,6 +201,10 @@ impl BoundaryIndex {
     fn validate(&self) -> Result<(), Error> {
         if self.stride == 0 {
             return Err(invalid("sidecar: stride must be >= 1"));
+        }
+        // The synthesized headers write link types as 16-bit fields.
+        if self.link_type > u32::from(u16::MAX) {
+            return Err(invalid("sidecar: link type does not fit 16 bits"));
         }
         if self.checkpoints.is_empty() {
             return Ok(());
@@ -172,6 +224,14 @@ impl BoundaryIndex {
                     "sidecar: interface state present iff the capture is PCAPNG",
                 ));
             }
+            for iface in cp.interface_state.iter().flat_map(|s| &s.interfaces) {
+                if iface.link_type > u32::from(u16::MAX) {
+                    return Err(invalid("sidecar: interface link type does not fit 16 bits"));
+                }
+                if tsresol_units(iface.if_tsresol).is_none() {
+                    return Err(invalid("sidecar: interface if_tsresol is not decodable"));
+                }
+            }
             if i > 0 {
                 let prev = &self.checkpoints[i - 1];
                 if cp.frame_number <= prev.frame_number || cp.byte_offset <= prev.byte_offset {
@@ -186,13 +246,14 @@ impl BoundaryIndex {
 
     // ---- Sidecar (de)serialization: explicit little-endian binary format ----
 
-    /// Serialize to the sidecar binary format.
+    /// Serialize to the sidecar binary format (body + trailing checksum).
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut w = Vec::new();
         w.extend_from_slice(SIDECAR_MAGIC);
         put_u64(&mut w, self.source_len);
         put_opt_systemtime(&mut w, self.source_mtime);
         put_u64(&mut w, self.header_hash);
+        put_opt_str(&mut w, self.source_etag.as_deref());
         w.push(format_to_u8(self.format));
         put_u32(&mut w, self.link_type);
         put_u32(&mut w, self.snaplen);
@@ -214,23 +275,34 @@ impl BoundaryIndex {
                         put_u32(&mut w, iface.link_type);
                         w.push(iface.if_tsresol);
                         put_u32(&mut w, iface.snaplen);
+                        w.extend_from_slice(&iface.if_tsoffset.to_le_bytes());
                     }
                 }
             }
         }
+        let checksum = fnv1a(&w);
+        put_u64(&mut w, checksum);
         w
     }
 
     /// Parse from the sidecar binary format.
     pub fn from_bytes(data: &[u8]) -> Result<Self, Error> {
-        let mut c = Cursor { data, pos: 0 };
-        let magic = c.take(8)?;
-        if magic != SIDECAR_MAGIC {
+        if data.len() < 8 || &data[..8] != SIDECAR_MAGIC {
             return Err(invalid("bad sidecar magic/version"));
         }
+        if data.len() < 16 {
+            return Err(invalid("sidecar truncated before checksum"));
+        }
+        let (body, trailer) = data.split_at(data.len() - 8);
+        let stored = u64::from_le_bytes(trailer.try_into().expect("8-byte trailer"));
+        if fnv1a(body) != stored {
+            return Err(invalid("sidecar checksum mismatch"));
+        }
+        let mut c = Cursor { data: body, pos: 8 };
         let source_len = c.u64()?;
         let source_mtime = c.opt_systemtime()?;
         let header_hash = c.u64()?;
+        let source_etag = c.opt_str()?;
         let format = u8_to_format(c.u8()?)?;
         let link_type = c.u32()?;
         let snaplen = c.u32()?;
@@ -257,10 +329,12 @@ impl BoundaryIndex {
                         let link_type = c.u32()?;
                         let if_tsresol = c.u8()?;
                         let snaplen = c.u32()?;
+                        let if_tsoffset = c.i64()?;
                         interfaces.push(InterfaceInfo {
                             link_type,
                             if_tsresol,
                             snaplen,
+                            if_tsoffset,
                         });
                     }
                     Some(InterfaceState {
@@ -278,10 +352,14 @@ impl BoundaryIndex {
                 max_ts,
             });
         }
+        if c.pos != body.len() {
+            return Err(invalid("sidecar: trailing bytes after index body"));
+        }
         let idx = BoundaryIndex {
             source_len,
             source_mtime,
             header_hash,
+            source_etag,
             format,
             link_type,
             snaplen,
@@ -334,21 +412,30 @@ pub fn sidecar_path(capture: &Path) -> PathBuf {
 /// documented algorithm: the value is persisted in the sidecar, so it must be
 /// identical across Rust releases and platforms (`DefaultHasher` is not).
 pub fn header_hash(header_bytes: &[u8]) -> u64 {
-    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
     let n = header_bytes.len().min(4096);
-    let mut h = FNV_OFFSET;
-    for &b in &header_bytes[..n] {
-        h ^= u64::from(b);
-        h = h.wrapping_mul(FNV_PRIME);
-    }
+    let h = fnv1a_update(FNV_OFFSET, &header_bytes[..n]);
     // Fold in the hashed length so a short header is distinct from a
     // zero-padded one.
-    for b in (n as u64).to_le_bytes() {
+    fnv1a_update(h, &(n as u64).to_le_bytes())
+}
+
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+/// FNV-1a 64-bit over `bytes`, continuing from state `h`.
+fn fnv1a_update(mut h: u64, bytes: &[u8]) -> u64 {
+    for &b in bytes {
         h ^= u64::from(b);
         h = h.wrapping_mul(FNV_PRIME);
     }
     h
+}
+
+/// The sidecar's trailing checksum: plain FNV-1a 64-bit over the body. Not a
+/// cryptographic hash; it catches torn writes, truncation and bit rot, and is
+/// identical across Rust releases and platforms.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    fnv1a_update(FNV_OFFSET, bytes)
 }
 
 /// Build a boundary index by a single sequential scan over the (uncompressed)
@@ -377,6 +464,7 @@ pub fn build_boundary_index<R: Read>(
         source_len,
         source_mtime,
         header_hash,
+        source_etag: None,
         format,
         link_type: builder.link_type,
         snaplen: builder.snaplen,
@@ -502,11 +590,9 @@ fn scan_pcapng<S: Read>(
                             builder.big_endian = shb.big_endian();
                         }
                         Block::InterfaceDescription(idb) => {
-                            let info = InterfaceInfo {
-                                link_type: idb.linktype.0 as u32,
-                                if_tsresol: idb.if_tsresol,
-                                snaplen: idb.snaplen,
-                            };
+                            // Same normalization as the packet reader, so the
+                            // persisted interface state always validates.
+                            let (info, _) = InterfaceInfo::from_idb(&idb, builder.big_endian);
                             if builder.interfaces.is_empty() {
                                 builder.link_type = info.link_type;
                                 builder.snaplen = info.snaplen;
@@ -514,12 +600,13 @@ fn scan_pcapng<S: Read>(
                             builder.interfaces.push(info);
                         }
                         Block::EnhancedPacket(epb) => {
-                            let resolution = builder
+                            let ts = builder
                                 .interfaces
                                 .get(epb.if_id as usize)
-                                .map(|i| i.resolution())
-                                .unwrap_or(1_000_000);
-                            let ts = ns_from_ticks(epb.ts_high, epb.ts_low, resolution);
+                                .map(|i| i.timestamp_ns(epb.ts_high, epb.ts_low))
+                                .unwrap_or_else(|| {
+                                    ns_from_ticks(epb.ts_high, epb.ts_low, 1_000_000, 0)
+                                });
                             builder.observe_packet(block_start, ts, true);
                         }
                         Block::SimplePacket(_) => {
@@ -596,9 +683,11 @@ pub fn synth_pcapng_header(state: &InterfaceState) -> Vec<u8> {
     put_u32_e(&mut v, 28, be); // total length (trailer)
 
     for iface in &state.interfaces {
-        // Interface Description Block, 32 bytes with if_tsresol option.
+        // Interface Description Block: 32 bytes with the if_tsresol option,
+        // plus 12 for an if_tsoffset option when the interface has one.
+        let total: u32 = if iface.if_tsoffset != 0 { 44 } else { 32 };
         put_u32_e(&mut v, 0x0000_0001, be); // block type
-        put_u32_e(&mut v, 32, be); // total length
+        put_u32_e(&mut v, total, be); // total length
         put_u16_e(&mut v, iface.link_type as u16, be); // linktype
         put_u16_e(&mut v, 0, be); // reserved
         put_u32_e(
@@ -615,10 +704,16 @@ pub fn synth_pcapng_header(state: &InterfaceState) -> Vec<u8> {
         put_u16_e(&mut v, 1, be);
         v.push(iface.if_tsresol);
         v.extend_from_slice(&[0, 0, 0]);
+        if iface.if_tsoffset != 0 {
+            // Option: if_tsoffset (code 14, len 8), seconds.
+            put_u16_e(&mut v, 14, be);
+            put_u16_e(&mut v, 8, be);
+            put_u64_e(&mut v, iface.if_tsoffset as u64, be);
+        }
         // opt_endofopt
         put_u16_e(&mut v, 0, be);
         put_u16_e(&mut v, 0, be);
-        put_u32_e(&mut v, 32, be); // total length (trailer)
+        put_u32_e(&mut v, total, be); // total length (trailer)
     }
     v
 }
@@ -659,6 +754,20 @@ fn put_opt_i64(v: &mut Vec<u8>, x: Option<i64>) {
         Some(n) => {
             v.push(1);
             v.extend_from_slice(&n.to_le_bytes());
+        }
+    }
+}
+/// Longest e-tag a sidecar stores; a longer one is written as absent (and
+/// the source drops it the same way, so the guard still agrees).
+pub(crate) const MAX_ETAG_BYTES: usize = 4096;
+
+fn put_opt_str(v: &mut Vec<u8>, s: Option<&str>) {
+    match s.filter(|s| s.len() <= MAX_ETAG_BYTES) {
+        None => v.push(0),
+        Some(s) => {
+            v.push(1);
+            put_u32(v, s.len() as u32);
+            v.extend_from_slice(s.as_bytes());
         }
     }
 }
@@ -726,14 +835,30 @@ impl<'a> Cursor<'a> {
             b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
         ]))
     }
+    fn i64(&mut self) -> Result<i64, Error> {
+        Ok(self.u64()? as i64)
+    }
     fn opt_i64(&mut self) -> Result<Option<i64>, Error> {
         Ok(match self.u8()? {
             0 => None,
+            1 => Some(self.i64()?),
+            _ => return Err(invalid("bad opt tag")),
+        })
+    }
+    fn opt_str(&mut self) -> Result<Option<String>, Error> {
+        Ok(match self.u8()? {
+            0 => None,
             1 => {
-                let b = self.take(8)?;
-                Some(i64::from_le_bytes([
-                    b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
-                ]))
+                let len = self.u32()? as usize;
+                if len > MAX_ETAG_BYTES {
+                    return Err(invalid("sidecar: e-tag too long"));
+                }
+                let bytes = self.take(len)?;
+                Some(
+                    std::str::from_utf8(bytes)
+                        .map_err(|_| invalid("sidecar: e-tag is not UTF-8"))?
+                        .to_string(),
+                )
             }
             _ => return Err(invalid("bad opt tag")),
         })
@@ -771,6 +896,7 @@ mod tests {
             source_len: 12345,
             source_mtime: Some(SystemTime::UNIX_EPOCH + std::time::Duration::new(100, 500)),
             header_hash: 0xDEAD_BEEF,
+            source_etag: Some("\"abc123\"".to_string()),
             format: PcapFormat::PcapNg,
             link_type: 1,
             snaplen: 65535,
@@ -786,11 +912,13 @@ mod tests {
                                 link_type: 1,
                                 if_tsresol: 6,
                                 snaplen: 65535,
+                                if_tsoffset: 0,
                             },
                             InterfaceInfo {
-                                link_type: 1,
+                                link_type: 113,
                                 if_tsresol: 9,
                                 snaplen: 262144,
+                                if_tsoffset: -3_600,
                             },
                         ],
                         big_endian: true,
@@ -818,6 +946,7 @@ mod tests {
             source_len: 100,
             source_mtime: None,
             header_hash: 42,
+            source_etag: None,
             format: PcapFormat::LegacyLeMicro,
             link_type: 1,
             snaplen: 0,
@@ -848,6 +977,13 @@ mod tests {
         assert_ne!(header_hash(b"\0\0"), header_hash(b"\0\0\0"));
     }
 
+    /// Append a valid checksum so the body itself is what gets exercised.
+    fn with_checksum(mut body: Vec<u8>) -> Vec<u8> {
+        let c = fnv1a(&body);
+        put_u64(&mut body, c);
+        body
+    }
+
     #[test]
     fn hostile_sidecar_is_rejected_not_panicking() {
         // Valid prefix up to the mtime, then an mtime that would overflow
@@ -858,7 +994,7 @@ mod tests {
         w.push(1); // mtime present
         put_u64(&mut w, u64::MAX); // secs
         put_u32(&mut w, 0); // nanos
-        assert!(BoundaryIndex::from_bytes(&w).is_err());
+        assert!(BoundaryIndex::from_bytes(&with_checksum(w)).is_err());
 
         let mut w = Vec::new();
         w.extend_from_slice(SIDECAR_MAGIC);
@@ -866,7 +1002,154 @@ mod tests {
         w.push(1);
         put_u64(&mut w, 1);
         put_u32(&mut w, 2_000_000_000); // nanos >= 1e9
-        assert!(BoundaryIndex::from_bytes(&w).is_err());
+        assert!(BoundaryIndex::from_bytes(&with_checksum(w)).is_err());
+
+        // Too short for even a checksum.
+        assert!(BoundaryIndex::from_bytes(SIDECAR_MAGIC).is_err());
+        assert!(BoundaryIndex::from_bytes(b"").is_err());
+    }
+
+    /// A flipped byte anywhere in the body, a truncated file, or a stale
+    /// format version is rejected (and therefore rebuilt), never misread.
+    #[test]
+    fn sidecar_checksum_and_version_guard() {
+        let idx = BoundaryIndex {
+            source_len: 1000,
+            source_mtime: None,
+            header_hash: 1,
+            source_etag: None,
+            format: PcapFormat::LegacyLeMicro,
+            link_type: 1,
+            snaplen: 65535,
+            packet_count: 10,
+            stride: 4,
+            checkpoints: vec![Checkpoint {
+                frame_number: 1,
+                byte_offset: 24,
+                interface_state: None,
+                min_ts: Some(5),
+                max_ts: Some(9),
+            }],
+        };
+        let bytes = idx.to_bytes();
+        assert_eq!(BoundaryIndex::from_bytes(&bytes).unwrap(), idx);
+
+        for i in 8..bytes.len() {
+            let mut bad = bytes.clone();
+            bad[i] ^= 0x01;
+            assert!(
+                BoundaryIndex::from_bytes(&bad).is_err(),
+                "flipped byte {i} must be rejected"
+            );
+        }
+        assert!(BoundaryIndex::from_bytes(&bytes[..bytes.len() - 1]).is_err());
+        let mut extra = bytes.clone();
+        extra.push(0);
+        assert!(BoundaryIndex::from_bytes(&extra).is_err());
+
+        // A v2 sidecar (previous magic) is rejected by the version check.
+        let mut v2 = bytes.clone();
+        v2[7] = 0x02;
+        assert!(BoundaryIndex::from_bytes(&v2).is_err());
+    }
+
+    /// `validate()` rejects interface state the synthesized header could not
+    /// reproduce: link types wider than 16 bits and undecodable `if_tsresol`.
+    #[test]
+    fn sidecar_rejects_unrepresentable_interface_state() {
+        let good = BoundaryIndex {
+            source_len: 1000,
+            source_mtime: None,
+            header_hash: 1,
+            source_etag: None,
+            format: PcapFormat::PcapNg,
+            link_type: 1,
+            snaplen: 65535,
+            packet_count: 10,
+            stride: 4,
+            checkpoints: vec![Checkpoint {
+                frame_number: 1,
+                byte_offset: 28,
+                interface_state: Some(InterfaceState {
+                    interfaces: vec![InterfaceInfo {
+                        link_type: 1,
+                        if_tsresol: 6,
+                        snaplen: 65535,
+                        if_tsoffset: 0,
+                    }],
+                    big_endian: false,
+                }),
+                min_ts: None,
+                max_ts: None,
+            }],
+        };
+        assert!(BoundaryIndex::from_bytes(&good.to_bytes()).is_ok());
+
+        let mut bad = good.clone();
+        bad.checkpoints[0]
+            .interface_state
+            .as_mut()
+            .unwrap()
+            .interfaces[0]
+            .link_type = 0x1_0000;
+        assert!(BoundaryIndex::from_bytes(&bad.to_bytes()).is_err());
+
+        let mut bad = good.clone();
+        bad.checkpoints[0]
+            .interface_state
+            .as_mut()
+            .unwrap()
+            .interfaces[0]
+            .if_tsresol = 20;
+        assert!(BoundaryIndex::from_bytes(&bad.to_bytes()).is_err());
+
+        let mut bad = good;
+        bad.link_type = 0x1_0000;
+        assert!(BoundaryIndex::from_bytes(&bad.to_bytes()).is_err());
+    }
+
+    /// The e-tag follows the same both-or-neither rule as the mtime.
+    #[test]
+    fn etag_guard() {
+        let idx = BoundaryIndex {
+            source_len: 100,
+            source_mtime: None,
+            header_hash: 42,
+            source_etag: Some("v1".into()),
+            format: PcapFormat::LegacyLeMicro,
+            link_type: 1,
+            snaplen: 0,
+            packet_count: 0,
+            stride: 4,
+            checkpoints: vec![],
+        };
+        assert!(idx.matches_source(100, None, 42, Some("v1")));
+        assert!(!idx.matches_source(100, None, 42, Some("v2")));
+        assert!(!idx.matches_source(100, None, 42, None));
+        assert!(!idx.is_valid_for(100, None, 42)); // tagged index, untagged source
+        assert!(!idx.worth_persisting());
+    }
+
+    /// A synthesized IDB carries the interface's `if_tsoffset`, so a mid-file
+    /// partition decodes the same timestamps as a sequential read.
+    #[test]
+    fn synth_pcapng_header_carries_tsoffset() {
+        let state = InterfaceState {
+            interfaces: vec![InterfaceInfo {
+                link_type: 1,
+                if_tsresol: 6,
+                snaplen: 65535,
+                if_tsoffset: 1_000,
+            }],
+            big_endian: false,
+        };
+        let h = synth_pcapng_header(&state);
+        assert_eq!(h.len(), 28 + 44);
+        let mut reader =
+            crate::io::GenericPcapReader::with_format(std::io::Cursor::new(h), PcapFormat::PcapNg)
+                .unwrap();
+        reader.process_packets(1, |_| Ok(())).unwrap();
+        assert_eq!(reader.interface_state().interfaces[0].if_tsoffset, 1_000);
     }
 
     #[test]
@@ -875,6 +1158,7 @@ mod tests {
             source_len: 1000,
             source_mtime: None,
             header_hash: 1,
+            source_etag: None,
             format: PcapFormat::LegacyLeMicro,
             link_type: 1,
             snaplen: 65535,
@@ -935,6 +1219,7 @@ mod tests {
             source_len: 0,
             source_mtime: None,
             header_hash: 0,
+            source_etag: None,
             format: PcapFormat::LegacyLeMicro,
             link_type: 1,
             snaplen: 0,
@@ -971,11 +1256,13 @@ mod tests {
                     link_type: 1,
                     if_tsresol: 6,
                     snaplen: 65535,
+                    if_tsoffset: 0,
                 },
                 InterfaceInfo {
                     link_type: 1,
                     if_tsresol: 9,
                     snaplen: 65535,
+                    if_tsoffset: 0,
                 },
             ],
             big_endian: false,
@@ -1050,6 +1337,7 @@ mod build_tests {
                 interfaces: vec![6],
                 sections: 1,
                 add_interface_midstream: false,
+                if_tsoffset: 0,
             };
             let stride = 4u64;
             let (idx, expected_count, len) = build_for(&spec, stride);
@@ -1115,6 +1403,7 @@ mod build_tests {
             interfaces: vec![6],
             sections: 2,
             add_interface_midstream: true,
+            if_tsoffset: 0,
         };
         let (idx, expected_count, _) = build_for(&spec, 3);
         assert_eq!(idx.packet_count, expected_count as u64);

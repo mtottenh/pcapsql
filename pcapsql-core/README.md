@@ -10,7 +10,7 @@ This crate provides the core parsing functionality for pcapsql, without any SQL 
 
 ## Features
 
-- **Protocol Parsing**: 17+ built-in protocol parsers
+- **Protocol Parsing**: 26 built-in protocol parsers
 - **PCAP Reading**: PCAP and PCAPNG formats with gzip/zstd compression
 - **Memory-Mapped I/O**: Efficient reading of large capture files
 - **Boundary Index**: Record-boundary checkpoints (persisted as a sidecar) so a capture can be read in parallel partitions, locally or over cloud byte ranges
@@ -58,7 +58,7 @@ automatically.
 
 | Layer | Protocols |
 |-------|-----------|
-| Link | Ethernet, VLAN (802.1Q), Linux SLL, Linux SLL2 |
+| Link | Ethernet, VLAN (802.1Q), Linux SLL, Linux SLL2, Netlink, rtnetlink |
 | Network | IPv4, IPv6, ARP, ICMP, ICMPv6 |
 | Transport | TCP, UDP |
 | Application | DNS, DHCP, NTP, HTTP, TLS, SSH, QUIC |

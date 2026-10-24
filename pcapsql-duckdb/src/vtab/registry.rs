@@ -25,6 +25,10 @@ const BATCH_SIZE: usize = 2048;
 fn protocol_description(name: &str) -> &'static str {
     match name {
         "ethernet" => "Ethernet II frames (Layer 2)",
+        "linux_sll" => "Linux cooked capture v1 (tcpdump -i any)",
+        "sll2" => "Linux cooked capture v2",
+        "netlink" => "Linux netlink messages (nlmon captures)",
+        "rtnetlink" => "Linux rtnetlink (route/link/address messages)",
         "vlan" => "IEEE 802.1Q VLAN tags",
         "arp" => "Address Resolution Protocol",
         "mpls" => "Multiprotocol Label Switching",

@@ -145,29 +145,35 @@ impl DynamicBuilder {
     }
 
     /// Append a FieldValue.
+    ///
+    /// Integer values are converted to the column's width only when they fit:
+    /// a value that does not fit the column becomes NULL, never a wrapped
+    /// value. Parser field widths are pinned to the table schemas by a test,
+    /// so in practice every value fits; the checks are the safety net for a
+    /// parser emitting a wider variant than its descriptor declares.
     fn append_field_value(&mut self, value: &FieldValue) {
         match self {
             DynamicBuilder::UInt8(b) => match value {
                 FieldValue::UInt8(v) => b.append_value(*v),
-                FieldValue::UInt16(v) => b.append_value(*v as u8),
-                FieldValue::UInt32(v) => b.append_value(*v as u8),
-                FieldValue::UInt64(v) => b.append_value(*v as u8),
+                FieldValue::UInt16(v) => b.append_option(u8::try_from(*v).ok()),
+                FieldValue::UInt32(v) => b.append_option(u8::try_from(*v).ok()),
+                FieldValue::UInt64(v) => b.append_option(u8::try_from(*v).ok()),
                 FieldValue::Null => b.append_null(),
                 _ => b.append_null(),
             },
             DynamicBuilder::UInt16(b) => match value {
                 FieldValue::UInt16(v) => b.append_value(*v),
-                FieldValue::UInt8(v) => b.append_value(*v as u16),
-                FieldValue::UInt32(v) => b.append_value(*v as u16),
-                FieldValue::UInt64(v) => b.append_value(*v as u16),
+                FieldValue::UInt8(v) => b.append_value(u16::from(*v)),
+                FieldValue::UInt32(v) => b.append_option(u16::try_from(*v).ok()),
+                FieldValue::UInt64(v) => b.append_option(u16::try_from(*v).ok()),
                 FieldValue::Null => b.append_null(),
                 _ => b.append_null(),
             },
             DynamicBuilder::UInt32(b) => match value {
                 FieldValue::UInt32(v) => b.append_value(*v),
-                FieldValue::UInt8(v) => b.append_value(*v as u32),
-                FieldValue::UInt16(v) => b.append_value(*v as u32),
-                FieldValue::UInt64(v) => b.append_value(*v as u32),
+                FieldValue::UInt8(v) => b.append_value(u32::from(*v)),
+                FieldValue::UInt16(v) => b.append_value(u32::from(*v)),
+                FieldValue::UInt64(v) => b.append_option(u32::try_from(*v).ok()),
                 FieldValue::IpAddr(addr) => {
                     // Convert IPv4 to u32
                     if let std::net::IpAddr::V4(v4) = addr {
@@ -181,33 +187,33 @@ impl DynamicBuilder {
             },
             DynamicBuilder::UInt64(b) => match value {
                 FieldValue::UInt64(v) => b.append_value(*v),
-                FieldValue::UInt8(v) => b.append_value(*v as u64),
-                FieldValue::UInt16(v) => b.append_value(*v as u64),
-                FieldValue::UInt32(v) => b.append_value(*v as u64),
+                FieldValue::UInt8(v) => b.append_value(u64::from(*v)),
+                FieldValue::UInt16(v) => b.append_value(u64::from(*v)),
+                FieldValue::UInt32(v) => b.append_value(u64::from(*v)),
                 FieldValue::Null => b.append_null(),
                 _ => b.append_null(),
             },
             DynamicBuilder::Int32(b) => match value {
-                FieldValue::UInt8(v) => b.append_value(*v as i32),
-                FieldValue::UInt16(v) => b.append_value(*v as i32),
-                FieldValue::UInt32(v) => b.append_value(*v as i32),
-                FieldValue::Int64(v) => b.append_value(*v as i32),
+                FieldValue::UInt8(v) => b.append_value(i32::from(*v)),
+                FieldValue::UInt16(v) => b.append_value(i32::from(*v)),
+                FieldValue::UInt32(v) => b.append_option(i32::try_from(*v).ok()),
+                FieldValue::Int64(v) => b.append_option(i32::try_from(*v).ok()),
                 FieldValue::Null => b.append_null(),
                 _ => b.append_null(),
             },
             DynamicBuilder::Int64(b) => match value {
                 FieldValue::Int64(v) => b.append_value(*v),
-                FieldValue::Int8(v) => b.append_value(*v as i64),
-                FieldValue::UInt8(v) => b.append_value(*v as i64),
-                FieldValue::UInt16(v) => b.append_value(*v as i64),
-                FieldValue::UInt32(v) => b.append_value(*v as i64),
-                FieldValue::UInt64(v) => b.append_value(*v as i64),
+                FieldValue::Int8(v) => b.append_value(i64::from(*v)),
+                FieldValue::UInt8(v) => b.append_value(i64::from(*v)),
+                FieldValue::UInt16(v) => b.append_value(i64::from(*v)),
+                FieldValue::UInt32(v) => b.append_value(i64::from(*v)),
+                FieldValue::UInt64(v) => b.append_option(i64::try_from(*v).ok()),
                 FieldValue::Null => b.append_null(),
                 _ => b.append_null(),
             },
             DynamicBuilder::Int8(b) => match value {
                 FieldValue::Int8(v) => b.append_value(*v),
-                FieldValue::Int64(v) => b.append_value(*v as i8),
+                FieldValue::Int64(v) => b.append_option(i8::try_from(*v).ok()),
                 FieldValue::Null => b.append_null(),
                 _ => b.append_null(),
             },
@@ -663,6 +669,29 @@ mod tests {
     }
     use pcapsql_core::TunnelType;
     use smallvec::SmallVec;
+
+    /// An integer wider than its column is NULL, not a wrapped value.
+    #[test]
+    fn out_of_range_integers_become_null_not_wrapped() {
+        use arrow::array::{Array, UInt16Array, UInt8Array};
+        let mut b8 = DynamicBuilder::new(&DataType::UInt8, 4);
+        b8.append_field_value(&FieldValue::UInt16(255));
+        b8.append_field_value(&FieldValue::UInt16(256));
+        b8.append_field_value(&FieldValue::UInt32(0x1_0005));
+        let a = b8.finish();
+        let a = a.as_any().downcast_ref::<UInt8Array>().unwrap();
+        assert_eq!(a.value(0), 255);
+        assert!(a.is_null(1), "256 does not fit u8");
+        assert!(a.is_null(2), "0x10005 must not wrap to 5");
+
+        let mut b16 = DynamicBuilder::new(&DataType::UInt16, 4);
+        b16.append_field_value(&FieldValue::UInt32(65_535));
+        b16.append_field_value(&FieldValue::UInt32(65_536));
+        let a = b16.finish();
+        let a = a.as_any().downcast_ref::<UInt16Array>().unwrap();
+        assert_eq!(a.value(0), 65_535);
+        assert!(a.is_null(1));
+    }
 
     #[test]
     fn test_protocol_builder_new() {

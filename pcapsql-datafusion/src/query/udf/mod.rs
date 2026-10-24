@@ -146,7 +146,78 @@ pub use histogram::{
 };
 
 use crate::error::Error;
+use arrow::array::{Array, StringArray};
+use arrow::datatypes::DataType;
+use datafusion::common::types::{
+    logical_string, logical_uint16, logical_uint32, logical_uint64, logical_uint8, NativeType,
+};
+use datafusion::common::{DataFusionError, Result as DFResult};
+use datafusion::logical_expr::{Coercion, Signature, TypeSignatureClass, Volatility};
 use datafusion::prelude::SessionContext;
+
+/// A signature whose unsigned-integer parameters accept any integer argument.
+///
+/// `Signature::exact([UInt8])` only matches a `UInt8` *column*: DataFusion
+/// never widens or narrows an `Int64` literal to it, so `dscp_name(46)` would
+/// fail to plan. Here each `UInt*` parameter is a coercible slot: an argument
+/// of that exact type passes through, any other integer type (the `Int64` of
+/// a literal, a `UInt32` column into a `UInt16` slot, …) is cast to it by the
+/// planner, and a non-integer argument is still rejected at planning. The
+/// cast is not range-checked: an integer that does not fit the parameter
+/// (`dscp_name(300)`, `tcp_flags_str(70000)`, a negative value) plans and
+/// then fails with a cast error, for a literal at optimization and for a
+/// column at execution; NULL passes through as NULL.
+///
+/// A `Utf8` parameter accepts any string type. DataFusion keeps the
+/// argument's physical string type (`Utf8`, `LargeUtf8`, or the `Utf8View`
+/// that SQL `VARCHAR`/`TEXT` casts produce), so a body must read the
+/// argument through [`string_arg`], which normalizes it to a `StringArray`.
+pub(crate) fn coercible_signature(params: &[DataType], volatility: Volatility) -> Signature {
+    let coercions = params
+        .iter()
+        .map(|param| match param {
+            DataType::UInt8 => integer_slot(logical_uint8(), NativeType::UInt8),
+            DataType::UInt16 => integer_slot(logical_uint16(), NativeType::UInt16),
+            DataType::UInt32 => integer_slot(logical_uint32(), NativeType::UInt32),
+            DataType::UInt64 => integer_slot(logical_uint64(), NativeType::UInt64),
+            DataType::Utf8 => Coercion::new_exact(TypeSignatureClass::Native(logical_string())),
+            other => unreachable!("coercible_signature: unsupported parameter type {other}"),
+        })
+        .collect();
+    Signature::coercible(coercions, volatility)
+}
+
+/// A UDF's string argument as a `StringArray`, whatever string type the
+/// planner delivered (`Utf8`, `LargeUtf8`, `Utf8View`); anything else is a
+/// planning/execution error naming the UDF, never a panic.
+pub(crate) fn string_arg(array: &arrow::array::ArrayRef, udf: &str) -> DFResult<StringArray> {
+    let utf8 = match array.data_type() {
+        DataType::Utf8 => array.clone(),
+        DataType::LargeUtf8 | DataType::Utf8View => arrow::compute::cast(array, &DataType::Utf8)?,
+        other => {
+            return Err(DataFusionError::Plan(format!(
+                "{udf}: expected a string argument, got {other}"
+            )))
+        }
+    };
+    utf8.as_any()
+        .downcast_ref::<StringArray>()
+        .cloned()
+        .ok_or_else(|| {
+            DataFusionError::Internal(format!("{udf}: cast to Utf8 produced {}", utf8.data_type()))
+        })
+}
+
+fn integer_slot(
+    desired: datafusion::common::types::LogicalTypeRef,
+    cast_to: NativeType,
+) -> Coercion {
+    Coercion::new_implicit(
+        TypeSignatureClass::Native(desired),
+        vec![TypeSignatureClass::Integer],
+        cast_to,
+    )
+}
 
 /// Register all network address UDFs with the DataFusion context.
 pub fn register_network_udfs(ctx: &SessionContext) -> Result<(), Error> {
@@ -309,6 +380,82 @@ pub fn register_time_udfs(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every UDF with an integer parameter plans with an integer literal
+    /// (an `Int64`), with a NULL, and with a narrower/wider integer column
+    /// type; a non-integer argument is still a planning error.
+    #[tokio::test]
+    async fn integer_udfs_accept_integer_literals() {
+        use arrow::util::pretty::pretty_format_batches;
+        let ctx = SessionContext::new();
+        register_all_udfs(&ctx).unwrap();
+        let calls = [
+            ("dscp_name(46)", "EF"),
+            ("ecn_name(1)", "ECT(1)"),
+            ("gtp_message_type_name(1)", "Echo Request"),
+            ("ip_proto_name(6)", "TCP"),
+            ("ethertype_name(2048)", "IPv4"),
+            ("tcp_flags_str(2)", "SYN"),
+            ("has_tcp_flag(18, 'SYN')", "true"),
+            ("icmp_type_name(8)", "Echo Request"),
+            ("icmpv6_type_name(128)", "Echo Request"),
+            ("dns_type_name(1)", "A"),
+            ("dns_rcode_name(0)", "NOERROR"),
+            ("dns_class_name(1)", "IN"),
+            ("ospf_packet_type_name(1)", "Hello"),
+            ("ntp_mode_name(3)", "Client"),
+            ("tls_version_name(771)", "TLS 1.2"),
+            ("tls_record_type_name(22)", "Handshake"),
+            ("bgp_message_type_name(2)", "UPDATE"),
+            ("ip4_to_string(3232235777)", "192.168.1.1"),
+            ("is_private_ip(3232235777)", "true"),
+            ("is_loopback_ip(2130706433)", "true"),
+            ("ip_in_cidr(3232235777, '192.168.1.0/24')", "true"),
+            // Two integer parameters, a cast column and a NULL.
+            ("icmp_code_name(3, 1)", "Host Unreachable"),
+            ("dscp_name(CAST(46 AS BIGINT))", "EF"),
+            ("dscp_name(arrow_cast(46, 'UInt32'))", "EF"),
+            ("dscp_name(NULL)", ""),
+            // String parameters take every physical string type: SQL
+            // VARCHAR/TEXT casts are Utf8View in DataFusion 51.
+            ("has_tcp_flag(2, CAST('SYN' AS VARCHAR))", "true"),
+            ("has_tcp_flag(2, CAST('SYN' AS TEXT))", "true"),
+            ("has_tcp_flag(2, arrow_cast('SYN', 'LargeUtf8'))", "true"),
+            ("has_tcp_flag(2, arrow_cast('SYN', 'Utf8View'))", "true"),
+            (
+                "ip_in_cidr(3232235777, CAST('192.168.1.0/24' AS VARCHAR))",
+                "true",
+            ),
+            (
+                "ip_in_cidr(3232235777, arrow_cast('192.168.1.0/24', 'LargeUtf8'))",
+                "true",
+            ),
+            ("ip4(CAST('10.0.0.1' AS VARCHAR))", "167772161"),
+            ("unhex(arrow_cast('0a', 'Utf8View'))", "0a"),
+        ];
+        for (call, want) in calls {
+            let batches = ctx
+                .sql(&format!("SELECT {call} AS v"))
+                .await
+                .unwrap_or_else(|e| panic!("{call}: plan: {e}"))
+                .collect()
+                .await
+                .unwrap_or_else(|e| panic!("{call}: exec: {e}"));
+            let out = pretty_format_batches(&batches).unwrap().to_string();
+            assert!(out.contains(want), "{call}: expected {want:?} in\n{out}");
+        }
+        // Non-integer arguments are still rejected when planning.
+        for call in [
+            "dscp_name('x')",
+            "ecn_name(1.5)",
+            "gtp_message_type_name(TRUE)",
+        ] {
+            assert!(
+                ctx.sql(&format!("SELECT {call}")).await.is_err(),
+                "{call} must not plan"
+            );
+        }
+    }
 
     #[test]
     fn test_register_network_udfs() {
