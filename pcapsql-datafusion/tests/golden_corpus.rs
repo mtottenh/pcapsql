@@ -1,11 +1,12 @@
 //! Golden query corpus: cross-phase result-identity guard.
 //!
-//! Two fixed, hand-crafted captures are queried with a corpus covering every
+//! Fixed, hand-crafted captures are queried with a corpus covering every
 //! populated protocol table plus joins, aggregates, LIMIT, views, list
 //! columns, `raw_data`, VLAN and VXLAN encapsulation, the time UDFs, and
 //! queries that reference the same table twice. The second capture uses the
 //! Linux "cooked" (SLL) link type, as `tcpdump -i any` writes, so the
-//! non-Ethernet link-layer path is guarded too. Results are compared
+//! non-Ethernet link-layer path is guarded too; the routing capture pins the
+//! full `SELECT *` column set of the routing and tunnel tables. Results are compared
 //! byte-for-byte against checked-in snapshots, so any refactor that changes
 //! query results — row content, order, types, or formatting — fails loudly.
 //!
@@ -443,6 +444,97 @@ fn http_frames() -> Vec<Vec<u8>> {
     frames
 }
 
+// ---------------------------------------------------------------------------
+// Routing / tunnel capture: BGP (OSPF, GTP and IPv6 extension headers follow
+// in their own frames). Each table's `SELECT *` snapshot pins every column.
+// ---------------------------------------------------------------------------
+
+/// A BGP message: 16-byte marker, length, type, body.
+fn bgp_message(msg_type: u8, body: &[u8]) -> Vec<u8> {
+    let mut m = vec![0xff; 16];
+    m.extend_from_slice(&((19 + body.len()) as u16).to_be_bytes());
+    m.push(msg_type);
+    m.extend_from_slice(body);
+    m
+}
+
+/// OPEN from AS 4200000001 (AS_TRANS in the 2-byte field, the real AS in the
+/// 4-byte-AS capability) with MULTIPROTOCOL and ROUTE_REFRESH capabilities.
+fn bgp_open() -> Vec<u8> {
+    let caps: &[u8] = &[
+        1, 4, 0, 1, 0, 1, // MULTIPROTOCOL: AFI 1 (IPv4), SAFI 1 (unicast)
+        2, 0, // ROUTE_REFRESH
+        65, 4, 0xfa, 0x56, 0xea, 0x01, // 4-BYTE-AS: 4200000001
+    ];
+    let mut body = vec![4]; // version
+    body.extend_from_slice(&23456u16.to_be_bytes()); // my AS: AS_TRANS
+    body.extend_from_slice(&90u16.to_be_bytes()); // hold time
+    body.extend_from_slice(&[10, 1, 0, 1]); // BGP identifier
+    body.push((caps.len() + 2) as u8); // optional parameters length
+    body.push(2); // parameter type: capabilities
+    body.push(caps.len() as u8);
+    body.extend_from_slice(caps);
+    bgp_message(1, &body)
+}
+
+fn bgp_path_attr(flags: u8, type_code: u8, value: &[u8]) -> Vec<u8> {
+    let mut a = vec![flags, type_code, value.len() as u8];
+    a.extend_from_slice(value);
+    a
+}
+
+/// UPDATE withdrawing two prefixes and announcing two with every path
+/// attribute the parser decodes.
+fn bgp_update() -> Vec<u8> {
+    let withdrawn: &[u8] = &[24, 192, 0, 2, 16, 198, 51]; // 192.0.2.0/24, 198.51.0.0/16
+    let mut attrs = Vec::new();
+    attrs.extend(bgp_path_attr(0x40, 1, &[0])); // ORIGIN: IGP
+                                                // AS_PATH: AS_SEQUENCE of 65002 65003 65004 (2-byte ASNs)
+    attrs.extend(bgp_path_attr(
+        0x40,
+        2,
+        &[2, 3, 0xfd, 0xea, 0xfd, 0xeb, 0xfd, 0xec],
+    ));
+    attrs.extend(bgp_path_attr(0x40, 3, &[10, 1, 0, 2])); // NEXT_HOP
+    attrs.extend(bgp_path_attr(0x80, 4, &100u32.to_be_bytes())); // MULTI_EXIT_DISC
+    attrs.extend(bgp_path_attr(0x40, 5, &200u32.to_be_bytes())); // LOCAL_PREF
+    attrs.extend(bgp_path_attr(0x40, 6, &[])); // ATOMIC_AGGREGATE
+    attrs.extend(bgp_path_attr(0xc0, 7, &[0xfd, 0xea, 10, 1, 0, 2])); // AGGREGATOR: AS 65002, 10.1.0.2
+    let nlri: &[u8] = &[24, 203, 0, 113, 25, 198, 51, 100, 0]; // 203.0.113.0/24, 198.51.100.0/25
+    let mut body = Vec::new();
+    body.extend_from_slice(&(withdrawn.len() as u16).to_be_bytes());
+    body.extend_from_slice(withdrawn);
+    body.extend_from_slice(&(attrs.len() as u16).to_be_bytes());
+    body.extend_from_slice(&attrs);
+    body.extend_from_slice(nlri);
+    bgp_message(2, &body)
+}
+
+/// Routing and tunnelling protocols on an Ethernet link. Frames are grouped
+/// by protocol, each group appended after the previous ones, so a table's
+/// `SELECT *` snapshot does not move when another protocol's frames are added.
+fn routing_capture() -> Vec<u8> {
+    let a = [10, 1, 0, 1];
+    let b = [10, 1, 0, 2];
+    let bgp = |src: [u8; 4], dst: [u8; 4], id: u16, sp: u16, dp: u16, msg: &[u8]| {
+        let seg = tcp(sp, dp, 1000 + u32::from(id), 1, 0x18, msg);
+        eth(MAC_B, MAC_A, ETH_IP4, &ipv4(src, dst, 6, id, &seg))
+    };
+    let frames: Vec<Vec<u8>> = vec![
+        // 1: BGP OPEN a -> b
+        bgp(a, b, 1, 40179, 179, &bgp_open()),
+        // 2: BGP KEEPALIVE b -> a
+        bgp(b, a, 2, 179, 40179, &bgp_message(4, &[])),
+        // 3: BGP UPDATE b -> a
+        bgp(b, a, 3, 179, 40179, &bgp_update()),
+        // 4: BGP NOTIFICATION a -> b: Cease / Administrative Shutdown
+        bgp(a, b, 4, 40179, 179, &bgp_message(3, &[6, 2])),
+        // 5: BGP ROUTE-REFRESH a -> b: IPv4 unicast
+        bgp(a, b, 5, 40179, 179, &bgp_message(5, &[0, 1, 0, 1])),
+    ];
+    to_capture(frames, LINKTYPE_ETHERNET)
+}
+
 /// The fixed Ethernet corpus capture: 11 frames covering
 /// tcp/udp/dns/arp/icmp/ipv6 plus one VLAN-tagged and one VXLAN-encapsulated
 /// frame (the latter carries an inner Ethernet/IPv4/UDP frame).
@@ -568,6 +660,8 @@ enum Capture {
     Sll2,
     /// `http_capture()`: reassembled HTTP/1.1 and TLS streams.
     Http,
+    /// `routing_capture()`: BGP, OSPF, GTP, IPv6 extension headers.
+    Routing,
 }
 
 /// (capture, snapshot name, SQL). Every query is fully ordered so output is
@@ -887,6 +981,13 @@ const CORPUS: &[(Capture, &str, &str)] = &[
          (SELECT count(*) FROM tcp WHERE dst_port = 80 OR src_port = 80) AS port_80_segments \
          FROM http",
     ),
+    // `SELECT *` pins the full column set of each routing / tunnel table
+    // (#138): adding a column changes the snapshot, on purpose.
+    (
+        Capture::Routing,
+        "v01_bgp",
+        "SELECT * FROM bgp ORDER BY frame_number",
+    ),
 ];
 
 /// Queries that must be the *first* query a fresh engine runs: their result
@@ -934,6 +1035,8 @@ async fn golden_corpus_matches_snapshots() {
     std::fs::write(&sll2_path, sll2_capture()).unwrap();
     let http_path = dir.path().join("corpus_http.pcap");
     std::fs::write(&http_path, http_capture()).unwrap();
+    let routing_path = dir.path().join("corpus_routing.pcap");
+    std::fs::write(&routing_path, routing_capture()).unwrap();
 
     let update = std::env::var("PCAPSQL_GOLDEN_UPDATE").is_ok();
     if update {
@@ -944,6 +1047,10 @@ async fn golden_corpus_matches_snapshots() {
     let sll = (engine(&sll_path, 2).await, engine(&sll_path, 1).await);
     let sll2 = (engine(&sll2_path, 2).await, engine(&sll2_path, 1).await);
     let http = (engine(&http_path, 2).await, engine(&http_path, 1).await);
+    let routing = (
+        engine(&routing_path, 2).await,
+        engine(&routing_path, 1).await,
+    );
     // One-shot CLI path: RetentionPolicy::None streams rather than
     // materializes. Its results must be identical.
     let streaming = |path: &Path| {
@@ -962,6 +1069,9 @@ async fn golden_corpus_matches_snapshots() {
     let sll_streamed = streaming(&sll_path).await.expect("build streaming engine");
     let sll2_streamed = streaming(&sll2_path).await.expect("build streaming engine");
     let http_streamed = streaming(&http_path).await.expect("build streaming engine");
+    let routing_streamed = streaming(&routing_path)
+        .await
+        .expect("build streaming engine");
 
     let mut failures = Vec::new();
     for (capture, name, sql) in CORPUS {
@@ -970,6 +1080,7 @@ async fn golden_corpus_matches_snapshots() {
             Capture::Sll => &sll_path,
             Capture::Sll2 => &sll2_path,
             Capture::Http => &http_path,
+            Capture::Routing => &routing_path,
         };
         // Fresh engines (materialized and streaming) for queries whose result
         // depends on engine-wide state no earlier query may have established.
@@ -988,6 +1099,7 @@ async fn golden_corpus_matches_snapshots() {
             (None, Capture::Sll) => (&sll.0, &sll.1, &sll_streamed),
             (None, Capture::Sll2) => (&sll2.0, &sll2.1, &sll2_streamed),
             (None, Capture::Http) => (&http.0, &http.1, &http_streamed),
+            (None, Capture::Routing) => (&routing.0, &routing.1, &routing_streamed),
         };
         let got = run(e2, sql).await;
 
@@ -1032,6 +1144,7 @@ async fn golden_corpus_matches_snapshots() {
             (Capture::Sll, &sll_path),
             (Capture::Sll2, &sll2_path),
             (Capture::Http, &http_path),
+            (Capture::Routing, &routing_path),
         ];
         for (capture, path) in captures {
             for retention in [RetentionPolicy::CacheOnTouch, RetentionPolicy::None] {

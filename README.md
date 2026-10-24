@@ -151,7 +151,7 @@ SELECT window_start, count(*) FROM tumble(frames, INTERVAL '10' SECOND) GROUP BY
 | `http2` | HTTP/2 frames (requires TLS decryption) |
 | `vxlan`, `gre`, `gtp`, `ipsec` | Tunnel headers (inner layers get `encap_depth` > 0 and a `tunnel_type`) |
 | `mpls` | Label stacks (label switching, not counted as a tunnel) |
-| `bgp`, `ospf` | Routing protocols |
+| `bgp`, `ospf` | Routing protocols: BGP OPEN capabilities, UPDATE path attributes (AS path, next hop, MED, local pref, aggregator) and withdrawn/announced prefixes, NOTIFICATION codes, ROUTE-REFRESH address family |
 
 ## SQL Functions (UDFs)
 

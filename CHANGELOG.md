@@ -143,6 +143,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Parser fields that the DataFusion tables dropped are now columns, so
+  `SELECT *` on these tables returns more columns and the engine agrees with
+  the DuckDB table functions, which already exposed every parser field
+  ([#138](https://github.com/mtottenh/pcapsql/issues/138)):
+  - `bgp`: `my_as_4byte`, `capabilities`, `withdrawn_routes`,
+    `withdrawn_count`, `origin`, `origin_name`, `as_path`, `as_path_length`,
+    `next_hop`, `med`, `local_pref`, `atomic_aggregate`, `aggregator_as`,
+    `aggregator_ip`, `nlri`, `nlri_count`, `error_code`, `error_code_name`,
+    `error_subcode`, `afi`, `safi`. The list-valued attributes
+    (`capabilities`, `withdrawn_routes`, `as_path`, `nlri`) are strings as the
+    parser formats them: comma-separated names and prefixes, space-separated
+    AS numbers with an AS_SET in braces.
 - The capture can be piped in: `pcapsql --stdin` (or `-` as the capture
   argument) reads pcap or pcapng, optionally gzip/zstd compressed, from
   standard input, e.g. `tcpdump -U -w - -i eth0 port 53 | pcapsql --stdin -e
