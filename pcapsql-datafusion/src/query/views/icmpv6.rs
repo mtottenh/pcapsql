@@ -44,10 +44,12 @@ SELECT
     icmpv6.ndp_prefix_length,
     icmpv6.mld_max_response_delay,
     icmpv6.mld_multicast_address,
-    icmpv6.mld_num_group_records
+    icmpv6.mld_num_group_records,
+    icmpv6.encap_depth,
+    icmpv6.tunnel_type
 FROM frames f
-JOIN ipv6 ip6 ON f.frame_number = ip6.frame_number
 JOIN icmpv6 ON f.frame_number = icmpv6.frame_number
+JOIN ipv6 ip6 ON ip6.frame_number = icmpv6.frame_number AND ip6.encap_depth = icmpv6.encap_depth
 "#,
     }
 }
@@ -59,6 +61,8 @@ mod tests {
     #[test]
     fn test_icmpv6_packets_view() {
         let view = icmpv6_packets_view();
+        // Layers join their anchor at the same encapsulation level.
+        assert!(view.sql.contains("ip6.encap_depth = icmpv6.encap_depth"));
         assert_eq!(view.name, "icmpv6_packets");
         assert!(view.sql.contains("JOIN icmpv6"));
         assert!(view.sql.contains("ndp_target_address"));

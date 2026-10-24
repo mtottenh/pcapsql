@@ -56,12 +56,14 @@ SELECT
     bgp.error_code_name,
     bgp.error_subcode,
     bgp.afi,
-    bgp.safi
+    bgp.safi,
+    bgp.encap_depth,
+    bgp.tunnel_type
 FROM frames f
-LEFT JOIN ipv4 ip4 ON f.frame_number = ip4.frame_number
-LEFT JOIN ipv6 ip6 ON f.frame_number = ip6.frame_number
-JOIN tcp ON f.frame_number = tcp.frame_number
 JOIN bgp ON f.frame_number = bgp.frame_number
+LEFT JOIN ipv4 ip4 ON ip4.frame_number = bgp.frame_number AND ip4.encap_depth = bgp.encap_depth
+LEFT JOIN ipv6 ip6 ON ip6.frame_number = bgp.frame_number AND ip6.encap_depth = bgp.encap_depth
+JOIN tcp ON tcp.frame_number = bgp.frame_number AND tcp.encap_depth = bgp.encap_depth
 "#,
     }
 }
@@ -73,6 +75,8 @@ mod tests {
     #[test]
     fn test_bgp_packets_view() {
         let view = bgp_packets_view();
+        // Layers join their anchor at the same encapsulation level.
+        assert!(view.sql.contains("tcp.encap_depth = bgp.encap_depth"));
         assert_eq!(view.name, "bgp_packets");
         assert!(view.sql.contains("JOIN bgp"));
         assert!(view.sql.contains("message_type_name"));

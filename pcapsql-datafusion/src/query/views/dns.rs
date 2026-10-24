@@ -54,15 +54,17 @@ SELECT
     dns.answer_types,
     dns.answer_ttls,
     dns.has_edns,
-    dns.edns_udp_size
+    dns.edns_udp_size,
+    dns.encap_depth,
+    dns.tunnel_type
 FROM frames f
-LEFT JOIN ipv4 ip4 ON f.frame_number = ip4.frame_number
-LEFT JOIN ipv6 ip6 ON f.frame_number = ip6.frame_number
-LEFT JOIN tcp ON f.frame_number = tcp.frame_number
-LEFT JOIN udp ON f.frame_number = udp.frame_number
-LEFT JOIN tls ON f.frame_number = tls.frame_number
-LEFT JOIN http ON f.frame_number = http.frame_number
 JOIN dns ON f.frame_number = dns.frame_number
+LEFT JOIN ipv4 ip4 ON ip4.frame_number = dns.frame_number AND ip4.encap_depth = dns.encap_depth
+LEFT JOIN ipv6 ip6 ON ip6.frame_number = dns.frame_number AND ip6.encap_depth = dns.encap_depth
+LEFT JOIN tcp ON tcp.frame_number = dns.frame_number AND tcp.encap_depth = dns.encap_depth
+LEFT JOIN udp ON udp.frame_number = dns.frame_number AND udp.encap_depth = dns.encap_depth
+LEFT JOIN tls ON tls.frame_number = dns.frame_number AND tls.encap_depth = dns.encap_depth
+LEFT JOIN http ON http.frame_number = dns.frame_number AND http.encap_depth = dns.encap_depth
 "#,
     }
 }
@@ -74,6 +76,8 @@ mod tests {
     #[test]
     fn test_dns_packets_view() {
         let view = dns_packets_view();
+        // Layers join their anchor at the same encapsulation level.
+        assert!(view.sql.contains("udp.encap_depth = dns.encap_depth"));
         assert_eq!(view.name, "dns_packets");
         assert!(view.sql.contains("JOIN dns"));
         assert!(view.sql.contains("query_name"));

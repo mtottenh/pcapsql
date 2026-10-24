@@ -26,12 +26,14 @@ SELECT
     udp.src_port,
     udp.dst_port,
     vxlan.flags,
-    vxlan.vni
+    vxlan.vni,
+    vxlan.encap_depth,
+    vxlan.tunnel_type
 FROM frames f
-LEFT JOIN ipv4 ip4 ON f.frame_number = ip4.frame_number
-LEFT JOIN ipv6 ip6 ON f.frame_number = ip6.frame_number
-JOIN udp ON f.frame_number = udp.frame_number
 JOIN vxlan ON f.frame_number = vxlan.frame_number
+LEFT JOIN ipv4 ip4 ON ip4.frame_number = vxlan.frame_number AND ip4.encap_depth = vxlan.encap_depth
+LEFT JOIN ipv6 ip6 ON ip6.frame_number = vxlan.frame_number AND ip6.encap_depth = vxlan.encap_depth
+JOIN udp ON udp.frame_number = vxlan.frame_number AND udp.encap_depth = vxlan.encap_depth
 "#,
     }
 }
@@ -43,6 +45,8 @@ mod tests {
     #[test]
     fn test_vxlan_packets_view() {
         let view = vxlan_packets_view();
+        // Layers join their anchor at the same encapsulation level.
+        assert!(view.sql.contains("udp.encap_depth = vxlan.encap_depth"));
         assert_eq!(view.name, "vxlan_packets");
         assert!(view.sql.contains("JOIN vxlan"));
         assert!(view.sql.contains("vni"));

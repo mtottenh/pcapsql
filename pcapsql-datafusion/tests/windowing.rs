@@ -535,13 +535,18 @@ async fn explain_shows_the_rewrite_and_scans_are_pruned() {
         "{plan}"
     );
     assert!(plan.contains("SessionAssignExec"), "{plan}");
-    // The join behind the view is pruned to the key columns plus timestamp.
+    // The join behind the view is pruned to the join keys (frame_number and,
+    // for the layers, encap_depth) plus timestamp and the selected column.
     assert!(
         plan.contains("TableScan: frames projection=[frame_number, timestamp]"),
         "{plan}"
     );
     assert!(
-        plan.contains("TableScan: udp projection=[frame_number, src_port]"),
+        plan.contains("TableScan: udp projection=[frame_number, src_port, encap_depth]"),
+        "{plan}"
+    );
+    assert!(
+        plan.contains("TableScan: ipv4 projection=[frame_number, encap_depth]"),
         "{plan}"
     );
 

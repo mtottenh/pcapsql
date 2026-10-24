@@ -34,12 +34,14 @@ SELECT
     tcp.flags,
     tcp.window,
     tcp.checksum,
-    tcp.urgent_ptr
+    tcp.urgent_ptr,
+    tcp.encap_depth,
+    tcp.tunnel_type
 FROM frames f
-LEFT JOIN ethernet e ON f.frame_number = e.frame_number
-LEFT JOIN ipv4 ip4 ON f.frame_number = ip4.frame_number
-LEFT JOIN ipv6 ip6 ON f.frame_number = ip6.frame_number
 JOIN tcp ON f.frame_number = tcp.frame_number
+LEFT JOIN ethernet e ON e.frame_number = tcp.frame_number AND e.encap_depth = tcp.encap_depth
+LEFT JOIN ipv4 ip4 ON ip4.frame_number = tcp.frame_number AND ip4.encap_depth = tcp.encap_depth
+LEFT JOIN ipv6 ip6 ON ip6.frame_number = tcp.frame_number AND ip6.encap_depth = tcp.encap_depth
 "#,
     }
 }
@@ -51,6 +53,8 @@ mod tests {
     #[test]
     fn test_tcp_packets_view() {
         let view = tcp_packets_view();
+        // Layers join their anchor at the same encapsulation level.
+        assert!(view.sql.contains("ip4.encap_depth = tcp.encap_depth"));
         assert_eq!(view.name, "tcp_packets");
         assert!(view.sql.contains("JOIN tcp"));
         assert!(view.sql.contains("FROM frames"));

@@ -26,11 +26,13 @@ SELECT
     ipsec.spi,
     ipsec.sequence,
     ipsec.ah_next_header,
-    ipsec.ah_icv_length
+    ipsec.ah_icv_length,
+    ipsec.encap_depth,
+    ipsec.tunnel_type
 FROM frames f
-LEFT JOIN ipv4 ip4 ON f.frame_number = ip4.frame_number
-LEFT JOIN ipv6 ip6 ON f.frame_number = ip6.frame_number
 JOIN ipsec ON f.frame_number = ipsec.frame_number
+LEFT JOIN ipv4 ip4 ON ip4.frame_number = ipsec.frame_number AND ip4.encap_depth = ipsec.encap_depth
+LEFT JOIN ipv6 ip6 ON ip6.frame_number = ipsec.frame_number AND ip6.encap_depth = ipsec.encap_depth
 "#,
     }
 }
@@ -42,6 +44,8 @@ mod tests {
     #[test]
     fn test_ipsec_packets_view() {
         let view = ipsec_packets_view();
+        // Layers join their anchor at the same encapsulation level.
+        assert!(view.sql.contains("ip4.encap_depth = ipsec.encap_depth"));
         assert_eq!(view.name, "ipsec_packets");
         assert!(view.sql.contains("JOIN ipsec"));
         assert!(view.sql.contains("spi"));
