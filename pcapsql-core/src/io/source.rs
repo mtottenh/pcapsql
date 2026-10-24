@@ -130,6 +130,13 @@ pub trait PacketSource: Send + Sync + Clone + 'static {
     fn link_type(&self) -> u32 {
         self.metadata().link_type
     }
+
+    /// Release a reader over this source that is waiting for input, now and
+    /// for good: its next `process_packets` fails and
+    /// [`PacketReader::cancelled`] is true. For a consumer that is done with
+    /// a stream whose producer may be blocked on a quiet pipe. The default
+    /// does nothing: a file reader never waits.
+    fn cancel_reads(&self) {}
 }
 
 /// Cost of starting a reader at an arbitrary packet boundary.
@@ -220,6 +227,14 @@ pub trait PacketReader: Send + Unpin {
     /// Whether the last `process_packets` error was a read timeout (and
     /// clear it). Never true for a reader that does not support timeouts.
     fn take_read_timeout(&mut self) -> bool {
+        false
+    }
+
+    /// Whether [`PacketSource::cancel_reads`] has been called on the
+    /// reader's source: the last `process_packets` error was the
+    /// cancellation and no later call will deliver anything. Never true for
+    /// a reader that cannot be cancelled.
+    fn cancelled(&self) -> bool {
         false
     }
 

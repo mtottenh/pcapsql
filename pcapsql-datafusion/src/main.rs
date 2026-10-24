@@ -236,17 +236,7 @@ async fn main() -> Result<()> {
         let query = apply_bpf_filter(&query, &bpf_filter);
         let output = engine.execute(&query).await;
         finish_progress();
-        let QueryOutput { batches, stats } = match output {
-            Ok(output) => output,
-            Err(e) if input_source.is_stdin() => {
-                // The parser may still be blocked reading the pipe, and the
-                // runtime's shutdown would wait for it: report and leave.
-                eprintln!("Error: {e}");
-                let _ = io::Write::flush(&mut io::stderr());
-                std::process::exit(1);
-            }
-            Err(e) => return Err(e.into()),
-        };
+        let QueryOutput { batches, stats } = output?;
 
         // Export if output file specified
         if let Some(output_path) = &args.output {
@@ -285,14 +275,14 @@ async fn main() -> Result<()> {
 }
 
 /// Run a continuous query: print every emitted window as it arrives, until
-/// the input ends or Ctrl-C.
+/// the input ends, an error, or Ctrl-C.
 ///
-/// On Ctrl-C the stream is dropped (its producers see their consumer gone)
-/// and the query's statistics are collected with a short grace period. The
-/// producer thread may be blocked in `read()` on a quiet pipe, and a blocked
-/// read cannot be interrupted from another thread, so when the grace period
-/// runs out the process exits with what it has: output is flushed, the
-/// runtime is not waited for.
+/// Then the query is finished: the source releases the producer if it is
+/// waiting for input on a quiet pipe (uncompressed stdin is read from its
+/// descriptor, so this is immediate) and its statistics are collected. The
+/// wait is bounded anyway, so a source that cannot be released (a compressed
+/// stream, whose decompressor hides the descriptor) still lets the process
+/// leave with its output flushed.
 async fn run_continuous(
     engine: &QueryEngine,
     query: &str,
@@ -316,6 +306,7 @@ async fn run_continuous(
     let mut header_written = false;
     let mut rows: u64 = 0;
     let mut interrupted = false;
+    let mut failure: Option<pcapsql_datafusion::error::Error> = None;
     // One signal future for the whole loop: a SIGINT that lands while a
     // batch is being written is remembered, not lost.
     let ctrl_c = tokio::signal::ctrl_c();
@@ -342,15 +333,8 @@ async fn run_continuous(
                     io::Write::flush(&mut stdout)?;
                 }
                 Some(Err(e)) => {
-                    if let Some(pb) = &progress_bar {
-                        pb.finish_and_clear();
-                    }
-                    // The parser may be blocked reading the pipe; the
-                    // runtime's shutdown would wait for it.
-                    let _ = io::Write::flush(&mut stdout);
-                    eprintln!("Error: {e}");
-                    let _ = io::Write::flush(&mut io::stderr());
-                    std::process::exit(1);
+                    failure = Some(e);
+                    break;
                 }
                 None => break,
             },
@@ -364,9 +348,8 @@ async fn run_continuous(
         pb.finish_and_clear();
     }
     io::Write::flush(&mut stdout)?;
-    let grace = std::time::Duration::from_secs(2);
-    // 130: the conventional status after SIGINT.
-    let exit_status = if interrupted { 130 } else { 0 };
+    // Only a source that cannot be released waits this long (see above).
+    let grace = std::time::Duration::from_secs(5);
     match tokio::time::timeout(grace, stream.finish()).await {
         Ok(Ok(stats)) => {
             if args.show_stats {
@@ -374,27 +357,34 @@ async fn run_continuous(
             }
         }
         Ok(Err(e)) => {
-            if !interrupted {
-                eprintln!("Error: {e}");
-                let _ = io::Write::flush(&mut io::stderr());
-                std::process::exit(1);
+            if failure.is_none() && !interrupted {
+                failure = Some(e);
+            } else {
+                eprintln!("{e}");
             }
-            eprintln!("{e}");
         }
         Err(_) => {
-            // The parser is still blocked reading the pipe: nothing more will
-            // come without input, so leave with the output flushed.
             if args.show_stats {
                 eprintln!(
-                    "Parse statistics unavailable: the input is still open and the reader is \
-                     blocked on it ({rows} rows printed)"
+                    "Parse statistics unavailable: the input is still open and the reader \
+                     could not be released ({rows} rows printed)"
                 );
             }
-            std::process::exit(exit_status);
+            // The runtime's shutdown would wait for the blocked reader.
+            let _ = io::Write::flush(&mut io::stderr());
+            std::process::exit(if interrupted {
+                130
+            } else {
+                i32::from(failure.is_some())
+            });
         }
     }
+    if let Some(e) = failure {
+        return Err(e.into());
+    }
     if interrupted {
-        std::process::exit(exit_status);
+        // 130: the conventional status after SIGINT.
+        std::process::exit(130);
     }
     Ok(())
 }

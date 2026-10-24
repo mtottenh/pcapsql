@@ -198,7 +198,16 @@ impl NormalizedBatchSet {
                     packet.link_type,
                 );
                 slot.rows_added += 1;
-                if let Some(batch) = slot.builder.try_build()? {
+                // A full batch goes out; so does a partial one the moment the
+                // row cap is reached, since nothing will be added to it (a
+                // LIMIT on a live pipe would otherwise wait for input that
+                // is not wanted).
+                let batch = if slot.capped() {
+                    slot.builder.finish()?
+                } else {
+                    slot.builder.try_build()?
+                };
+                if let Some(batch) = batch {
                     self.deliver("frames", batch);
                 }
             }
@@ -219,7 +228,12 @@ impl NormalizedBatchSet {
                 }
                 slot.builder.add_parsed_row(frame_number, result);
                 slot.rows_added += 1;
-                if let Some(batch) = slot.builder.try_build()? {
+                let batch = if slot.capped() {
+                    slot.builder.finish()?
+                } else {
+                    slot.builder.try_build()?
+                };
+                if let Some(batch) = batch {
                     self.deliver(proto_name, batch);
                 }
             }

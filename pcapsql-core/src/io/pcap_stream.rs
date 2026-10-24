@@ -529,11 +529,17 @@ where
                 break;
             }
             Err(PcapParserError::Incomplete(_)) => {
-                reader.refill().map_err(|e| {
-                    Error::Pcap(PcapError::InvalidFormat {
+                if let Err(e) = reader.refill() {
+                    // Packets already delivered in this call are reported
+                    // first; the read error recurs on the next call (a
+                    // cancelled or timed-out reader fails again at once).
+                    if count > 0 {
+                        break;
+                    }
+                    return Err(Error::Pcap(PcapError::InvalidFormat {
                         reason: format!("Legacy PCAP refill error: {e:?}"),
-                    })
-                })?;
+                    }));
+                }
             }
             Err(PcapParserError::BufferTooSmall) => {
                 grow_buffer(reader, capacity, "Legacy PCAP")?;
@@ -680,11 +686,16 @@ where
                 break;
             }
             Err(PcapParserError::Incomplete(_)) => {
-                reader.refill().map_err(|e| {
-                    Error::Pcap(PcapError::InvalidFormat {
+                if let Err(e) = reader.refill() {
+                    // As for legacy pcap: report the packets delivered so
+                    // far, the error recurs on the next call.
+                    if count > 0 {
+                        break;
+                    }
+                    return Err(Error::Pcap(PcapError::InvalidFormat {
                         reason: format!("PCAPNG refill error: {e:?}"),
-                    })
-                })?;
+                    }));
+                }
             }
             Err(PcapParserError::BufferTooSmall) => {
                 grow_buffer(reader, capacity, "PCAPNG")?;

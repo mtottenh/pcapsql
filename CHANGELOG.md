@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A query over uncompressed standard input (or any uncompressed
+  descriptor-backed stream) now releases its parser when it is done, instead
+  of leaving it blocked in `read()` on a quiet pipe until the next byte:
+  `PacketSource::cancel_reads` writes to a cancel descriptor (an `eventfd`, or
+  a pipe) that the reader's `poll(2)` watches alongside the input.
+  `QueryStream::finish()` and dropping a `QueryStream` cancel the query's
+  reader, and so does `execute()` once its result is collected, so
+  `--stdin ... LIMIT n` returns while the pipe stays open and a `--continuous`
+  query stopped with Ctrl-C always prints its `--stats`. The CLI no longer
+  has to `exit()` past a blocked reader. Two things on the way: stdin is read
+  from its descriptor rather than through `io::stdin()`'s 8 KiB buffer, whose
+  contents the `poll(2)` behind `--flush-interval` / `--idle-timeout` could
+  not see (a feed of fewer than 8 KiB sat there until the next packet); and a
+  table's partial batch is handed on the moment its `LIMIT` is reached rather
+  than when the batch fills. A compressed stream still cannot be released
+  (its decompressor hides the descriptor); such a producer stops at the next
+  byte or end of input.
+
 - The `http` table was never populated: it was registered, but no packet
   parser fed it, so `SELECT * FROM http` and the `http_packets` view returned
   no rows and the `packets` view's `http_*` columns were always NULL. A
