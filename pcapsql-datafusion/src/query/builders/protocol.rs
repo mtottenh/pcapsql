@@ -2,7 +2,6 @@
 //!
 //! Builds Arrow RecordBatches for a single protocol table from parsed packet data.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow::array::*;
@@ -462,6 +461,29 @@ impl DynamicBuilder {
     }
 }
 
+/// Where a protocol table column's value comes from in
+/// [`ProtocolBatchBuilder::add_parsed_row`], resolved once from the schema.
+enum ParsedSource {
+    FrameNumber,
+    EncapDepth,
+    TunnelType,
+    TunnelId,
+    /// A field the parser extracted, by name.
+    Field(String),
+}
+
+/// Where a `frames` column's value comes from in
+/// [`ProtocolBatchBuilder::add_frame_from_raw`].
+enum FrameSource {
+    FrameNumber,
+    Timestamp,
+    Length,
+    OriginalLength,
+    LinkType,
+    RawData,
+    Null,
+}
+
 /// Builds Arrow RecordBatches for a single protocol table.
 ///
 /// Unlike PacketBatchBuilder which creates a flat table with all protocols,
@@ -478,8 +500,11 @@ pub struct ProtocolBatchBuilder {
     rows: usize,
     /// Dynamic builders for each field in schema order
     builders: Vec<DynamicBuilder>,
-    /// Map from field name to index in builders vec
-    field_index: HashMap<String, usize>,
+    /// Per column, in schema order: its source for a parsed row and for a
+    /// `frames` row. Resolved from the column names once, so that adding a
+    /// row does no string work beyond the field lookup.
+    parsed_sources: Vec<ParsedSource>,
+    frame_sources: Vec<FrameSource>,
 }
 
 impl ProtocolBatchBuilder {
@@ -495,13 +520,33 @@ impl ProtocolBatchBuilder {
 
     /// Create a new builder with a specific schema.
     pub fn with_schema(protocol_name: String, schema: Arc<Schema>, batch_size: usize) -> Self {
-        let mut builders = Vec::with_capacity(schema.fields().len());
-        let mut field_index = HashMap::with_capacity(schema.fields().len());
-
-        for (idx, field) in schema.fields().iter().enumerate() {
-            builders.push(DynamicBuilder::new(field.data_type(), batch_size));
-            field_index.insert(field.name().to_string(), idx);
-        }
+        let fields = schema.fields();
+        let builders = fields
+            .iter()
+            .map(|f| DynamicBuilder::new(f.data_type(), batch_size))
+            .collect();
+        let parsed_sources = fields
+            .iter()
+            .map(|f| match f.name().as_str() {
+                "frame_number" => ParsedSource::FrameNumber,
+                "encap_depth" => ParsedSource::EncapDepth,
+                "tunnel_type" => ParsedSource::TunnelType,
+                "tunnel_id" => ParsedSource::TunnelId,
+                name => ParsedSource::Field(name.to_string()),
+            })
+            .collect();
+        let frame_sources = fields
+            .iter()
+            .map(|f| match f.name().as_str() {
+                "frame_number" => FrameSource::FrameNumber,
+                "timestamp" => FrameSource::Timestamp,
+                "length" => FrameSource::Length,
+                "original_length" => FrameSource::OriginalLength,
+                "link_type" => FrameSource::LinkType,
+                "raw_data" => FrameSource::RawData,
+                _ => FrameSource::Null,
+            })
+            .collect();
 
         Self {
             protocol_name,
@@ -509,7 +554,8 @@ impl ProtocolBatchBuilder {
             batch_size,
             rows: 0,
             builders,
-            field_index,
+            parsed_sources,
+            frame_sources,
         }
     }
 
@@ -549,29 +595,16 @@ impl ProtocolBatchBuilder {
 
         self.rows += 1;
 
-        for (field_name, idx) in &self.field_index {
-            let builder = &mut self.builders[*idx];
-            match field_name.as_str() {
-                "frame_number" => builder.append_u64(frame_number),
+        for (source, builder) in self.frame_sources.iter().zip(self.builders.iter_mut()) {
+            match source {
+                FrameSource::FrameNumber => builder.append_u64(frame_number),
                 // Arrow timestamp column is microseconds; reader timestamps are ns.
-                "timestamp" => builder.append_timestamp(timestamp_ns / 1_000),
-                "length" => {
-                    if let DynamicBuilder::UInt32(b) = builder {
-                        b.append_value(captured_len);
-                    }
-                }
-                "original_length" => {
-                    if let DynamicBuilder::UInt32(b) = builder {
-                        b.append_value(original_len);
-                    }
-                }
-                "link_type" => {
-                    if let DynamicBuilder::UInt16(b) = builder {
-                        b.append_value(link_type);
-                    }
-                }
-                "raw_data" => builder.append_binary(data),
-                _ => builder.append_null(),
+                FrameSource::Timestamp => builder.append_timestamp(timestamp_ns / 1_000),
+                FrameSource::Length => builder.append_u32(captured_len),
+                FrameSource::OriginalLength => builder.append_u32(original_len),
+                FrameSource::LinkType => builder.append_u16(link_type),
+                FrameSource::RawData => builder.append_binary(data),
+                FrameSource::Null => builder.append_null(),
             }
         }
     }
@@ -588,38 +621,26 @@ impl ProtocolBatchBuilder {
     pub fn add_parsed_row(&mut self, frame_number: u64, parsed: &ParseResult<'_>) {
         self.rows += 1;
 
-        for (field_name, idx) in &self.field_index {
-            let builder = &mut self.builders[*idx];
-
-            if field_name == "frame_number" {
-                builder.append_u64(frame_number);
-            } else if field_name == "encap_depth" {
-                // Special handling for encap_depth from ParseResult
-                if let DynamicBuilder::UInt8(b) = builder {
-                    b.append_value(parsed.encap_depth);
-                }
-            } else if field_name == "tunnel_type" {
-                // Special handling for tunnel_type from ParseResult
-                if let DynamicBuilder::Utf8(b) = builder {
-                    if let Some(type_str) = parsed.tunnel_type.as_str() {
-                        b.append_value(type_str);
-                    } else {
-                        b.append_null();
+        for (source, builder) in self.parsed_sources.iter().zip(self.builders.iter_mut()) {
+            match source {
+                ParsedSource::FrameNumber => builder.append_u64(frame_number),
+                // The encapsulation columns come from the ParseResult's
+                // context, not from its fields.
+                ParsedSource::EncapDepth => builder.append_u8(parsed.encap_depth),
+                ParsedSource::TunnelType => {
+                    if let DynamicBuilder::Utf8(b) = builder {
+                        b.append_option(parsed.tunnel_type.as_str());
                     }
                 }
-            } else if field_name == "tunnel_id" {
-                // Special handling for tunnel_id from ParseResult
-                if let DynamicBuilder::UInt64(b) = builder {
-                    if let Some(id) = parsed.tunnel_id {
-                        b.append_value(id);
-                    } else {
-                        b.append_null();
+                ParsedSource::TunnelId => {
+                    if let DynamicBuilder::UInt64(b) = builder {
+                        b.append_option(parsed.tunnel_id);
                     }
                 }
-            } else if let Some(value) = parsed.get(field_name) {
-                builder.append_field_value(value);
-            } else {
-                builder.append_null();
+                ParsedSource::Field(name) => match parsed.get(name) {
+                    Some(value) => builder.append_field_value(value),
+                    None => builder.append_null(),
+                },
             }
         }
     }
