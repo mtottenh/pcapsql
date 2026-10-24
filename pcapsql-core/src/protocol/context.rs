@@ -185,6 +185,22 @@ impl ParseContext {
     pub fn is_root(&self) -> bool {
         self.parent_protocol.is_none()
     }
+
+    /// Whether the parent transport is TCP (`transport` hint 6).
+    ///
+    /// Port-based parsers check this before claiming a segment: the ports a
+    /// TCP service and a UDP service use overlap, and a parser for one
+    /// transport misparses the other's payload.
+    #[inline]
+    pub fn over_tcp(&self) -> bool {
+        self.hint("transport") == Some(super::tcp::IP_PROTO_TCP as u64)
+    }
+
+    /// Whether the parent transport is UDP (`transport` hint 17).
+    #[inline]
+    pub fn over_udp(&self) -> bool {
+        self.hint("transport") == Some(super::udp::IP_PROTO_UDP as u64)
+    }
 }
 
 /// Result of parsing a protocol layer.

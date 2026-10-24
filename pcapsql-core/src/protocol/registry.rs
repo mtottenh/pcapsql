@@ -28,6 +28,28 @@ pub enum PayloadMode {
     None,
 }
 
+/// The highest priority a parser may return from port numbers alone.
+///
+/// A port is a guess: any service can run on any port, and nothing but the
+/// number says the bytes are this protocol. Parsers that match on
+/// `src_port`/`dst_port` (DNS, NTP, DHCP, BGP, TLS, SSH, ...) return this
+/// or less, so that a parser with a positive content signal always wins
+/// (see [`CONTENT_PRIORITY`]). Enforced by a registry test.
+pub const PORT_PRIORITY_MAX: u32 = 100;
+
+/// Priority for a parser whose parent layer sniffed the payload and
+/// recognised this protocol's message start (TCP sets `http_payload` for an
+/// HTTP/1.x request or status line). Above [`PORT_PRIORITY_MAX`], so content
+/// outranks a port guess: plaintext HTTP to port 8443 is parsed as `http`,
+/// not reported as a `tls` error row.
+pub const CONTENT_PRIORITY: u32 = 200;
+
+// On a tie the registry runs the parser registered later in
+// `default_registry()` (`find_parser` uses `max_by_key`, which keeps the last
+// maximum): TCP 53 -> 179 is DNS, not BGP; UDP 53 -> 123 is NTP, not DNS.
+
+const _: () = assert!(CONTENT_PRIORITY > PORT_PRIORITY_MAX);
+
 /// Core trait all protocol parsers must implement.
 pub trait Protocol: Send + Sync {
     /// Unique identifier for this protocol (e.g., "tcp", "dns").
@@ -39,7 +61,10 @@ pub trait Protocol: Send + Sync {
     }
 
     /// Check if this parser can handle the given context.
-    /// Returns a priority score (higher = more specific match).
+    /// Returns a priority score (higher = more specific match); the registry
+    /// runs the candidate with the highest score. A match on port numbers
+    /// alone returns at most [`PORT_PRIORITY_MAX`]; a match the parent layer
+    /// confirmed by looking at the payload returns [`CONTENT_PRIORITY`].
     /// Returns `None` if this parser cannot handle the context.
     fn can_parse(&self, context: &ParseContext) -> Option<u32>;
 
@@ -516,5 +541,34 @@ mod tests {
         assert!(registry.get_parser("tcp").is_some());
         assert!(registry.get_parser("udp").is_some());
         assert!(registry.get_parser("unknown").is_none());
+    }
+
+    /// No parser claims a transport payload from its ports alone with a
+    /// priority a content-sniffed match could not beat. Every port, both
+    /// directions, both transports, no payload hints.
+    #[test]
+    fn port_only_matches_stay_below_content_priority() {
+        let registry = crate::protocol::default_registry();
+        for transport in [6u64, 17] {
+            let parent = if transport == 6 { "tcp" } else { "udp" };
+            for port in 0..=u16::MAX as u64 {
+                for (src, dst) in [(port, 40000), (40000, port)] {
+                    let mut ctx = ParseContext::new(1);
+                    ctx.parent_protocol = Some(parent);
+                    ctx.insert_hint("src_port", src);
+                    ctx.insert_hint("dst_port", dst);
+                    ctx.insert_hint("transport", transport);
+                    for parser in registry.all_parsers() {
+                        if let Some(priority) = parser.can_parse(&ctx) {
+                            assert!(
+                                priority <= PORT_PRIORITY_MAX,
+                                "{} claims {parent} {src}->{dst} at {priority} from ports alone",
+                                parser.name()
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 }

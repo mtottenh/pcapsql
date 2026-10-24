@@ -126,6 +126,11 @@ impl Protocol for TlsProtocol {
     }
 
     fn can_parse(&self, context: &ParseContext) -> Option<u32> {
+        // TLS records run over TCP. UDP 443 is QUIC (its own parser); DTLS
+        // has a different record header and is not parsed here.
+        if !context.over_tcp() {
+            return None;
+        }
         let src_port = context.hint("src_port");
         let dst_port = context.hint("dst_port");
 
@@ -1009,20 +1014,29 @@ mod tests {
         let ctx1 = ParseContext::new(1);
         assert!(parser.can_parse(&ctx1).is_none());
 
-        // With dst_port 443
+        // With dst_port 443 over TCP
         let mut ctx2 = ParseContext::new(1);
         ctx2.insert_hint("dst_port", 443);
+        ctx2.insert_hint("transport", 6);
         assert!(parser.can_parse(&ctx2).is_some());
 
-        // With src_port 443
+        // With src_port 443 over TCP
         let mut ctx3 = ParseContext::new(1);
         ctx3.insert_hint("src_port", 443);
+        ctx3.insert_hint("transport", 6);
         assert!(parser.can_parse(&ctx3).is_some());
 
         // With other TLS ports
         let mut ctx4 = ParseContext::new(1);
         ctx4.insert_hint("dst_port", 8443);
+        ctx4.insert_hint("transport", 6);
         assert!(parser.can_parse(&ctx4).is_some());
+
+        // UDP 443 is QUIC's, not TLS's
+        let mut ctx5 = ParseContext::new(1);
+        ctx5.insert_hint("dst_port", 443);
+        ctx5.insert_hint("transport", 17);
+        assert!(parser.can_parse(&ctx5).is_none());
     }
 
     #[test]

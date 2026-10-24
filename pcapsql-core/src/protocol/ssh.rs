@@ -55,6 +55,10 @@ impl Protocol for SshProtocol {
     }
 
     fn can_parse(&self, context: &ParseContext) -> Option<u32> {
+        // SSH is TCP only: a UDP datagram on port 22 is something else.
+        if !context.over_tcp() {
+            return None;
+        }
         let src_port = context.hint("src_port");
         let dst_port = context.hint("dst_port");
 
@@ -528,11 +532,19 @@ mod tests {
 
         let mut ctx2 = ParseContext::new(1);
         ctx2.insert_hint("dst_port", 22);
+        ctx2.insert_hint("transport", 6);
         assert!(parser.can_parse(&ctx2).is_some());
 
         let mut ctx3 = ParseContext::new(1);
         ctx3.insert_hint("src_port", 22);
+        ctx3.insert_hint("transport", 6);
         assert!(parser.can_parse(&ctx3).is_some());
+
+        // Port 22 over UDP is not SSH
+        let mut ctx4 = ParseContext::new(1);
+        ctx4.insert_hint("dst_port", 22);
+        ctx4.insert_hint("transport", 17);
+        assert!(parser.can_parse(&ctx4).is_none());
     }
 
     #[test]

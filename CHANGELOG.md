@@ -115,6 +115,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   count its tables actually have, so no scan with more than one partition is
   repartitioned; a one-partition scan keeps the engine's parallelism, which
   is order-safe ([#122](https://github.com/mtottenh/pcapsql/issues/122)).
+- Port-only parsers no longer outrank the HTTP payload sniff: a TCP segment
+  whose payload starts an HTTP/1.x message is parsed as `http` whatever its
+  ports (plaintext HTTP to 8443, 993, 995 or 465 was a `tls` error row;
+  from source port 53 or 123 to port 80 it was a `dns`/`ntp` error row).
+  `Protocol::can_parse` now has two documented tiers, `PORT_PRIORITY_MAX`
+  (100) for a match on port numbers alone and `CONTENT_PRIORITY` (200) for
+  a match the parent layer confirmed in the payload, and a registry test
+  pins every port-only parser below the content tier. The port-based
+  parsers also check the transport before claiming a segment: DNS, NTP,
+  DHCP, GTP and VXLAN require UDP (DNS also accepts TCP, where it now strips
+  the two-byte length prefix instead of misparsing it), and BGP, SSH and
+  TLS require TCP (UDP 443 is QUIC's, which the `tls` port match used to
+  shadow) ([#134](https://github.com/mtottenh/pcapsql/issues/134)).
 
 ### Changed
 

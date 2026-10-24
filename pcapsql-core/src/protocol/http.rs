@@ -18,11 +18,12 @@ use compact_str::CompactString;
 use httparse::{Request, Response, Status, EMPTY_HEADER};
 use smallvec::SmallVec;
 
-use super::{FieldEntry, FieldValue, ParseContext, ParseResult, Protocol};
+use super::{FieldEntry, FieldValue, ParseContext, ParseResult, Protocol, CONTENT_PRIORITY};
 use crate::schema::{DataKind, FieldDescriptor};
 
-/// Ports on which an HTTP/1.x message start is matched with raised priority.
-/// Shared with the stream parser's port check.
+/// Ports the stream layer treats as HTTP when a connection's first bytes
+/// are not conclusive. The packet parser does not use them: it matches on
+/// the sniffed payload alone, whatever the port.
 pub const HTTP_PORTS: &[u16] = &[80, 8080, 8000, 8888, 3000, 5000];
 
 /// Child hint the TCP layer sets to 1 when its payload starts an HTTP/1.x
@@ -243,19 +244,20 @@ impl Protocol for HttpProtocol {
     }
 
     /// Matches a TCP segment whose payload starts an HTTP/1.x message (the
-    /// TCP layer's [`PAYLOAD_HINT`]). On an HTTP port the match outranks the
-    /// other port-based TCP parsers; elsewhere it ranks below them, so a
-    /// well-known port's own protocol (TLS, SSH, DNS, BGP) keeps the
-    /// segment and only unclaimed ports fall through to HTTP.
+    /// TCP layer's [`PAYLOAD_HINT`]), at [`CONTENT_PRIORITY`] whatever the
+    /// ports: the sniffed payload is a positive signal, so it outranks every
+    /// parser that claims the segment from a well-known port alone (TLS on
+    /// 8443, DNS from source port 53, ...). Without the hint HTTP never
+    /// matches, so a port's own protocol keeps non-HTTP segments.
     fn can_parse(&self, context: &ParseContext) -> Option<u32> {
-        if context.hint("transport") != Some(6) || context.hint(PAYLOAD_HINT) != Some(1) {
+        // TCP sets the hint only when the payload starts an HTTP/1.x message.
+        // That is a positive content signal, so it outranks every parser that
+        // claims the segment from a port number alone (TLS on 8443, DNS from
+        // source port 53, ...): plaintext HTTP is HTTP on any port.
+        if !context.over_tcp() || context.hint(PAYLOAD_HINT) != Some(1) {
             return None;
         }
-        let on_http_port = [context.hint("src_port"), context.hint("dst_port")]
-            .iter()
-            .flatten()
-            .any(|port| HTTP_PORTS.iter().any(|p| *p as u64 == *port));
-        Some(if on_http_port { 60 } else { 40 })
+        Some(CONTENT_PRIORITY)
     }
 
     fn parse<'a>(&self, data: &'a [u8], _context: &ParseContext) -> ParseResult<'a> {
@@ -369,11 +371,25 @@ mod tests {
     #[test]
     fn can_parse_needs_tcp_and_sniffed_payload() {
         let parser = HttpProtocol;
-        assert_eq!(parser.can_parse(&ctx(40000, 80, true)), Some(60));
-        assert_eq!(parser.can_parse(&ctx(8080, 40000, true)), Some(60));
-        // An HTTP message start on an unclaimed port still matches, below
-        // the port-based parsers' priority.
-        assert_eq!(parser.can_parse(&ctx(40000, 9999, true)), Some(40));
+        assert_eq!(
+            parser.can_parse(&ctx(40000, 80, true)),
+            Some(CONTENT_PRIORITY)
+        );
+        assert_eq!(
+            parser.can_parse(&ctx(8080, 40000, true)),
+            Some(CONTENT_PRIORITY)
+        );
+        // An HTTP message start on any other port matches at the same
+        // priority: the payload, not the port, says it is HTTP, and that
+        // beats every port-only parser (#134).
+        assert_eq!(
+            parser.can_parse(&ctx(40000, 9999, true)),
+            Some(CONTENT_PRIORITY)
+        );
+        assert_eq!(
+            parser.can_parse(&ctx(40000, 8443, true)),
+            Some(CONTENT_PRIORITY)
+        );
         // Port 80 traffic that does not start a message is not HTTP.
         assert_eq!(parser.can_parse(&ctx(40000, 80, false)), None);
         // UDP never carries HTTP/1.x.
@@ -671,10 +687,139 @@ mod tests {
             ["ethernet", "ipv4", "tcp", "http"]
         );
 
-        // TLS keeps its port even when the payload looks like HTTP.
+        // Plaintext HTTP on a TLS port is HTTP: the sniffed payload outranks
+        // the port guess (#134).
         assert_eq!(
             layer_names(&tcp_frame(40000, 443, b"GET / HTTP/1.1\r\n\r\n")),
-            ["ethernet", "ipv4", "tcp", "tls"]
+            ["ethernet", "ipv4", "tcp", "http"]
+        );
+    }
+
+    /// A minimal TLS 1.2 ClientHello record (one cipher suite, no extensions).
+    fn tls_client_hello() -> Vec<u8> {
+        let mut body = vec![0x03, 0x03]; // client_version TLS 1.2
+        body.extend_from_slice(&[0x01; 32]); // random
+        body.push(0x00); // session_id length
+        body.extend_from_slice(&[0x00, 0x02, 0xC0, 0x2F]); // one cipher suite
+        body.extend_from_slice(&[0x01, 0x00]); // compression: null
+        let mut hs = vec![0x01, 0x00, 0x00, body.len() as u8]; // ClientHello
+        hs.extend_from_slice(&body);
+        let mut rec = vec![0x16, 0x03, 0x01]; // handshake record, TLS 1.0 hdr
+        rec.extend_from_slice(&(hs.len() as u16).to_be_bytes());
+        rec.extend_from_slice(&hs);
+        rec
+    }
+
+    /// A QUIC v1 Initial (long header, 8-byte DCID, no SCID, no token).
+    fn quic_initial() -> Vec<u8> {
+        let mut p = vec![0xC0]; // long header, fixed bit, type Initial
+        p.extend_from_slice(&1u32.to_be_bytes()); // version 1
+        p.push(8);
+        p.extend_from_slice(&[0x11; 8]); // DCID
+        p.push(0); // SCID length
+        p.push(0); // token length
+        p.extend_from_slice(&[0x40, 0x20]); // packet length 32 (2-byte varint)
+        p.extend_from_slice(&[0u8; 32]);
+        p
+    }
+
+    /// A one-question DNS query for `a.`.
+    fn dns_query() -> Vec<u8> {
+        let mut q = vec![
+            0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        q.extend_from_slice(&[0x01, b'a', 0x00, 0x00, 0x01, 0x00, 0x01]);
+        q
+    }
+
+    fn udp_frame(src_port: u16, dst_port: u16, payload: &[u8]) -> Vec<u8> {
+        use crate::protocol::test_utils::{EthernetBuilder, Ipv4Builder, UdpBuilder};
+        let udp = UdpBuilder::new()
+            .src_port(src_port)
+            .dst_port(dst_port)
+            .payload(payload.to_vec())
+            .build();
+        let ip = Ipv4Builder::new().udp().payload(udp).build();
+        EthernetBuilder::new().ipv4().payload(ip).build()
+    }
+
+    /// Issue #134: a port-only parser must not outrank the sniffed HTTP
+    /// payload, and UDP-service parsers must not claim TCP segments; the
+    /// real protocols on those ports keep working.
+    #[test]
+    fn content_sniff_outranks_port_only_parsers() {
+        let registry = default_registry();
+        let http = |frame: &[u8]| {
+            let parsed = parse_packet(&registry, 1, frame, &ParseScope::full());
+            let names: Vec<_> = parsed.iter().map(|(n, _)| *n).collect();
+            assert_eq!(names, ["ethernet", "ipv4", "tcp", "http"], "{names:?}");
+            let http = &parsed.iter().find(|(n, _)| *n == "http").unwrap().1;
+            assert!(http.is_ok(), "{:?}", http.error);
+            assert_eq!(text(http, "method"), Some("GET"));
+        };
+
+        // Plaintext HTTP to a TLS port: `http`, not a `tls` error row.
+        http(&tcp_frame(
+            40000,
+            8443,
+            b"GET / HTTP/1.1\r\nHost: h\r\n\r\n",
+        ));
+        for port in [993u16, 995, 465] {
+            http(&tcp_frame(40000, port, b"GET / HTTP/1.1\r\n\r\n"));
+        }
+        // HTTP from source port 53 or 123 to port 80: `http`, not `dns`/`ntp`.
+        http(&tcp_frame(53, 80, b"GET / HTTP/1.1\r\n\r\n"));
+        http(&tcp_frame(123, 80, b"GET / HTTP/1.1\r\n\r\n"));
+        http(&tcp_frame(40000, 67, b"GET / HTTP/1.1\r\n\r\n"));
+
+        // A real TLS ClientHello on 8443 is still TLS.
+        let frame = tcp_frame(40000, 8443, &tls_client_hello());
+        let parsed = parse_packet(&registry, 1, &frame, &ParseScope::full());
+        let names: Vec<_> = parsed.iter().map(|(n, _)| *n).collect();
+        assert_eq!(names, ["ethernet", "ipv4", "tcp", "tls"]);
+        let tls = &parsed.iter().find(|(n, _)| *n == "tls").unwrap().1;
+        assert!(tls.is_ok(), "{:?}", tls.error);
+        assert_eq!(tls.get("handshake_type"), Some(&FieldValue::UInt8(1)));
+
+        // A QUIC Initial on UDP 443 is QUIC: the TLS port match no longer
+        // claims UDP, so it does not shadow the lower-priority QUIC match.
+        let frame = udp_frame(40000, 443, &quic_initial());
+        let parsed = parse_packet(&registry, 1, &frame, &ParseScope::full());
+        let names: Vec<_> = parsed.iter().map(|(n, _)| *n).collect();
+        assert_eq!(names, ["ethernet", "ipv4", "udp", "quic"]);
+        let quic = &parsed.iter().find(|(n, _)| *n == "quic").unwrap().1;
+        assert!(quic.is_ok(), "{:?}", quic.error);
+        assert_eq!(text(quic, "long_packet_type"), Some("Initial"));
+        assert_eq!(quic.get("version"), Some(&FieldValue::UInt32(1)));
+
+        // DNS over UDP 53 and over TCP 53 (two-byte length prefix) are DNS.
+        let frame = udp_frame(40000, 53, &dns_query());
+        let parsed = parse_packet(&registry, 1, &frame, &ParseScope::full());
+        let names: Vec<_> = parsed.iter().map(|(n, _)| *n).collect();
+        assert_eq!(names, ["ethernet", "ipv4", "udp", "dns"]);
+        let dns = &parsed.iter().find(|(n, _)| *n == "dns").unwrap().1;
+        assert_eq!(dns.get("transaction_id"), Some(&FieldValue::UInt16(0x1234)));
+
+        let mut over_tcp = (dns_query().len() as u16).to_be_bytes().to_vec();
+        over_tcp.extend_from_slice(&dns_query());
+        let frame = tcp_frame(40000, 53, &over_tcp);
+        let parsed = parse_packet(&registry, 1, &frame, &ParseScope::full());
+        let names: Vec<_> = parsed.iter().map(|(n, _)| *n).collect();
+        assert_eq!(names, ["ethernet", "ipv4", "tcp", "dns"]);
+        let dns = &parsed.iter().find(|(n, _)| *n == "dns").unwrap().1;
+        assert!(dns.is_ok(), "{:?}", dns.error);
+        assert_eq!(dns.get("transaction_id"), Some(&FieldValue::UInt16(0x1234)));
+        assert_eq!(text(dns, "query_name"), Some("a"));
+
+        // A UDP datagram to a TCP-only service port is not that service
+        // (no error row claims it), and vice versa.
+        assert_eq!(
+            layer_names(&udp_frame(40000, 179, b"xxxxxxxx")),
+            ["ethernet", "ipv4", "udp"]
+        );
+        assert_eq!(
+            layer_names(&tcp_frame(40000, 123, b"xxxxxxxx")),
+            ["ethernet", "ipv4", "tcp"]
         );
     }
 
