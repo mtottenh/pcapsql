@@ -404,6 +404,14 @@ fn list_udfs() {
     println!();
     println!("  -- Latency histogram");
     println!("  SELECT hdr_percentile(hdr_histogram(length), 0.99) as p99 FROM frames;");
+    println!();
+    println!("Table functions (not listed above): tumble(source, size),");
+    println!("hop(source, slide, size) and session(source, key_column, gap) add");
+    println!("window_start / window_end for time-windowed GROUP BY, e.g.");
+    println!(
+        "  SELECT window_start, COUNT(*) FROM tumble(frames, INTERVAL '10' SECOND) GROUP BY 1;"
+    );
+    println!("See the README section \"Window Functions\".");
 }
 
 fn show_schema() {

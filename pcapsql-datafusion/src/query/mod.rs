@@ -13,6 +13,8 @@
 //! default) and cloud URLs funnel into one shared parse pass, parallel across
 //! partitions for seekable sources, fanned out to every protocol table. JOINs
 //! use sort-merge since all tables emit rows sorted by `frame_number`.
+//! The `tumble` / `hop` / `session` table functions (`windowing`) add time
+//! windows over `frames` and the `*_packets` views.
 //!
 //! The migration plan in `docs/query-scoped-parse-migration.md` moves this
 //! parse from engine construction to query time, scoped to each query.
@@ -28,6 +30,7 @@ pub mod stream_tables;
 pub mod tables;
 pub mod udf;
 pub mod views;
+pub mod windowing;
 
 pub use arrow_schema::{descriptors_to_arrow_schema, protocol_to_arrow_schema, to_arrow_field};
 pub use builders::NormalizedBatchSet;
@@ -45,7 +48,7 @@ use std::sync::{Arc, RwLock};
 use arrow::array::RecordBatch;
 use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion::config::ConfigOptions;
-use datafusion::execution::session_state::SessionState;
+use datafusion::execution::session_state::{SessionState, SessionStateBuilder};
 use datafusion::logical_expr::{DdlStatement, Expr, LogicalPlan, Statement};
 use datafusion::prelude::*;
 use tokio::task::JoinHandle;
@@ -97,7 +100,8 @@ fn session_target_partitions(partitions: usize, parallelism: usize) -> usize {
     }
 }
 
-/// Configure DataFusion for SortMergeJoin on frame_number-sorted streams.
+/// Configure DataFusion for SortMergeJoin on frame_number-sorted streams,
+/// with the planner for the window table functions' extension nodes.
 ///
 /// `parallelism` is the engine's parse parallelism; each query re-targets its
 /// own session state to the partition count it actually has (see
@@ -112,7 +116,12 @@ fn create_session_context(parallelism: usize) -> SessionContext {
     config.optimizer.prefer_hash_join = false;
     config.optimizer.repartition_joins = true;
 
-    SessionContext::new_with_config(config.into())
+    let state = SessionStateBuilder::new()
+        .with_config(config.into())
+        .with_default_features()
+        .with_query_planner(Arc::new(windowing::WindowQueryPlanner))
+        .build();
+    SessionContext::new_with_state(state)
 }
 
 /// Where to read a capture from.
@@ -605,6 +614,9 @@ impl QueryEngine {
         }
 
         Self::register_cross_layer_views(&ctx).await?;
+        // tumble / hop / session resolve their source in this context's
+        // catalog (tables and views alike) and expand into its scan.
+        windowing::register_window_functions(&ctx);
 
         let parse_source: Arc<dyn ParseSource> = Arc::new(SourceParser {
             source,

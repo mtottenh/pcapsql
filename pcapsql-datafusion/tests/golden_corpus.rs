@@ -740,6 +740,25 @@ const CORPUS: &[(Capture, &str, &str)] = &[
         "SELECT t.frame_number, t.dst_port, u.flag_syn \
          FROM tcp_packets t JOIN tcp u USING (frame_number) ORDER BY t.frame_number",
     ),
+    // --- window table functions over frames and a view ---
+    (
+        Capture::Eth,
+        "q30_tumble",
+        "SELECT window_start, window_end, count(*) AS n, sum(length) AS bytes \
+         FROM tumble(frames, INTERVAL '5' SECOND) GROUP BY 1, 2 ORDER BY 1",
+    ),
+    (
+        Capture::Eth,
+        "q31_hop",
+        "SELECT window_start, count(*) AS n \
+         FROM hop(frames, INTERVAL '5' SECOND, INTERVAL '10' SECOND) GROUP BY 1 ORDER BY 1",
+    ),
+    (
+        Capture::Eth,
+        "q32_session",
+        "SELECT dst_port, window_start, window_end, count(*) AS n \
+         FROM session(tcp_packets, dst_port, INTERVAL '2' SECOND) GROUP BY 1, 2, 3 ORDER BY 1, 2",
+    ),
     // --- Linux cooked capture: non-Ethernet link layer ---
     (
         Capture::Sll,

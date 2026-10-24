@@ -131,6 +131,9 @@ SELECT method, path, status FROM http2 WHERE method IS NOT NULL;
 
 -- Traffic inside VXLAN tunnels
 SELECT * FROM ipv4 WHERE tunnel_type = 'vxlan';
+
+-- Packets per 10-second window (see Window Functions)
+SELECT window_start, count(*) FROM tumble(frames, INTERVAL '10' SECOND) GROUP BY 1 ORDER BY 1;
 ```
 
 ## Tables
@@ -207,6 +210,43 @@ wrapped lookup. String parameters take any string type.
 |----------|-------------|
 | `hex(binary)` | Convert binary to hex string |
 | `unhex('48656c6c6f')` | Parse hex string to binary |
+
+### Window Functions
+
+Table functions that add `window_start` / `window_end` (half-open, `Timestamp(Microsecond)`)
+to a source's columns, for GROUP BY over time:
+
+| Function | Windows |
+|----------|---------|
+| `tumble(source, size)` | Fixed, non-overlapping, aligned to the epoch |
+| `hop(source, slide, size)` | Fixed size, a new window every `slide` (overlapping when `slide < size`) |
+| `session(source, key_column, gap)` | Per key, closed after `gap` without a packet |
+
+The source is `frames` or any `*_packets` view (they carry `frames.timestamp`); a protocol
+table alone has no timestamp, so window `tcp_packets`, not `tcp`. Any other table or view
+works when a `Timestamp(Microsecond)` column is named after the source:
+`tumble(source, ts_column, size)`, `session(source, ts_column, key_column, gap)`. Sizes are
+INTERVAL literals without months (`INTERVAL '10' SECOND`, `INTERVAL '1' HOUR`).
+
+```sql
+-- Packets and bytes per 10-second window
+SELECT window_start, count(*) AS packets, sum(length) AS bytes
+FROM tumble(frames, INTERVAL '10' SECOND) GROUP BY 1 ORDER BY 1;
+
+-- 1-minute windows every 10 seconds, per destination port
+SELECT window_start, dst_port, count(*)
+FROM hop(tcp_packets, INTERVAL '10' SECOND, INTERVAL '1' MINUTE) GROUP BY 1, 2 ORDER BY 1, 2;
+
+-- Sessions per client: a new session after 30 seconds of silence
+SELECT src_ip_v4, window_start, window_end, count(*) AS packets
+FROM session(tcp_packets, src_ip_v4, INTERVAL '30' SECOND) GROUP BY 1, 2, 3 ORDER BY 1, 2;
+```
+
+The functions expand into the query plan, so only the columns the query uses are parsed and
+`WHERE` clauses on source columns reach the parser; `EXPLAIN` shows the expanded plan.
+`session` buffers its (pruned) input in memory before it can emit anything, since a session's
+bounds depend on every packet of its key; `hop` emits each row once per covering window, so
+`size / slide` is capped at 10,000.
 
 ## CLI Options
 

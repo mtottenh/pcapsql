@@ -48,6 +48,9 @@ SELECT query_name, dns_type_name(query_type) as qtype, COUNT(*) FROM dns GROUP B
 
 -- HTTP/2 requests (requires --keylog)
 SELECT method, path, status FROM http2 WHERE method IS NOT NULL;
+
+-- Packets per 10-second window (also hop(...) and session(...))
+SELECT window_start, COUNT(*) FROM tumble(frames, INTERVAL '10' SECOND) GROUP BY 1 ORDER BY 1;
 ```
 
 ## Tables
