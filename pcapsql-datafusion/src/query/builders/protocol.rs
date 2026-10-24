@@ -11,7 +11,7 @@ use arrow::record_batch::{RecordBatch, RecordBatchOptions};
 
 use crate::error::{Error, QueryError};
 use crate::query::tables;
-use pcapsql_core::{FieldValue, ParseResult};
+use pcapsql_core::{FieldHint, FieldValue, ParseResult};
 
 /// Dynamic array builder that can hold different builder types.
 pub(crate) enum DynamicBuilder {
@@ -468,8 +468,9 @@ enum ParsedSource {
     EncapDepth,
     TunnelType,
     TunnelId,
-    /// A field the parser extracted, by name.
-    Field(String),
+    /// A field the parser extracted, by name, with where it was found in
+    /// the previous row.
+    Field(String, FieldHint),
 }
 
 /// Where a `frames` column's value comes from in
@@ -532,7 +533,7 @@ impl ProtocolBatchBuilder {
                 "encap_depth" => ParsedSource::EncapDepth,
                 "tunnel_type" => ParsedSource::TunnelType,
                 "tunnel_id" => ParsedSource::TunnelId,
-                name => ParsedSource::Field(name.to_string()),
+                name => ParsedSource::Field(name.to_string(), FieldHint::default()),
             })
             .collect();
         let frame_sources = fields
@@ -621,7 +622,7 @@ impl ProtocolBatchBuilder {
     pub fn add_parsed_row(&mut self, frame_number: u64, parsed: &ParseResult<'_>) {
         self.rows += 1;
 
-        for (source, builder) in self.parsed_sources.iter().zip(self.builders.iter_mut()) {
+        for (source, builder) in self.parsed_sources.iter_mut().zip(self.builders.iter_mut()) {
             match source {
                 ParsedSource::FrameNumber => builder.append_u64(frame_number),
                 // The encapsulation columns come from the ParseResult's
@@ -637,7 +638,7 @@ impl ProtocolBatchBuilder {
                         b.append_option(parsed.tunnel_id);
                     }
                 }
-                ParsedSource::Field(name) => match parsed.get(name) {
+                ParsedSource::Field(name, hint) => match parsed.get_hinted(name, hint) {
                     Some(value) => builder.append_field_value(value),
                     None => builder.append_null(),
                 },

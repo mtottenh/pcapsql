@@ -79,7 +79,9 @@ mod vxlan;
 #[cfg(test)]
 pub mod test_utils;
 
-pub use context::{FieldEntry, HintEntry, ParseContext, ParseResult, TunnelLayer, TunnelType};
+pub use context::{
+    FieldEntry, FieldHint, HintEntry, ParseContext, ParseResult, TunnelLayer, TunnelType,
+};
 pub use field::{FieldValue, OwnedFieldValue};
 pub use projection::{
     chain_fields_for_protocol, merge_with_chain_fields, FieldSet, ProjectionConfig,
