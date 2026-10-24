@@ -300,10 +300,10 @@ Semantics and knobs:
 - Output is appended per window: CSV prints its header once, JSON is one object per line, the
   table format prints one table per window. `-o` is not available. `--progress` shows rows,
   windows, the current watermark and late rows.
-- Ctrl-C stops the query, prints `--stats` when the parser can be released within two seconds,
-  and exits with status 130. A reader blocked on a quiet pipe cannot be interrupted from
-  another thread, so the process exits without waiting for it; output is flushed first. An
-  execution error exits with status 1 the same way.
+- Ctrl-C stops the query, releases the parser (a reader waiting on a quiet pipe is woken
+  through a cancel descriptor, so this is immediate for an uncompressed feed; a compressed one
+  is released by its next byte or end of input), prints `--stats`, and exits with status 130.
+  An execution error prints `--stats` the same way and exits with status 1.
 - Everything that applies to `--stdin` applies: one statement, `RetentionPolicy::None`, no
   time-range functions, a single parse partition. Use `tcpdump -U` so packets are not held in
   tcpdump's stdio buffer.

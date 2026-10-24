@@ -440,7 +440,49 @@ async fn idle_timeout_closes_open_windows_without_input() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn finish_releases_a_producer_waiting_on_a_quiet_pipe() {
+    // The pipe stays open and silent: the producer is waiting for input, and
+    // only the source's cancel descriptor can end that. `finish()` joins it
+    // and returns the statistics of what was parsed.
+    let Live { engine, mut feed } = live(|_| {}).await;
+    let mut stream = engine
+        .execute_stream(&format!(
+            "SELECT window_start, count(*) AS n FROM {TUMBLE_10S} GROUP BY 1"
+        ))
+        .await
+        .expect("plan");
+    feed.send(&[record(1, 0, 1000, 10)]);
+    expect_quiet(&mut stream, "window [0, 10) is open").await;
+    let stats = tokio::time::timeout(Duration::from_secs(3), stream.finish())
+        .await
+        .expect("finish() returns while the pipe is open")
+        .expect("stats");
+    assert_eq!(stats.packets_scanned, 1);
+    assert_eq!(engine.last_parse_stats().packets_scanned, 1);
+    // The engine is still usable for statements that parse nothing; a second
+    // scan is refused, not hung.
+    let out = engine
+        .execute("SELECT 1 AS one")
+        .await
+        .expect("scan-free query");
+    assert_eq!(out.batches[0].num_rows(), 1);
+    let err = engine
+        .execute(&format!(
+            "SELECT window_start, count(*) FROM {TUMBLE_10S} GROUP BY 1"
+        ))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("already consumed"), "{err}");
+    feed.close();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dropping_the_stream_releases_the_producer() {
+    // Dropping the stream cancels the reader the same way; the pipe is never
+    // fed again or closed, so a producer that was not released would hold
+    // its thread (and a reader left blocked would be visible as a hang of
+    // the runtime shutdown at the end of the test).
     let Live { engine, mut feed } = live(|_| {}).await;
     let stream = engine
         .execute_stream(&format!(
@@ -450,14 +492,8 @@ async fn dropping_the_stream_releases_the_producer() {
         .expect("plan");
     feed.send(&[record(1, 0, 1000, 10)]);
     drop(stream);
-    // The producer is blocked in read() on the pipe until the next byte; it
-    // then sees its consumer gone and stops. Prove it by feeding and closing:
-    // a second query must fail with "consumed" rather than hang, and the
-    // engine is still usable for statements that parse nothing.
-    feed.send(&[record(2, 0, 1000, 10)]);
-    feed.close();
     let err = tokio::time::timeout(
-        Duration::from_secs(10),
+        Duration::from_secs(5),
         engine.execute(&format!(
             "SELECT window_start, count(*) FROM {TUMBLE_10S} GROUP BY 1"
         )),
@@ -467,11 +503,67 @@ async fn dropping_the_stream_releases_the_producer() {
     .unwrap_err()
     .to_string();
     assert!(err.contains("already consumed"), "{err}");
-    let out = engine
-        .execute("SELECT 1 AS one")
-        .await
-        .expect("scan-free query");
+    // The feed is leaked, never closed: a producer that was not released
+    // would stay blocked on it, and the runtime's shutdown at the end of the
+    // test waits for blocking threads, so that would hang the test.
+    std::mem::forget(feed);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_statement_that_parsed_nothing_leaves_the_stream_for_the_next() {
+    // Cancelling a single-use source is permanent, so it must only happen for
+    // a query that started the parse: `SELECT 1` and EXPLAIN start none.
+    let Live { engine, mut feed } = live(|_| {}).await;
+    let out = engine.execute("SELECT 1 AS one").await.expect("scan-free");
     assert_eq!(out.batches[0].num_rows(), 1);
+    let stream = engine
+        .execute_stream("SELECT 2 AS two")
+        .await
+        .expect("scan-free stream");
+    stream.finish().await.expect("finish without producers");
+    engine
+        .execute(&format!(
+            "EXPLAIN SELECT window_start, count(*) FROM {TUMBLE_10S} GROUP BY 1"
+        ))
+        .await
+        .expect("plan-only");
+    let mut stream = engine
+        .execute_stream(&format!(
+            "SELECT window_start, count(*) AS n FROM {TUMBLE_10S} GROUP BY 1"
+        ))
+        .await
+        .expect("plan");
+    feed.send(&[record(1, 0, 1000, 10)]);
+    feed.close();
+    let batch = expect_batch(&mut stream, "the stream was not cancelled").await;
+    assert_eq!(i64_column(&batch, 1), vec![1]);
+    let stats = stream.finish().await.expect("stats");
+    assert_eq!(stats.packets_scanned, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_shot_limit_returns_while_the_pipe_stays_open() {
+    // The same release on the one-shot path (`--stdin`, no continuous mode):
+    // the LIMIT is reached, `execute()` collects, and the producer that would
+    // otherwise sit in read() until the next byte is released and joined.
+    // One packet into a batch of two: the batch is handed on because the
+    // table's row cap is reached, not because it is full (without a flush
+    // interval nothing else would deliver it).
+    let Live { engine, mut feed } = live(|o| {
+        o.continuous = false;
+        o.batch_size = 2;
+    })
+    .await;
+    feed.send(&[record(1, 0, 1000, 10)]);
+    let out = tokio::time::timeout(
+        Duration::from_secs(5),
+        engine.execute("SELECT frame_number FROM frames LIMIT 1"),
+    )
+    .await
+    .expect("execute() returns while the pipe is open")
+    .expect("query");
+    assert_eq!(u64_column(&out.batches[0], 0), vec![1]);
+    feed.close();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

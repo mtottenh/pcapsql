@@ -666,6 +666,12 @@ fn stream_partition<R: PacketReader>(
         });
         let processed = match result {
             Ok(n) => n,
+            Err(_) if reader.cancelled() => {
+                // The consumer is done and released the reader: stop with
+                // what was parsed, as if every table had reached its cap.
+                capped = true;
+                break;
+            }
             Err(_) if reader.take_read_timeout() => {
                 // Nothing arrived within the interval: hand on what is held
                 // and keep waiting.

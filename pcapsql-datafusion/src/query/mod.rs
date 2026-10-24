@@ -349,6 +349,10 @@ trait ParseSource: Send + Sync {
     /// Total frame count from the boundary index, if cheaply available
     /// (header-only scan; `None` for compressed/non-seekable sources).
     fn frame_count(&self) -> Option<u64>;
+    /// Release a producer waiting for input on the source (a stream whose
+    /// pipe has gone quiet), for good: called once a query is done with its
+    /// tables. A file source has nothing to release.
+    fn cancel(&self) {}
 }
 
 /// Binds a concrete seekable source to the parse parameters.
@@ -440,6 +444,10 @@ impl<S: PacketSource> ParseSource for SequentialParser<S> {
 
     fn frame_count(&self) -> Option<u64> {
         None
+    }
+
+    fn cancel(&self) {
+        self.source.cancel_reads();
     }
 }
 
@@ -657,16 +665,20 @@ async fn fold_producers(
 ///
 /// Owns the query's session state, prepared tables and parse producers.
 /// Yields `Err` once and ends on an execution error. Dropping the stream
-/// cancels the query: its receivers go away, and the producers stop at their
-/// next batch. [`QueryStream::finish`] drops the same holders *before*
-/// joining the producers, in that order, so a producer waiting on a receiver
-/// the plan never drained is released rather than waited for.
+/// cancels the query: its receivers go away, the source is told to stop
+/// waiting for input, and the producers stop. [`QueryStream::finish`] drops
+/// the same holders *before* joining the producers, in that order, so a
+/// producer waiting on a receiver the plan never drained is released rather
+/// than waited for.
 pub struct QueryStream {
     inner: Option<SendableRecordBatchStream>,
     plan: Option<Arc<dyn ExecutionPlan>>,
     state: Option<SessionState>,
     prepared: Option<Arc<QueryTables>>,
     producers: Vec<JoinHandle<Result<PartitionStat, Error>>>,
+    /// The engine's source, told to release a waiting producer when the
+    /// stream is finished or dropped.
+    parse_source: Option<Arc<dyn ParseSource>>,
     /// Statistics known before execution (see [`fold_producers`]).
     stats: ParseStats,
     bootstrap: ParseStats,
@@ -684,6 +696,7 @@ impl QueryStream {
             state: None,
             prepared: None,
             producers: Vec::new(),
+            parse_source: None,
             stats: output.stats,
             bootstrap: ParseStats::default(),
             time_range: Arc::new(CaptureTimeRange::new()),
@@ -721,9 +734,12 @@ impl QueryStream {
     /// the query's statistics (what `--stats` prints) or the parse error that
     /// ended it. Call it after the stream has ended, or earlier to cancel.
     ///
-    /// A producer blocked in a `read` on an idle pipe only returns when a
-    /// byte arrives or the writer closes, so on a live feed this can wait;
-    /// bound it with a timeout and let the process exit if it matters.
+    /// A producer waiting for input on a quiet pipe is released
+    /// ([`pcapsql_core::PacketSource::cancel_reads`]) before it is joined, so
+    /// this returns promptly on a source opened from a descriptor (stdin, a
+    /// pipe). A source opened from an arbitrary `Read` cannot be released:
+    /// its producer returns at the next byte or when the writer closes, so
+    /// bound the call with a timeout if that matters.
     pub async fn finish(mut self) -> Result<ParseStats, Error> {
         let late_rows = self.late_rows();
         // Order matters: the stream and the plan hold the receivers and the
@@ -733,6 +749,14 @@ impl QueryStream {
         self.state = None;
         self.prepared = None;
         let producers = std::mem::take(&mut self.producers);
+        // Only a query that started the parse has a producer to release;
+        // cancelling is permanent on a single-use source, so a statement
+        // that parsed nothing must leave the stream for the next one.
+        if let Some(source) = self.parse_source.take() {
+            if !producers.is_empty() {
+                source.cancel();
+            }
+        }
         let stats = std::mem::take(&mut self.stats);
         let (mut stats, error) =
             fold_producers(producers, stats, &self.bootstrap, &self.time_range).await;
@@ -741,6 +765,19 @@ impl QueryStream {
         match error {
             Some(e) => Err(e),
             None => Ok(stats),
+        }
+    }
+}
+
+impl Drop for QueryStream {
+    /// A stream dropped before `finish()` cancels its query: the receivers
+    /// go with the fields, and the source releases a producer still waiting
+    /// for input. The producers are detached, not joined.
+    fn drop(&mut self) {
+        if !self.producers.is_empty() {
+            if let Some(source) = self.parse_source.take() {
+                source.cancel();
+            }
         }
     }
 }
@@ -1172,9 +1209,16 @@ impl QueryEngine {
         // `prepared` is ours. Receivers of partitions the plan never executed
         // (a LIMIT satisfied early) drop here, so a producer waiting on them
         // sees its consumers gone rather than waiting forever. Dropping this
-        // future anywhere above has the same effect.
+        // future anywhere above has the same effect. A producer of a
+        // single-use stream may instead be waiting for input on a quiet
+        // pipe: the source releases it (only when this query started one;
+        // cancelling is permanent, and a statement that parsed nothing must
+        // leave the stream for the next).
         drop(state);
         drop(prepared);
+        if !producers.is_empty() {
+            self.parse_source.cancel();
+        }
 
         let (stats, producer_error) =
             fold_producers(producers, stats, &bootstrap, &self.time_range).await;
@@ -1207,8 +1251,10 @@ impl QueryEngine {
     /// session state, prepared tables, parse producers); call
     /// [`QueryStream::finish`] after the last batch for the query's
     /// [`ParseStats`] and any parse error, or just drop it to cancel: the
-    /// producers see their consumers gone and stop (one blocked in a `read`
-    /// on an idle pipe stops at the next byte, or when the process exits).
+    /// producers see their consumers gone and stop, and one waiting for
+    /// input on a quiet pipe is released by the source (a source opened
+    /// from an arbitrary `Read` cannot be: its producer stops at the next
+    /// byte, or when the process exits).
     pub async fn execute_stream(&self, sql: &str) -> Result<QueryStream, Error> {
         let PlannedQuery {
             mut state,
@@ -1242,6 +1288,7 @@ impl QueryEngine {
                 state: Some(state),
                 prepared: Some(prepared),
                 producers,
+                parse_source: Some(Arc::clone(&self.parse_source)),
                 stats,
                 bootstrap,
                 time_range: Arc::clone(&self.time_range),
@@ -1249,10 +1296,14 @@ impl QueryEngine {
                 ready: VecDeque::new(),
             }),
             Err(e) => {
-                // Planning failed: release the tables, then join the
-                // producers so a parse error is not lost and nothing leaks.
+                // Planning failed: release the tables and the source, then
+                // join the producers so a parse error is not lost and
+                // nothing leaks.
                 drop(state);
                 drop(prepared);
+                if !producers.is_empty() {
+                    self.parse_source.cancel();
+                }
                 let (_, producer_error) =
                     fold_producers(producers, stats, &bootstrap, &self.time_range).await;
                 Err(producer_error.unwrap_or(e))
