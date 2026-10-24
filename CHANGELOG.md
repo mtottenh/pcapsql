@@ -163,6 +163,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   session detection that accepts events in any order, and bounded
   out-of-orderness watermarks with every-event / every-N-events /
   every-N-microseconds evaluation and late-event counting.
+- `tumble(source, size)`, `hop(source, slide, size)` and
+  `session(source, key_column, gap)` table functions add `window_start` /
+  `window_end` columns to `frames` or a `*_packets` view (or to any table or
+  view with a `Timestamp(Microsecond)` column named as the second argument)
+  for time-windowed `GROUP BY`. They expand into the query plan when the SQL
+  is planned, so the source is parsed with only the columns the query uses,
+  `WHERE` clauses on source columns reach the parser, un-`ORDER BY`ed rows
+  stay in capture order and `EXPLAIN` shows the expanded plan. Session
+  detection accepts input in any order (joins, parallel partitions); null
+  timestamps yield null window bounds. Windowing a protocol table without a
+  timestamp (`tumble(tcp, …)`) is a planning error that names the view to use;
+  so is a hop with more than 10,000 windows per row. `session` buffers its
+  pruned input (accounted to the memory pool) before emitting.
 
 ## [0.4.0] - 2026-10-23
 

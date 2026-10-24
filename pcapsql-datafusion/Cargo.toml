@@ -45,6 +45,7 @@ parquet.workspace = true
 tokio.workspace = true
 futures.workspace = true
 async-trait.workspace = true
+parking_lot.workspace = true
 
 # CLI
 clap.workspace = true
