@@ -83,7 +83,9 @@ pub use context::{FieldEntry, HintEntry, ParseContext, ParseResult, TunnelLayer,
 pub use field::{FieldValue, OwnedFieldValue};
 pub use projection::{chain_fields_for_protocol, merge_with_chain_fields, ProjectionConfig};
 pub use pruning::{compute_required_protocols, should_run_parser};
-pub use registry::{BuiltinProtocol, PayloadMode, Protocol, ProtocolRegistry};
+pub use registry::{
+    BuiltinProtocol, PayloadMode, Protocol, ProtocolRegistry, CONTENT_PRIORITY, PORT_PRIORITY_MAX,
+};
 
 // Re-export protocol implementations
 pub use arp::ArpProtocol;

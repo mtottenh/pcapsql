@@ -35,6 +35,10 @@ impl Protocol for DhcpProtocol {
     }
 
     fn can_parse(&self, context: &ParseContext) -> Option<u32> {
+        // DHCP is UDP only: a TCP segment on port 67/68 is something else.
+        if !context.over_udp() {
+            return None;
+        }
         // Check for DHCP ports in either direction
         let src_port = context.hint("src_port");
         let dst_port = context.hint("dst_port");
@@ -425,20 +429,29 @@ mod tests {
         let ctx1 = ParseContext::new(1);
         assert!(parser.can_parse(&ctx1).is_none());
 
-        // With dst_port 67 (server)
+        // With dst_port 67 (server) over UDP
         let mut ctx2 = ParseContext::new(1);
         ctx2.insert_hint("dst_port", 67);
+        ctx2.insert_hint("transport", 17);
         assert!(parser.can_parse(&ctx2).is_some());
 
-        // With src_port 68 (client)
+        // With src_port 68 (client) over UDP
         let mut ctx3 = ParseContext::new(1);
         ctx3.insert_hint("src_port", 68);
+        ctx3.insert_hint("transport", 17);
         assert!(parser.can_parse(&ctx3).is_some());
 
         // With different port
         let mut ctx4 = ParseContext::new(1);
         ctx4.insert_hint("dst_port", 80);
+        ctx4.insert_hint("transport", 17);
         assert!(parser.can_parse(&ctx4).is_none());
+
+        // Port 67 over TCP is not DHCP
+        let mut ctx5 = ParseContext::new(1);
+        ctx5.insert_hint("dst_port", 67);
+        ctx5.insert_hint("transport", 6);
+        assert!(parser.can_parse(&ctx5).is_none());
     }
 
     #[test]

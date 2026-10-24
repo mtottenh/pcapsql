@@ -117,6 +117,10 @@ impl Protocol for GtpProtocol {
     }
 
     fn can_parse(&self, context: &ParseContext) -> Option<u32> {
+        // GTP is UDP only: a TCP segment to port 2152/2123 is something else.
+        if !context.over_udp() {
+            return None;
+        }
         // Match when UDP dst_port hint equals GTP-U or GTP-C port
         match context.hint("dst_port") {
             Some(port) if port == GTP_U_PORT as u64 => Some(100),
@@ -441,13 +445,21 @@ mod tests {
         // With wrong port
         let mut ctx2 = ParseContext::new(1);
         ctx2.insert_hint("dst_port", 80);
+        ctx2.insert_hint("transport", 17);
         assert!(parser.can_parse(&ctx2).is_none());
 
-        // With GTP-U port
+        // With GTP-U port over UDP
         let mut ctx3 = ParseContext::new(1);
         ctx3.insert_hint("dst_port", 2152);
+        ctx3.insert_hint("transport", 17);
         assert!(parser.can_parse(&ctx3).is_some());
         assert_eq!(parser.can_parse(&ctx3), Some(100));
+
+        // GTP-U port over TCP is not GTP
+        let mut ctx4 = ParseContext::new(1);
+        ctx4.insert_hint("dst_port", 2152);
+        ctx4.insert_hint("transport", 6);
+        assert!(parser.can_parse(&ctx4).is_none());
     }
 
     // Test 2: can_parse with GTP-C port
@@ -457,6 +469,7 @@ mod tests {
 
         let mut context = ParseContext::new(1);
         context.insert_hint("dst_port", 2123);
+        context.insert_hint("transport", 17);
 
         assert!(parser.can_parse(&context).is_some());
         assert_eq!(parser.can_parse(&context), Some(100));

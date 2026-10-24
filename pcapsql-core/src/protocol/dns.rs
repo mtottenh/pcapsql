@@ -12,6 +12,28 @@ use crate::schema::{DataKind, FieldDescriptor};
 /// DNS well-known port.
 pub const DNS_PORT: u16 = 53;
 
+/// The DNS message in a transport payload: the whole UDP datagram, or the
+/// first message of a TCP segment, which carries a two-byte big-endian
+/// length prefix (RFC 1035 section 4.2.2). A segment that ends before the
+/// prefixed length (a message split across segments) yields what is there,
+/// and `Packet::parse` reports the truncation. Only a segment that starts a
+/// message parses: a continuation segment of a long response has no prefix
+/// to strip, and its first bytes are not a DNS header.
+fn dns_message<'a>(data: &'a [u8], context: &ParseContext) -> Result<&'a [u8], String> {
+    if !context.over_tcp() {
+        return Ok(data);
+    }
+    if data.len() < 2 {
+        return Err(format!(
+            "DNS over TCP: {} byte segment is shorter than the length prefix",
+            data.len()
+        ));
+    }
+    let len = u16::from_be_bytes([data[0], data[1]]) as usize;
+    let body = &data[2..];
+    Ok(&body[..body.len().min(len)])
+}
+
 /// DNS protocol parser.
 #[derive(Debug, Clone, Copy)]
 pub struct DnsProtocol;
@@ -26,7 +48,11 @@ impl Protocol for DnsProtocol {
     }
 
     fn can_parse(&self, context: &ParseContext) -> Option<u32> {
-        // Check for DNS port in either src_port or dst_port
+        // DNS runs over UDP and, with a two-byte length prefix, over TCP
+        // (RFC 1035 section 4.2.2). Both are port-only matches.
+        if !context.over_udp() && !context.over_tcp() {
+            return None;
+        }
         let src_port = context.hint("src_port");
         let dst_port = context.hint("dst_port");
 
@@ -36,9 +62,13 @@ impl Protocol for DnsProtocol {
         }
     }
 
-    fn parse<'a>(&self, data: &'a [u8], _context: &ParseContext) -> ParseResult<'a> {
+    fn parse<'a>(&self, data: &'a [u8], context: &ParseContext) -> ParseResult<'a> {
+        let message = match dns_message(data, context) {
+            Ok(m) => m,
+            Err(e) => return ParseResult::error(e, data),
+        };
         // Parse using simple-dns
-        let packet = match Packet::parse(data) {
+        let packet = match Packet::parse(message) {
             Ok(p) => p,
             Err(e) => return ParseResult::error(format!("DNS parse error: {e}"), data),
         };
@@ -122,18 +152,22 @@ impl Protocol for DnsProtocol {
     fn parse_projected<'a>(
         &self,
         data: &'a [u8],
-        _context: &ParseContext,
+        context: &ParseContext,
         requested_fields: Option<&HashSet<String>>,
     ) -> ParseResult<'a> {
         // If no projection, use full parse
         let requested = match requested_fields {
-            None => return self.parse(data, _context),
-            Some(f) if f.is_empty() => return self.parse(data, _context),
+            None => return self.parse(data, context),
+            Some(f) if f.is_empty() => return self.parse(data, context),
             Some(f) => f,
         };
 
+        let message = match dns_message(data, context) {
+            Ok(m) => m,
+            Err(e) => return ParseResult::error(e, data),
+        };
         // Parse using simple-dns
-        let packet = match Packet::parse(data) {
+        let packet = match Packet::parse(message) {
             Ok(p) => p,
             Err(e) => return ParseResult::error(format!("DNS parse error: {e}"), data),
         };
@@ -811,20 +845,73 @@ mod tests {
         let ctx1 = ParseContext::new(1);
         assert!(parser.can_parse(&ctx1).is_none());
 
-        // With dst_port 53
+        // With dst_port 53 over UDP
         let mut ctx2 = ParseContext::new(1);
         ctx2.insert_hint("dst_port", 53);
+        ctx2.insert_hint("transport", 17);
         assert!(parser.can_parse(&ctx2).is_some());
 
-        // With src_port 53
+        // With src_port 53 over TCP
         let mut ctx3 = ParseContext::new(1);
         ctx3.insert_hint("src_port", 53);
+        ctx3.insert_hint("transport", 6);
         assert!(parser.can_parse(&ctx3).is_some());
 
         // With different port
         let mut ctx4 = ParseContext::new(1);
         ctx4.insert_hint("dst_port", 80);
+        ctx4.insert_hint("transport", 17);
         assert!(parser.can_parse(&ctx4).is_none());
+
+        // Port 53 without a transport (not reached from TCP or UDP)
+        let mut ctx5 = ParseContext::new(1);
+        ctx5.insert_hint("dst_port", 53);
+        assert!(parser.can_parse(&ctx5).is_none());
+    }
+
+    #[test]
+    fn test_dns_over_tcp_strips_length_prefix() {
+        let parser = DnsProtocol;
+        let query = create_dns_query(0x1234, b"\x07example\x03com\x00");
+        let mut segment = (query.len() as u16).to_be_bytes().to_vec();
+        segment.extend_from_slice(&query);
+
+        let mut tcp = ParseContext::new(1);
+        tcp.insert_hint("dst_port", 53);
+        tcp.insert_hint("transport", 6);
+        let result = parser.parse(&segment, &tcp);
+        assert!(result.is_ok(), "{:?}", result.error);
+        assert_eq!(
+            result.get("transaction_id"),
+            Some(&FieldValue::UInt16(0x1234))
+        );
+        assert_eq!(
+            result.get("query_name").and_then(|v| v.as_str()),
+            Some("example.com")
+        );
+
+        // Projection goes through the same prefix handling.
+        let fields: HashSet<String> = ["transaction_id"].iter().map(|s| s.to_string()).collect();
+        let projected = parser.parse_projected(&segment, &tcp, Some(&fields));
+        assert!(projected.is_ok(), "{:?}", projected.error);
+        assert_eq!(
+            projected.get("transaction_id"),
+            Some(&FieldValue::UInt16(0x1234))
+        );
+
+        // Over UDP the same bytes are not a message (no prefix expected).
+        let mut udp = ParseContext::new(1);
+        udp.insert_hint("dst_port", 53);
+        udp.insert_hint("transport", 17);
+        let result = parser.parse(&query, &udp);
+        assert!(result.is_ok(), "{:?}", result.error);
+        assert_eq!(
+            result.get("transaction_id"),
+            Some(&FieldValue::UInt16(0x1234))
+        );
+
+        // A one-byte TCP segment is an error, not a panic.
+        assert!(parser.parse(&[0x00], &tcp).error.is_some());
     }
 
     #[test]

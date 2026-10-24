@@ -147,6 +147,10 @@ impl Protocol for BgpProtocol {
     }
 
     fn can_parse(&self, context: &ParseContext) -> Option<u32> {
+        // BGP is TCP only: a UDP datagram on port 179 is something else.
+        if !context.over_tcp() {
+            return None;
+        }
         // Match when TCP dst_port or src_port hint equals 179
         if let Some(dst_port) = context.hint("dst_port") {
             if dst_port == BGP_PORT as u64 {
@@ -860,17 +864,26 @@ mod tests {
         // With wrong port
         let mut ctx2 = ParseContext::new(1);
         ctx2.insert_hint("dst_port", 80);
+        ctx2.insert_hint("transport", 6);
         assert!(parser.can_parse(&ctx2).is_none());
 
-        // With BGP dst_port
+        // With BGP dst_port over TCP
         let mut ctx3 = ParseContext::new(1);
         ctx3.insert_hint("dst_port", 179);
+        ctx3.insert_hint("transport", 6);
         assert!(parser.can_parse(&ctx3).is_some());
 
-        // With BGP src_port
+        // With BGP src_port over TCP
         let mut ctx4 = ParseContext::new(1);
         ctx4.insert_hint("src_port", 179);
+        ctx4.insert_hint("transport", 6);
         assert!(parser.can_parse(&ctx4).is_some());
+
+        // Port 179 over UDP is not BGP
+        let mut ctx5 = ParseContext::new(1);
+        ctx5.insert_hint("dst_port", 179);
+        ctx5.insert_hint("transport", 17);
+        assert!(parser.can_parse(&ctx5).is_none());
     }
 
     // Test 2: Marker validation (16 bytes of 0xFF)

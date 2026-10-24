@@ -27,6 +27,10 @@ impl Protocol for VxlanProtocol {
     }
 
     fn can_parse(&self, context: &ParseContext) -> Option<u32> {
+        // VXLAN is UDP only: a TCP segment to port 4789 is something else.
+        if !context.over_udp() {
+            return None;
+        }
         // Match when UDP dst_port hint equals 4789
         match context.hint("dst_port") {
             Some(port) if port == VXLAN_PORT as u64 => Some(100),
@@ -145,13 +149,21 @@ mod tests {
         // With wrong port
         let mut ctx2 = ParseContext::new(1);
         ctx2.insert_hint("dst_port", 80);
+        ctx2.insert_hint("transport", 17);
         assert!(parser.can_parse(&ctx2).is_none());
 
-        // With VXLAN port
+        // With VXLAN port over UDP
         let mut ctx3 = ParseContext::new(1);
         ctx3.insert_hint("dst_port", 4789);
+        ctx3.insert_hint("transport", 17);
         assert!(parser.can_parse(&ctx3).is_some());
         assert_eq!(parser.can_parse(&ctx3), Some(100));
+
+        // VXLAN port over TCP is not VXLAN
+        let mut ctx4 = ParseContext::new(1);
+        ctx4.insert_hint("dst_port", 4789);
+        ctx4.insert_hint("transport", 6);
+        assert!(parser.can_parse(&ctx4).is_none());
     }
 
     // Test 2: VNI extraction
