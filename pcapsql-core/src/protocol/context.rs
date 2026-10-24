@@ -325,6 +325,14 @@ impl<'data> ParseResult<'data> {
     /// entry there is the same string (same pointer and length) it is the
     /// answer, in one compare; otherwise the lookup scans as `get` does and
     /// moves the hint to what it found.
+    ///
+    /// The hint only ever stores a position found by that scan, i.e. a first
+    /// occurrence of the name. A hit at that position is the same answer as
+    /// `get` unless a row repeats a key *and* its first occurrence moved to
+    /// where a later one sat in the previous row. The parsers that repeat a
+    /// key (TLS, one `handshake_type` per message of a record) emit it after
+    /// a fixed prefix, so the first occurrence does not move; debug builds
+    /// check every hit against `get`.
     #[inline]
     pub fn get_hinted(&self, name: &str, hint: &mut FieldHint) -> Option<&FieldValue<'data>> {
         if let Some((key, value)) = self.fields.get(hint.position) {

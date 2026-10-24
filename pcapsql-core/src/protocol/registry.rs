@@ -688,9 +688,9 @@ mod tests {
     #[test]
     fn candidate_lists_match_a_full_scan() {
         let registry = crate::protocol::default_registry();
-        let values: [u64; 24] = [
+        let values: [u64; 29] = [
             0, 1, 2, 4, 6, 17, 41, 47, 50, 51, 58, 89, 22, 53, 67, 68, 123, 179, 443, 2152, 4789,
-            0x0800, 0x86dd, 0x8100,
+            0x0800, 0x86dd, 0x8100, 0x0806, 0x8847, 0x8848, 0x88a8, 0x6558,
         ];
         let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
         let mut next = move || {
