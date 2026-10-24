@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`--format raw`.** Prints only the values: no header, no quoting or
+  escaping, columns separated by tabs, one row per line. A multi-line text
+  value such as `hdr_ascii(...)` output prints as rendered, and a row that
+  already ends in a newline gets no second one.
+
 ## [0.4.1] - 2026-10-24
 
 The three limitations listed with continuous mode in 0.4.0 are gone: the

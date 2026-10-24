@@ -209,6 +209,13 @@ wrapped lookup. String parameters take any string type.
 | `hdr_buckets(hist)` | Distribution as log-scale bucket rows (explode with `UNNEST`) |
 | `hdr_ascii(hist)` | Render ASCII histogram with cumulative % (CDF) |
 
+`hdr_ascii` output is easiest to read with `--format raw`, which prints values
+without a table border, header or quoting:
+
+```bash
+pcapsql capture.pcap --format raw -e "SELECT hdr_ascii(hdr_histogram(length)) FROM frames"
+```
+
 ### Utility Functions
 
 | Function | Description |

@@ -2,7 +2,7 @@
 //!
 //! This module provides type-aware formatting for query results, automatically
 //! converting network addresses (IPv4, IPv6, MAC) to human-readable strings
-//! while displaying in table, CSV, or JSON format.
+//! while displaying in table, CSV, JSON or raw format.
 
 use std::io::Write;
 use std::sync::Arc;
@@ -33,12 +33,13 @@ impl OutputFormatter {
             OutputFormat::Table => self.write_table(batch, writer),
             OutputFormat::Csv => self.write_csv(batch, writer),
             OutputFormat::Json => self.write_json(batch, writer),
+            OutputFormat::Raw => self.write_raw(batch, writer),
         }
     }
 
     /// Append one batch of a continuous result: CSV writes its header before
-    /// the first non-empty batch only, JSON lines need none, and the table
-    /// format renders one table per batch (each closed window).
+    /// the first non-empty batch only, JSON lines and raw need none, and the
+    /// table format renders one table per batch (each closed window).
     pub fn write_incremental<W: Write>(
         &self,
         batch: &RecordBatch,
@@ -49,7 +50,9 @@ impl OutputFormatter {
             return Ok(());
         }
         match self.format {
-            OutputFormat::Table | OutputFormat::Json => self.write(batch, writer),
+            OutputFormat::Table | OutputFormat::Json | OutputFormat::Raw => {
+                self.write(batch, writer)
+            }
             OutputFormat::Csv => {
                 if *header_written {
                     self.write_csv_rows(batch, writer)
@@ -71,6 +74,7 @@ impl OutputFormatter {
             OutputFormat::Table => self.write_table_batches(batches, writer),
             OutputFormat::Csv => self.write_csv_batches(batches, writer),
             OutputFormat::Json => self.write_json_batches(batches, writer),
+            OutputFormat::Raw => batches.iter().try_for_each(|b| self.write_raw(b, writer)),
         }
     }
 
@@ -222,6 +226,28 @@ impl OutputFormatter {
         Ok(())
     }
 
+    /// Write each row's values tab-separated, with no header and no quoting,
+    /// so a text value (such as `hdr_ascii` output) prints exactly as it is.
+    /// A row that already ends in a newline gets no second one.
+    fn write_raw<W: Write>(&self, batch: &RecordBatch, writer: &mut W) -> std::io::Result<()> {
+        let address_kinds = Self::detect_address_columns(batch.schema().as_ref());
+        for row_idx in 0..batch.num_rows() {
+            let line = batch
+                .columns()
+                .iter()
+                .enumerate()
+                .map(|(col_idx, col)| Self::format_value(col, row_idx, address_kinds[col_idx]))
+                .collect::<Vec<_>>()
+                .join("\t");
+            if line.ends_with('\n') {
+                write!(writer, "{line}")?;
+            } else {
+                writeln!(writer, "{line}")?;
+            }
+        }
+        Ok(())
+    }
+
     /// Write multiple batches as a single combined table.
     fn write_table_batches<W: Write>(
         &self,
@@ -330,7 +356,7 @@ impl OutputFormatter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::UInt16Array;
+    use arrow::array::{StringArray, UInt16Array};
     use arrow::datatypes::{DataType, Field};
 
     fn create_test_batch() -> RecordBatch {
@@ -421,6 +447,40 @@ mod tests {
 
         // Count should be a number in JSON
         assert!(output_str.contains("\"count\":42"));
+    }
+
+    #[test]
+    fn test_raw_output_formats_ips() {
+        let batch = create_test_batch();
+        let formatter = OutputFormatter::new(OutputFormat::Raw);
+
+        let mut output = Vec::new();
+        formatter.write(&batch, &mut output).unwrap();
+
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "192.168.1.1\t8.8.8.8\t42\t443\n10.0.0.1\t8.8.4.4\t100\t80\n"
+        );
+    }
+
+    #[test]
+    fn test_raw_output_keeps_text_verbatim() {
+        let schema = Schema::new(vec![Field::new("h", DataType::Utf8, true)]);
+        let text = StringArray::from(vec![Some("a, \"b\"\n  c\n"), None, Some("d")]);
+        let batch = RecordBatch::try_new(Arc::new(schema), vec![Arc::new(text)]).unwrap();
+        let formatter = OutputFormatter::new(OutputFormat::Raw);
+
+        let mut output = Vec::new();
+        formatter
+            .write_batches(&[batch.clone(), batch], &mut output)
+            .unwrap();
+
+        // No quoting, no extra newline after a value that ends in one, and a
+        // null prints as an empty line.
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "a, \"b\"\n  c\n\nd\na, \"b\"\n  c\n\nd\n"
+        );
     }
 
     #[test]
