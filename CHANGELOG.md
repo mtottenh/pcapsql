@@ -143,10 +143,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Parser fields that the DataFusion tables dropped are now columns, so
-  `SELECT *` on these tables returns more columns and the engine agrees with
-  the DuckDB table functions, which already exposed every parser field
-  ([#138](https://github.com/mtottenh/pcapsql/issues/138)):
+- Parser fields that the DataFusion tables dropped are now columns, and the
+  engine agrees with the DuckDB table functions, which already exposed every
+  parser field. The new columns sit next to the related existing ones, so
+  `SELECT *` on these tables returns more columns *and* the existing columns
+  move position (name the columns you rely on). The `bgp_packets`,
+  `ospf_packets` and `gtp_packets` views append the same columns after their
+  existing ones ([#138](https://github.com/mtottenh/pcapsql/issues/138)):
   - `bgp`: `my_as_4byte`, `capabilities`, `withdrawn_routes`,
     `withdrawn_count`, `origin`, `origin_name`, `as_path`, `as_path_length`,
     `next_hop`, `med`, `local_pref`, `atomic_aggregate`, `aggregator_as`,

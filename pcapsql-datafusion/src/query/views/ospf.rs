@@ -30,7 +30,21 @@ SELECT
     ospf.hello_interval,
     ospf.dead_interval,
     ospf.designated_router,
-    ospf.backup_dr
+    ospf.backup_dr,
+    ospf.neighbor_count,
+    ospf.dd_interface_mtu,
+    ospf.dd_options,
+    ospf.dd_flags,
+    ospf.dd_sequence,
+    ospf.dd_lsa_count,
+    ospf.lsu_lsa_count,
+    ospf.lsa_ack_count,
+    ospf.lsa_age,
+    ospf.lsa_type,
+    ospf.lsa_type_name,
+    ospf.lsa_id,
+    ospf.lsa_advertising_router,
+    ospf.lsa_sequence
 FROM frames f
 JOIN ipv4 ip4 ON f.frame_number = ip4.frame_number
 JOIN ospf ON f.frame_number = ospf.frame_number
@@ -48,5 +62,6 @@ mod tests {
         assert_eq!(view.name, "ospf_packets");
         assert!(view.sql.contains("JOIN ospf"));
         assert!(view.sql.contains("router_id"));
+        assert!(view.sql.contains("ospf.lsa_advertising_router,"));
     }
 }

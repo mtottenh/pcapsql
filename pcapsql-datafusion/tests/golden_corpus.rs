@@ -626,11 +626,13 @@ fn gtpv2(piggyback: bool, msg_type: u8, teid: u32, seq: u32) -> Vec<u8> {
     p
 }
 
-/// Hop-by-Hop (PadN), type 2 Routing (one segment left) and Fragment (first
-/// fragment, more to follow) extension headers in front of a UDP payload.
+/// Hop-by-Hop (PadN), Type 2 Routing (RFC 6275: Hdr Ext Len 2, one segment
+/// left, a 16-byte home address) and Fragment (first fragment, more to
+/// follow) extension headers in front of a UDP payload.
 fn ipv6_ext_chain(udp_payload: &[u8]) -> Vec<u8> {
     let mut p = vec![43, 0, 1, 4, 0, 0, 0, 0]; // Hop-by-Hop -> Routing
-    p.extend_from_slice(&[44, 0, 2, 1, 0, 0, 0, 0]); // Routing type 2, 1 left -> Fragment
+    p.extend_from_slice(&[44, 2, 2, 1, 0, 0, 0, 0]); // Routing type 2, 1 left -> Fragment
+    p.extend_from_slice(&IP6_A); // home address
     p.extend_from_slice(&[17, 0, 0x00, 0x01]); // Fragment -> UDP; offset 0, M=1
     p.extend_from_slice(&0xbeefu32.to_be_bytes()); // identification
     p.extend_from_slice(udp_payload);
@@ -1186,6 +1188,24 @@ const CORPUS: &[(Capture, &str, &str)] = &[
         Capture::Routing,
         "v04_ipv6",
         "SELECT * FROM ipv6 ORDER BY frame_number",
+    ),
+    // The convenience views project the new columns too.
+    (
+        Capture::Routing,
+        "v05_bgp_packets_view",
+        "SELECT * FROM bgp_packets ORDER BY frame_number",
+    ),
+    (
+        Capture::Routing,
+        "v06_ospf_packets_view",
+        "SELECT * FROM ospf_packets ORDER BY frame_number",
+    ),
+    // The G-PDU frame carries an inner IPv4/UDP packet, so its ipv4 and udp
+    // joins each match twice (outer and inner rows): order by them as well.
+    (
+        Capture::Routing,
+        "v07_gtp_packets_view",
+        "SELECT * FROM gtp_packets ORDER BY frame_number, src_ip_v4, src_port",
     ),
 ];
 
