@@ -279,58 +279,62 @@ impl DynamicBuilder {
                 FieldValue::Null => b.append_null(),
                 _ => b.append_null(),
             },
-            // List builders
+            // List builders: each item goes straight into the values
+            // builder, then the list entry is closed (no per-cell Vec).
             DynamicBuilder::ListOfUInt16(b) => match value {
                 FieldValue::List(items) => {
-                    let values: Vec<Option<u16>> = items
-                        .iter()
-                        .map(|v| match v {
+                    for item in items {
+                        b.values().append_option(match item {
                             FieldValue::UInt16(n) => Some(*n),
                             FieldValue::UInt8(n) => Some(*n as u16),
                             _ => None,
-                        })
-                        .collect();
-                    b.append_value(values);
+                        });
+                    }
+                    b.append(true);
                 }
                 FieldValue::Null => b.append_null(),
                 _ => b.append_null(),
             },
             DynamicBuilder::ListOfUInt32(b) => match value {
                 FieldValue::List(items) => {
-                    let values: Vec<Option<u32>> = items
-                        .iter()
-                        .map(|v| match v {
+                    for item in items {
+                        b.values().append_option(match item {
                             FieldValue::UInt32(n) => Some(*n),
                             FieldValue::UInt16(n) => Some(*n as u32),
                             FieldValue::UInt8(n) => Some(*n as u32),
                             FieldValue::IpAddr(std::net::IpAddr::V4(v4)) => Some(u32::from(*v4)),
                             _ => None,
-                        })
-                        .collect();
-                    b.append_value(values);
+                        });
+                    }
+                    b.append(true);
                 }
                 FieldValue::Null => b.append_null(),
                 _ => b.append_null(),
             },
             DynamicBuilder::ListOfUtf8(b) => match value {
                 FieldValue::List(items) => {
-                    let values: Vec<Option<String>> = items.iter().map(|v| v.as_string()).collect();
-                    b.append_value(values);
+                    for item in items {
+                        match item {
+                            FieldValue::Str(s) => b.values().append_value(s),
+                            FieldValue::OwnedString(s) => b.values().append_value(s),
+                            other => b.values().append_option(other.as_string()),
+                        }
+                    }
+                    b.append(true);
                 }
                 FieldValue::Null => b.append_null(),
                 _ => b.append_null(),
             },
             DynamicBuilder::ListOfBinary(b) => match value {
                 FieldValue::List(items) => {
-                    let values: Vec<Option<Vec<u8>>> = items
-                        .iter()
-                        .map(|v| match v {
-                            FieldValue::Bytes(data) => Some(data.to_vec()),
-                            FieldValue::OwnedBytes(data) => Some(data.clone()),
-                            _ => None,
-                        })
-                        .collect();
-                    b.append_value(values);
+                    for item in items {
+                        match item {
+                            FieldValue::Bytes(data) => b.values().append_value(data),
+                            FieldValue::OwnedBytes(data) => b.values().append_value(data),
+                            _ => b.values().append_null(),
+                        }
+                    }
+                    b.append(true);
                 }
                 FieldValue::Null => b.append_null(),
                 _ => b.append_null(),
@@ -741,6 +745,69 @@ mod tests {
         let a = a.as_any().downcast_ref::<UInt16Array>().unwrap();
         assert_eq!(a.value(0), 65_535);
         assert!(a.is_null(1));
+    }
+
+    /// List cells: each item converted (or NULL when it has the wrong
+    /// type), a NULL cell for a non-list value, and an empty list for an
+    /// empty one.
+    #[test]
+    fn list_cells_keep_items_and_nulls() {
+        use arrow::datatypes::Field;
+        let list = |inner: DataType| DataType::List(Arc::new(Field::new("item", inner, true)));
+        let cells = [
+            FieldValue::List(vec![
+                FieldValue::UInt16(7),
+                FieldValue::UInt8(3),
+                FieldValue::Str("a.example"),
+                FieldValue::OwnedString("b".into()),
+                FieldValue::Bytes(b"xy"),
+                FieldValue::OwnedBytes(vec![1, 2]),
+                FieldValue::IpAddr("10.0.0.1".parse().unwrap()),
+                FieldValue::Bool(true),
+            ]),
+            FieldValue::Null,
+            FieldValue::List(vec![]),
+            FieldValue::UInt16(1),
+        ];
+        let render = |data_type: DataType| -> Vec<String> {
+            let mut b = DynamicBuilder::new(&data_type, 4);
+            for cell in &cells {
+                b.append_field_value(cell);
+            }
+            let array = b.finish();
+            let array = array.as_any().downcast_ref::<ListArray>().unwrap();
+            (0..array.len())
+                .map(|i| {
+                    if array.is_null(i) {
+                        return "NULL".to_string();
+                    }
+                    let options = arrow::util::display::FormatOptions::default().with_null("∅");
+                    let values = array.value(i);
+                    let f =
+                        arrow::util::display::ArrayFormatter::try_new(&values, &options).unwrap();
+                    (0..values.len())
+                        .map(|j| f.value(j).to_string())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .collect()
+        };
+        assert_eq!(
+            render(list(DataType::UInt16)),
+            ["7,3,∅,∅,∅,∅,∅,∅", "NULL", "", "NULL"]
+        );
+        assert_eq!(
+            render(list(DataType::UInt32)),
+            ["7,3,∅,∅,∅,∅,167772161,∅", "NULL", "", "NULL"]
+        );
+        assert_eq!(
+            render(list(DataType::Utf8)),
+            ["7,3,a.example,b,∅,∅,10.0.0.1,true", "NULL", "", "NULL"]
+        );
+        assert_eq!(
+            render(list(DataType::Binary)),
+            ["∅,∅,∅,∅,7879,0102,∅,∅", "NULL", "", "NULL"]
+        );
     }
 
     #[test]
