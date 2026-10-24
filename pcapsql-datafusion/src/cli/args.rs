@@ -132,6 +132,21 @@ pub struct Args {
     /// Use a value above --flush-interval.
     #[arg(long = "idle-timeout", value_name = "SECONDS")]
     pub idle_timeout: Option<f64>,
+    /// Memory DataFusion may use for this run's sorts, joins, aggregates and
+    /// a continuous query's window state, e.g. 512MiB, 2GB, 1073741824.
+    /// Unlimited by default.
+    #[arg(long = "memory-limit", value_name = "SIZE")]
+    pub memory_limit: Option<String>,
+    /// Continuous: what to do when the window state exceeds --memory-limit.
+    /// 'error' fails the query; 'close-oldest' prints the oldest open windows
+    /// before their time until the state fits (counted in --stats, and a
+    /// packet for such a window arriving later is late).
+    #[arg(
+        long = "on-memory-limit",
+        value_name = "POLICY",
+        default_value = "error"
+    )]
+    pub on_memory_limit: String,
 
     /// Execute a single SQL query and exit
     #[arg(short = 'e', long = "execute", value_name = "SQL")]

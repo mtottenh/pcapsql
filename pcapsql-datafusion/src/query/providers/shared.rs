@@ -297,6 +297,10 @@ pub struct ParseStats {
     /// (later than `allowed_lateness` behind the stream, or after an idle
     /// timeout closed the window).
     pub late_rows: u64,
+    /// Continuous queries only: windows the streaming window aggregate
+    /// emitted before their time because the memory limit was reached
+    /// (`--on-memory-limit close-oldest`).
+    pub windows_forced: u64,
 }
 
 /// Result of one scoped parse pass.
@@ -495,6 +499,7 @@ fn assemble_pass(
         tables: tables_out,
         stats: ParseStats {
             late_rows: 0,
+            windows_forced: 0,
             parse_passes: 1,
             packets_scanned,
             partitions: num_partitions,

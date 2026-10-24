@@ -42,6 +42,7 @@ pub use providers::{
     auto_target_partitions, merge_ordered_partitions, ParseStats, ParseSubscription, ProgressFn,
     ProtocolScanExec, ProtocolTableProvider, ServedFrom, TableSubscription,
 };
+pub use streaming::MemoryLimitPolicy;
 pub use udf::CaptureTimeRange;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -55,6 +56,7 @@ use std::time::Duration;
 use arrow::array::RecordBatch;
 use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion::config::ConfigOptions;
+use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::execution::session_state::{SessionState, SessionStateBuilder};
 use datafusion::logical_expr::{DdlStatement, Expr, LogicalPlan, Statement};
 use datafusion::physical_optimizer::optimizer::PhysicalOptimizer;
@@ -120,7 +122,8 @@ fn create_session_context(
     parallelism: usize,
     continuous: Option<&streaming::ContinuousConfig>,
     fuse_frame_joins: bool,
-) -> SessionContext {
+    memory_limit: Option<usize>,
+) -> Result<SessionContext, Error> {
     let mut config = ConfigOptions::default();
 
     config.execution.target_partitions = session_target_partitions(1, parallelism);
@@ -143,6 +146,16 @@ fn create_session_context(
         .with_config(config.into())
         .with_default_features()
         .with_query_planner(Arc::new(windowing::WindowQueryPlanner));
+    if let Some(limit) = memory_limit {
+        // A greedy pool: every consumer takes what it asks for until the
+        // limit, then the request fails (DataFusion's operators spill or
+        // error; the streaming aggregate applies its policy).
+        let runtime = RuntimeEnvBuilder::new()
+            .with_memory_limit(limit, 1.0)
+            .build_arc()
+            .map_err(|e| Error::Query(QueryError::from(e)))?;
+        builder = builder.with_runtime_env(runtime);
+    }
     if fuse_frame_joins {
         // Last, over the optimized plan: the view joins it replaces must
         // already have had their projections and filters pushed down.
@@ -171,7 +184,7 @@ fn create_session_context(
         );
         builder = builder.with_physical_optimizer_rules(rules);
     }
-    SessionContext::new_with_state(builder.build())
+    Ok(SessionContext::new_with_state(builder.build()))
 }
 
 /// Where to read a capture from.
@@ -275,6 +288,13 @@ pub struct EngineOptions {
     /// under [`RetentionPolicy::None`] only; on by default. Off is for
     /// comparing plans and results against the join path.
     pub fuse_frame_joins: bool,
+    /// Bytes DataFusion's memory pool may hand out to this engine's queries
+    /// (sorts, joins, aggregates, and a continuous query's window state).
+    /// `None`: unbounded, DataFusion's default.
+    pub memory_limit: Option<usize>,
+    /// Continuous only: what the streaming window aggregate does when its
+    /// state does not fit the memory limit (see [`MemoryLimitPolicy`]).
+    pub on_memory_limit: MemoryLimitPolicy,
 }
 
 impl Default for EngineOptions {
@@ -293,6 +313,8 @@ impl Default for EngineOptions {
             flush_interval: Duration::from_secs(1),
             idle_timeout: None,
             fuse_frame_joins: true,
+            memory_limit: None,
+            on_memory_limit: MemoryLimitPolicy::Error,
         }
     }
 }
@@ -768,6 +790,21 @@ impl QueryStream {
             .unwrap_or(0)
     }
 
+    /// Continuous queries: windows emitted early because the memory limit
+    /// was reached (`on_memory_limit: CloseOldest`).
+    pub fn windows_forced(&self) -> u64 {
+        self.plan
+            .as_ref()
+            .map(streaming::windows_forced)
+            .unwrap_or(0)
+    }
+
+    /// Continuous queries: bytes of window state the streaming aggregate
+    /// holds right now (what it accounts to the memory pool).
+    pub fn state_bytes(&self) -> u64 {
+        self.plan.as_ref().map(streaming::state_bytes).unwrap_or(0)
+    }
+
     /// Release the query's context and join its parse producers, returning
     /// the query's statistics (what `--stats` prints) or the parse error that
     /// ended it. Call it after the stream has ended, or earlier to cancel.
@@ -780,6 +817,7 @@ impl QueryStream {
     /// bound the call with a timeout if that matters.
     pub async fn finish(mut self) -> Result<ParseStats, Error> {
         let late_rows = self.late_rows();
+        let windows_forced = self.windows_forced();
         // Order matters: the stream and the plan hold the receivers and the
         // TaskContext, the state and the tables hold the rest.
         self.inner = None;
@@ -799,6 +837,7 @@ impl QueryStream {
         let (mut stats, error) =
             fold_producers(producers, stats, &self.bootstrap, &self.time_range).await;
         stats.late_rows = late_rows;
+        stats.windows_forced = windows_forced;
         *self.last_stats.write().expect("stats lock poisoned") = stats.clone();
         match error {
             Some(e) => Err(e),
@@ -1087,6 +1126,7 @@ impl QueryEngine {
         let continuous = opts.continuous.then_some(streaming::ContinuousConfig {
             allowed_lateness: opts.allowed_lateness,
             idle_timeout: opts.idle_timeout,
+            on_memory_limit: opts.on_memory_limit,
         });
         // Fusion needs the parse to serve the joined table directly; under
         // CacheOnTouch the per-table cache and DataFusion's joins stay.
@@ -1094,7 +1134,8 @@ impl QueryEngine {
             parallelism,
             continuous.as_ref(),
             opts.retention == RetentionPolicy::None && opts.fuse_frame_joins,
-        );
+            opts.memory_limit,
+        )?;
         udf::register_all_udfs(&ctx)?;
 
         // Time UDFs read a shared range that parse passes widen.

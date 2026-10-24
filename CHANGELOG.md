@@ -193,6 +193,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Memory limit and sliced hop windows for continuous queries.**
+  `--memory-limit SIZE` (`EngineOptions::memory_limit`) gives the engine a
+  DataFusion memory pool of that size; the streaming window aggregate
+  registers a consumer and accounts its state (open windows × groups ×
+  accumulators, frozen slice states, keys) to it after every batch. When the
+  state does not fit, `--on-memory-limit error` (the default) fails the query
+  naming the state, the open windows and the groups, and
+  `--on-memory-limit close-oldest` emits the oldest open windows before their
+  time until it fits, counted in `ParseStats::windows_forced`, `--stats` and
+  `--progress`; a row for such a window arriving later is late. Independently
+  of the limit, a `hop()` whose size is a multiple of its slide is now
+  aggregated per slice (one slide's worth of rows) and the slices are merged
+  through the accumulators' intermediate state when a window closes, so the
+  state and the per-row work no longer grow with `size / slide`; the
+  per-window path remains for other hops and for `tumble()`.
 - **Fused joins: the parser emits a view's joined row itself.** Under
   `RetentionPolicy::None` (every one-shot, `--stdin` and `--continuous` run) a
   tree of inner and left joins of protocol tables on `frame_number` (and

@@ -81,6 +81,7 @@ use arrow::row::{OwnedRow, RowConverter, SortField};
 use datafusion::common::tree_node::{Transformed, TreeNode};
 use datafusion::common::{plan_err, DataFusionError, Result, ScalarValue};
 use datafusion::config::ConfigOptions;
+use datafusion::execution::memory_pool::{MemoryConsumer, MemoryReservation};
 use datafusion::execution::TaskContext;
 use datafusion::logical_expr::Accumulator;
 use datafusion::logical_expr::Operator;
@@ -117,6 +118,37 @@ pub struct ContinuousConfig {
     /// Close every open window after this long without input (`None`:
     /// windows close on event time only).
     pub idle_timeout: Option<Duration>,
+    /// What to do when the window state does not fit the memory pool.
+    pub on_memory_limit: MemoryLimitPolicy,
+}
+
+/// What the streaming window aggregate does when its state (open windows ×
+/// groups × accumulators, accounted to DataFusion's memory pool) exceeds
+/// the engine's memory limit.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MemoryLimitPolicy {
+    /// Fail the query, naming the open windows and groups (the default:
+    /// nothing is silently approximated).
+    #[default]
+    Error,
+    /// Emit the oldest open windows before their time until the state fits
+    /// again. Each is counted in `windows_forced`; a row arriving for one of
+    /// them later is late. If the newest window alone does not fit, fail.
+    CloseOldest,
+}
+
+impl std::str::FromStr for MemoryLimitPolicy {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "error" => Ok(Self::Error),
+            "close-oldest" => Ok(Self::CloseOldest),
+            other => Err(format!(
+                "unknown memory-limit policy '{other}': use 'error' or 'close-oldest'"
+            )),
+        }
+    }
 }
 
 /// The window a fused aggregate groups by.
@@ -130,6 +162,24 @@ impl WindowSpec {
     fn size_us(&self) -> i64 {
         match self {
             WindowSpec::Tumble { size_us } | WindowSpec::Hop { size_us, .. } => *size_us,
+        }
+    }
+
+    /// A hop whose size is a multiple of its slide is aggregated per
+    /// **slice** (one slide's worth of rows) and the slices merged into each
+    /// window when it closes: `size / slide` times less state and work than
+    /// one accumulator per (window, row). Any other window is aggregated
+    /// per window.
+    fn sliced(&self) -> bool {
+        matches!(self, WindowSpec::Hop { slide_us, size_us } if size_us % slide_us == 0 && size_us > slide_us)
+    }
+
+    /// The width of one state entry: the slide for a sliced hop, else the
+    /// window size.
+    fn slice_us(&self) -> i64 {
+        match self {
+            WindowSpec::Hop { slide_us, .. } if self.sliced() => *slide_us,
+            other => other.size_us(),
         }
     }
 
@@ -286,8 +336,23 @@ impl WindowChain {
                         .as_any()
                         .downcast_ref::<HopAssignExec>()
                         .expect("hop window node");
-                    // HopAssignExec prepends the two window columns.
-                    (Arc::clone(&self.window), hop.timestamp_index() + 2)
+                    // HopAssignExec prepends the two window columns. A sliced
+                    // hop (see `WindowSpec::sliced`) is fed one row per
+                    // input row with the *slice* bounds in those columns: a
+                    // hop whose size is its slide, same schema. The aggregate
+                    // knows the real window from the spec.
+                    let window: Arc<dyn ExecutionPlan> = if self.spec.sliced() {
+                        let slide = hop.assigner().slide_us();
+                        Arc::new(HopAssignExec::try_new(
+                            Arc::clone(hop.input()),
+                            hop.timestamp_index(),
+                            slide,
+                            slide,
+                        )?)
+                    } else {
+                        Arc::clone(&self.window)
+                    };
+                    (window, hop.timestamp_index() + 2)
                 }
             };
         for node in self.chain.iter().rev() {
@@ -591,6 +656,12 @@ impl DisplayAs for StreamingWindowAggregateExec {
         if let Some(idle) = self.config.idle_timeout {
             write!(f, ", idle_timeout={idle:?}")?;
         }
+        if self.spec.sliced() {
+            write!(f, ", sliced")?;
+        }
+        if self.config.on_memory_limit == MemoryLimitPolicy::CloseOldest {
+            write!(f, ", on_memory_limit=close-oldest")?;
+        }
         Ok(())
     }
 }
@@ -648,8 +719,10 @@ impl ExecutionPlan for StreamingWindowAggregateExec {
         if partition != 0 {
             return plan_err!("StreamingWindowAggregateExec has one partition, got {partition}");
         }
+        let reservation = MemoryConsumer::new(format!("StreamingWindowAggregateExec[{partition}]"))
+            .register(context.memory_pool());
         let input = self.input.execute(0, context)?;
-        let state = AggregateState::try_new(self, partition)?;
+        let state = AggregateState::try_new(self, partition, reservation)?;
         Ok(Box::pin(StreamingAggregateStream {
             input,
             state,
@@ -662,12 +735,24 @@ impl ExecutionPlan for StreamingWindowAggregateExec {
     }
 }
 
-/// The accumulators of one `(window, group)`.
+/// The accumulators of one `(slice, group)`.
 type Accumulators = Vec<Box<dyn Accumulator>>;
 
-/// The groups of one open window, keyed by the encoded non-window group
-/// values (`None` when the query groups by the window alone).
-type WindowGroups = BTreeMap<Option<OwnedRow>, Accumulators>;
+/// One group's state within one slice.
+struct GroupState {
+    /// Accumulators still taking rows.
+    live: Accumulators,
+    /// For a sliced hop: the states frozen out of `live` each time a window
+    /// containing this slice was emitted (`frozen[piece][aggregate]`), to be
+    /// merged into the later windows that contain the slice too. A frozen
+    /// accumulator cannot take rows again (`state()` consumes it), so `live`
+    /// is replaced by a fresh one; rows arriving after a freeze land there.
+    frozen: Vec<Vec<Vec<ScalarValue>>>,
+}
+
+/// The groups of one slice, keyed by the encoded non-window group values
+/// (`None` when the query groups by the window alone).
+type SliceGroups = BTreeMap<Option<OwnedRow>, GroupState>;
 
 /// Per-partition aggregate state.
 struct AggregateState {
@@ -683,19 +768,32 @@ struct AggregateState {
     aggr_expr: Vec<Arc<AggregateFunctionExpr>>,
     filter_expr: Vec<Option<Arc<dyn PhysicalExpr>>>,
     schema: SchemaRef,
-    /// Open windows by start.
-    windows: BTreeMap<i64, WindowGroups>,
+    /// Open state by slice start: one slice per window (tumble, a hop whose
+    /// size is not a multiple of its slide) or per slide (a sliced hop).
+    slices: BTreeMap<i64, SliceGroups>,
+    /// Sliced hop: the start of the oldest window not yet emitted (`None`
+    /// until a slice exists; re-derived from the oldest slice).
+    next_window: Option<i64>,
     watermark: WatermarkGenerator,
     /// Every window ending at or before this has been emitted (by the
-    /// watermark, the idle timeout or end of input).
+    /// watermark, the idle timeout, end of input or the memory limit).
     closed_through: i64,
+    /// What the state above weighs, as last accounted to the pool.
+    reservation: MemoryReservation,
+    on_memory_limit: MemoryLimitPolicy,
     late_rows: Count,
     windows_emitted: Count,
+    windows_forced: Count,
     watermark_metric: Gauge,
+    state_bytes_metric: Gauge,
 }
 
 impl AggregateState {
-    fn try_new(exec: &StreamingWindowAggregateExec, partition: usize) -> Result<Self> {
+    fn try_new(
+        exec: &StreamingWindowAggregateExec,
+        partition: usize,
+        reservation: MemoryReservation,
+    ) -> Result<Self> {
         let group_exprs: Vec<Arc<dyn PhysicalExpr>> = exec
             .group_by
             .expr()
@@ -725,17 +823,22 @@ impl AggregateState {
             aggr_expr: exec.aggr_expr.clone(),
             filter_expr: exec.filter_expr.clone(),
             schema: Arc::clone(&exec.schema),
-            windows: BTreeMap::new(),
+            slices: BTreeMap::new(),
+            next_window: None,
             watermark: WatermarkGenerator::new(WatermarkConfig {
                 allowed_lateness: exec.config.allowed_lateness,
                 emit_strategy: WatermarkEmitStrategy::EveryEvent,
                 track_late_events: false,
             }),
             closed_through: i64::MIN,
+            reservation,
+            on_memory_limit: exec.config.on_memory_limit,
             late_rows: MetricBuilder::new(&exec.metrics).counter("late_rows", partition),
             windows_emitted: MetricBuilder::new(&exec.metrics)
                 .counter("windows_emitted", partition),
+            windows_forced: MetricBuilder::new(&exec.metrics).counter("windows_forced", partition),
             watermark_metric: MetricBuilder::new(&exec.metrics).gauge("watermark_us", partition),
+            state_bytes_metric: MetricBuilder::new(&exec.metrics).gauge("state_bytes", partition),
         })
     }
 
@@ -745,6 +848,118 @@ impl AggregateState {
             .current()
             .as_micros()
             .max(self.closed_through)
+    }
+
+    /// Whether any state is open.
+    fn is_empty(&self) -> bool {
+        self.slices.is_empty()
+    }
+
+    /// Windows containing the slice at `slice` that are closed at `horizon`:
+    /// a sliced hop's windows are `slice - j * slide` for `j` in
+    /// `0..size/slide`, and window `w` is closed once `w + size <= horizon`.
+    /// For an unsliced window the slice is the window: 0 or 1.
+    fn closed_windows_of(&self, slice: i64, horizon: i64) -> i64 {
+        let size = self.spec.size_us();
+        let slide = self.spec.slice_us();
+        let k = size / slide;
+        // Closed: slice - j*slide + size <= horizon, i.e. j >= (slice + size - horizon) / slide.
+        // The horizon starts at i64::MIN (no watermark yet): saturate.
+        let still_open = slice.saturating_add(size).saturating_sub(horizon);
+        let first_closed = if still_open <= 0 {
+            0
+        } else {
+            still_open.saturating_add(slide - 1) / slide
+        };
+        (k - first_closed).clamp(0, k)
+    }
+
+    /// The bytes the open state holds: accumulators, frozen states and keys.
+    fn state_bytes(&self) -> usize {
+        // Per entry: the map node, the key, the vectors.
+        const OVERHEAD: usize = 96;
+        self.slices
+            .values()
+            .flat_map(|groups| groups.iter())
+            .map(|(key, group)| {
+                OVERHEAD
+                    + key.as_ref().map(|k| k.as_ref().len()).unwrap_or(0)
+                    + group.live.iter().map(|a| a.size()).sum::<usize>()
+                    + group
+                        .frozen
+                        .iter()
+                        .flat_map(|piece| piece.iter())
+                        .flat_map(|states| states.iter())
+                        .map(ScalarValue::size)
+                        .sum::<usize>()
+            })
+            .sum()
+    }
+
+    /// Account the state to the memory pool; when it does not fit, apply the
+    /// policy: fail, or emit the oldest windows (appended to `out`) until it
+    /// does.
+    fn account(&mut self, out: &mut Vec<RecordBatch>) -> Result<()> {
+        loop {
+            let bytes = self.state_bytes();
+            self.state_bytes_metric.set(bytes);
+            match self.reservation.try_resize(bytes) {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    let windows = self.open_windows();
+                    let groups: usize = self.slices.values().map(BTreeMap::len).sum();
+                    if self.on_memory_limit == MemoryLimitPolicy::Error || windows <= 1 {
+                        let hint = if self.on_memory_limit == MemoryLimitPolicy::Error {
+                            "lower --allowed-lateness, use a larger window or fewer group \
+                             columns, raise --memory-limit, or --on-memory-limit close-oldest"
+                        } else {
+                            "the newest window alone does not fit: use a larger window or \
+                             fewer group columns, or raise --memory-limit"
+                        };
+                        return Err(DataFusionError::ResourcesExhausted(format!(
+                            "the streaming aggregate holds {bytes} bytes of state for {windows} \
+                             open windows ({groups} group entries), more than the memory limit \
+                             allows; {hint} ({e})"
+                        )));
+                    }
+                    let forced = self.emit_oldest()?;
+                    self.windows_forced.add(forced.len());
+                    out.extend(forced);
+                }
+            }
+        }
+    }
+
+    /// Open windows: for a sliced hop, those from the oldest pending window
+    /// to the one starting at the newest slice; otherwise one per slice.
+    fn open_windows(&self) -> usize {
+        if !self.spec.sliced() {
+            return self.slices.len();
+        }
+        match (self.next_window, self.slices.keys().next_back()) {
+            (Some(next), Some(&last)) if last >= next => {
+                ((last - next) / self.spec.slice_us() + 1) as usize
+            }
+            (None, Some(_)) => (self.spec.size_us() / self.spec.slice_us()) as usize,
+            _ => 0,
+        }
+    }
+
+    /// Emit the oldest open window before its time (memory limit).
+    fn emit_oldest(&mut self) -> Result<Vec<RecordBatch>> {
+        let size = self.spec.size_us();
+        if self.spec.sliced() {
+            let w = self.pending_window().expect("open state");
+            let batches = self.emit_hop_windows_through(w + size)?;
+            Ok(batches)
+        } else {
+            let Some(&start) = self.slices.keys().next() else {
+                return Ok(Vec::new());
+            };
+            let groups = self.slices.remove(&start).expect("window present");
+            self.closed_through = self.closed_through.max(start + size);
+            Ok(vec![self.emit_window(start, size, groups)?])
+        }
     }
 
     /// Fold one input batch into the open windows; returns the windows the
@@ -817,7 +1032,10 @@ impl AggregateState {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        // Bucket rows by (window, group); rows of a closed window are late.
+        // Bucket rows by (slice, group). A row whose windows have all been
+        // emitted is late; for a sliced hop a row may be late for some of
+        // its windows and counted for the rest, and the late ones are
+        // counted (as the per-window expansion would have).
         let size = self.spec.size_us();
         let mut buckets: HashMap<(i64, Option<OwnedRow>), Vec<u32>> = HashMap::new();
         let mut late = 0usize;
@@ -830,8 +1048,8 @@ impl AggregateState {
             }
             self.watermark.observe(ts.value(i));
             let start = starts.value(i);
+            late += self.closed_windows_of(start, horizon_before) as usize;
             if start + size <= horizon_before {
-                late += 1;
                 continue;
             }
             let key = key_rows.as_ref().map(|rows| rows.row(i).owned());
@@ -842,16 +1060,22 @@ impl AggregateState {
         }
         for ((start, key), indices) in buckets {
             let indices = UInt32Array::from(indices);
-            let groups = self.windows.entry(start).or_default();
+            let groups = self.slices.entry(start).or_default();
             let accumulators = match groups.get_mut(&key) {
-                Some(a) => a,
+                Some(g) => &mut g.live,
                 None => {
                     let fresh = self
                         .aggr_expr
                         .iter()
                         .map(|a| a.create_accumulator())
                         .collect::<Result<Vec<_>>>()?;
-                    groups.entry(key).or_insert(fresh)
+                    &mut groups
+                        .entry(key)
+                        .or_insert(GroupState {
+                            live: fresh,
+                            frozen: Vec::new(),
+                        })
+                        .live
                 }
             };
             for (k, acc) in accumulators.iter_mut().enumerate() {
@@ -878,23 +1102,28 @@ impl AggregateState {
         if wm > 0 {
             self.watermark_metric.set(wm as usize);
         }
-        self.emit_closed(wm)
+        let mut out = self.emit_closed(wm)?;
+        self.account(&mut out)?;
+        Ok(out)
     }
 
     /// Emit every window whose end is at or before `horizon`.
     fn emit_closed(&mut self, horizon: i64) -> Result<Vec<RecordBatch>> {
+        if self.spec.sliced() {
+            return self.emit_hop_windows_through(horizon);
+        }
         let size = self.spec.size_us();
         let closed: Vec<i64> = self
-            .windows
+            .slices
             .keys()
             .copied()
             .take_while(|start| start + size <= horizon)
             .collect();
         let mut out = Vec::with_capacity(closed.len());
         for start in closed {
-            let groups = self.windows.remove(&start).expect("window present");
-            out.push(self.emit_window(start, groups)?);
+            let groups = self.slices.remove(&start).expect("window present");
             self.closed_through = self.closed_through.max(start + size);
+            out.push(self.emit_window(start, size, groups)?);
         }
         Ok(out)
     }
@@ -904,8 +1133,112 @@ impl AggregateState {
         self.emit_closed(i64::MAX)
     }
 
-    fn emit_window(&mut self, start: i64, groups: WindowGroups) -> Result<RecordBatch> {
+    /// Sliced hop: the oldest window not yet emitted, derived from the oldest
+    /// slice when nothing is pending (the first window that contains it).
+    fn pending_window(&mut self) -> Option<i64> {
         let size = self.spec.size_us();
+        let slide = self.spec.slice_us();
+        let &first = self.slices.keys().next()?;
+        let earliest = first - size + slide;
+        let w = match self.next_window {
+            Some(w) if w >= earliest => w,
+            // Nothing pending, or the pending window is older than every
+            // slice (a long gap in the stream): jump to the first window
+            // with data.
+            _ => earliest,
+        };
+        self.next_window = Some(w);
+        Some(w)
+    }
+
+    /// Sliced hop: emit, in start order, every window ending at or before
+    /// `horizon`, merging the slices it covers; drop a slice once the last
+    /// window containing it (the one starting at it) has been emitted.
+    fn emit_hop_windows_through(&mut self, horizon: i64) -> Result<Vec<RecordBatch>> {
+        let size = self.spec.size_us();
+        let slide = self.spec.slice_us();
+        let mut out = Vec::new();
+        while let Some(w) = self.pending_window() {
+            if w.saturating_add(size) > horizon {
+                break;
+            }
+            let covered: Vec<i64> = self.slices.range(w..w + size).map(|(s, _)| *s).collect();
+            if !covered.is_empty() {
+                out.push(self.emit_hop_window(w, &covered)?);
+            }
+            // Slice `w` was in its last window; anything older is stale.
+            let stale: Vec<i64> = self.slices.range(..w + slide).map(|(s, _)| *s).collect();
+            for s in stale {
+                self.slices.remove(&s);
+            }
+            self.closed_through = self.closed_through.max(w + size);
+            self.next_window = Some(w + slide);
+        }
+        if self.slices.is_empty() {
+            self.next_window = None;
+        }
+        Ok(out)
+    }
+
+    /// Sliced hop: one window from the slices it covers. Each slice's live
+    /// accumulators are frozen into states (and replaced, since freezing
+    /// consumes them) so later windows covering the slice merge the same
+    /// states again; the window's own accumulators are fresh ones that merge
+    /// every piece of every covered slice.
+    fn emit_hop_window(&mut self, start: i64, covered: &[i64]) -> Result<RecordBatch> {
+        let size = self.spec.size_us();
+        // pieces[group][aggregate] = the state rows to merge.
+        let mut pieces: BTreeMap<Option<OwnedRow>, Vec<Vec<Vec<ScalarValue>>>> = BTreeMap::new();
+        for s in covered {
+            let groups = self.slices.get_mut(s).expect("covered slice");
+            for (key, group) in groups.iter_mut() {
+                let states = group
+                    .live
+                    .iter_mut()
+                    .map(|a| a.state())
+                    .collect::<Result<Vec<_>>>()?;
+                group.live = self
+                    .aggr_expr
+                    .iter()
+                    .map(|a| a.create_accumulator())
+                    .collect::<Result<Vec<_>>>()?;
+                group.frozen.push(states);
+                let into = pieces
+                    .entry(key.clone())
+                    .or_insert_with(|| vec![Vec::new(); self.aggr_expr.len()]);
+                for piece in &group.frozen {
+                    for (k, states) in piece.iter().enumerate() {
+                        into[k].push(states.clone());
+                    }
+                }
+            }
+        }
+        let mut merged: SliceGroups = BTreeMap::new();
+        for (key, per_agg) in pieces {
+            let mut live = Vec::with_capacity(self.aggr_expr.len());
+            for (k, agg) in self.aggr_expr.iter().enumerate() {
+                let mut acc = agg.create_accumulator()?;
+                let rows = &per_agg[k];
+                if let Some(first) = rows.first() {
+                    let columns = (0..first.len())
+                        .map(|j| ScalarValue::iter_to_array(rows.iter().map(|r| r[j].clone())))
+                        .collect::<Result<Vec<ArrayRef>>>()?;
+                    acc.merge_batch(&columns)?;
+                }
+                live.push(acc);
+            }
+            merged.insert(
+                key,
+                GroupState {
+                    live,
+                    frozen: Vec::new(),
+                },
+            );
+        }
+        self.emit_window(start, size, merged)
+    }
+
+    fn emit_window(&mut self, start: i64, size: i64, groups: SliceGroups) -> Result<RecordBatch> {
         let n = groups.len();
         let mut columns: Vec<ArrayRef> = Vec::with_capacity(self.schema.fields().len());
         let keys: Vec<ArrayRef> = match &self.key_converter {
@@ -942,8 +1275,8 @@ impl AggregateState {
             columns.push(cast_to(column, field.data_type())?);
         }
         let mut results: Vec<Vec<ScalarValue>> = vec![Vec::with_capacity(n); self.aggr_expr.len()];
-        for mut accumulators in groups.into_values() {
-            for (k, acc) in accumulators.iter_mut().enumerate() {
+        for mut group in groups.into_values() {
+            for (k, acc) in group.live.iter_mut().enumerate() {
                 results[k].push(acc.evaluate()?);
             }
         }
@@ -1011,7 +1344,7 @@ impl Stream for StreamingAggregateStream {
                     let Some(idle_timeout) = self.idle_timeout else {
                         return Poll::Pending;
                     };
-                    if self.state.windows.is_empty() {
+                    if self.state.is_empty() {
                         // Nothing to close: no timer until a window opens.
                         self.idle = None;
                         return Poll::Pending;
@@ -1063,6 +1396,17 @@ pub fn late_rows(plan: &Arc<dyn ExecutionPlan>) -> u64 {
 /// Windows the fused aggregates of `plan` emitted so far.
 pub fn windows_emitted(plan: &Arc<dyn ExecutionPlan>) -> u64 {
     sum_metric(plan, "windows_emitted") as u64
+}
+
+/// Windows the fused aggregates of `plan` emitted before their time because
+/// the memory limit was reached.
+pub fn windows_forced(plan: &Arc<dyn ExecutionPlan>) -> u64 {
+    sum_metric(plan, "windows_forced") as u64
+}
+
+/// Bytes of window state the fused aggregates of `plan` hold now.
+pub fn state_bytes(plan: &Arc<dyn ExecutionPlan>) -> u64 {
+    sum_metric(plan, "state_bytes") as u64
 }
 
 /// The fused aggregate's current watermark (microseconds since the epoch),
