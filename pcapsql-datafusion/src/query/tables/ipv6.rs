@@ -30,6 +30,11 @@ use arrow::datatypes::{DataType, Field, Schema};
 /// - `hop_limit`: Hop limit (similar to TTL)
 /// - `src_ip`: Source IPv6 address (FixedSizeBinary(16))
 /// - `dst_ip`: Destination IPv6 address (FixedSizeBinary(16))
+/// - `ext_hop_by_hop`, `ext_routing`, `ext_fragment`, `ext_destination`:
+///   whether the extension header chain contains that header (`next_header`
+///   is the first header of the chain; the transport is found after it)
+/// - `frag_offset`, `frag_more`, `frag_id`: Fragment header
+/// - `routing_type`, `segments_left`: Routing header
 pub fn ipv6_table_schema() -> Schema {
     Schema::new(vec![
         Field::new("frame_number", DataType::UInt64, false),
@@ -42,6 +47,16 @@ pub fn ipv6_table_schema() -> Schema {
         // IPv6 addresses stored as FixedSizeBinary(16) (128 bits)
         Field::new("src_ip", DataType::FixedSizeBinary(16), true),
         Field::new("dst_ip", DataType::FixedSizeBinary(16), true),
+        // Extension header chain
+        Field::new("ext_hop_by_hop", DataType::Boolean, true),
+        Field::new("ext_routing", DataType::Boolean, true),
+        Field::new("ext_fragment", DataType::Boolean, true),
+        Field::new("ext_destination", DataType::Boolean, true),
+        Field::new("frag_offset", DataType::UInt16, true),
+        Field::new("frag_more", DataType::Boolean, true),
+        Field::new("frag_id", DataType::UInt32, true),
+        Field::new("routing_type", DataType::UInt8, true),
+        Field::new("segments_left", DataType::UInt8, true),
     ])
 }
 
@@ -53,11 +68,26 @@ mod tests {
     fn test_ipv6_schema() {
         let schema = ipv6_table_schema();
 
-        assert_eq!(schema.fields().len(), 9);
+        assert_eq!(schema.fields().len(), 18);
         assert!(schema.field_with_name("frame_number").is_ok());
         assert!(schema.field_with_name("src_ip").is_ok());
         assert!(schema.field_with_name("dst_ip").is_ok());
         assert!(schema.field_with_name("hop_limit").is_ok());
         assert!(schema.field_with_name("next_header").is_ok());
+        for (name, ty) in [
+            ("ext_hop_by_hop", DataType::Boolean),
+            ("ext_fragment", DataType::Boolean),
+            ("frag_offset", DataType::UInt16),
+            ("frag_more", DataType::Boolean),
+            ("frag_id", DataType::UInt32),
+            ("routing_type", DataType::UInt8),
+            ("segments_left", DataType::UInt8),
+        ] {
+            assert_eq!(
+                schema.field_with_name(name).unwrap().data_type(),
+                &ty,
+                "{name}"
+            );
+        }
     }
 }

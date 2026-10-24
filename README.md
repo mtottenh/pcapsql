@@ -143,7 +143,7 @@ SELECT window_start, count(*) FROM tumble(frames, INTERVAL '10' SECOND) GROUP BY
 
 | Table | Description |
 |-------|-------------|
-| `ethernet`, `ipv4`, `ipv6`, `tcp`, `udp` | Layer 2-4 protocols |
+| `ethernet`, `ipv4`, `ipv6`, `tcp`, `udp` | Layer 2-4 protocols (`ipv6` includes the extension header chain: Hop-by-Hop/Routing/Fragment/Destination presence, fragment and routing header fields) |
 | `dns`, `dhcp`, `ntp` | Application protocols |
 | `http` | HTTP/1.x request/status line and headers, per packet (the segment that starts a message) |
 | `tls` | TLS records and handshakes |

@@ -57,7 +57,7 @@ SELECT window_start, COUNT(*) FROM tumble(frames, INTERVAL '10' SECOND) GROUP BY
 
 | Table | Description |
 |-------|-------------|
-| `ethernet`, `ipv4`, `ipv6`, `tcp`, `udp` | Layer 2-4 protocols |
+| `ethernet`, `ipv4`, `ipv6`, `tcp`, `udp` | Layer 2-4 protocols (`ipv6` includes the extension header chain: Hop-by-Hop/Routing/Fragment/Destination presence, fragment and routing header fields) |
 | `dns`, `dhcp`, `ntp`, `http` | Application protocols |
 | `tls` | TLS records and handshakes |
 | `http2` | HTTP/2 frames (requires TLS decryption) |

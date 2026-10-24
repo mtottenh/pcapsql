@@ -162,6 +162,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `gtp`: `npdu`, `extension_headers` (the GTPv1 chain as comma-separated
     `Name(0xNN)` entries), `extension_header_count`, and the GTPv2-C
     `piggyback` and `teid_present` flags.
+  - `ipv6`: `ext_hop_by_hop`, `ext_routing`, `ext_fragment`,
+    `ext_destination`, `frag_offset`, `frag_more`, `frag_id`, `routing_type`,
+    `segments_left`.
+  The `mpls`, `gre` and `vxlan` validity, derived-length and name fields stay
+  out of the DataFusion tables (see `NOT_EXPOSED_AS_COLUMNS`).
 - The capture can be piped in: `pcapsql --stdin` (or `-` as the capture
   argument) reads pcap or pcapng, optionally gzip/zstd compressed, from
   standard input, e.g. `tcpdump -U -w - -i eth0 port 53 | pcapsql --stdin -e

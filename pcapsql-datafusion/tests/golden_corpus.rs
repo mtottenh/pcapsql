@@ -445,8 +445,8 @@ fn http_frames() -> Vec<Vec<u8>> {
 }
 
 // ---------------------------------------------------------------------------
-// Routing / tunnel capture: BGP, OSPF, GTP (IPv6 extension headers follow in
-// their own frames). Each table's `SELECT *` snapshot pins every column.
+// Routing / tunnel capture: BGP, OSPF, GTP and IPv6 extension headers. Each
+// table's `SELECT *` snapshot pins every column.
 // ---------------------------------------------------------------------------
 
 /// A BGP message: 16-byte marker, length, type, body.
@@ -626,6 +626,17 @@ fn gtpv2(piggyback: bool, msg_type: u8, teid: u32, seq: u32) -> Vec<u8> {
     p
 }
 
+/// Hop-by-Hop (PadN), type 2 Routing (one segment left) and Fragment (first
+/// fragment, more to follow) extension headers in front of a UDP payload.
+fn ipv6_ext_chain(udp_payload: &[u8]) -> Vec<u8> {
+    let mut p = vec![43, 0, 1, 4, 0, 0, 0, 0]; // Hop-by-Hop -> Routing
+    p.extend_from_slice(&[44, 0, 2, 1, 0, 0, 0, 0]); // Routing type 2, 1 left -> Fragment
+    p.extend_from_slice(&[17, 0, 0x00, 0x01]); // Fragment -> UDP; offset 0, M=1
+    p.extend_from_slice(&0xbeefu32.to_be_bytes()); // identification
+    p.extend_from_slice(udp_payload);
+    p
+}
+
 /// Routing and tunnelling protocols on an Ethernet link. Frames are grouped
 /// by protocol, each group appended after the previous ones, so a table's
 /// `SELECT *` snapshot does not move when another protocol's frames are added.
@@ -685,6 +696,25 @@ fn routing_capture() -> Vec<u8> {
         gtp(10, 2152, 2152, &gtpv1_gpdu(0x1001, &inner)),
         gtp(11, 2123, 2123, &gtpv2(false, 32, 0, 1)),
         gtp(12, 2123, 2123, &gtpv2(true, 33, 0x2000, 1)),
+        // 13: IPv6 with Hop-by-Hop, Routing and Fragment extension headers;
+        // 14: IPv6 without extension headers.
+        eth(
+            MAC_B,
+            MAC_A,
+            ETH_IP6,
+            &ipv6(
+                IP6_A,
+                IP6_B,
+                0,
+                &ipv6_ext_chain(&udp(1024, 2048, &[0x66; 4])),
+            ),
+        ),
+        eth(
+            MAC_A,
+            MAC_B,
+            ETH_IP6,
+            &ipv6(IP6_B, IP6_A, 17, &udp(2048, 1024, &[0x77; 4])),
+        ),
     ];
     to_capture(frames, LINKTYPE_ETHERNET)
 }
@@ -1151,6 +1181,11 @@ const CORPUS: &[(Capture, &str, &str)] = &[
         Capture::Routing,
         "v03_gtp",
         "SELECT * FROM gtp ORDER BY frame_number",
+    ),
+    (
+        Capture::Routing,
+        "v04_ipv6",
+        "SELECT * FROM ipv6 ORDER BY frame_number",
     ),
 ];
 
