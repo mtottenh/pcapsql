@@ -251,6 +251,65 @@ The functions expand into the query plan, so only the columns the query uses are
 bounds depend on every packet of its key; `hop` emits each row once per covering window, so
 `size / slide` is capped at 10,000.
 
+## Continuous Queries
+
+`--continuous` runs a windowed aggregate over a **live** capture piped into standard input
+and prints every window as soon as the stream's event time has passed its end:
+
+```bash
+# Packets and bytes per 10-second window, as they complete
+tcpdump -U -w - -i eth0 | pcapsql --continuous --format csv \
+  -e "SELECT window_start, count(*) AS packets, sum(length) AS bytes
+      FROM tumble(frames, INTERVAL '10' SECOND) GROUP BY 1"
+
+# Bytes per minute, every 10 seconds, per link type, for DNS traffic only
+tcpdump -U -w - -i eth0 port 53 | pcapsql --continuous \
+  -e "SELECT window_start, link_type, sum(length) AS bytes
+      FROM hop(frames, INTERVAL '10' SECOND, INTERVAL '1' MINUTE) GROUP BY 1, 2"
+```
+
+The source of a continuous query is `frames`: the `*_packets` views join protocol tables with
+`frames`, and a join would buffer one side of the stream for ever, so they are rejected
+(filter the capture with tcpdump's own expression instead, as above).
+
+A continuous query **aggregates over `tumble()` or `hop()` windows and nothing else**:
+`SELECT window_start, …, <aggregates> FROM tumble(source, …) [WHERE …] GROUP BY window_start
+[, window_end, <columns>]`. `WHERE` on source or window columns, several group columns, any
+number of aggregates, `FILTER (WHERE …)` clauses, `HAVING`, `SELECT DISTINCT` and a `LIMIT`
+(the first N windows) are fine; `ORDER BY`, `count(DISTINCT …)`, joins, `session()` windows and
+aggregates without `GROUP BY window_start` need the whole stream first and are rejected at
+planning. Stream tables (`tcp_connections`, …) are not available. `EXPLAIN` shows the
+`StreamingWindowAggregateExec` that will run, or the refusal.
+
+Semantics and knobs:
+
+- A window `[start, end)` is emitted once the **watermark** — the newest timestamp seen minus
+  `--allowed-lateness` (default 1 s) — reaches `end`. A packet behind the newest timestamp is
+  still counted while its window is open; one arriving after its window was emitted is dropped
+  and counted (`--stats` prints `Late rows dropped`).
+- Packets reach the query in batches of `--batch-size`, or after `--flush-interval` seconds
+  (default 1) since the previous batch, whichever comes first. The wait for input is a
+  `poll(2)` on the pipe with that timeout, so a quiet feed delivers its last packets within
+  the interval even when nothing else arrives (a compressed stream cannot time out: its held
+  packets wait for the next one).
+- Windows close on **event time**. `--idle-timeout N` additionally closes every open window
+  after N seconds without any input (off by default; use a value above `--flush-interval`); a
+  packet for such a window arriving later is late.
+- Output is appended per window: CSV prints its header once, JSON is one object per line, the
+  table format prints one table per window. `-o` is not available. `--progress` shows rows,
+  windows, the current watermark and late rows.
+- Ctrl-C stops the query, prints `--stats` when the parser can be released within two seconds,
+  and exits with status 130. A reader blocked on a quiet pipe cannot be interrupted from
+  another thread, so the process exits without waiting for it; output is flushed first. An
+  execution error exits with status 1 the same way.
+- Everything that applies to `--stdin` applies: one statement, `RetentionPolicy::None`, no
+  time-range functions, a single parse partition. Use `tcpdump -U` so packets are not held in
+  tcpdump's stdio buffer.
+
+Library callers use `EngineOptions { continuous: true, .. }` with `SourceSpec::Stdin` /
+`SourceSpec::Sequential` and consume `QueryEngine::execute_stream(sql)`, a `Stream` of
+`RecordBatch`es whose `finish()` returns the query's `ParseStats`.
+
 ## CLI Options
 
 ```

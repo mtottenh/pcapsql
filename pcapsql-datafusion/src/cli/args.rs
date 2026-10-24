@@ -102,6 +102,36 @@ pub struct Args {
     /// packets back in its stdio buffer for seconds.
     #[arg(long = "stdin", conflicts_with = "file", verbatim_doc_comment)]
     pub stdin: bool,
+    /// Run the query continuously over a live capture on standard input.
+    ///
+    /// Implies --stdin. The capture is treated as an unbounded stream: the
+    /// query must aggregate over tumble() or hop() windows
+    /// (GROUP BY window_start), and every window is printed as soon as the
+    /// stream's event time has passed its end (plus --allowed-lateness).
+    /// Results are appended batch by batch in the output format (CSV/JSON
+    /// print their header once; table output prints one table per window);
+    /// Ctrl-C stops the query and prints --stats if requested.
+    ///
+    /// Example:
+    ///   tcpdump -U -w - -i eth0 | pcapsql --continuous \
+    ///     -e "SELECT window_start, count(*) FROM tumble(frames, INTERVAL '10' SECOND) GROUP BY 1"
+    #[arg(long = "continuous", conflicts_with = "file", verbatim_doc_comment)]
+    pub continuous: bool,
+    /// Continuous: how many seconds a packet may arrive behind the stream's
+    /// newest timestamp and still be counted (the watermark trails by this).
+    #[arg(long = "allowed-lateness", value_name = "SECONDS", default_value = "1")]
+    pub allowed_lateness: f64,
+    /// Continuous: hand partially filled batches to the query after this many
+    /// seconds, so results do not wait for --batch-size packets (the wait for
+    /// input times out at this interval, so a quiet feed delivers what it
+    /// holds).
+    #[arg(long = "flush-interval", value_name = "SECONDS", default_value = "1")]
+    pub flush_interval: f64,
+    /// Continuous: close and print every open window after this many seconds
+    /// without any input (off by default: windows close on event time only).
+    /// Use a value above --flush-interval.
+    #[arg(long = "idle-timeout", value_name = "SECONDS")]
+    pub idle_timeout: Option<f64>,
 
     /// Execute a single SQL query and exit
     #[arg(short = 'e', long = "execute", value_name = "SQL")]

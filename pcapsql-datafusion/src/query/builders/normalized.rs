@@ -228,6 +228,24 @@ impl NormalizedBatchSet {
         Ok(())
     }
 
+    /// Streaming: deliver every table's partially filled batch now (a
+    /// continuous engine's time-based flush), leaving the builders empty.
+    pub fn flush_partial(&mut self) -> Result<(), Error> {
+        let mut pending = Vec::new();
+        for (name, slot) in self.slots.iter_mut() {
+            if slot.done() {
+                continue;
+            }
+            if let Some(batch) = slot.builder.finish()? {
+                pending.push((name.clone(), batch));
+            }
+        }
+        for (name, batch) in pending {
+            self.deliver(&name, batch);
+        }
+        Ok(())
+    }
+
     /// True when nothing this pass produces can still be observed: every
     /// subscribed table has reached its row cap, or (streaming) every consumer
     /// has dropped its receiver because the query finished — e.g. a `LIMIT`

@@ -32,13 +32,23 @@
 //!   source-level metadata a planner sees before the first packet.
 //! - The source is **bounded**: the reader runs to end of input, like a file.
 //!   A continuous (unbounded) mode is a property of the engine that consumes
-//!   the stream, not of this type; see the notes on [`StdinPacketReader`].
+//!   the stream, not of this type. What this type offers it is a **read
+//!   timeout** ([`PacketReader::set_read_timeout`]) on a source opened from
+//!   a file descriptor ([`StdinPacketSource::stdin`],
+//!   [`StdinPacketSource::from_fd_reader`]): the reader waits for input with
+//!   `poll(2)` and reports when none arrived in time, so the consumer can
+//!   flush what it holds while the feed is quiet. A source opened from an
+//!   arbitrary `Read` ([`StdinPacketSource::from_reader`]) or a compressed
+//!   stream cannot time out (a blocked `read` cannot be interrupted, and a
+//!   decompressor's buffering hides the descriptor's readiness).
 //!
 //! Everything here is `Send` by construction (a boxed `Read + Send` behind a
 //! mutex); there is no `unsafe`.
 
 use std::io::{self, Cursor, Read};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use crate::error::{Error, PcapError};
 use crate::io::decompress::{decompress_header, Compression, DecompressReader};
@@ -101,6 +111,79 @@ pub struct StdinPacketSource {
     /// The stream (probed prefix chained before the rest), taken exactly
     /// once by `sequential_reader`.
     stream: Arc<Mutex<Option<Box<dyn Read + Send>>>>,
+    /// The read-timeout control of the stream's descriptor, when the source
+    /// was opened from one and is not compressed.
+    timeout: Option<Arc<ReadTimeout>>,
+}
+
+/// Shared control of a [`TimedRead`]: the current timeout and whether the
+/// last read gave up because of it.
+#[derive(Debug, Default)]
+struct ReadTimeout {
+    /// Timeout in milliseconds; negative means none.
+    millis: AtomicI64,
+    timed_out: AtomicBool,
+}
+
+impl ReadTimeout {
+    fn set(&self, timeout: Option<Duration>) {
+        let millis = match timeout {
+            Some(t) => i64::try_from(t.as_millis())
+                .unwrap_or(i64::MAX)
+                .min(i32::MAX as i64),
+            None => -1,
+        };
+        self.millis.store(millis, Ordering::Relaxed);
+    }
+
+    fn take_timed_out(&self) -> bool {
+        self.timed_out.swap(false, Ordering::Relaxed)
+    }
+}
+
+/// A reader over a file descriptor whose `read` first waits for readability
+/// with `poll(2)` when a timeout is set, and fails with
+/// `io::ErrorKind::TimedOut` (recording it) when nothing arrives in time.
+/// Without a timeout it is a plain pass-through.
+#[cfg(unix)]
+struct TimedRead<R> {
+    inner: R,
+    fd: std::os::fd::RawFd,
+    control: Arc<ReadTimeout>,
+}
+
+#[cfg(unix)]
+impl<R: Read> Read for TimedRead<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let millis = self.control.millis.load(Ordering::Relaxed);
+        if millis >= 0 {
+            let mut pfd = libc::pollfd {
+                fd: self.fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            loop {
+                // SAFETY: `pfd` is a valid, initialised pollfd that outlives
+                // the call; `nfds` is 1.
+                let ready = unsafe { libc::poll(&mut pfd, 1, millis as libc::c_int) };
+                if ready > 0 {
+                    break; // readable, hung up or in error: `read` reports which
+                }
+                if ready == 0 {
+                    self.control.timed_out.store(true, Ordering::Relaxed);
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "no input within the read timeout",
+                    ));
+                }
+                let err = io::Error::last_os_error();
+                if err.kind() != io::ErrorKind::Interrupted {
+                    return Err(err);
+                }
+            }
+        }
+        self.inner.read(buf)
+    }
 }
 
 impl StdinPacketSource {
@@ -110,7 +193,35 @@ impl StdinPacketSource {
     /// producer has written it); the packets are read by the sequential
     /// reader.
     pub fn stdin() -> Result<Self, Error> {
-        Self::from_reader(io::stdin())
+        #[cfg(unix)]
+        {
+            Self::from_fd_reader(io::stdin())
+        }
+        #[cfg(not(unix))]
+        {
+            Self::from_reader(io::stdin())
+        }
+    }
+
+    /// Open a byte stream that is backed by a file descriptor (a pipe, a
+    /// socket): like [`Self::from_reader`], plus a read timeout for a
+    /// continuous consumer, implemented with `poll(2)` on the descriptor.
+    /// A compressed stream gets no timeout (the decompressor's buffering
+    /// hides the descriptor's readiness).
+    #[cfg(unix)]
+    pub fn from_fd_reader<R: Read + std::os::fd::AsRawFd + Send + 'static>(
+        mut reader: R,
+    ) -> Result<Self, Error> {
+        let fd = reader.as_raw_fd();
+        let (header, prefix) = probe_stream(&mut reader)?;
+        let control = Arc::new(ReadTimeout::default());
+        let timed = TimedRead {
+            inner: reader,
+            fd,
+            control: Arc::clone(&control),
+        };
+        let timeout = (header.compression == Compression::None).then_some(control);
+        Ok(Self::assemble(header, prefix, Box::new(timed), timeout))
     }
 
     /// Open any byte stream as a packet source.
@@ -118,20 +229,40 @@ impl StdinPacketSource {
     /// Probes the stream head for compression, format and link type, reading
     /// exactly the header bytes. Fails if the stream is empty, ends inside
     /// the header, or does not start with a capture (or compression) magic.
+    ///
+    /// Such a source cannot time out a read (see [`Self::from_fd_reader`]):
+    /// a continuous engine over it flushes held packets only when the next
+    /// packet arrives.
     pub fn from_reader<R: Read + Send + 'static>(mut reader: R) -> Result<Self, Error> {
         let (header, prefix) = probe_stream(&mut reader)?;
+        Ok(Self::assemble(header, prefix, Box::new(reader), None))
+    }
+
+    fn assemble(
+        header: StreamHeader,
+        prefix: Vec<u8>,
+        rest: Box<dyn Read + Send>,
+        timeout: Option<Arc<ReadTimeout>>,
+    ) -> Self {
         let metadata = PacketSourceMetadata {
             link_type: header.link_type,
             snaplen: header.snaplen,
             size_bytes: None,   // unknown for a stream
             packet_count: None, // unknown for a stream
         };
-        let stream: Box<dyn Read + Send> = Box::new(Cursor::new(prefix).chain(reader));
-        Ok(Self {
+        let stream: Box<dyn Read + Send> = Box::new(Cursor::new(prefix).chain(rest));
+        Self {
             metadata,
             header,
             stream: Arc::new(Mutex::new(Some(stream))),
-        })
+            timeout,
+        }
+    }
+
+    /// Whether a reader over this source can time out waiting for input
+    /// (opened from a descriptor, uncompressed).
+    pub fn supports_read_timeout(&self) -> bool {
+        self.timeout.is_some()
     }
 
     /// What the probe found at the head of the stream.
@@ -187,7 +318,7 @@ impl PacketSource for StdinPacketSource {
                     "stdin was already consumed: a non-seekable source can be read exactly once",
                 )
             })?;
-        StdinPacketReader::new(stream, self.header)
+        StdinPacketReader::new(stream, self.header, self.timeout.clone())
     }
 }
 
@@ -195,20 +326,27 @@ impl PacketSource for StdinPacketSource {
 /// pcap/pcapng parser, with the probed header length guaranteed to arrive in
 /// the parser's first read.
 ///
-/// Bounded today: `process_packets` returns 0 at end of input, after the
-/// parser has reported a truncated trailing record if the stream ended
-/// inside one. A continuous mode will need two things from here, neither of
-/// which changes the type's shape: a way to stop a reader blocked in
-/// `read()` on an idle pipe (close the producer's write end, or exit the
-/// process after flushing output; a blocked `read` cannot be interrupted from
-/// another thread), and the engine marking the scan unbounded.
+/// `process_packets` returns 0 at end of input, after the parser has reported
+/// a truncated trailing record if the stream ended inside one. On a source
+/// opened from a descriptor, [`PacketReader::set_read_timeout`] bounds how
+/// long a call waits for input: the wait is a `poll(2)` on the descriptor,
+/// a timeout surfaces as an error that [`PacketReader::take_read_timeout`]
+/// identifies, and the parser's buffer is untouched, so the next call
+/// resumes exactly where it was. A reader blocked in `read()` with no
+/// timeout can only be released by input, the writer closing, or the process
+/// exiting.
 pub struct StdinPacketReader {
     inner: GenericPcapReader<HeadFill<DecompressReader<Box<dyn Read + Send>>>>,
     link_type: u32,
+    timeout: Option<Arc<ReadTimeout>>,
 }
 
 impl StdinPacketReader {
-    fn new(stream: Box<dyn Read + Send>, header: StreamHeader) -> Result<Self, Error> {
+    fn new(
+        stream: Box<dyn Read + Send>,
+        header: StreamHeader,
+        timeout: Option<Arc<ReadTimeout>>,
+    ) -> Result<Self, Error> {
         let decode = DecompressReader::new(stream, header.compression).map_err(|e| {
             Error::Pcap(PcapError::InvalidFormat {
                 reason: format!("decompressor: {e}"),
@@ -226,7 +364,11 @@ impl StdinPacketReader {
         } else {
             inner.link_type()
         };
-        Ok(Self { inner, link_type })
+        Ok(Self {
+            inner,
+            link_type,
+            timeout,
+        })
     }
 }
 
@@ -252,6 +394,22 @@ impl PacketReader for StdinPacketReader {
 
     fn link_type(&self) -> u32 {
         self.link_type
+    }
+
+    fn set_read_timeout(&mut self, timeout: Option<Duration>) -> bool {
+        match &self.timeout {
+            Some(control) => {
+                control.set(timeout);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn take_read_timeout(&mut self) -> bool {
+        self.timeout
+            .as_ref()
+            .is_some_and(|control| control.take_timed_out())
     }
 }
 
