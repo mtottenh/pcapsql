@@ -147,7 +147,7 @@ jobs:
                   # Rename: pcapsql-datafusion-0.1.0-1.x86_64.rpm -> pcapsql-0.1.0-1.fedora-40.x86_64.rpm
                   basename=$(basename "$pkg")
                   # Extract version and arch from original name
-                  pkg_version=$(echo "$basename" | sed 's/pcapsql-datafusion-\([^.]*-[^.]*\)\..*/\1/')
+                  pkg_version=$(echo "$basename" | sed 's/^pcapsql-datafusion-\(.*\)\.[^.]*\.rpm$/\1/')
                   arch=$(echo "$basename" | sed 's/.*\.\([^.]*\)\.rpm/\1/')
                   newname="pcapsql-${pkg_version}.${distro}-${version}.${arch}.rpm"
                   cp "$pkg" "release-assets/$newname"
