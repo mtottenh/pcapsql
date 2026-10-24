@@ -323,6 +323,9 @@ impl ParseScope {
 /// extracted some fields before failing (`ParseResult::partial`) is kept with
 /// those fields and ends the walk as well. The outer layers that were parsed
 /// successfully are always returned.
+///
+/// A returned layer's `child_hints` are empty: the walk moves them into the
+/// context of the layer that follows rather than copying them.
 pub fn parse_packet<'a>(
     registry: &ProtocolRegistry,
     link_type: u16,
@@ -392,7 +395,7 @@ pub fn parse_packet<'a>(
         // Update context for the next layer.
         context.parent_protocol = Some(name);
         parent = Some(index);
-        context.hints = result.child_hints.clone();
+        context.hints = std::mem::take(&mut result.child_hints);
         context.offset += remaining.len() - result.remaining.len();
 
         let should_stop = result.error.is_some();
