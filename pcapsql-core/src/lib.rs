@@ -94,6 +94,7 @@ pub mod protocol;
 pub mod schema;
 pub mod stream;
 pub mod tls;
+pub mod windowing;
 
 // Re-export commonly used types at crate root for convenience
 pub use error::{Error, PcapError, ProtocolError, Result};

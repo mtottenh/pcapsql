@@ -157,6 +157,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ParseStats` (`QueryOutput`), which is what concurrent callers should use;
   `last_parse_stats()` reports the most recently completed query. The one-shot
   CLI prints `--stats` from it.
+- `pcapsql_core::windowing`: engine-agnostic time-window primitives over
+  microsecond timestamps — tumbling and hopping window assignment (floor
+  aligned, so timestamps before the epoch are placed correctly), per-key
+  session detection that accepts events in any order, and bounded
+  out-of-orderness watermarks with every-event / every-N-events /
+  every-N-microseconds evaluation and late-event counting.
 
 ## [0.4.0] - 2026-10-23
 
