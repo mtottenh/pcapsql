@@ -258,20 +258,6 @@ mod tests {
         "gtp.extension_header_count",
         "gtp.piggyback",
         "gtp.teid_present",
-        "ospf.neighbor_count",
-        "ospf.dd_interface_mtu",
-        "ospf.dd_options",
-        "ospf.dd_flags",
-        "ospf.dd_sequence",
-        "ospf.dd_lsa_count",
-        "ospf.lsu_lsa_count",
-        "ospf.lsa_age",
-        "ospf.lsa_type",
-        "ospf.lsa_type_name",
-        "ospf.lsa_id",
-        "ospf.lsa_advertising_router",
-        "ospf.lsa_sequence",
-        "ospf.lsa_ack_count",
     ];
 
     /// Every parser field descriptor (`proto.field`) with a column in its

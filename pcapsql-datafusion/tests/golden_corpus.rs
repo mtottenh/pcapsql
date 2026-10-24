@@ -445,7 +445,7 @@ fn http_frames() -> Vec<Vec<u8>> {
 }
 
 // ---------------------------------------------------------------------------
-// Routing / tunnel capture: BGP (OSPF, GTP and IPv6 extension headers follow
+// Routing / tunnel capture: BGP, OSPF (GTP and IPv6 extension headers follow
 // in their own frames). Each table's `SELECT *` snapshot pins every column.
 // ---------------------------------------------------------------------------
 
@@ -510,12 +510,109 @@ fn bgp_update() -> Vec<u8> {
     bgp_message(2, &body)
 }
 
+/// An OSPFv2 packet: 24-byte header (checksum left zero, null authentication)
+/// and the type-specific body.
+fn ospf_packet(ptype: u8, router_id: [u8; 4], body: &[u8]) -> Vec<u8> {
+    let mut p = vec![2, ptype];
+    p.extend_from_slice(&((24 + body.len()) as u16).to_be_bytes());
+    p.extend_from_slice(&router_id);
+    p.extend_from_slice(&[0, 0, 0, 1]); // area 0.0.0.1
+    p.extend_from_slice(&[0, 0]); // checksum
+    p.extend_from_slice(&[0, 0]); // AuType: null
+    p.extend_from_slice(&[0; 8]); // authentication
+    p.extend_from_slice(body);
+    p
+}
+
+/// A 20-byte LSA header.
+fn ospf_lsa_header(
+    age: u16,
+    ls_type: u8,
+    ls_id: [u8; 4],
+    adv: [u8; 4],
+    seq: u32,
+    len: u16,
+) -> Vec<u8> {
+    let mut h = age.to_be_bytes().to_vec();
+    h.push(0x02); // options: E
+    h.push(ls_type);
+    h.extend_from_slice(&ls_id);
+    h.extend_from_slice(&adv);
+    h.extend_from_slice(&seq.to_be_bytes());
+    h.extend_from_slice(&[0, 0]); // checksum
+    h.extend_from_slice(&len.to_be_bytes());
+    h
+}
+
+/// Hello with two neighbours.
+fn ospf_hello(router_id: [u8; 4]) -> Vec<u8> {
+    let mut body = vec![255, 255, 255, 0]; // network mask
+    body.extend_from_slice(&10u16.to_be_bytes()); // hello interval
+    body.push(0x02); // options: E
+    body.push(1); // router priority
+    body.extend_from_slice(&40u32.to_be_bytes()); // dead interval
+    body.extend_from_slice(&[10, 2, 0, 1]); // DR
+    body.extend_from_slice(&[10, 2, 0, 2]); // BDR
+    body.extend_from_slice(&[10, 2, 0, 2]); // neighbour
+    body.extend_from_slice(&[10, 2, 0, 3]); // neighbour
+    ospf_packet(1, router_id, &body)
+}
+
+/// Database Description carrying one LSA header.
+fn ospf_dd(router_id: [u8; 4]) -> Vec<u8> {
+    let mut body = 1500u16.to_be_bytes().to_vec(); // interface MTU
+    body.push(0x42); // options: O, E
+    body.push(0x07); // flags: I, M, MS
+    body.extend_from_slice(&0x0000_1234u32.to_be_bytes()); // DD sequence
+    body.extend(ospf_lsa_header(
+        1,
+        1,
+        [10, 2, 0, 2],
+        [10, 2, 0, 2],
+        0x8000_0001,
+        36,
+    ));
+    ospf_packet(2, router_id, &body)
+}
+
+/// Link State Update with one Router-LSA (header plus a minimal body).
+fn ospf_lsu(router_id: [u8; 4]) -> Vec<u8> {
+    let mut body = 1u32.to_be_bytes().to_vec(); // number of LSAs
+    body.extend(ospf_lsa_header(5, 1, router_id, router_id, 0x8000_0002, 36));
+    body.extend_from_slice(&[0x02, 0x00, 0x00, 0x01]); // flags, 1 link
+    body.extend_from_slice(&[10, 2, 0, 0, 255, 255, 255, 0, 3, 0, 0, 10]); // stub link
+    ospf_packet(4, router_id, &body)
+}
+
+/// Link State Acknowledgment of two LSA headers.
+fn ospf_lsack(router_id: [u8; 4]) -> Vec<u8> {
+    let mut body = ospf_lsa_header(5, 1, [10, 2, 0, 1], [10, 2, 0, 1], 0x8000_0002, 36);
+    body.extend(ospf_lsa_header(
+        7,
+        2,
+        [10, 2, 0, 1],
+        [10, 2, 0, 1],
+        0x8000_0003,
+        32,
+    ));
+    ospf_packet(5, router_id, &body)
+}
+
 /// Routing and tunnelling protocols on an Ethernet link. Frames are grouped
 /// by protocol, each group appended after the previous ones, so a table's
 /// `SELECT *` snapshot does not move when another protocol's frames are added.
 fn routing_capture() -> Vec<u8> {
     let a = [10, 1, 0, 1];
     let b = [10, 1, 0, 2];
+    let r1 = [10, 2, 0, 1];
+    let ospf = |id: u16, pkt: &[u8]| {
+        eth(
+            [0x01, 0x00, 0x5e, 0x00, 0x00, 0x05],
+            MAC_A,
+            ETH_IP4,
+            &ipv4(r1, [224, 0, 0, 5], 89, id, pkt),
+        )
+    };
     let bgp = |src: [u8; 4], dst: [u8; 4], id: u16, sp: u16, dp: u16, msg: &[u8]| {
         let seg = tcp(sp, dp, 1000 + u32::from(id), 1, 0x18, msg);
         eth(MAC_B, MAC_A, ETH_IP4, &ipv4(src, dst, 6, id, &seg))
@@ -531,6 +628,12 @@ fn routing_capture() -> Vec<u8> {
         bgp(a, b, 4, 40179, 179, &bgp_message(3, &[6, 2])),
         // 5: BGP ROUTE-REFRESH a -> b: IPv4 unicast
         bgp(a, b, 5, 40179, 179, &bgp_message(5, &[0, 1, 0, 1])),
+        // 6-9: OSPF Hello, Database Description, Link State Update and
+        // Acknowledgment from router 10.2.0.1 to AllSPFRouters.
+        ospf(6, &ospf_hello(r1)),
+        ospf(7, &ospf_dd(r1)),
+        ospf(8, &ospf_lsu(r1)),
+        ospf(9, &ospf_lsack(r1)),
     ];
     to_capture(frames, LINKTYPE_ETHERNET)
 }
@@ -987,6 +1090,11 @@ const CORPUS: &[(Capture, &str, &str)] = &[
         Capture::Routing,
         "v01_bgp",
         "SELECT * FROM bgp ORDER BY frame_number",
+    ),
+    (
+        Capture::Routing,
+        "v02_ospf",
+        "SELECT * FROM ospf ORDER BY frame_number",
     ),
 ];
 

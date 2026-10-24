@@ -155,6 +155,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     (`capabilities`, `withdrawn_routes`, `as_path`, `nlri`) are strings as the
     parser formats them: comma-separated names and prefixes, space-separated
     AS numbers with an AS_SET in braces.
+  - `ospf`: `neighbor_count`, `dd_interface_mtu`, `dd_options`, `dd_flags`,
+    `dd_sequence`, `dd_lsa_count`, `lsu_lsa_count`, `lsa_ack_count`, and the
+    first LSA header of a DD, LSU or LSAck packet: `lsa_age`, `lsa_type`,
+    `lsa_type_name`, `lsa_id`, `lsa_advertising_router`, `lsa_sequence`.
 - The capture can be piped in: `pcapsql --stdin` (or `-` as the capture
   argument) reads pcap or pcapng, optionally gzip/zstd compressed, from
   standard input, e.g. `tcpdump -U -w - -i eth0 port 53 | pcapsql --stdin -e
