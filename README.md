@@ -300,6 +300,20 @@ Semantics and knobs:
 - Windows close on **event time**. `--idle-timeout N` additionally closes every open window
   after N seconds without any input (off by default; use a value above `--flush-interval`); a
   packet for such a window arriving later is late.
+- State is one accumulator set per open window and group. A `hop()` whose size is a multiple
+  of its slide is aggregated per **slice** (one slide's worth) and the slices are merged when a
+  window closes, so a 1-minute window sliding every 10 seconds updates one accumulator per row
+  instead of six, and holds one accumulator set plus one frozen state per slice. Slicing is
+  used only when nothing but `GROUP BY window_start` / `window_end` reads the window columns
+  (a `WHERE` on `window_start`, or `max(window_end)`, keeps the per-window path). Aggregates
+  whose result depends on input order, such as `array_agg` without `ORDER BY`, may list a
+  sliced window's elements in slice order.
+- `--memory-limit SIZE` (e.g. `512MiB`) caps what DataFusion may hold for the run, the window
+  state included; the aggregate accounts its state to the pool after every batch. When the state
+  does not fit, `--on-memory-limit error` (the default) fails the query naming the open windows
+  and groups, and `--on-memory-limit close-oldest` prints the oldest open windows before their
+  time until it fits (`--stats` and `--progress` count them; a packet for such a window
+  arriving later is late). Without a limit, state is bounded only by closed windows.
 - Output is appended per window: CSV prints its header once, JSON is one object per line, the
   table format prints one table per window. `-o` is not available. `--progress` shows rows,
   windows, the current watermark and late rows.

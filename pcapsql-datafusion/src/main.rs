@@ -126,6 +126,34 @@ async fn main() -> Result<()> {
         }) as ProgressFn
     });
 
+    let seconds = |s: f64, what: &str| -> Result<std::time::Duration> {
+        if !(s.is_finite() && s >= 0.0) {
+            anyhow::bail!("{what} must be a non-negative number of seconds, got {s}");
+        }
+        Ok(std::time::Duration::from_secs_f64(s))
+    };
+    if args.continuous && (args.output.is_some() || args.export_format.is_some()) {
+        anyhow::bail!(
+            "--continuous prints each window as it closes; exporting to a file (-o, \
+             --export-format) is not supported — redirect stdout (--format csv) instead"
+        );
+    }
+    let allowed_lateness = seconds(args.allowed_lateness, "--allowed-lateness")?;
+    let flush_interval = seconds(args.flush_interval, "--flush-interval")?;
+    let idle_timeout = args
+        .idle_timeout
+        .map(|s| seconds(s, "--idle-timeout"))
+        .transpose()?;
+    let memory_limit = args
+        .memory_limit
+        .as_deref()
+        .map(parse_memory_size)
+        .transpose()?;
+    let on_memory_limit: pcapsql_datafusion::query::MemoryLimitPolicy = args
+        .on_memory_limit
+        .parse()
+        .map_err(|e: String| anyhow::anyhow!("--on-memory-limit: {e}"))?;
+
     let spec = match &input_source {
         #[cfg(feature = "cloud")]
         InputSource::CloudUrl(url) => {
@@ -167,18 +195,6 @@ async fn main() -> Result<()> {
         pcapsql_datafusion::query::RetentionPolicy::CacheOnTouch
     };
 
-    let seconds = |s: f64, what: &str| -> Result<std::time::Duration> {
-        if !(s.is_finite() && s >= 0.0) {
-            anyhow::bail!("{what} must be a non-negative number of seconds, got {s}");
-        }
-        Ok(std::time::Duration::from_secs_f64(s))
-    };
-    if args.continuous && (args.output.is_some() || args.export_format.is_some()) {
-        anyhow::bail!(
-            "--continuous prints each window as it closes; exporting to a file (-o, \
-             --export-format) is not supported — redirect stdout (--format csv) instead"
-        );
-    }
     let opts = EngineOptions {
         batch_size: args.batch_size,
         retention,
@@ -187,12 +203,11 @@ async fn main() -> Result<()> {
         fuse_frame_joins: !args.no_fuse_joins,
         progress: if args.continuous { None } else { progress_cb },
         continuous: args.continuous,
-        allowed_lateness: seconds(args.allowed_lateness, "--allowed-lateness")?,
-        flush_interval: seconds(args.flush_interval, "--flush-interval")?,
-        idle_timeout: args
-            .idle_timeout
-            .map(|s| seconds(s, "--idle-timeout"))
-            .transpose()?,
+        allowed_lateness,
+        flush_interval,
+        idle_timeout,
+        memory_limit,
+        on_memory_limit,
         #[cfg(feature = "cloud")]
         cloud: pcapsql_datafusion::query::CloudSourceOptions {
             endpoint: args.cloud_endpoint.clone(),
@@ -323,8 +338,12 @@ async fn run_continuous(
                             .watermark_us()
                             .map(format_timestamp_us)
                             .unwrap_or_else(|| "-".to_string());
+                        let forced = match stream.windows_forced() {
+                            0 => String::new(),
+                            n => format!(", {n} forced by the memory limit"),
+                        };
                         pb.set_message(format!(
-                            "{rows} rows in {} windows, watermark {watermark}, {} late rows",
+                            "{rows} rows in {} windows{forced}, watermark {watermark}, {} late rows",
                             stream.windows_emitted(),
                             stream.late_rows()
                         ));
@@ -445,6 +464,38 @@ fn print_parse_stats(stats: &ParseStats) {
     print_parse_stats_ext(stats, false);
 }
 
+/// `--memory-limit`: a byte count with an optional unit, `512MiB`, `2GB`,
+/// `1G`, `1073741824`. Binary and decimal units are both accepted and mean
+/// what they say.
+fn parse_memory_size(s: &str) -> Result<usize> {
+    let s = s.trim();
+    let split = s
+        .find(|c: char| !c.is_ascii_digit() && c != '.' && c != '_')
+        .unwrap_or(s.len());
+    let (number, unit) = s.split_at(split);
+    let number: f64 = number
+        .replace('_', "")
+        .parse()
+        .map_err(|_| anyhow::anyhow!("--memory-limit: '{s}' is not a size"))?;
+    let multiplier: f64 = match unit.trim().to_ascii_lowercase().as_str() {
+        "" | "b" => 1.0,
+        "k" | "kib" => 1024.0,
+        "kb" => 1e3,
+        "m" | "mib" => 1024.0 * 1024.0,
+        "mb" => 1e6,
+        "g" | "gib" => 1024.0 * 1024.0 * 1024.0,
+        "gb" => 1e9,
+        "t" | "tib" => 1024.0 * 1024.0 * 1024.0 * 1024.0,
+        "tb" => 1e12,
+        other => anyhow::bail!("--memory-limit: unknown unit '{other}' in '{s}'"),
+    };
+    let bytes = number * multiplier;
+    if bytes.is_nan() || bytes < 1.0 {
+        anyhow::bail!("--memory-limit: '{s}' must be at least one byte");
+    }
+    Ok(bytes as usize)
+}
+
 /// `interrupted`: the scan was cut short by Ctrl-C, not by a LIMIT.
 fn print_parse_stats_ext(stats: &ParseStats, interrupted: bool) {
     eprintln!();
@@ -497,6 +548,12 @@ fn print_parse_stats_ext(stats: &ParseStats, interrupted: bool) {
         eprintln!(
             "Late rows dropped (window already emitted): {}",
             stats.late_rows
+        );
+    }
+    if stats.windows_forced > 0 {
+        eprintln!(
+            "Windows emitted early by the memory limit: {}",
+            stats.windows_forced
         );
     }
     let mut rows: Vec<_> = stats.rows_built.iter().filter(|(_, n)| **n > 0).collect();
@@ -1546,4 +1603,27 @@ fn format_hexdump(frame_number: u64, data: &[u8]) -> String {
     }
 
     output
+}
+
+#[cfg(test)]
+mod memory_size_tests {
+    use super::parse_memory_size;
+
+    #[test]
+    fn units_are_what_they_say() {
+        assert_eq!(parse_memory_size("1073741824").unwrap(), 1 << 30);
+        assert_eq!(parse_memory_size("512MiB").unwrap(), 512 << 20);
+        assert_eq!(parse_memory_size("512M").unwrap(), 512 << 20);
+        assert_eq!(parse_memory_size("2GB").unwrap(), 2_000_000_000);
+        assert_eq!(parse_memory_size("2 GiB").unwrap(), 2 << 30);
+        assert_eq!(parse_memory_size("1.5k").unwrap(), 1536);
+        assert_eq!(parse_memory_size("64kb").unwrap(), 64_000);
+    }
+
+    #[test]
+    fn rejects_nonsense() {
+        for bad in ["", "abc", "0", "-1M", "3 parsecs"] {
+            assert!(parse_memory_size(bad).is_err(), "{bad}");
+        }
+    }
 }

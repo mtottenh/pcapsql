@@ -14,7 +14,7 @@ use arrow::util::pretty::pretty_format_batches;
 use futures::StreamExt;
 use pcapsql_core::StdinPacketSource;
 use pcapsql_datafusion::query::{
-    EngineOptions, QueryEngine, QueryStream, RetentionPolicy, SourceSpec,
+    EngineOptions, MemoryLimitPolicy, QueryEngine, QueryStream, RetentionPolicy, SourceSpec,
 };
 use pcapsql_testgen::{legacy_pcap, GenPacket, LegacyVariant};
 
@@ -435,6 +435,472 @@ async fn hop_windows_close_in_order() {
     let starts: Vec<i64> = rest.iter().flat_map(|b| window_start_secs(b, 0)).collect();
     assert_eq!(starts, vec![10, 15]);
     stream.finish().await.expect("stats");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sliced_hop_merges_slices_into_exact_window_aggregates() {
+    // A hop whose size is a multiple of its slide is aggregated per slice
+    // and the slices merged when a window closes; the results must be the
+    // ones a per-window accumulator gives, for aggregates with non-trivial
+    // merge state (avg carries sum and count).
+    let Live { engine, .. } = live(|_| {}).await;
+    let plan = pretty(
+        &engine
+            .execute(
+                "EXPLAIN SELECT window_start, count(*) \
+                 FROM hop(frames, INTERVAL '5' SECOND, INTERVAL '10' SECOND) GROUP BY 1",
+            )
+            .await
+            .expect("explain")
+            .batches,
+    );
+    assert!(
+        plan.contains("window=HOP(slide=5s, size=10s)") && plan.contains("sliced"),
+        "{plan}"
+    );
+    // The slice is the hop's slide, so the plan feeds one row per packet.
+    assert!(
+        plan.contains("HopAssignExec: timestamp=timestamp, slide=5s, size=5s"),
+        "{plan}"
+    );
+
+    let Live { engine, mut feed } = live(|_| {}).await;
+    let mut stream = engine
+        .execute_stream(
+            "SELECT window_start, count(*) AS n, sum(length) AS bytes, min(length) AS lo, \
+             max(length) AS hi, avg(length) AS mean \
+             FROM hop(frames, INTERVAL '5' SECOND, INTERVAL '10' SECOND) GROUP BY 1",
+        )
+        .await
+        .expect("plan");
+    // Lengths 52, 62, 72, 52 at 1 s, 3 s, 7 s, 12 s. Windows: [-5, 5) holds
+    // the first two, [0, 10) the first three, [5, 15) the last two, [10, 20)
+    // the last.
+    feed.send(&[
+        record(1, 0, 1000, 10),
+        record(3, 0, 1000, 20),
+        record(7, 0, 1000, 30),
+        record(12, 0, 1000, 10),
+    ]);
+    // Watermark 11 s closes [-5, 5) and [0, 10), in order.
+    let first = expect_batch(&mut stream, "[-5, 5)").await;
+    let second = expect_batch(&mut stream, "[0, 10)").await;
+    let expected = "\
++---------------------+---+-------+----+----+------+
+| window_start        | n | bytes | lo | hi | mean |
++---------------------+---+-------+----+----+------+
+| 2023-11-14T22:13:15 | 2 | 114   | 52 | 62 | 57.0 |
+| 2023-11-14T22:13:20 | 3 | 186   | 52 | 72 | 62.0 |
++---------------------+---+-------+----+----+------+";
+    assert_eq!(pretty(&[first, second]), expected);
+    expect_quiet(&mut stream, "[5, 15) open").await;
+    feed.close();
+    let mut rest = Vec::new();
+    while let Some(b) = next_within(&mut stream, Duration::from_secs(5)).await {
+        rest.push(b);
+    }
+    let expected = "\
++---------------------+---+-------+----+----+------+
+| window_start        | n | bytes | lo | hi | mean |
++---------------------+---+-------+----+----+------+
+| 2023-11-14T22:13:25 | 2 | 124   | 52 | 72 | 62.0 |
+| 2023-11-14T22:13:30 | 1 | 52    | 52 | 52 | 52.0 |
++---------------------+---+-------+----+----+------+";
+    assert_eq!(pretty(&rest), expected);
+    let stats = stream.finish().await.expect("stats");
+    assert_eq!(stats.late_rows, 0);
+    assert_eq!(stats.windows_forced, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hop_with_a_size_that_is_not_a_multiple_of_its_slide_is_not_sliced() {
+    let Live { engine, mut feed } = live(|_| {}).await;
+    let plan = pretty(
+        &engine
+            .execute(
+                "EXPLAIN SELECT window_start, count(*) \
+                 FROM hop(frames, INTERVAL '3' SECOND, INTERVAL '10' SECOND) GROUP BY 1",
+            )
+            .await
+            .expect("explain")
+            .batches,
+    );
+    assert!(!plan.contains("sliced"), "{plan}");
+    let mut stream = engine
+        .execute_stream(
+            "SELECT window_start, count(*) AS n \
+             FROM hop(frames, INTERVAL '3' SECOND, INTERVAL '10' SECOND) GROUP BY 1",
+        )
+        .await
+        .expect("plan");
+    // Windows start at multiples of 3 s from the epoch, and the capture start
+    // is 2 mod 3, so relative to it they start at -2, 1, 4, 7, …; t = 7 s
+    // lies in the four 10 s windows starting at -2, 1, 4 and 7.
+    feed.send(&[record(7, 0, 1000, 10)]);
+    feed.close();
+    let mut out = Vec::new();
+    while let Some(b) = next_within(&mut stream, Duration::from_secs(5)).await {
+        out.push(b);
+    }
+    let starts: Vec<i64> = out.iter().flat_map(|b| window_start_secs(b, 0)).collect();
+    assert_eq!(starts, vec![-2, 1, 4, 7]);
+    stream.finish().await.expect("stats");
+}
+
+const HOP_5S_10S: &str = "hop(frames, INTERVAL '5' SECOND, INTERVAL '10' SECOND)";
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sliced_hop_emits_the_window_of_an_older_slice_arriving_within_lateness() {
+    // A slice older than the newest one, but with a window still open,
+    // arrives in a later batch: its open window is emitted (in order) and
+    // its closed one counted late, as per-window accumulators would have.
+    let Live { engine, mut feed } = live(|o| o.allowed_lateness = Duration::from_secs(5)).await;
+    let mut stream = engine
+        .execute_stream(&format!(
+            "SELECT window_start, count(*) AS n FROM {HOP_5S_10S} GROUP BY 1"
+        ))
+        .await
+        .expect("plan");
+    // t = 22 s: slice 20, watermark 17 s; the oldest window with data is
+    // [15, 25).
+    feed.send(&[record(22, 0, 1000, 10)]);
+    expect_quiet(&mut stream, "nothing closed at watermark 17 s").await;
+    // t = 12 s: slice 10. [5, 15) is closed (late), [10, 20) is open.
+    feed.send(&[record(12, 0, 1000, 10)]);
+    expect_quiet(&mut stream, "nothing closed at watermark 17 s").await;
+    // t = 30 s: watermark 25 s closes [10, 20) and [15, 25).
+    feed.send(&[record(30, 0, 1000, 10)]);
+    let first = expect_batch(&mut stream, "[10, 20)").await;
+    assert_eq!(window_start_secs(&first, 0), vec![10]);
+    assert_eq!(i64_column(&first, 1), vec![1]);
+    let second = expect_batch(&mut stream, "[15, 25)").await;
+    assert_eq!(window_start_secs(&second, 0), vec![15]);
+    assert_eq!(i64_column(&second, 1), vec![1]);
+    feed.close();
+    let mut rest = Vec::new();
+    while let Some(b) = next_within(&mut stream, Duration::from_secs(5)).await {
+        rest.push(b);
+    }
+    let starts: Vec<i64> = rest.iter().flat_map(|b| window_start_secs(b, 0)).collect();
+    assert_eq!(starts, vec![20, 25, 30]);
+    let stats = stream.finish().await.expect("stats");
+    assert_eq!(stats.late_rows, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sliced_hop_does_not_re_emit_windows_closed_by_the_idle_timeout() {
+    // The idle timeout closes every window of the only slice; a row for a
+    // later slice then reopens the pending window after the closed ones,
+    // not the first window containing its slice.
+    let Live { engine, mut feed } =
+        live(|o| o.idle_timeout = Some(Duration::from_millis(300))).await;
+    let mut stream = engine
+        .execute_stream(
+            "SELECT window_start, count(*) AS n \
+             FROM hop(frames, INTERVAL '5' SECOND, INTERVAL '15' SECOND) GROUP BY 1",
+        )
+        .await
+        .expect("plan");
+    // t = 1 s is in [-10, 5), [-5, 10) and [0, 15); the idle timeout emits
+    // all three.
+    feed.send(&[record(1, 0, 1000, 10)]);
+    let mut starts = Vec::new();
+    for _ in 0..3 {
+        let b = expect_batch(&mut stream, "idle-closed window").await;
+        starts.extend(window_start_secs(&b, 0));
+        assert_eq!(i64_column(&b, 1), vec![1]);
+    }
+    assert_eq!(starts, vec![-10, -5, 0]);
+    // t = 6 s (slice 5) is late for [-5, 10) and [0, 15), counted for [5, 20).
+    feed.send(&[record(6, 0, 1000, 10)]);
+    let b = expect_batch(&mut stream, "[5, 20) by idle timeout").await;
+    assert_eq!(window_start_secs(&b, 0), vec![5]);
+    assert_eq!(i64_column(&b, 1), vec![1]);
+    feed.close();
+    assert!(next_within(&mut stream, Duration::from_secs(5))
+        .await
+        .is_none());
+    let stats = stream.finish().await.expect("stats");
+    assert_eq!(stats.late_rows, 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sliced_hop_row_late_for_some_windows_counts_for_the_open_ones() {
+    // A row for a slice already frozen once (its first window was emitted)
+    // lands in the slice's fresh accumulators and is merged, with the frozen
+    // piece, into the windows still open. Groups differ between slices, and
+    // the source is a fused view.
+    let Live { engine, mut feed } = live(|_| {}).await;
+    let mut stream = engine
+        .execute_stream(
+            "SELECT window_start, src_port, count(*) AS n, sum(udp_length) AS bytes \
+             FROM hop(udp_packets, INTERVAL '5' SECOND, INTERVAL '10' SECOND) GROUP BY 1, 2",
+        )
+        .await
+        .expect("plan");
+    // UDP lengths 18, 28, 38 at 1 s, 7 s (port 1000) and 12 s (port 2000);
+    // watermark 11 s closes [-5, 5) and [0, 10).
+    feed.send(&[
+        record(1, 0, 1000, 10),
+        record(7, 0, 1000, 20),
+        record(12, 0, 2000, 30),
+    ]);
+    let first = expect_batch(&mut stream, "[-5, 5)").await;
+    let second = expect_batch(&mut stream, "[0, 10)").await;
+    assert_eq!(
+        pretty(&[first, second]),
+        "\
++---------------------+----------+---+-------+
+| window_start        | src_port | n | bytes |
++---------------------+----------+---+-------+
+| 2023-11-14T22:13:15 | 1000     | 1 | 18    |
+| 2023-11-14T22:13:20 | 1000     | 2 | 46    |
++---------------------+----------+---+-------+"
+    );
+    // t = 8 s (slice 5, UDP length 48): late for [0, 10), counted for [5, 15).
+    feed.send(&[record(8, 0, 1000, 40)]);
+    expect_quiet(&mut stream, "[5, 15) open").await;
+    // 16.5 s (watermark 15.5 s) closes [5, 15); end of input the rest.
+    feed.send(&[record(16, 500_000, 1000, 10)]);
+    let third = expect_batch(&mut stream, "[5, 15)").await;
+    expect_quiet(&mut stream, "[10, 20) open").await;
+    feed.close();
+    let fourth = expect_batch(&mut stream, "[10, 20)").await;
+    let fifth = expect_batch(&mut stream, "[15, 25)").await;
+    assert_eq!(
+        pretty(&[third, fourth, fifth]),
+        "\
++---------------------+----------+---+-------+
+| window_start        | src_port | n | bytes |
++---------------------+----------+---+-------+
+| 2023-11-14T22:13:25 | 1000     | 2 | 76    |
+| 2023-11-14T22:13:25 | 2000     | 1 | 38    |
+| 2023-11-14T22:13:30 | 1000     | 1 | 18    |
+| 2023-11-14T22:13:30 | 2000     | 1 | 38    |
+| 2023-11-14T22:13:35 | 1000     | 1 | 18    |
++---------------------+----------+---+-------+"
+    );
+    let stats = stream.finish().await.expect("stats");
+    assert_eq!(stats.late_rows, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hop_whose_window_columns_are_read_elsewhere_is_not_sliced() {
+    // Sliced rows carry slice bounds in window_start / window_end, so a
+    // filter or an aggregate over them keeps the per-window path.
+    let Live { engine, mut feed } = live(|_| {}).await;
+    for query in [
+        format!(
+            "SELECT window_start, count(*) FROM {HOP_5S_10S} \
+             WHERE window_start >= '2023-11-14T22:13:25'::timestamp GROUP BY 1"
+        ),
+        format!("SELECT window_start, max(window_end) FROM {HOP_5S_10S} GROUP BY 1"),
+        format!(
+            "SELECT window_start, window_end - window_start AS width, count(*) \
+             FROM {HOP_5S_10S} GROUP BY 1, 2"
+        ),
+    ] {
+        let plan = pretty(
+            &engine
+                .execute(&format!("EXPLAIN {query}"))
+                .await
+                .expect("explain")
+                .batches,
+        );
+        assert!(plan.contains("StreamingWindowAggregateExec"), "{plan}");
+        assert!(!plan.contains("sliced"), "{query}\n{plan}");
+    }
+    let mut stream = engine
+        .execute_stream(&format!(
+            "SELECT window_start, count(*) AS n FROM {HOP_5S_10S} \
+             WHERE window_start >= '2023-11-14T22:13:25'::timestamp GROUP BY 1"
+        ))
+        .await
+        .expect("plan");
+    // t = 7 s is in [0, 10) and [5, 15); the filter keeps the latter only.
+    feed.send(&[record(7, 0, 1000, 10)]);
+    feed.close();
+    let mut out = Vec::new();
+    while let Some(b) = next_within(&mut stream, Duration::from_secs(5)).await {
+        out.push(b);
+    }
+    let starts: Vec<i64> = out.iter().flat_map(|b| window_start_secs(b, 0)).collect();
+    assert_eq!(starts, vec![5]);
+    stream.finish().await.expect("stats");
+}
+
+/// The sliced aggregate's weight once slice 0 (`groups` groups) has been
+/// frozen for [-5, 5) and slice 5 holds the same groups live, from an
+/// unlimited engine.
+async fn two_slice_state_bytes(groups: u16) -> u64 {
+    let Live { engine, mut feed } = live(|_| {}).await;
+    let mut stream = engine
+        .execute_stream(&format!(
+            "SELECT window_start, length, count(*) AS n, sum(length) AS bytes \
+             FROM {HOP_5S_10S} GROUP BY 1, 2"
+        ))
+        .await
+        .expect("plan");
+    feed.send(&grouped_records(1, 0, groups));
+    expect_quiet(&mut stream, "slice 0 open").await;
+    feed.send(&grouped_records(6, 0, groups));
+    let first = expect_batch(&mut stream, "[-5, 5) by watermark").await;
+    assert_eq!(window_start_secs(&first, 0)[0], -5);
+    let bytes = stream.state_bytes();
+    assert!(bytes > 0);
+    feed.close();
+    while next_within(&mut stream, Duration::from_secs(5))
+        .await
+        .is_some()
+    {}
+    stream.finish().await.expect("stats");
+    bytes
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn memory_limit_close_oldest_forces_one_window_of_a_sliced_hop() {
+    let two_slices = two_slice_state_bytes(40).await;
+    // One byte short of two slices: once slice 5 arrives, [0, 10) is forced
+    // out, which drops slice 0 and leaves slice 5 frozen (less than the two).
+    let Live { engine, mut feed } = live(|o| {
+        o.memory_limit = Some(two_slices as usize - 1);
+        o.on_memory_limit = MemoryLimitPolicy::CloseOldest;
+    })
+    .await;
+    let query = format!(
+        "SELECT window_start, length, count(*) AS n, sum(length) AS bytes \
+         FROM {HOP_5S_10S} GROUP BY 1, 2"
+    );
+    let plan = pretty(
+        &engine
+            .execute(&format!("EXPLAIN {query}"))
+            .await
+            .expect("explain")
+            .batches,
+    );
+    assert!(
+        plan.contains("sliced") && plan.contains("on_memory_limit=close-oldest"),
+        "{plan}"
+    );
+    let mut stream = engine.execute_stream(&query).await.expect("plan");
+    feed.send(&grouped_records(1, 0, 40));
+    expect_quiet(&mut stream, "slice 0 fits").await;
+    feed.send(&grouped_records(6, 0, 40));
+    let by_watermark = expect_batch(&mut stream, "[-5, 5) by watermark").await;
+    assert_eq!(window_start_secs(&by_watermark, 0)[0], -5);
+    let forced = expect_batch(&mut stream, "[0, 10) forced by the memory limit").await;
+    assert_eq!(window_start_secs(&forced, 0)[0], 0);
+    assert_eq!(forced.num_rows(), 40);
+    assert_eq!(stream.windows_forced(), 1);
+    expect_quiet(&mut stream, "[5, 15) open").await;
+    feed.close();
+    let rest = expect_batch(&mut stream, "[5, 15) at end of input").await;
+    assert_eq!(window_start_secs(&rest, 0)[0], 5);
+    assert_eq!(rest.num_rows(), 40);
+    assert!(next_within(&mut stream, Duration::from_secs(5))
+        .await
+        .is_none());
+    let stats = stream.finish().await.expect("stats");
+    assert_eq!(stats.windows_forced, 1);
+}
+
+/// Rows at `secs` + `micros` with `groups` distinct lengths (one group each).
+fn grouped_records(secs: u32, micros: u32, groups: u16) -> Vec<Vec<u8>> {
+    (0..groups)
+        .map(|g| record(secs, micros + u32::from(g), 1000, 10 + usize::from(g)))
+        .collect()
+}
+
+/// The window state's weight after one window of `groups` groups, from an
+/// unlimited engine, so the limit tests can be set between one and two
+/// windows of it.
+async fn one_window_state_bytes(groups: u16) -> u64 {
+    let Live { engine, mut feed } = live(|_| {}).await;
+    let mut stream = engine
+        .execute_stream(&format!(
+            "SELECT window_start, length, count(*) AS n, sum(length) AS bytes \
+             FROM {TUMBLE_10S} GROUP BY 1, 2"
+        ))
+        .await
+        .expect("plan");
+    feed.send(&grouped_records(1, 0, groups));
+    expect_quiet(&mut stream, "window open").await;
+    let bytes = stream.state_bytes();
+    assert!(bytes > 0, "the aggregate accounts its state");
+    feed.close();
+    while next_within(&mut stream, Duration::from_secs(5))
+        .await
+        .is_some()
+    {}
+    stream.finish().await.expect("stats");
+    bytes
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn memory_limit_error_policy_fails_the_query_with_the_state_named() {
+    let one_window = one_window_state_bytes(40).await;
+    // Room for one window of state and some, not two.
+    let Live { engine, mut feed } = live(|o| {
+        o.memory_limit = Some(one_window as usize + one_window as usize / 2);
+        o.on_memory_limit = MemoryLimitPolicy::Error;
+    })
+    .await;
+    let mut stream = engine
+        .execute_stream(&format!(
+            "SELECT window_start, length, count(*) AS n, sum(length) AS bytes \
+             FROM {TUMBLE_10S} GROUP BY 1, 2"
+        ))
+        .await
+        .expect("plan");
+    feed.send(&grouped_records(1, 0, 40));
+    expect_quiet(&mut stream, "one window fits").await;
+    // A second window's worth at 10.5 s: the watermark (9.5 s) keeps the
+    // first window open, so two windows of state no longer fit.
+    feed.send(&grouped_records(10, 500_000, 40));
+    let err = match tokio::time::timeout(Duration::from_secs(10), stream.next()).await {
+        Ok(Some(Err(e))) => e.to_string(),
+        other => panic!("expected the memory-limit error, got {other:?}"),
+    };
+    assert!(err.contains("memory limit"), "{err}");
+    assert!(err.contains("2 open windows"), "{err}");
+    assert!(err.contains("close-oldest"), "{err}");
+    feed.close();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn memory_limit_close_oldest_emits_the_oldest_window_early() {
+    let one_window = one_window_state_bytes(40).await;
+    let Live { engine, mut feed } = live(|o| {
+        o.memory_limit = Some(one_window as usize + one_window as usize / 2);
+        o.on_memory_limit = MemoryLimitPolicy::CloseOldest;
+    })
+    .await;
+    // The same shape the limit was measured on.
+    let mut stream = engine
+        .execute_stream(&format!(
+            "SELECT window_start, length, count(*) AS n, sum(length) AS bytes \
+             FROM {TUMBLE_10S} GROUP BY 1, 2"
+        ))
+        .await
+        .expect("plan");
+    feed.send(&grouped_records(1, 0, 40));
+    expect_quiet(&mut stream, "one window fits").await;
+    // The second window (10.5 s, watermark 9.5 s) pushes the state over the
+    // limit: [0, 10) is emitted now, before the watermark passes its end.
+    feed.send(&grouped_records(10, 500_000, 40));
+    let forced = expect_batch(&mut stream, "[0, 10) forced out by the memory limit").await;
+    assert_eq!(window_start_secs(&forced, 0)[0], 0);
+    assert_eq!(forced.num_rows(), 40);
+    assert_eq!(stream.windows_forced(), 1);
+    // A row for the forced window is late now.
+    feed.send(&[record(2, 0, 1000, 10)]);
+    expect_quiet(&mut stream, "[10, 20) open").await;
+    feed.close();
+    let rest = expect_batch(&mut stream, "[10, 20) at end of input").await;
+    assert_eq!(window_start_secs(&rest, 0)[0], 10);
+    let stats = stream.finish().await.expect("stats");
+    assert_eq!(stats.windows_forced, 1);
+    assert_eq!(stats.late_rows, 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -180,7 +180,7 @@ pub struct HopAssignExec {
 }
 
 impl HopAssignExec {
-    pub(super) fn try_new(
+    pub(crate) fn try_new(
         input: Arc<dyn ExecutionPlan>,
         timestamp_index: usize,
         slide_us: i64,
