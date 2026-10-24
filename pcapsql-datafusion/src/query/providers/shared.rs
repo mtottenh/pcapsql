@@ -21,10 +21,12 @@ use tokio::task::JoinHandle;
 
 use pcapsql_core::io::PacketRange;
 use pcapsql_core::{
-    parse_packet, PacketReader, ParseScope, ProtocolRegistry, SeekablePacketSource,
+    parse_packet, PacketReader, PacketSource, ParseScope, ProtocolRegistry, SeekablePacketSource,
 };
 
-use super::exchange::{self, BatchReceiver, OverflowStats, Pacer, STREAM_CHANNEL_CAPACITY};
+use super::exchange::{
+    self, BatchReceiver, BatchSender, OverflowStats, Pacer, STREAM_CHANNEL_CAPACITY,
+};
 use crate::error::Error;
 use crate::query::builders::NormalizedBatchSet;
 use crate::query::filter::FilterEvaluator;
@@ -303,26 +305,18 @@ struct PartitionOutput {
     capped: bool,
 }
 
-/// Parse a single partition into per-table batches restricted to the
-/// subscription.
-#[allow(clippy::too_many_arguments)]
-fn parse_partition<S: SeekablePacketSource>(
-    source: &S,
+/// Parse one partition through `reader` into per-table batches restricted to
+/// the subscription. The reader is already positioned: a sequential reader
+/// (the whole source) or a seekable source's reader at a range start.
+fn parse_partition<R: PacketReader>(
+    mut reader: R,
     registry: &ProtocolRegistry,
     scope: &ParseScope,
     subscription: &ParseSubscription,
     batch_size: usize,
-    range: &PacketRange,
-    single: bool,
     progress: Option<(&AtomicU64, &ProgressFn)>,
     mut subscriber: Option<StreamSubscriber>,
 ) -> Result<PartitionOutput, Error> {
-    let mut reader = if single {
-        source.sequential_reader()?
-    } else {
-        source.reader_at(range)?
-    };
-
     let mut batch_set = NormalizedBatchSet::new(batch_size, subscription)?;
     let mut min_us = i64::MAX;
     let mut max_us = i64::MIN;
@@ -377,85 +371,13 @@ fn parse_partition<S: SeekablePacketSource>(
     })
 }
 
-/// Run one scoped parse pass over a seekable source, fanning out to the
-/// subscribed tables. Parses partitions in parallel when more than one;
-/// each worker owns its reader and builders — no shared mutable state.
-///
-/// A subscription with stream tables attaches a [`StreamSubscriber`] (TCP
-/// reassembly → TLS → HTTP) to the same pass; reassembly needs the capture
-/// in order, so such a pass is pinned to a single partition.
-pub fn run_shared_parse<S: SeekablePacketSource>(
-    source: &Arc<S>,
-    registry: &Arc<ProtocolRegistry>,
-    batch_size: usize,
-    target_partitions: usize,
-    progress: Option<ProgressFn>,
+/// Fold the partitions' outputs (in partition order) into the pass result:
+/// per table, one `Vec<RecordBatch>` per partition in frame order, plus the
+/// pass statistics. Surfaces the first partition error.
+fn assemble_pass(
+    results: Vec<Result<PartitionOutput, Error>>,
     subscription: &ParseSubscription,
-    keylog: Option<Arc<KeyLog>>,
 ) -> Result<SharedParseState, Error> {
-    let scope = subscription.parse_scope(registry);
-    let streams = !subscription.stream_tables.is_empty();
-    let ranges = if streams {
-        vec![PacketRange::whole()]
-    } else {
-        decide_ranges(source.as_ref(), target_partitions)?
-    };
-    let single = ranges.len() == 1;
-    let progress_count = AtomicU64::new(0);
-
-    let results: Vec<Result<PartitionOutput, Error>> = if single {
-        let subscriber =
-            streams.then(|| StreamSubscriber::new(subscription.stream_tables.clone(), keylog));
-        vec![parse_partition(
-            source.as_ref(),
-            registry,
-            &scope,
-            subscription,
-            batch_size,
-            &ranges[0],
-            true,
-            progress.as_ref().map(|cb| (&progress_count, cb)),
-            subscriber,
-        )]
-    } else {
-        std::thread::scope(|thread_scope| {
-            let handles: Vec<_> = ranges
-                .iter()
-                .map(|range| {
-                    let source = source.clone();
-                    let registry = registry.clone();
-                    let range = range.clone();
-                    let scope = &scope;
-                    let progress = progress.as_ref().map(|cb| (&progress_count, cb));
-                    thread_scope.spawn(move || {
-                        parse_partition(
-                            source.as_ref(),
-                            &registry,
-                            scope,
-                            subscription,
-                            batch_size,
-                            &range,
-                            false,
-                            progress,
-                            None,
-                        )
-                    })
-                })
-                .collect();
-            handles
-                .into_iter()
-                .map(|h| {
-                    h.join().unwrap_or_else(|_| {
-                        Err(Error::Query(crate::error::QueryError::Execution(
-                            "parse worker panicked".into(),
-                        )))
-                    })
-                })
-                .collect()
-        })
-    };
-
-    // Surface the first error, if any; otherwise collect partition outputs.
     let mut outputs: Vec<HashMap<String, Vec<RecordBatch>>> = Vec::with_capacity(results.len());
     let mut start_ts_us = i64::MAX;
     let mut end_ts_us = i64::MIN;
@@ -524,6 +446,112 @@ pub fn run_shared_parse<S: SeekablePacketSource>(
     })
 }
 
+/// Run one scoped parse pass over a seekable source, fanning out to the
+/// subscribed tables. Parses partitions in parallel when more than one;
+/// each worker owns its reader and builders — no shared mutable state.
+///
+/// A subscription with stream tables attaches a [`StreamSubscriber`] (TCP
+/// reassembly → TLS → HTTP) to the same pass; reassembly needs the capture
+/// in order, so such a pass is pinned to a single partition. A pass that
+/// ends up with one partition (stream tables, a compressed or small source,
+/// an unavailable index) is exactly [`run_shared_parse_sequential`].
+pub fn run_shared_parse<S: SeekablePacketSource>(
+    source: &Arc<S>,
+    registry: &Arc<ProtocolRegistry>,
+    batch_size: usize,
+    target_partitions: usize,
+    progress: Option<ProgressFn>,
+    subscription: &ParseSubscription,
+    keylog: Option<Arc<KeyLog>>,
+) -> Result<SharedParseState, Error> {
+    let streams = !subscription.stream_tables.is_empty();
+    let ranges = if streams {
+        vec![PacketRange::whole()]
+    } else {
+        decide_ranges(source.as_ref(), target_partitions)?
+    };
+    if ranges.len() == 1 {
+        return run_shared_parse_sequential(
+            source.as_ref(),
+            registry,
+            batch_size,
+            progress,
+            subscription,
+            keylog,
+        );
+    }
+
+    let scope = subscription.parse_scope(registry);
+    let progress_count = AtomicU64::new(0);
+    let results: Vec<Result<PartitionOutput, Error>> = std::thread::scope(|thread_scope| {
+        let handles: Vec<_> = ranges
+            .iter()
+            .map(|range| {
+                let source = source.clone();
+                let registry = registry.clone();
+                let range = range.clone();
+                let scope = &scope;
+                let progress = progress.as_ref().map(|cb| (&progress_count, cb));
+                thread_scope.spawn(move || {
+                    let reader = source.reader_at(&range)?;
+                    parse_partition(
+                        reader,
+                        &registry,
+                        scope,
+                        subscription,
+                        batch_size,
+                        progress,
+                        None,
+                    )
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| {
+                h.join().unwrap_or_else(|_| {
+                    Err(Error::Query(crate::error::QueryError::Execution(
+                        "parse worker panicked".into(),
+                    )))
+                })
+            })
+            .collect()
+    });
+    assemble_pass(results, subscription)
+}
+
+/// Run one scoped parse pass over any source as a **single partition**,
+/// through its sequential reader.
+///
+/// This is the whole of a pass over a non-seekable source (a pipe, stdin:
+/// [`pcapsql_core::StdinPacketSource`]), and the one-partition case of
+/// [`run_shared_parse`]. Stream tables, when subscribed, are built by a
+/// subscriber of the same pass.
+pub fn run_shared_parse_sequential<S: PacketSource>(
+    source: &S,
+    registry: &Arc<ProtocolRegistry>,
+    batch_size: usize,
+    progress: Option<ProgressFn>,
+    subscription: &ParseSubscription,
+    keylog: Option<Arc<KeyLog>>,
+) -> Result<SharedParseState, Error> {
+    let scope = subscription.parse_scope(registry);
+    let subscriber = (!subscription.stream_tables.is_empty())
+        .then(|| StreamSubscriber::new(subscription.stream_tables.clone(), keylog));
+    let progress_count = AtomicU64::new(0);
+    let reader = source.sequential_reader()?;
+    let result = parse_partition(
+        reader,
+        registry,
+        &scope,
+        subscription,
+        batch_size,
+        progress.as_ref().map(|cb| (&progress_count, cb)),
+        subscriber,
+    );
+    assemble_pass(vec![result], subscription)
+}
+
 // ============================================================================
 // Streaming parse (RetentionPolicy::None) — batches flow to the plan as they form.
 // ============================================================================
@@ -553,6 +581,178 @@ pub struct StreamingHandle {
     pub schemas: HashMap<String, SchemaRef>,
 }
 
+/// How a streaming producer opens the reader of its partition. Opened on the
+/// producer's own blocking thread, so a slow open (a seek, a range request,
+/// a pipe that has not produced its header) never stalls the caller.
+trait OpenReader: Send + 'static {
+    type Reader: PacketReader;
+    fn open(self) -> Result<Self::Reader, Error>;
+}
+
+/// The one partition of a sequential pass.
+struct SequentialOpener<S: PacketSource>(Arc<S>);
+
+impl<S: PacketSource> OpenReader for SequentialOpener<S> {
+    type Reader = S::Reader;
+    fn open(self) -> Result<S::Reader, Error> {
+        Ok(self.0.sequential_reader()?)
+    }
+}
+
+/// One range of a partitioned pass over a seekable source.
+struct RangeOpener<S: SeekablePacketSource> {
+    source: Arc<S>,
+    range: PacketRange,
+}
+
+impl<S: SeekablePacketSource> OpenReader for RangeOpener<S> {
+    type Reader = S::Reader;
+    fn open(self) -> Result<S::Reader, Error> {
+        Ok(self.source.reader_at(&self.range)?)
+    }
+}
+
+/// One streaming producer: parse `reader` to completion, sending each
+/// table's batches to its exchange as they form.
+#[allow(clippy::too_many_arguments)]
+fn stream_partition<R: PacketReader>(
+    mut reader: R,
+    registry: &ProtocolRegistry,
+    scope: &ParseScope,
+    subscription: &ParseSubscription,
+    batch_size: usize,
+    senders: HashMap<String, BatchSender>,
+    pacer: Arc<Pacer>,
+    progress: Option<(&AtomicU64, &ProgressFn)>,
+) -> Result<PartitionStat, Error> {
+    let mut batch_set =
+        NormalizedBatchSet::new_streaming(batch_size, subscription, senders, pacer)?;
+    let mut min_us = i64::MAX;
+    let mut max_us = i64::MIN;
+    let mut packets: u64 = 0;
+    let mut capped = false;
+
+    loop {
+        let processed = reader.process_packets(1024, |packet| {
+            let us = packet.timestamp_ns / 1_000;
+            min_us = min_us.min(us);
+            max_us = max_us.max(us);
+            let parsed = parse_packet(registry, packet.link_type, packet.data, scope);
+            batch_set.add_packet_from_ref(packet, &parsed)?;
+            Ok(())
+        })?;
+        packets += processed as u64;
+        if let Some((counter, cb)) = progress {
+            let total = counter.fetch_add(processed as u64, Ordering::Relaxed) + processed as u64;
+            cb(total);
+        }
+        if processed == 0 {
+            break;
+        }
+        if batch_set.all_capped() {
+            capped = true;
+            break;
+        }
+    }
+
+    let rows_built: HashMap<String, usize> = subscription
+        .tables
+        .keys()
+        .map(|t| (t.clone(), batch_set.row_count(t)))
+        .collect();
+    // Flushes final batches and closes every exchange (buffered batches
+    // become the receivers' tails).
+    let overflow = batch_set.finish_streaming()?;
+
+    Ok(PartitionStat {
+        min_us,
+        max_us,
+        packets,
+        capped,
+        rows_built,
+        overflow,
+    })
+}
+
+/// Start the producers of a streaming pass, one per opener (= per
+/// partition), each on its own `spawn_blocking` thread with its own
+/// per-table exchanges.
+fn start_streaming_parse<O: OpenReader>(
+    openers: Vec<O>,
+    registry: &Arc<ProtocolRegistry>,
+    batch_size: usize,
+    progress: Option<ProgressFn>,
+    subscription: &ParseSubscription,
+) -> Result<StreamingHandle, Error> {
+    if !subscription.stream_tables.is_empty() {
+        // Stream tables are complete only at end of capture; the engine
+        // routes queries that touch them through the materialize path.
+        return Err(Error::Query(crate::error::QueryError::Execution(
+            "stream tables cannot be streamed; use run_shared_parse".into(),
+        )));
+    }
+    let scope = Arc::new(subscription.parse_scope(registry));
+    let num_partitions = openers.len();
+    let progress_count = Arc::new(AtomicU64::new(0));
+
+    let table_names: Vec<String> = subscription.tables.keys().cloned().collect();
+    let mut schemas = HashMap::with_capacity(table_names.len());
+    for name in &table_names {
+        let schema = subscription.table_schema(name).ok_or_else(|| {
+            Error::Query(crate::error::QueryError::Execution(format!(
+                "Unknown table: {name}"
+            )))
+        })?;
+        schemas.insert(name.clone(), schema);
+    }
+
+    // receivers[table] = one receiver per partition, in partition order.
+    let mut receivers: HashMap<String, Vec<BatchReceiver>> = table_names
+        .iter()
+        .map(|n| (n.clone(), Vec::with_capacity(num_partitions)))
+        .collect();
+    let mut producers = Vec::with_capacity(num_partitions);
+
+    for opener in openers {
+        // Per-table exchange for this partition, sharing one pacer so the
+        // producer can wait for progress on any of them.
+        let pacer = Pacer::new();
+        let mut senders = HashMap::with_capacity(table_names.len());
+        for name in &table_names {
+            let (tx, rx) = exchange::channel(STREAM_CHANNEL_CAPACITY, pacer.clone());
+            senders.insert(name.clone(), tx);
+            receivers.get_mut(name).expect("receiver slot").push(rx);
+        }
+
+        let registry = registry.clone();
+        let scope = scope.clone();
+        let subscription = subscription.clone();
+        let progress = progress.clone();
+        let progress_count = progress_count.clone();
+
+        producers.push(tokio::task::spawn_blocking(move || {
+            let reader = opener.open()?;
+            stream_partition(
+                reader,
+                &registry,
+                &scope,
+                &subscription,
+                batch_size,
+                senders,
+                pacer,
+                progress.as_ref().map(|cb| (progress_count.as_ref(), cb)),
+            )
+        }));
+    }
+
+    Ok(StreamingHandle {
+        receivers,
+        producers,
+        num_partitions,
+        schemas,
+    })
+}
+
 /// Start one scoped parse pass that **streams** each subscribed table's
 /// batches to per-(table, partition) bounded exchanges.
 ///
@@ -578,115 +778,46 @@ pub fn run_streaming_parse<S: SeekablePacketSource>(
     subscription: &ParseSubscription,
 ) -> Result<StreamingHandle, Error> {
     if !subscription.stream_tables.is_empty() {
-        // Stream tables are complete only at end of capture; the engine
-        // routes queries that touch them through the materialize path.
         return Err(Error::Query(crate::error::QueryError::Execution(
             "stream tables cannot be streamed; use run_shared_parse".into(),
         )));
     }
-    let scope = Arc::new(subscription.parse_scope(registry));
     let ranges = decide_ranges(source.as_ref(), target_partitions)?;
-    let single = ranges.len() == 1;
-    let num_partitions = ranges.len();
-    let progress_count = Arc::new(AtomicU64::new(0));
-
-    let table_names: Vec<String> = subscription.tables.keys().cloned().collect();
-    let mut schemas = HashMap::with_capacity(table_names.len());
-    for name in &table_names {
-        let schema = subscription.table_schema(name).ok_or_else(|| {
-            Error::Query(crate::error::QueryError::Execution(format!(
-                "Unknown table: {name}"
-            )))
-        })?;
-        schemas.insert(name.clone(), schema);
+    if ranges.len() == 1 {
+        return run_streaming_parse_sequential(
+            source,
+            registry,
+            batch_size,
+            progress,
+            subscription,
+        );
     }
-
-    // receivers[table] = one receiver per partition, in partition order.
-    let mut receivers: HashMap<String, Vec<BatchReceiver>> = table_names
-        .iter()
-        .map(|n| (n.clone(), Vec::with_capacity(num_partitions)))
+    let openers: Vec<RangeOpener<S>> = ranges
+        .into_iter()
+        .map(|range| RangeOpener {
+            source: source.clone(),
+            range,
+        })
         .collect();
-    let mut producers = Vec::with_capacity(num_partitions);
+    start_streaming_parse(openers, registry, batch_size, progress, subscription)
+}
 
-    for range in ranges {
-        // Per-table exchange for this partition, sharing one pacer so the
-        // producer can wait for progress on any of them.
-        let pacer = Pacer::new();
-        let mut senders = HashMap::with_capacity(table_names.len());
-        for name in &table_names {
-            let (tx, rx) = exchange::channel(STREAM_CHANNEL_CAPACITY, pacer.clone());
-            senders.insert(name.clone(), tx);
-            receivers.get_mut(name).expect("receiver slot").push(rx);
-        }
-
-        let source = source.clone();
-        let registry = registry.clone();
-        let scope = scope.clone();
-        let subscription = subscription.clone();
-        let progress = progress.clone();
-        let progress_count = progress_count.clone();
-        let tables: Vec<String> = table_names.clone();
-
-        producers.push(tokio::task::spawn_blocking(move || {
-            let mut reader = if single {
-                source.sequential_reader()?
-            } else {
-                source.reader_at(&range)?
-            };
-            let mut batch_set =
-                NormalizedBatchSet::new_streaming(batch_size, &subscription, senders, pacer)?;
-            let mut min_us = i64::MAX;
-            let mut max_us = i64::MIN;
-            let mut packets: u64 = 0;
-            let mut capped = false;
-
-            loop {
-                let processed = reader.process_packets(1024, |packet| {
-                    let us = packet.timestamp_ns / 1_000;
-                    min_us = min_us.min(us);
-                    max_us = max_us.max(us);
-                    let parsed = parse_packet(&registry, packet.link_type, packet.data, &scope);
-                    batch_set.add_packet_from_ref(packet, &parsed)?;
-                    Ok(())
-                })?;
-                packets += processed as u64;
-                if let Some(cb) = &progress {
-                    let total = progress_count.fetch_add(processed as u64, Ordering::Relaxed)
-                        + processed as u64;
-                    cb(total);
-                }
-                if processed == 0 {
-                    break;
-                }
-                if batch_set.all_capped() {
-                    capped = true;
-                    break;
-                }
-            }
-
-            let rows_built: HashMap<String, usize> = tables
-                .iter()
-                .map(|t| (t.clone(), batch_set.row_count(t)))
-                .collect();
-            // Flushes final batches and closes every exchange (buffered
-            // batches become the receivers' tails).
-            let overflow = batch_set.finish_streaming()?;
-
-            Ok(PartitionStat {
-                min_us,
-                max_us,
-                packets,
-                capped,
-                rows_built,
-                overflow,
-            })
-        }));
-    }
-
-    Ok(StreamingHandle {
-        receivers,
-        producers,
-        num_partitions,
-        schemas,
-    })
+/// [`run_streaming_parse`] for any source as a **single partition**: one
+/// producer over the source's sequential reader. The whole of a streaming
+/// pass over a non-seekable source (a pipe, stdin), and the one-partition
+/// case of the seekable entry point.
+pub fn run_streaming_parse_sequential<S: PacketSource>(
+    source: &Arc<S>,
+    registry: &Arc<ProtocolRegistry>,
+    batch_size: usize,
+    progress: Option<ProgressFn>,
+    subscription: &ParseSubscription,
+) -> Result<StreamingHandle, Error> {
+    start_streaming_parse(
+        vec![SequentialOpener(source.clone())],
+        registry,
+        batch_size,
+        progress,
+        subscription,
+    )
 }

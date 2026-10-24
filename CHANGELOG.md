@@ -143,6 +143,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The capture can be piped in: `pcapsql --stdin` (or `-` as the capture
+  argument) reads pcap or pcapng, optionally gzip/zstd compressed, from
+  standard input, e.g. `tcpdump -U -w - -i eth0 port 53 | pcapsql --stdin -e
+  "SELECT ... FROM dns_packets"`. Stdin is read sequentially to end of input
+  in one parse pass, so it takes a one-shot query (`-e`/`-f`, one statement;
+  no REPL) and the time-range functions are not available before the pass; any one
+  query may still join any tables, stream tables included. The library gets
+  `StdinPacketSource` (`PacketSource` only, built from stdin or any
+  `Read + Send`), `SourceSpec::Stdin` / `SourceSpec::Sequential`, and
+  `run_shared_parse_sequential` / `run_streaming_parse_sequential`, the
+  single-partition pass that the seekable entry points now share.
 - Stream-analysis tables `tcp_connections`, `tls_sessions` and `http_messages`
   (one row per TCP connection, TLS handshake and HTTP/1.x message, reassembled
   from TCP streams), alongside `http2`. Stream analysis is now a subscriber of

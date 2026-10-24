@@ -80,9 +80,28 @@ impl ExportFormat {
 #[command(name = "pcapsql")]
 #[command(author, version, about, long_about = None)]
 pub struct Args {
-    /// PCAP file to query
+    /// PCAP file to query (`-` reads the capture from standard input)
     #[arg(value_name = "FILE")]
     pub file: Option<PathBuf>,
+
+    /// Read the capture from standard input instead of a file.
+    ///
+    /// The capture (pcap or pcapng, optionally gzip/zstd compressed) is read
+    /// sequentially to end of input in one pass, so this needs a one-shot
+    /// query: -e or -f with exactly one statement. The REPL is not available
+    /// (it would read its SQL from the same stdin), and neither are the
+    /// time-range functions start_time()/end_time()/relative_time(), which
+    /// need a pass of their own. `-` as FILE means the same.
+    ///
+    /// Examples:
+    ///   tcpdump -U -w - -i eth0 port 53 | pcapsql --stdin -e "SELECT * FROM dns_packets"
+    ///   dumpcap -w - -i any | pcapsql --stdin -e "SELECT count(*) FROM linux_sll"
+    ///   zcat capture.pcap.gz | pcapsql - -e "SELECT count(*) FROM frames"
+    ///
+    /// Use tcpdump's -U (packet-buffered output): without it tcpdump holds
+    /// packets back in its stdio buffer for seconds.
+    #[arg(long = "stdin", conflicts_with = "file", verbatim_doc_comment)]
+    pub stdin: bool,
 
     /// Execute a single SQL query and exit
     #[arg(short = 'e', long = "execute", value_name = "SQL")]
@@ -318,7 +337,25 @@ mod tests {
         );
     }
 
-    // Test 9: Cloud storage arguments (only when cloud feature enabled)
+    // Test 9: --stdin, and `-` as the capture argument
+    #[test]
+    fn test_stdin_flag_and_dash() {
+        let args =
+            Args::try_parse_from(["pcapsql", "--stdin", "-e", "SELECT count(*) FROM frames"])
+                .unwrap();
+        assert!(args.stdin);
+        assert!(args.file.is_none());
+
+        let args = Args::try_parse_from(["pcapsql", "-", "-f", "query.sql"]).unwrap();
+        assert!(!args.stdin);
+        assert_eq!(args.file, Some(PathBuf::from("-")));
+        assert_eq!(args.query_file, Some(PathBuf::from("query.sql")));
+
+        // --stdin and a capture path are mutually exclusive.
+        assert!(Args::try_parse_from(["pcapsql", "--stdin", "cap.pcap"]).is_err());
+    }
+
+    // Test 10: Cloud storage arguments (only when cloud feature enabled)
     #[cfg(feature = "cloud")]
     #[test]
     fn test_cloud_arguments() {
@@ -343,7 +380,7 @@ mod tests {
         assert_eq!(args.cloud_chunk_size, 16 * 1024 * 1024);
     }
 
-    // Test 10: Cloud storage default values
+    // Test 11: Cloud storage default values
     #[cfg(feature = "cloud")]
     #[test]
     fn test_cloud_defaults() {

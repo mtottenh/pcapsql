@@ -29,9 +29,9 @@ pub use protocol_provider::{
 };
 pub use scan_exec::ProtocolScanExec;
 pub use shared::{
-    auto_target_partitions, run_shared_parse, run_streaming_parse, ParseStats, ParseSubscription,
-    PartitionStat, ProgressFn, ServedFrom, SharedParseState, StreamingHandle, TableData,
-    TableSubscription,
+    auto_target_partitions, run_shared_parse, run_shared_parse_sequential, run_streaming_parse,
+    run_streaming_parse_sequential, ParseStats, ParseSubscription, PartitionStat, ProgressFn,
+    ServedFrom, SharedParseState, StreamingHandle, TableData, TableSubscription,
 };
 
 use std::sync::Arc;

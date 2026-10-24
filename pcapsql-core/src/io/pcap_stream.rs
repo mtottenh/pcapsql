@@ -43,7 +43,7 @@ use crate::io::PacketRef;
 ///
 /// Frames larger than this are handled by growing the buffer on demand (see the
 /// `BufferTooSmall` handling in the read loops).
-const BUFFER_SIZE: usize = 262144;
+pub(crate) const BUFFER_SIZE: usize = 262144;
 
 /// Hard ceiling for the read buffer (64 MiB).
 ///

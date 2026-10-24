@@ -15,6 +15,7 @@
 //! - [`FilePacketSource`] - Standard buffered file I/O (`SeekCost::Cheap`)
 //! - [`MmapPacketSource`] - Memory-mapped I/O (`SeekCost::Free`; requires `mmap`)
 //! - [`CloudPacketSource`] - Object-store I/O (`SeekCost::RangeRequest`; requires `cloud`)
+//! - [`StdinPacketSource`] - Standard input or any other `Read` stream (sequential only)
 
 #[cfg(feature = "cloud")]
 mod cloud;
@@ -24,6 +25,7 @@ mod index;
 mod mmap;
 mod pcap_stream;
 mod source;
+mod stdin;
 
 pub use decompress::{decompress_header, Compression, DecompressReader, FileDecoder};
 #[cfg(feature = "mmap")]
@@ -39,6 +41,7 @@ pub use source::{
     FilePacketReader, FilePacketSource, PacketPosition, PacketRange, PacketReader, PacketRef,
     PacketSource, PacketSourceMetadata, SeekCost, SeekablePacketSource,
 };
+pub use stdin::{StdinPacketReader, StdinPacketSource, StreamHeader};
 
 #[cfg(feature = "cloud")]
 pub use cloud::{

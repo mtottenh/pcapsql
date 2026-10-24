@@ -101,7 +101,7 @@ pub use error::{Error, PcapError, ProtocolError, Result};
 pub use format::{detect_address_column, format_ipv4, format_ipv6, format_mac, AddressKind};
 pub use io::{
     BoundaryIndex, FilePacketReader, FilePacketSource, PacketReader, PacketSource, SeekCost,
-    SeekablePacketSource,
+    SeekablePacketSource, StdinPacketReader, StdinPacketSource,
 };
 #[cfg(feature = "mmap")]
 pub use io::{MmapPacketReader, MmapPacketSource};

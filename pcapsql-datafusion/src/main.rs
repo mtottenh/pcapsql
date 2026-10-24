@@ -8,7 +8,8 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
-use pcapsql_core::{default_registry, KeyLog, Protocol};
+use datafusion::sql::parser::DFParser;
+use pcapsql_core::{default_registry, KeyLog, PacketSource, Protocol, StdinPacketSource};
 use pcapsql_datafusion::cli::{
     Args, ExportFormat, Exporter, InputSource, OutputFormatter, Repl, ReplCommand, ReplInput,
 };
@@ -55,15 +56,50 @@ async fn main() -> Result<()> {
         print_tls_status(&keylog);
     }
 
-    // Require a PCAP file for query operations
-    let pcap_file_arg = args
-        .file
-        .as_ref()
-        .context("PCAP file required. Use --help for usage.")?;
-
-    // Parse input source (local file or cloud URL)
-    let input_source = InputSource::parse(&pcap_file_arg.to_string_lossy());
+    // Input: `--stdin` or `-` read the capture from standard input;
+    // otherwise a file path or cloud URL is required.
+    let input_source = if args.stdin {
+        InputSource::Stdin
+    } else {
+        let pcap_file_arg = args.file.as_ref().context(
+            "PCAP file required (or --stdin to read the capture from standard input). \
+             Use --help for usage.",
+        )?;
+        InputSource::parse(&pcap_file_arg.to_string_lossy())
+    };
     let source_name = input_source.display_name();
+
+    // The SQL of a one-shot invocation: `-e`, else the contents of `-f`.
+    let one_shot_sql: Option<String> = match (&args.query, &args.query_file) {
+        (Some(query), _) => Some(query.clone()),
+        (None, Some(query_file)) => Some(
+            std::fs::read_to_string(query_file)
+                .with_context(|| format!("Failed to read query file: {}", query_file.display()))?,
+        ),
+        (None, None) => None,
+    };
+    let one_shot = one_shot_sql.is_some();
+
+    // Standard input can be read once, so it is a one-shot query of exactly
+    // one statement: the REPL would read its SQL from the same stdin, and a
+    // second statement would find the capture gone.
+    if input_source.is_stdin() {
+        let Some(sql) = &one_shot_sql else {
+            anyhow::bail!(
+                "reading the capture from stdin needs a one-shot query (-e <SQL> or -f <FILE>): \
+                 the interactive REPL would read its SQL from the same stdin.\n\
+                 Example: tcpdump -U -w - -i eth0 | pcapsql --stdin -e \"SELECT count(*) FROM frames\""
+            );
+        };
+        if let Ok(statements) = DFParser::parse_sql(sql) {
+            if statements.len() != 1 {
+                anyhow::bail!(
+                    "stdin can be read once: the query must be exactly one statement (found {})",
+                    statements.len()
+                );
+            }
+        }
+    }
 
     // Optional progress spinner driven by the parse callback. Parsing happens
     // at query time, so the spinner runs during each query: once for a
@@ -99,10 +135,33 @@ async fn main() -> Result<()> {
             SourceSpec::Url(url.clone())
         }
         InputSource::LocalFile(path) => SourceSpec::Path(path.clone()),
+        InputSource::Stdin => {
+            // A terminal on stdin means nothing is piped in: say so instead
+            // of blocking on a header that never comes.
+            if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                anyhow::bail!(
+                    "--stdin: standard input is a terminal, not a pipe; nothing would be read.\n\
+                     Pipe a capture in, e.g. tcpdump -U -w - -i eth0 | pcapsql --stdin -e \"SELECT count(*) FROM frames\""
+                );
+            }
+            // Reads the capture header now (blocking until the producer has
+            // written it); the packets are read by the query.
+            let source = StdinPacketSource::stdin()
+                .context("Failed to read a capture header from standard input")?;
+            if args.verbose > 0 {
+                eprintln!(
+                    "Reading the capture from stdin: {:?}, compression {}, link type {}",
+                    source.format(),
+                    source.compression(),
+                    source.link_type()
+                );
+            }
+            SourceSpec::Sequential(source)
+        }
     };
 
     // One-shot invocations retain nothing; the REPL caches touched tables.
-    let retention = if args.query.is_some() || args.query_file.is_some() {
+    let retention = if one_shot {
         pcapsql_datafusion::query::RetentionPolicy::None
     } else {
         pcapsql_datafusion::query::RetentionPolicy::CacheOnTouch
@@ -146,41 +205,8 @@ async fn main() -> Result<()> {
         None
     };
 
-    // Execute query from -e flag
-    if let Some(query) = args.query {
-        let query = apply_bpf_filter(&query, &bpf_filter);
-        let output = engine.execute(&query).await;
-        finish_progress();
-        let QueryOutput { batches, stats } = output?;
-
-        // Export if output file specified
-        if let Some(output_path) = &args.output {
-            let export_format = args
-                .export_format
-                .or_else(|| ExportFormat::from_extension(output_path))
-                .unwrap_or(ExportFormat::Parquet);
-
-            let rows = Exporter::export(output_path, export_format, &batches)?;
-            eprintln!("Exported {} rows to {}", rows, output_path.display());
-        } else {
-            // Print to stdout
-            let mut stdout = io::stdout();
-            formatter.write_batches(&batches, &mut stdout)?;
-        }
-
-        // Show parse/partition stats if requested
-        if args.show_stats {
-            print_parse_stats(&stats);
-        }
-
-        return Ok(());
-    }
-
-    // Execute query from -f file
-    if let Some(query_file) = args.query_file {
-        let query = std::fs::read_to_string(&query_file)
-            .with_context(|| format!("Failed to read query file: {}", query_file.display()))?;
-
+    // One-shot query (-e / -f)
+    if let Some(query) = one_shot_sql {
         let query = apply_bpf_filter(&query, &bpf_filter);
         let output = engine.execute(&query).await;
         finish_progress();
