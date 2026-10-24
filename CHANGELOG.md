@@ -187,6 +187,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   timestamp (`tumble(tcp, …)`) is a planning error that names the view to use;
   so is a hop with more than 10,000 windows per row. `session` buffers its
   pruned input (accounted to the memory pool) before emitting.
+- Continuous queries over a live capture: `pcapsql --continuous -e "SELECT
+  window_start, count(*) FROM tumble(frames, INTERVAL '10' SECOND) GROUP BY 1"`
+  (implies `--stdin`) treats the piped capture as an unbounded stream and
+  prints each window as soon as the stream's event time has passed its end
+  (plus `--allowed-lateness`, default 1 s). A `GROUP BY window_start` over
+  `tumble()` / `hop()` is planned as a fused `StreamingWindowAggregateExec`
+  with per-(window, group) state, a per-row watermark and bounded memory;
+  rows for an already emitted window are dropped and counted (`late_rows` in
+  `ParseStats`, `--stats`). Partial batches are handed on after
+  `--flush-interval` (default 1 s); `--idle-timeout N` closes open windows
+  after N seconds without input; CSV/JSON headers print once; Ctrl-C prints
+  `--stats` and exits. Library: `EngineOptions { continuous, allowed_lateness,
+  flush_interval, idle_timeout }` and `QueryEngine::execute_stream(sql) ->
+  QueryStream` (a `Stream` of batches owning the query's context; `finish()`
+  returns its `ParseStats`), usable on any engine. Queries that need the
+  whole stream (sorts, limits, joins — including the `*_packets` views —,
+  `session()`, aggregates without `GROUP BY window_start`, stream tables) are
+  rejected at planning with a message naming the supported shape; the source
+  of a continuous query is `frames`.
 
 ## [0.4.0] - 2026-10-23
 

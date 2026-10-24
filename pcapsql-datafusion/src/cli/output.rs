@@ -36,6 +36,31 @@ impl OutputFormatter {
         }
     }
 
+    /// Append one batch of a continuous result: CSV writes its header before
+    /// the first non-empty batch only, JSON lines need none, and the table
+    /// format renders one table per batch (each closed window).
+    pub fn write_incremental<W: Write>(
+        &self,
+        batch: &RecordBatch,
+        writer: &mut W,
+        header_written: &mut bool,
+    ) -> std::io::Result<()> {
+        if batch.num_rows() == 0 {
+            return Ok(());
+        }
+        match self.format {
+            OutputFormat::Table | OutputFormat::Json => self.write(batch, writer),
+            OutputFormat::Csv => {
+                if *header_written {
+                    self.write_csv_rows(batch, writer)
+                } else {
+                    *header_written = true;
+                    self.write_csv(batch, writer)
+                }
+            }
+        }
+    }
+
     /// Format multiple RecordBatches and write to the given writer as a single combined result.
     pub fn write_batches<W: Write>(
         &self,
@@ -126,14 +151,16 @@ impl OutputFormatter {
     }
 
     fn write_csv<W: Write>(&self, batch: &RecordBatch, writer: &mut W) -> std::io::Result<()> {
-        let address_kinds = Self::detect_address_columns(batch.schema().as_ref());
-
         // Write header
         let schema = batch.schema();
         let headers: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         writeln!(writer, "{}", headers.join(","))?;
+        self.write_csv_rows(batch, writer)
+    }
 
-        // Write rows
+    /// The rows of one batch as CSV, without a header.
+    fn write_csv_rows<W: Write>(&self, batch: &RecordBatch, writer: &mut W) -> std::io::Result<()> {
+        let address_kinds = Self::detect_address_columns(batch.schema().as_ref());
         for row_idx in 0..batch.num_rows() {
             let mut values = Vec::with_capacity(batch.num_columns());
             for (col_idx, col) in batch.columns().iter().enumerate() {

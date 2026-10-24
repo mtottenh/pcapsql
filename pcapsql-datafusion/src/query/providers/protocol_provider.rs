@@ -245,6 +245,10 @@ pub struct ProtocolTableProvider {
     /// Nominal partition count reported by a plan-only scan (the engine's
     /// parse parallelism).
     default_partitions: usize,
+    /// The engine reads an unbounded stream (continuous mode): every scan,
+    /// plan-only ones included, is marked unbounded so plans are checked and
+    /// displayed as what will run.
+    unbounded: bool,
 }
 
 impl ProtocolTableProvider {
@@ -253,6 +257,21 @@ impl ProtocolTableProvider {
             table_name,
             schema,
             default_partitions,
+            unbounded: false,
+        }
+    }
+
+    /// Mark every scan of this table as reading an unbounded stream.
+    pub fn with_unbounded(mut self, unbounded: bool) -> Self {
+        self.unbounded = unbounded;
+        self
+    }
+
+    fn finish_exec(&self, exec: ProtocolScanExec) -> Arc<dyn ExecutionPlan> {
+        if self.unbounded {
+            Arc::new(exec.unbounded())
+        } else {
+            Arc::new(exec)
         }
     }
 
@@ -309,7 +328,7 @@ impl ProtocolTableProvider {
                 remapped,
             ),
         };
-        Ok(Arc::new(exec))
+        Ok(self.finish_exec(exec))
     }
 }
 
@@ -360,7 +379,7 @@ impl TableProvider for ProtocolTableProvider {
             // No query context: the statement is plan-only (EXPLAIN) or
             // bypassed `QueryEngine::query`. Plan over the full schema; fail
             // at execute.
-            return Ok(Arc::new(ProtocolScanExec::plan_only(
+            return Ok(self.finish_exec(ProtocolScanExec::plan_only(
                 self.table_name.clone(),
                 self.schema.clone(),
                 projection.cloned(),

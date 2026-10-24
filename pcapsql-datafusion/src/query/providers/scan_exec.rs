@@ -101,6 +101,21 @@ impl ProtocolScanExec {
         )
     }
 
+    /// Mark the scan as reading an unbounded stream (a continuous engine):
+    /// DataFusion then refuses operators that need the whole input, and the
+    /// fused streaming window aggregate takes over `GROUP BY window_start`.
+    pub fn unbounded(mut self) -> Self {
+        self.properties = self.properties.with_boundedness(Boundedness::Unbounded {
+            requires_infinite_memory: false,
+        });
+        self
+    }
+
+    /// Whether the scan reads an unbounded stream.
+    pub fn is_unbounded(&self) -> bool {
+        self.properties.boundedness.is_unbounded()
+    }
+
     /// Plan-only scan over the table's full schema for a table that was not
     /// prepared for the query being planned. `partitions` is the nominal
     /// partition count to display; `execute` fails.
@@ -289,9 +304,14 @@ impl DisplayAs for ProtocolScanExec {
                 };
                 write!(
                     f,
-                    "ProtocolScanExec: table={}, mode={mode}, partitions={}",
+                    "ProtocolScanExec: table={}, mode={mode}, partitions={}{}",
                     self.table_name,
-                    self.source.num_partitions()
+                    self.source.num_partitions(),
+                    if self.is_unbounded() {
+                        ", unbounded"
+                    } else {
+                        ""
+                    }
                 )
             }
         }
