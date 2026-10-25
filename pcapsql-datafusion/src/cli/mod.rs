@@ -3,7 +3,7 @@
 //! This module handles:
 //! - Argument parsing via clap
 //! - Interactive REPL via rustyline
-//! - Output formatting (table, CSV, JSON)
+//! - Output formatting (table, CSV, JSON, raw)
 //! - Export functionality (Parquet, JSON, CSV, SQLite files)
 //! - URI handling and cloud storage detection
 

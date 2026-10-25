@@ -12,6 +12,8 @@ pub enum OutputFormat {
     Csv,
     /// JSON Lines (one JSON object per row)
     Json,
+    /// Values only: no header, no quoting, tab-separated columns
+    Raw,
 }
 
 /// Parse size string like "512M" or "1G" into bytes.
