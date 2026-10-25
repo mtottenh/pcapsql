@@ -413,35 +413,51 @@ fn output_parsed_row(
                     vector.set_null(row_idx);
                 }
                 FieldValue::Bool(v) => {
-                    let slice = vector.as_mut_slice::<bool>();
+                    // SAFETY: bool matches the vector's physical storage and we hold
+                    // an exclusive borrow of the vector.
+                    let slice = unsafe { vector.as_mut_slice::<bool>() };
                     slice[row_idx] = *v;
                 }
                 FieldValue::UInt8(v) => {
-                    let slice = vector.as_mut_slice::<u8>();
+                    // SAFETY: u8 matches the vector's physical storage and we hold an
+                    // exclusive borrow of the vector.
+                    let slice = unsafe { vector.as_mut_slice::<u8>() };
                     slice[row_idx] = *v;
                 }
                 FieldValue::UInt16(v) => {
-                    let slice = vector.as_mut_slice::<u16>();
+                    // SAFETY: u16 matches the vector's physical storage and we hold an
+                    // exclusive borrow of the vector.
+                    let slice = unsafe { vector.as_mut_slice::<u16>() };
                     slice[row_idx] = *v;
                 }
                 FieldValue::UInt32(v) => {
-                    let slice = vector.as_mut_slice::<u32>();
+                    // SAFETY: u32 matches the vector's physical storage and we hold an
+                    // exclusive borrow of the vector.
+                    let slice = unsafe { vector.as_mut_slice::<u32>() };
                     slice[row_idx] = *v;
                 }
                 FieldValue::UInt64(v) => {
-                    let slice = vector.as_mut_slice::<u64>();
+                    // SAFETY: u64 matches the vector's physical storage and we hold an
+                    // exclusive borrow of the vector.
+                    let slice = unsafe { vector.as_mut_slice::<u64>() };
                     slice[row_idx] = *v;
                 }
                 FieldValue::Int8(v) => {
-                    let slice = vector.as_mut_slice::<i8>();
+                    // SAFETY: i8 matches the vector's physical storage and we hold an
+                    // exclusive borrow of the vector.
+                    let slice = unsafe { vector.as_mut_slice::<i8>() };
                     slice[row_idx] = *v;
                 }
                 FieldValue::Int64(v) => {
-                    let slice = vector.as_mut_slice::<i64>();
+                    // SAFETY: i64 matches the vector's physical storage and we hold an
+                    // exclusive borrow of the vector.
+                    let slice = unsafe { vector.as_mut_slice::<i64>() };
                     slice[row_idx] = *v;
                 }
                 FieldValue::Float64(v) => {
-                    let slice = vector.as_mut_slice::<f64>();
+                    // SAFETY: f64 matches the vector's physical storage and we hold an
+                    // exclusive borrow of the vector.
+                    let slice = unsafe { vector.as_mut_slice::<f64>() };
                     slice[row_idx] = *v;
                 }
                 FieldValue::Str(v) => {

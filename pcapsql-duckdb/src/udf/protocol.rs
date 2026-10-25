@@ -28,14 +28,16 @@ pub struct TcpFlagsStrScalar;
 impl VScalar for TcpFlagsStrScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let len = input.len();
         let flags_vec = input.flat_vector(0);
-        let flags_slice = flags_vec.as_slice_with_len::<u16>(len);
+        // SAFETY: u16 matches the vector's physical storage and the backing
+        // allocation covers the chunk's `len` rows.
+        let flags_slice = unsafe { flags_vec.as_slice_with_len::<u16>(len) };
 
         let mut out = output.flat_vector();
 
@@ -70,7 +72,7 @@ pub struct HasTcpFlagScalar;
 impl VScalar for HasTcpFlagScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
@@ -79,11 +81,17 @@ impl VScalar for HasTcpFlagScalar {
         let flags_vec = input.flat_vector(0);
         let name_vec = input.flat_vector(1);
 
-        let flags_slice = flags_vec.as_slice_with_len::<u16>(len);
-        let name_slice = name_vec.as_slice_with_len::<duckdb_string_t>(len);
+        // SAFETY: u16 matches the vector's physical storage and the backing
+        // allocation covers the chunk's `len` rows.
+        let flags_slice = unsafe { flags_vec.as_slice_with_len::<u16>(len) };
+        // SAFETY: duckdb_string_t matches the vector's physical storage and the
+        // backing allocation covers the chunk's `len` rows.
+        let name_slice = unsafe { name_vec.as_slice_with_len::<duckdb_string_t>(len) };
 
         let mut out = output.flat_vector();
-        let out_ptr = out.as_mut_ptr::<bool>();
+        // SAFETY: bool matches the output vector's physical storage; writes below
+        // only touch rows i < len.
+        let out_ptr = unsafe { out.as_mut_ptr::<bool>() };
 
         for i in 0..len {
             if flags_vec.row_is_null(i as u64) || name_vec.row_is_null(i as u64) {
@@ -94,7 +102,8 @@ impl VScalar for HasTcpFlagScalar {
             let flags = flags_slice[i];
             let mut name_val = name_slice[i];
             let name = DuckString::new(&mut name_val).as_str();
-            std::ptr::write(out_ptr.add(i), check_tcp_flag(flags, &name));
+            // SAFETY: out_ptr points into the output vector's data and i < len.
+            unsafe { std::ptr::write(out_ptr.add(i), check_tcp_flag(flags, &name)) };
         }
         Ok(())
     }
@@ -120,14 +129,16 @@ pub struct DnsTypeNameScalar;
 impl VScalar for DnsTypeNameScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let len = input.len();
         let type_vec = input.flat_vector(0);
-        let type_slice = type_vec.as_slice_with_len::<u16>(len);
+        // SAFETY: u16 matches the vector's physical storage and the backing
+        // allocation covers the chunk's `len` rows.
+        let type_slice = unsafe { type_vec.as_slice_with_len::<u16>(len) };
 
         let mut out = output.flat_vector();
 
@@ -162,14 +173,16 @@ pub struct DnsRcodeNameScalar;
 impl VScalar for DnsRcodeNameScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let len = input.len();
         let rcode_vec = input.flat_vector(0);
-        let rcode_slice = rcode_vec.as_slice_with_len::<u16>(len);
+        // SAFETY: u16 matches the vector's physical storage and the backing
+        // allocation covers the chunk's `len` rows.
+        let rcode_slice = unsafe { rcode_vec.as_slice_with_len::<u16>(len) };
 
         let mut out = output.flat_vector();
 
@@ -204,14 +217,16 @@ pub struct IpProtoNameScalar;
 impl VScalar for IpProtoNameScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let len = input.len();
         let proto_vec = input.flat_vector(0);
-        let proto_slice = proto_vec.as_slice_with_len::<u8>(len);
+        // SAFETY: u8 matches the vector's physical storage and the backing
+        // allocation covers the chunk's `len` rows.
+        let proto_slice = unsafe { proto_vec.as_slice_with_len::<u8>(len) };
 
         let mut out = output.flat_vector();
 
@@ -246,14 +261,16 @@ pub struct EthertypeNameScalar;
 impl VScalar for EthertypeNameScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let len = input.len();
         let etype_vec = input.flat_vector(0);
-        let etype_slice = etype_vec.as_slice_with_len::<u16>(len);
+        // SAFETY: u16 matches the vector's physical storage and the backing
+        // allocation covers the chunk's `len` rows.
+        let etype_slice = unsafe { etype_vec.as_slice_with_len::<u16>(len) };
 
         let mut out = output.flat_vector();
 

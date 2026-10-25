@@ -171,7 +171,9 @@ impl VTab for PcapProtocolsVTab {
             // field_count (column 2)
             {
                 let mut vector = output.flat_vector(2);
-                let slice = vector.as_mut_slice::<u32>();
+                // SAFETY: u32 matches the vector's physical storage and we hold an
+                // exclusive borrow of the vector.
+                let slice = unsafe { vector.as_mut_slice::<u32>() };
                 slice[i] = proto.field_count as u32;
             }
         }
@@ -333,7 +335,9 @@ impl VTab for PcapSchemaVTab {
             // nullable (column 2)
             {
                 let mut vector = output.flat_vector(2);
-                let slice = vector.as_mut_slice::<bool>();
+                // SAFETY: bool matches the vector's physical storage and we hold an
+                // exclusive borrow of the vector.
+                let slice = unsafe { vector.as_mut_slice::<bool>() };
                 slice[i] = field.nullable;
             }
         }
