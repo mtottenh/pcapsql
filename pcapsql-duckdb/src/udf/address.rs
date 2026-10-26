@@ -30,17 +30,21 @@ pub struct Ip4Scalar;
 impl VScalar for Ip4Scalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let len = input.len();
         let strings = input.flat_vector(0);
-        let string_slice = strings.as_slice_with_len::<duckdb_string_t>(len);
+        // SAFETY: duckdb_string_t matches the vector's physical storage and the
+        // backing allocation covers the chunk's `len` rows.
+        let string_slice = unsafe { strings.as_slice_with_len::<duckdb_string_t>(len) };
 
         let mut out = output.flat_vector();
-        let out_ptr = out.as_mut_ptr::<u32>();
+        // SAFETY: u32 matches the output vector's physical storage; writes below
+        // only touch rows i < len.
+        let out_ptr = unsafe { out.as_mut_ptr::<u32>() };
 
         for i in 0..len {
             if strings.row_is_null(i as u64) {
@@ -52,7 +56,8 @@ impl VScalar for Ip4Scalar {
             let s = DuckString::new(&mut str_val).as_str();
             match Ipv4Addr::from_str(&s) {
                 Ok(addr) => {
-                    std::ptr::write(out_ptr.add(i), u32::from(addr));
+                    // SAFETY: out_ptr points into the output vector's data and i < len.
+                    unsafe { std::ptr::write(out_ptr.add(i), u32::from(addr)) };
                 }
                 Err(_) => {
                     out.set_null(i);
@@ -80,14 +85,16 @@ pub struct Ip4ToStringScalar;
 impl VScalar for Ip4ToStringScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let len = input.len();
         let values = input.flat_vector(0);
-        let value_slice = values.as_slice_with_len::<u32>(len);
+        // SAFETY: u32 matches the vector's physical storage and the backing
+        // allocation covers the chunk's `len` rows.
+        let value_slice = unsafe { values.as_slice_with_len::<u32>(len) };
 
         let mut out = output.flat_vector();
 
@@ -121,14 +128,16 @@ pub struct Ip6Scalar;
 impl VScalar for Ip6Scalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let len = input.len();
         let strings = input.flat_vector(0);
-        let string_slice = strings.as_slice_with_len::<duckdb_string_t>(len);
+        // SAFETY: duckdb_string_t matches the vector's physical storage and the
+        // backing allocation covers the chunk's `len` rows.
+        let string_slice = unsafe { strings.as_slice_with_len::<duckdb_string_t>(len) };
 
         let mut out = output.flat_vector();
 
@@ -171,14 +180,16 @@ pub struct Ip6ToStringScalar;
 impl VScalar for Ip6ToStringScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let len = input.len();
         let values = input.flat_vector(0);
-        let value_slice = values.as_slice_with_len::<duckdb_string_t>(len);
+        // SAFETY: duckdb_string_t matches the vector's physical storage and the
+        // backing allocation covers the chunk's `len` rows.
+        let value_slice = unsafe { values.as_slice_with_len::<duckdb_string_t>(len) };
 
         let mut out = output.flat_vector();
 
@@ -223,14 +234,16 @@ pub struct MacScalar;
 impl VScalar for MacScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let len = input.len();
         let strings = input.flat_vector(0);
-        let string_slice = strings.as_slice_with_len::<duckdb_string_t>(len);
+        // SAFETY: duckdb_string_t matches the vector's physical storage and the
+        // backing allocation covers the chunk's `len` rows.
+        let string_slice = unsafe { strings.as_slice_with_len::<duckdb_string_t>(len) };
 
         let mut out = output.flat_vector();
 
@@ -272,14 +285,16 @@ pub struct MacToStringScalar;
 impl VScalar for MacToStringScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let len = input.len();
         let values = input.flat_vector(0);
-        let value_slice = values.as_slice_with_len::<duckdb_string_t>(len);
+        // SAFETY: duckdb_string_t matches the vector's physical storage and the
+        // backing allocation covers the chunk's `len` rows.
+        let value_slice = unsafe { values.as_slice_with_len::<duckdb_string_t>(len) };
 
         let mut out = output.flat_vector();
 

@@ -25,14 +25,16 @@ pub struct PcapHexScalar;
 impl VScalar for PcapHexScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let len = input.len();
         let blob_vec = input.flat_vector(0);
-        let blob_slice = blob_vec.as_slice_with_len::<duckdb_string_t>(len);
+        // SAFETY: duckdb_string_t matches the vector's physical storage and the
+        // backing allocation covers the chunk's `len` rows.
+        let blob_slice = unsafe { blob_vec.as_slice_with_len::<duckdb_string_t>(len) };
 
         let mut out = output.flat_vector();
 
@@ -69,14 +71,16 @@ pub struct PcapUnhexScalar;
 impl VScalar for PcapUnhexScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let len = input.len();
         let str_vec = input.flat_vector(0);
-        let str_slice = str_vec.as_slice_with_len::<duckdb_string_t>(len);
+        // SAFETY: duckdb_string_t matches the vector's physical storage and the
+        // backing allocation covers the chunk's `len` rows.
+        let str_slice = unsafe { str_vec.as_slice_with_len::<duckdb_string_t>(len) };
 
         let mut out = output.flat_vector();
 

@@ -23,7 +23,7 @@ pub struct IpInCidrScalar;
 impl VScalar for IpInCidrScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
@@ -32,11 +32,15 @@ impl VScalar for IpInCidrScalar {
         let ip_vec = input.flat_vector(0);
         let cidr_vec = input.flat_vector(1);
 
-        let ip_slice = ip_vec.as_slice_with_len::<u32>(len);
-        let cidr_slice = cidr_vec.as_slice_with_len::<duckdb_string_t>(len);
+        // SAFETY: the element types match each vector's physical storage and the
+        // backing allocations cover the chunk's `len` rows.
+        let ip_slice = unsafe { ip_vec.as_slice_with_len::<u32>(len) };
+        let cidr_slice = unsafe { cidr_vec.as_slice_with_len::<duckdb_string_t>(len) };
 
         let mut out = output.flat_vector();
-        let out_ptr = out.as_mut_ptr::<bool>();
+        // SAFETY: bool matches the output vector's physical storage; writes below
+        // only touch rows i < len.
+        let out_ptr = unsafe { out.as_mut_ptr::<bool>() };
 
         for i in 0..len {
             if ip_vec.row_is_null(i as u64) || cidr_vec.row_is_null(i as u64) {
@@ -50,7 +54,10 @@ impl VScalar for IpInCidrScalar {
 
             match parse_cidr_v4(&cidr_str) {
                 Some((network, prefix_len)) => {
-                    std::ptr::write(out_ptr.add(i), ipv4_in_cidr(ip, network, prefix_len));
+                    // SAFETY: out_ptr points into the output vector's data and i < len.
+                    unsafe {
+                        std::ptr::write(out_ptr.add(i), ipv4_in_cidr(ip, network, prefix_len))
+                    };
                 }
                 None => {
                     out.set_null(i);
@@ -81,7 +88,7 @@ pub struct Ip6InCidrScalar;
 impl VScalar for Ip6InCidrScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
@@ -90,11 +97,15 @@ impl VScalar for Ip6InCidrScalar {
         let ip_vec = input.flat_vector(0);
         let cidr_vec = input.flat_vector(1);
 
-        let ip_slice = ip_vec.as_slice_with_len::<duckdb_string_t>(len);
-        let cidr_slice = cidr_vec.as_slice_with_len::<duckdb_string_t>(len);
+        // SAFETY: duckdb_string_t matches each vector's physical storage and the
+        // backing allocations cover the chunk's `len` rows.
+        let ip_slice = unsafe { ip_vec.as_slice_with_len::<duckdb_string_t>(len) };
+        let cidr_slice = unsafe { cidr_vec.as_slice_with_len::<duckdb_string_t>(len) };
 
         let mut out = output.flat_vector();
-        let out_ptr = out.as_mut_ptr::<bool>();
+        // SAFETY: bool matches the output vector's physical storage; writes below
+        // only touch rows i < len.
+        let out_ptr = unsafe { out.as_mut_ptr::<bool>() };
 
         for i in 0..len {
             if ip_vec.row_is_null(i as u64) || cidr_vec.row_is_null(i as u64) {
@@ -116,10 +127,13 @@ impl VScalar for Ip6InCidrScalar {
 
             match parse_cidr_v6(&cidr_str) {
                 Some((network, prefix_len)) => {
-                    std::ptr::write(
-                        out_ptr.add(i),
-                        ipv6_in_prefix(ip_bytes, &network, prefix_len),
-                    );
+                    // SAFETY: out_ptr points into the output vector's data and i < len.
+                    unsafe {
+                        std::ptr::write(
+                            out_ptr.add(i),
+                            ipv6_in_prefix(ip_bytes, &network, prefix_len),
+                        )
+                    };
                 }
                 None => {
                     out.set_null(i);

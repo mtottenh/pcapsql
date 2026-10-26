@@ -120,12 +120,16 @@ impl ListColumnBuilder {
         match self.value_type {
             ListValueType::UInt16 => {
                 let mut child = list_vector.child(total_elements);
-                child.copy(&self.uint16_values);
+                // SAFETY: u16 matches the child vector's physical storage; the child
+                // was created with capacity for all accumulated values.
+                unsafe { child.copy(&self.uint16_values) };
                 list_vector.set_len(total_elements);
             }
             ListValueType::UInt32 => {
                 let mut child = list_vector.child(total_elements);
-                child.copy(&self.uint32_values);
+                // SAFETY: u32 matches the child vector's physical storage; the child
+                // was created with capacity for all accumulated values.
+                unsafe { child.copy(&self.uint32_values) };
                 list_vector.set_len(total_elements);
             }
             ListValueType::String => {
@@ -272,35 +276,51 @@ pub fn insert_field_value(vector: &mut FlatVector, row_idx: usize, value: &Field
             vector.set_null(row_idx);
         }
         FieldValue::Bool(v) => {
-            let slice = vector.as_mut_slice::<bool>();
+            // SAFETY: bool matches the vector's physical storage and we hold an
+            // exclusive borrow of the vector.
+            let slice = unsafe { vector.as_mut_slice::<bool>() };
             slice[row_idx] = *v;
         }
         FieldValue::UInt8(v) => {
-            let slice = vector.as_mut_slice::<u8>();
+            // SAFETY: u8 matches the vector's physical storage and we hold an
+            // exclusive borrow of the vector.
+            let slice = unsafe { vector.as_mut_slice::<u8>() };
             slice[row_idx] = *v;
         }
         FieldValue::UInt16(v) => {
-            let slice = vector.as_mut_slice::<u16>();
+            // SAFETY: u16 matches the vector's physical storage and we hold an
+            // exclusive borrow of the vector.
+            let slice = unsafe { vector.as_mut_slice::<u16>() };
             slice[row_idx] = *v;
         }
         FieldValue::UInt32(v) => {
-            let slice = vector.as_mut_slice::<u32>();
+            // SAFETY: u32 matches the vector's physical storage and we hold an
+            // exclusive borrow of the vector.
+            let slice = unsafe { vector.as_mut_slice::<u32>() };
             slice[row_idx] = *v;
         }
         FieldValue::UInt64(v) => {
-            let slice = vector.as_mut_slice::<u64>();
+            // SAFETY: u64 matches the vector's physical storage and we hold an
+            // exclusive borrow of the vector.
+            let slice = unsafe { vector.as_mut_slice::<u64>() };
             slice[row_idx] = *v;
         }
         FieldValue::Int8(v) => {
-            let slice = vector.as_mut_slice::<i8>();
+            // SAFETY: i8 matches the vector's physical storage and we hold an
+            // exclusive borrow of the vector.
+            let slice = unsafe { vector.as_mut_slice::<i8>() };
             slice[row_idx] = *v;
         }
         FieldValue::Int64(v) => {
-            let slice = vector.as_mut_slice::<i64>();
+            // SAFETY: i64 matches the vector's physical storage and we hold an
+            // exclusive borrow of the vector.
+            let slice = unsafe { vector.as_mut_slice::<i64>() };
             slice[row_idx] = *v;
         }
         FieldValue::Float64(v) => {
-            let slice = vector.as_mut_slice::<f64>();
+            // SAFETY: f64 matches the vector's physical storage and we hold an
+            // exclusive borrow of the vector.
+            let slice = unsafe { vector.as_mut_slice::<f64>() };
             slice[row_idx] = *v;
         }
         FieldValue::Str(v) => {
@@ -359,28 +379,36 @@ pub fn insert_null(vector: &mut FlatVector, row_idx: usize) {
 /// Insert a u64 value (for frame_number column).
 #[inline]
 pub fn insert_u64(vector: &mut FlatVector, row_idx: usize, value: u64) {
-    let slice = vector.as_mut_slice::<u64>();
+    // SAFETY: u64 matches the vector's physical storage and we hold an
+    // exclusive borrow of the vector.
+    let slice = unsafe { vector.as_mut_slice::<u64>() };
     slice[row_idx] = value;
 }
 
 /// Insert a u32 value.
 #[inline]
 pub fn insert_u32(vector: &mut FlatVector, row_idx: usize, value: u32) {
-    let slice = vector.as_mut_slice::<u32>();
+    // SAFETY: u32 matches the vector's physical storage and we hold an
+    // exclusive borrow of the vector.
+    let slice = unsafe { vector.as_mut_slice::<u32>() };
     slice[row_idx] = value;
 }
 
 /// Insert a u16 value.
 #[inline]
 pub fn insert_u16(vector: &mut FlatVector, row_idx: usize, value: u16) {
-    let slice = vector.as_mut_slice::<u16>();
+    // SAFETY: u16 matches the vector's physical storage and we hold an
+    // exclusive borrow of the vector.
+    let slice = unsafe { vector.as_mut_slice::<u16>() };
     slice[row_idx] = value;
 }
 
 /// Insert an i64 value (for timestamps).
 #[inline]
 pub fn insert_i64(vector: &mut FlatVector, row_idx: usize, value: i64) {
-    let slice = vector.as_mut_slice::<i64>();
+    // SAFETY: i64 matches the vector's physical storage and we hold an
+    // exclusive borrow of the vector.
+    let slice = unsafe { vector.as_mut_slice::<i64>() };
     slice[row_idx] = value;
 }
 
