@@ -105,6 +105,132 @@ jobs:
           name: rpm-${{ matrix.distro }}-${{ matrix.version }}
           path: target/generate-rpm/*.rpm
 
+  apt-repo:
+    needs: [build-deb]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download deb artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: deb-*
+          path: packages
+
+      - name: Install reprepro
+        run: sudo apt-get update && sudo apt-get install -y reprepro
+
+      - name: Import GPG signing key
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.APT_REPO_GPG_PRIVATE_KEY }}
+        run: |
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+          KEYID=$(gpg --list-secret-keys --with-colons | awk -F: '/^sec/ {print $5; exit}')
+          echo "KEYID=$KEYID" >> "$GITHUB_ENV"
+
+      - name: Check out existing gh-pages branch (or create empty repo tree)
+        run: |
+          if git ls-remote --exit-code --heads origin gh-pages >/dev/null 2>&1; then
+            git fetch origin gh-pages
+            git worktree add repo gh-pages
+          else
+            mkdir -p repo
+            git -C repo init -b gh-pages
+            git -C repo remote add origin "$(git config --get remote.origin.url)"
+          fi
+
+      - name: Write reprepro configuration
+        env:
+          KEYID: ${{ env.KEYID }}
+        run: |
+          mkdir -p repo/conf
+          printf 'db/\nconf/\n' > repo/.gitignore
+          cat > repo/conf/distributions <<'EOF'
+          Origin: pcapsql
+          Label: pcapsql apt repository
+          Codename: focal
+          Architectures: amd64
+          Components: main
+          Description: pcapsql packages built for Ubuntu 20.04
+          SignWith: __KEYID__
+
+          Origin: pcapsql
+          Label: pcapsql apt repository
+          Codename: jammy
+          Architectures: amd64
+          Components: main
+          Description: pcapsql packages built for Ubuntu 22.04
+          SignWith: __KEYID__
+
+          Origin: pcapsql
+          Label: pcapsql apt repository
+          Codename: noble
+          Architectures: amd64
+          Components: main
+          Description: pcapsql packages built for Ubuntu 24.04
+          SignWith: __KEYID__
+
+          Origin: pcapsql
+          Label: pcapsql apt repository
+          Codename: bullseye
+          Architectures: amd64
+          Components: main
+          Description: pcapsql packages built for Debian 11
+          SignWith: __KEYID__
+
+          Origin: pcapsql
+          Label: pcapsql apt repository
+          Codename: bookworm
+          Architectures: amd64
+          Components: main
+          Description: pcapsql packages built for Debian 12
+          SignWith: __KEYID__
+
+          Origin: pcapsql
+          Label: pcapsql apt repository
+          Codename: trixie
+          Architectures: amd64
+          Components: main
+          Description: pcapsql packages built for Debian 13
+          SignWith: __KEYID__
+          EOF
+          sed -i "s/__KEYID__/$KEYID/" repo/conf/distributions
+
+      - name: Add packages to repository and sign
+        run: |
+          set -e
+          for dir in packages/deb-*; do
+            [ -d "$dir" ] || continue
+            name=$(basename "$dir")
+            case "$name" in
+              deb-ubuntu-20.04) codename=focal ;;
+              deb-ubuntu-22.04) codename=jammy ;;
+              deb-ubuntu-24.04) codename=noble ;;
+              deb-debian-11)    codename=bullseye ;;
+              deb-debian-12)    codename=bookworm ;;
+              deb-debian-13)    codename=trixie ;;
+              *) echo "Unknown suite for $name, skipping"; continue ;;
+            esac
+            reprepro --nothingiserror -b repo includedeb "$codename" "$dir"/*.deb
+          done
+          reprepro -b repo export
+
+      - name: Publish public GPG key
+        run: gpg --armor --export "$KEYID" > repo/pcapsql.asc
+
+      - name: Push to gh-pages
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd repo
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Update apt repository for ${GITHUB_REF_NAME}" || echo "No changes to commit"
+          git push origin HEAD:gh-pages
+
   release:
     needs: [build-deb, build-rpm]
     runs-on: ubuntu-latest
