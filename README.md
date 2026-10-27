@@ -20,6 +20,26 @@ Download the latest release for your distribution from [GitHub Releases](https:/
 | ![Rocky Linux](https://img.shields.io/badge/Rocky_Linux-10B981?logo=rockylinux&logoColor=white) | 9, 10 | `.rpm` |
 | ![Arch Linux](https://img.shields.io/badge/Arch_Linux-1793D1?logo=archlinux&logoColor=white) | Rolling | [AUR](https://aur.archlinux.org/packages/pcapsql) |
 
+### apt Repository (Debian/Ubuntu)
+
+See [docs/apt-repo.md](docs/apt-repo.md) for details.
+
+```bash
+curl -fsSL https://mtottenh.github.io/pcapsql/pcapsql.asc \
+  | sudo gpg --dearmor -o /usr/share/keyrings/pcapsql.gpg
+
+echo "deb [signed-by=/usr/share/keyrings/pcapsql.gpg] \
+https://mtottenh.github.io/pcapsql/ noble main" \
+  | sudo tee /etc/apt/sources.list.d/pcapsql.list
+
+sudo apt update && sudo apt install pcapsql-datafusion
+```
+
+Codenames by release: Ubuntu 20.04 `focal`, 22.04 `jammy`, 24.04
+`noble`; Debian 11 `bullseye`, 12 `bookworm`, 13 `trixie`.
+
+### One-off Package Downloads
+
 ```bash
 # Debian/Ubuntu
 sudo dpkg -i pcapsql_*.deb

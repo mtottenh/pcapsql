@@ -4,12 +4,23 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to release (e.g. v1.2.3)'
+        required: true
+        type: string
 
 env:
   CARGO_TERM_COLOR: always
+  RELEASE_REF: ${{ github.event.inputs.tag || github.ref }}
+  RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
 
 jobs:
   build-deb:
+    # On manual dispatch we rebuild nothing; the apt repo is refreshed
+    # from the packages already published on the GitHub release.
+    if: github.event_name != 'workflow_dispatch'
     strategy:
       matrix:
         include:
@@ -35,6 +46,8 @@ jobs:
     container: ${{ matrix.container }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_REF }}
 
       - name: Install build dependencies
         env:
@@ -63,6 +76,7 @@ jobs:
           path: target/debian/*.deb
 
   build-rpm:
+    if: github.event_name != 'workflow_dispatch'
     strategy:
       matrix:
         include:
@@ -85,6 +99,8 @@ jobs:
     container: ${{ matrix.container }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_REF }}
 
       - name: Install build dependencies
         run: |
@@ -106,18 +122,27 @@ jobs:
           path: target/generate-rpm/*.rpm
 
   apt-repo:
-    needs: [build-deb]
+    needs: [release]
+    # On manual dispatch, 'release' is skipped; still run to refresh the
+    # apt repository from the existing release assets.
+    if: ${{ github.event_name == 'workflow_dispatch' || needs.release.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
-
-      - name: Download deb artifacts
-        uses: actions/download-artifact@v4
         with:
-          pattern: deb-*
-          path: packages
+          ref: ${{ env.RELEASE_REF }}
+
+      # Download the .debs published on the GitHub release itself, so the
+      # apt repository always serves exactly what the release page does.
+      - name: Download deb packages from GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p packages
+          gh release download "$RELEASE_TAG" -p '*.deb' -D packages
+          ls -la packages/
 
       - name: Install reprepro
         run: sudo apt-get update && sudo apt-get install -y reprepro
@@ -201,19 +226,23 @@ jobs:
       - name: Add packages to repository and sign
         run: |
           set -e
-          for dir in packages/deb-*; do
-            [ -d "$dir" ] || continue
-            name=$(basename "$dir")
-            case "$name" in
-              deb-ubuntu-20.04) codename=focal ;;
-              deb-ubuntu-22.04) codename=jammy ;;
-              deb-ubuntu-24.04) codename=noble ;;
-              deb-debian-11)    codename=bullseye ;;
-              deb-debian-12)    codename=bookworm ;;
-              deb-debian-13)    codename=trixie ;;
-              *) echo "Unknown suite for $name, skipping"; continue ;;
+          for pkg in packages/*.deb; do
+            [ -f "$pkg" ] || continue
+            # Release assets are named pcapsql_<v>_<distro>-<ver>_<arch>.deb
+            if ! echo "$pkg" | grep -qE '_(ubuntu|debian)-[0-9]'; then
+              echo "Cannot determine suite for $pkg, skipping"
+              continue
+            fi
+            case "$pkg" in
+              *_ubuntu-20.04_*) codename=focal ;;
+              *_ubuntu-22.04_*) codename=jammy ;;
+              *_ubuntu-24.04_*) codename=noble ;;
+              *_debian-11_*)    codename=bullseye ;;
+              *_debian-12_*)    codename=bookworm ;;
+              *_debian-13_*)    codename=trixie ;;
+              *) echo "Unknown suite for $pkg, skipping"; continue ;;
             esac
-            reprepro --nothingiserror -b repo includedeb "$codename" "$dir"/*.deb
+            reprepro --nothingiserror -b repo includedeb "$codename" "$pkg"
           done
           reprepro -b repo export
 
@@ -228,10 +257,11 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -A
-          git commit -m "Update apt repository for ${GITHUB_REF_NAME}" || echo "No changes to commit"
+          git commit -m "Update apt repository for ${RELEASE_TAG}" || echo "No changes to commit"
           git push origin HEAD:gh-pages
 
   release:
+    if: github.event_name != 'workflow_dispatch'
     needs: [build-deb, build-rpm]
     runs-on: ubuntu-latest
     permissions:
@@ -287,5 +317,6 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
           files: release-assets/*
           generate_release_notes: true
