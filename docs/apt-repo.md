@@ -1,7 +1,7 @@
 # apt repository
 
 Each tagged release publishes a signed apt repository to GitHub Pages
-(`gh-pages` branch, served at `https://<owner>.github.io/pcapsql/`). One
+(`gh-pages` branch, served at `https://packages.tottenham.io/`). One
 suite per distro release: `focal`, `jammy`, `noble` (Ubuntu) and
 `bullseye`, `bookworm`, `trixie` (Debian).
 
@@ -56,12 +56,12 @@ the `workflow_dispatch` trigger is on the default branch.)
 
 ```sh
 # Trust the repository key
-curl -fsSL https://<owner>.github.io/pcapsql/pcapsql.asc \
+curl -fsSL https://packages.tottenham.io/pcapsql.asc \
   | sudo gpg --dearmor -o /usr/share/keyrings/pcapsql.gpg
 
 # Add the repository (pick your distro codename, e.g. noble or bookworm)
 echo "deb [signed-by=/usr/share/keyrings/pcapsql.gpg] \
-https://<owner>.github.io/pcapsql/ noble main" \
+https://packages.tottenham.io/ noble main" \
   | sudo tee /etc/apt/sources.list.d/pcapsql.list
 
 sudo apt update
@@ -77,6 +77,6 @@ Codenames by release: Ubuntu 20.04 `focal`, 22.04 `jammy`, 24.04
 KEYID=<key id from workflow log>
 gpg --armor --export "$KEYID" | gpg --keyring ./trusted.gpg
 # Fetch for a suite:
-#   https://<owner>.github.io/pcapsql/dists/<codename>/Release{,.gpg}
+#   https://packages.tottenham.io/dists/<codename>/Release{,.gpg}
 gpgv --keyring ./trusted.gpg Release.gpg Release
 ```

@@ -25,11 +25,11 @@ Download the latest release for your distribution from [GitHub Releases](https:/
 See [docs/apt-repo.md](docs/apt-repo.md) for details.
 
 ```bash
-curl -fsSL https://mtottenh.github.io/pcapsql/pcapsql.asc \
+curl -fsSL https://packages.tottenham.io/pcapsql.asc \
   | sudo gpg --dearmor -o /usr/share/keyrings/pcapsql.gpg
 
 echo "deb [signed-by=/usr/share/keyrings/pcapsql.gpg] \
-https://mtottenh.github.io/pcapsql/ noble main" \
+https://packages.tottenham.io/ noble main" \
   | sudo tee /etc/apt/sources.list.d/pcapsql.list
 
 sudo apt update && sudo apt install pcapsql-datafusion
