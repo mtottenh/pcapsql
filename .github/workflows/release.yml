@@ -26,21 +26,27 @@ jobs:
         include:
           - distro: ubuntu
             version: "20.04"
+            codename: focal
             container: ubuntu:20.04
           - distro: ubuntu
             version: "22.04"
+            codename: jammy
             container: ubuntu:22.04
           - distro: ubuntu
             version: "24.04"
+            codename: noble
             container: ubuntu:24.04
           - distro: debian
             version: "11"
+            codename: bullseye
             container: debian:11
           - distro: debian
             version: "12"
+            codename: bookworm
             container: debian:12
           - distro: debian
             version: "13"
+            codename: trixie
             container: debian:trixie
     runs-on: ubuntu-latest
     container: ${{ matrix.container }}
@@ -65,9 +71,14 @@ jobs:
       - name: Build release binary and .deb package
         run: |
           . $HOME/.cargo/env
+          # Stamp the distro codename into the package version
+          # (0.4.2-1~jammy1): apt repo pools key files by
+          # name_version_arch, so per-distro builds of the same version
+          # must have distinct versions or they collide.
+          VERSION="${RELEASE_TAG#v}-1~${{ matrix.codename }}1"
           cargo install cargo-deb
           cargo build --release -p pcapsql-datafusion
-          cargo deb -p pcapsql-datafusion --no-build
+          cargo deb -p pcapsql-datafusion --no-build --deb-version "$VERSION"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
