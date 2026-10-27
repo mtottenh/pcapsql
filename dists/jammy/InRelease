@@ -1,0 +1,38 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA512
+
+Origin: pcapsql
+Label: pcapsql apt repository
+Codename: jammy
+Date: Tue, 27 Oct 2026 18:00:59 UTC
+Architectures: amd64
+Components: main
+Description: pcapsql packages built for Ubuntu 22.04
+MD5Sum:
+ 7a93066d705de26260032169f8919ae7 4420 main/binary-amd64/Packages
+ 352a59b12b1fabb195b946b4506e9318 2117 main/binary-amd64/Packages.gz
+ cc63734102aebc2ade1be54722951a76 135 main/binary-amd64/Release
+SHA1:
+ d81f4b6f711df17d6489f7d8dc62e827dea20151 4420 main/binary-amd64/Packages
+ aacc882f89812356094d3381c6d3e24c8660549f 2117 main/binary-amd64/Packages.gz
+ c9399038a6573ec5a6301d6e6f281c73036abfaf 135 main/binary-amd64/Release
+SHA256:
+ b640b1be81b5e6df1d72e2fdc0fc1565c6b371129dfb7864f8a0fb35deb0262d 4420 main/binary-amd64/Packages
+ 6214e00d938c04c6110f1d1a159eee48dce255ee972ff4963f893573a2c9c8e1 2117 main/binary-amd64/Packages.gz
+ 7279c0fcc7d84a0cd075405c1b1272075951ea9b5b94081588f120c8a89f0b3e 135 main/binary-amd64/Release
+-----BEGIN PGP SIGNATURE-----
+
+iQIzBAEBCgAdFiEEBDW9/bJRnRIQRSe3tg95UKgkh9sFAmrg5tsACgkQtg95UKgk
+h9uzfQ/+J2lSpma6aMsGICJaJTxioyCCr/vCY4s3fIvglm5U8abKJqpUs5BYyIGV
+4aIl+BJ4NQbePwa/lqZCsAcVs6qx+av/xkdJdX2XRcUUqnfARoDGiprUra50NFE8
++VYFCbbPcWOpkDKW0k8yeMDriP2I8s1arYENoE7h0MpvmGqAtkiH5HwXzL3OoSC6
+t6tJjqIEdC2izzOssuSzDjthk690d4FWFt2qoSskBDjOr/MoAlLxyuNQZiLUa39N
+7SdPPHLMOoGVrihbxBygtlvLfbX+kz5XPYpkAzr6u/fHgVsGZlvylucFC5h2lrrT
+YJKVnhGPtzQoUcUAtPXs7YyyEFpuJYFAc34GOVEwdDqoLDvmRCwnTZJD3czq7Uy4
+PNdYEllxL1HLhutxfdQhQXv8ZaSnW9xubzT0C81QHiwTeRmeaU9ruwFFacHBqw9g
+qhUJ7FNStjeBeOkppcrir+MjD7/5GSCC7GjjuSpQw5ydVJoxz9Ywi0KAyyoLLsum
+vrG8V2Yow74WSoTBt4FQzRvBH7aFYBjgtPSzizhSePjHvSF3Ugc6lSpPRd6mYOxJ
++3HKWDHzYUl5aY+Y4LVdGRnRToyq644RjB9nreaEhvRdX5a7JUc4VC551g7KTEi+
+2bcfCcRDqVRgn/t25zzmUryjS6LE9YlhIyLMa7zucF+8hHzd3+U=
+=3U0U
+-----END PGP SIGNATURE-----

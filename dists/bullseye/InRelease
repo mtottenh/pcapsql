@@ -1,0 +1,38 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA512
+
+Origin: pcapsql
+Label: pcapsql apt repository
+Codename: bullseye
+Date: Tue, 27 Oct 2026 18:00:59 UTC
+Architectures: amd64
+Components: main
+Description: pcapsql packages built for Debian 11
+MD5Sum:
+ 050c7729cc776138465f61ce06ce9a6d 4426 main/binary-amd64/Packages
+ 9d44a7b1db31acd204385c6d3975f896 2115 main/binary-amd64/Packages.gz
+ 0d1470a17271d5aa38d61359cd21601f 132 main/binary-amd64/Release
+SHA1:
+ abb41e0562fbd79032fe333c1ce12f364d02aca5 4426 main/binary-amd64/Packages
+ 6472e608730a9f4f99cb1758c213f2ddea02dd09 2115 main/binary-amd64/Packages.gz
+ 971a26d688ca0e903e06dec765980d90fc51e1fb 132 main/binary-amd64/Release
+SHA256:
+ 7d33688c095397690ffa0ff11396bf0bf665fba50be66d47f7303976ec550a5e 4426 main/binary-amd64/Packages
+ 7b0383e6f1b9e1d59b355dbb2976d25b895adc93aed2eaaffa511d7a3a8d5960 2115 main/binary-amd64/Packages.gz
+ 552431381e153b83bfa71bd3727e6e4dc7aa044e1495eeee00053f66fd4ec93e 132 main/binary-amd64/Release
+-----BEGIN PGP SIGNATURE-----
+
+iQIzBAEBCgAdFiEEBDW9/bJRnRIQRSe3tg95UKgkh9sFAmrg5tsACgkQtg95UKgk
+h9un+BAAygAweye3ZB45vD2zSTJYaR54dssfXC0q1Wnn/5tbroBtREy2bTgJ8OEv
+DDrCYp3wp7ApDgSNeoDfp8nOhnpuJ/F5xFC7SKVbsFxaz59FM0Ubi8YOmLgrGb+z
+0q756+9MRMxhCuMnI/F0V7KMKYgEHHDtFIGCtBKAojm360ZBsaiIjLR4YK7nHL0y
+xfN4YdCpyvRH7Er1qa4bE7OaydcVtzpen/TwLaYA+ctVxgoBs+0D07wnCOyNn8LW
+euqb7668etI5oZoutCPX+ti5z7salGHY7RplFq0cYSYMpRwTw9mNhAKo/xFRO/yg
+wvpPsWXRuanFqHcwzhUzfbwuNXmZC8ODq2qIQbUYIFjYwVFLB7xk0YUrg2+qhOap
+AqoYW3Bok1PaK1r2Kdnq6sw0gq6wuGyYMJcfFvNQkTg4Vvt7Zhu8YC6Z5ui1WZzi
+KO7h6PARuGU4d/yhZUzVCBDq91vnBzPToszcVEBB24kkiEUwsTrFXZM0W/AqTHdH
+SANerar+FLrPYUioxuYcV40NI2Xwt4Ma9zvHFSd3seLPJZOvOOJ7RBZ94eF8xlAb
+c4mlRSvm7M3adjBem1lnp3OUNWooQm3jXA7Qt2lJ5sGqY7WJYSJXjPqfTJuE5WcV
+BprKPgmCAgFBp3W7zzwNM7DDGOuhGdR/FFD7Y71XviTn51gbLxQ=
+=P8dD
+-----END PGP SIGNATURE-----

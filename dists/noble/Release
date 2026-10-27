@@ -1,0 +1,19 @@
+Origin: pcapsql
+Label: pcapsql apt repository
+Codename: noble
+Date: Tue, 27 Oct 2026 18:00:59 UTC
+Architectures: amd64
+Components: main
+Description: pcapsql packages built for Ubuntu 24.04
+MD5Sum:
+ 21647c9a881769aecf94bed0fcb31431 4420 main/binary-amd64/Packages
+ dba1a9afedf350fd57b575915c604705 2115 main/binary-amd64/Packages.gz
+ 07ff7bbbe7d38514d6f270e2c427f7fc 135 main/binary-amd64/Release
+SHA1:
+ 587d40f942be7a07a0ba2bdb3e32c2402cc853df 4420 main/binary-amd64/Packages
+ cde6c184c6ed3ef68aaaef83b60545b526629ea1 2115 main/binary-amd64/Packages.gz
+ b18fdbf5578bf3a0239b19931f06f5f4486bb0c8 135 main/binary-amd64/Release
+SHA256:
+ d8a005795ac3f3da1af9e57aa3409a1a63e247a542da32c9e3e0536c345b618b 4420 main/binary-amd64/Packages
+ 881833489d97c57daf4bf7f53ae6ea22598b2267e1fa24bfeec3e09cbf406152 2115 main/binary-amd64/Packages.gz
+ 5a0b60665b3319cfe372b79170d6f7031949b38172200000336d569619fc78eb 135 main/binary-amd64/Release

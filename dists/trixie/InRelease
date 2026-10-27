@@ -1,0 +1,38 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA512
+
+Origin: pcapsql
+Label: pcapsql apt repository
+Codename: trixie
+Date: Tue, 27 Oct 2026 18:00:59 UTC
+Architectures: amd64
+Components: main
+Description: pcapsql packages built for Debian 13
+MD5Sum:
+ 451c2d35b3d592a9aebbb998e9bca939 4422 main/binary-amd64/Packages
+ 214aa23051a47eaae5adfa31cac5d9da 2120 main/binary-amd64/Packages.gz
+ b660135d2d010bb98e81bef7d535009c 132 main/binary-amd64/Release
+SHA1:
+ 1a30f21857f43a9d147e23d84ecbbef80688d12a 4422 main/binary-amd64/Packages
+ 12e9bf2aed21a0dce662caca4d18072ffde87abc 2120 main/binary-amd64/Packages.gz
+ 9f3eb0bef28964488afb500dec70222f954a1822 132 main/binary-amd64/Release
+SHA256:
+ b408b43fc9ef3ec382bfae3ed85360a42934cf13af91a560841cc22b2742b5bc 4422 main/binary-amd64/Packages
+ 1929364895c7cf297c91afb473f107e03fcde53db93bc2ba9d80a25c00f489cd 2120 main/binary-amd64/Packages.gz
+ 6196683e2964f9dc771cf7a649fc23d1bdc6c7a1ceca234f44b27ba3850e6f52 132 main/binary-amd64/Release
+-----BEGIN PGP SIGNATURE-----
+
+iQIzBAEBCgAdFiEEBDW9/bJRnRIQRSe3tg95UKgkh9sFAmrg5tsACgkQtg95UKgk
+h9vfpg//XkUEg+07s7FeYhE07IFvwQEMxTlWnhiqMwg2Zni1iLbTHJQKie63p58s
+MKLO394dJDRlZBPdv0BEW0h2V4MuGYXDlFoZ3jVfRBsNI2yRKoO2QVxhlUGrBLcc
+Hqf7p+2AHH3dPSwz9a6M264hiGyv07RYJWgyhl4OkwqyZl29IEft8A98aCq5CD5e
+bFYZzMjsB2RQ7kb0C1Ff+oSeMCnKvfotxm6Pwhhap80bbbec33lcq515cAa/MZkP
+06zz0sHRssScNZwEiMZ+dZcwDSbBG7c8OZHOBbgVtyd5ipnB+68btORTZN2ytAr1
+u5YhrMPoPYzcUQpmDg8HUo31Jsb/ZAyoRcBhknCMaVcYQngqvYig1Z7xsK88agkl
+do0YnLiI8DRXPNJ2bg1ZTs/uztxywVzcNf+lwJxFDvpcQG8oBtMPEbVD6Dto5CXm
+r7c/5XK1bUsJKB3/G1mW0J+ivLHHCEgPYPvDBugqNo0dIC504Pr0FlPjl6LRxBCu
+NokY7Ipz5eB11LJjj6IvNgAwqm1jHGpxi1J48XmMLbr1muuO6hqylDKQEVoHr8qQ
+MQOJgkpn7G2256wtFgiZb3drYo+uNy3d6FebfhrX7m7nZUN9zH6Fun30qKGGGCB2
+zRbn8mpJlq3cBB70IqXNK4JgAXvGV5Xw//ro9HUF0OyBF0vgd7c=
+=paCV
+-----END PGP SIGNATURE-----

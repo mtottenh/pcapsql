@@ -1,0 +1,19 @@
+Origin: pcapsql
+Label: pcapsql apt repository
+Codename: focal
+Date: Tue, 27 Oct 2026 18:00:59 UTC
+Architectures: amd64
+Components: main
+Description: pcapsql packages built for Ubuntu 20.04
+MD5Sum:
+ d951ee52f7fc18cfb134eaa1f6f75c61 4420 main/binary-amd64/Packages
+ b2a17167418c1dcf7525fc81c409f07b 2115 main/binary-amd64/Packages.gz
+ 192835623f3b4cb84f80801ebfff1d46 135 main/binary-amd64/Release
+SHA1:
+ 4d904af5b0ba9ec8ccb438fe0acfdfe762fab5aa 4420 main/binary-amd64/Packages
+ e7f704cab490242885192a3b82646701bb28359d 2115 main/binary-amd64/Packages.gz
+ 1581a381e3381f25c870b13d274b91ea5301518c 135 main/binary-amd64/Release
+SHA256:
+ 7248d2d60979edfe0154b762535565db9475994d408d0fed7a3c528804ab183d 4420 main/binary-amd64/Packages
+ d7a8e5c4bb13040817ed0234b4c85d52af28af59d242c42f7333434bfbf11bb6 2115 main/binary-amd64/Packages.gz
+ 9a78d707dc8c9398499a37bda17644e1bc376fa98aa03e0481efd31e6e04cf4e 135 main/binary-amd64/Release

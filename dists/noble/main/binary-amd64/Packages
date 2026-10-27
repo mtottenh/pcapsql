@@ -1,0 +1,141 @@
+Package: pcapsql-datafusion
+Version: 0.4.2-1~noble1
+Architecture: amd64
+Homepage: https://github.com/mtottenh/pcapsql
+Maintainer: Max Tottenham <max@tottenham.io>
+Installed-Size: 85716
+Depends: libc6 (>= 2.39)
+Priority: optional
+Section: utils
+Filename: pool/main/p/pcapsql-datafusion/pcapsql-datafusion_0.4.2-1~noble1_amd64.deb
+Size: 17351136
+SHA256: 2aeb628799594409cc7930b6d1ccc8f7a0493aab0683d75ebd28d1a4c7b6af59
+SHA1: a923c53154a7902c4cda8f7cba9db5f5f25cd249
+MD5sum: db40e90163698f4743434385d39ed90e
+Description: SQL interface for PCAP analysis using DataFusion
+ # pcapsql-datafusion
+ .
+ [![Crates.io](https://img.shields.io/crates/v/pcapsql-datafusion.svg)](https://crates.io/crates/pcapsql-datafusion)
+ [![License:
+ MIT](https://img.shields.io/badge/License-MIT-blue.svg)](../LICENSE)
+ .
+ SQL interface for PCAP analysis using Apache DataFusion.
+ .
+ This crate provides the `pcapsql` CLI tool for querying PCAP files using SQL.
+ .
+ ## Installation
+ .
+ ```bash
+ cargo install pcapsql-datafusion
+ ```
+ .
+ Or download pre-built packages from [GitHub
+ Releases](https://github.com/mtottenh/pcapsql/releases).
+ .
+ ## Quick Start
+ .
+ ```bash
+ # Interactive mode
+ pcapsql capture.pcap
+ .
+ # Single query
+ pcapsql capture.pcap -e "SELECT * FROM tcp LIMIT 10"
+ .
+ # With TLS decryption
+ pcapsql capture.pcap --keylog sslkeys.log -e "SELECT * FROM http2"
+ .
+ # Export to Parquet
+ pcapsql capture.pcap -e "SELECT * FROM dns" -o dns.parquet
+ ```
+ .
+ ## Example Queries
+ .
+ ```sql
+ -- Protocol distribution
+ SELECT protocol, COUNT(*) FROM packets GROUP BY protocol;
+ .
+ -- TCP SYN packets
+ SELECT src_ip, dst_ip, dst_port FROM tcp WHERE has_tcp_flag(tcp_flags, 'SYN');
+ .
+ -- Top talkers
+ SELECT src_ip, SUM(length) as bytes FROM ipv4 GROUP BY src_ip ORDER BY bytes
+ DESC LIMIT 10;
+ .
+ -- DNS queries by type
+ SELECT query_name, dns_type_name(query_type) as qtype, COUNT(*) FROM dns GROUP
+ BY 1, 2;
+ .
+ -- HTTP/2 requests (requires --keylog)
+ SELECT method, path, status FROM http2 WHERE method IS NOT NULL;
+ .
+ -- Packets per 10-second window (also hop(...) and session(...))
+ SELECT window_start, COUNT(*) FROM tumble(frames, INTERVAL '10' SECOND) GROUP
+ BY 1 ORDER BY 1;
+ ```
+ .
+ ## Tables
+ .
+ | Table | Description |
+ |-------|-------------|
+ | `ethernet`, `ipv4`, `ipv6`, `tcp`, `udp` | Layer 2-4 protocols (`ipv6`
+ includes the extension header chain: Hop-by-Hop/Routing/Fragment/Destination
+ presence, fragment and routing header fields) |
+ | `dns`, `dhcp`, `ntp`, `http` | Application protocols |
+ | `tls` | TLS records and handshakes |
+ | `http2` | HTTP/2 frames (requires TLS decryption) |
+ | `vxlan`, `gre`, `gtp`, `ipsec` | Tunnel headers (inner layers get
+ `encap_depth` > 0 and a `tunnel_type`); `gtp` includes the GTPv1 N-PDU number
+ and extension header chain and the GTPv2-C flags |
+ | `mpls` | Label stacks (label switching, not counted as a tunnel) |
+ | `bgp`, `ospf` | Routing protocols: BGP OPEN capabilities, UPDATE path
+ attributes (AS path, next hop, MED, local pref, aggregator) and
+ withdrawn/announced prefixes, NOTIFICATION codes, ROUTE-REFRESH address family;
+ OSPFv2 Hello (neighbour count), Database Description and the first LSA header
+ of DD/LSU/LSAck packets |
+ .
+ ## CLI Options
+ .
+ ```
+ pcapsql <PCAP> [OPTIONS]
+ .
+ Query:
+   -e, --execute <SQL>       Execute query and exit
+   -o, --output <FILE>       Export results (.parquet, .csv, .json)
+ .
+ Input:
+   --stdin                   Read the capture from standard input (`-` as <PCAP>
+ means the same;
+                             one-shot query only)
+ .
+ TLS Decryption:
+   --keylog <FILE>           SSLKEYLOGFILE for TLS decryption
+ .
+ Performance:
+   --no-mmap                 Disable memory-mapped file access
+   --batch-size <N>          Packets per batch (default: 10000)
+ ```
+ .
+ ## REPL Commands
+ .
+ ```
+ .tables                 List available tables
+ .schema [table]         Show table schema
+ .export <file> [query]  Export query results
+ .quit                   Exit
+ ```
+ .
+ ## Crate Features
+ .
+ | Feature | Default | Description |
+ |---------|---------|-------------|
+ | `compress-gzip` | Yes | Gzip-compressed PCAP support |
+ | `compress-zstd` | Yes | Zstd-compressed PCAP support |
+ | `compress-lz4` | No | LZ4-compressed PCAP support |
+ | `compress-bzip2` | No | Bzip2-compressed PCAP support |
+ | `compress-xz` | No | XZ-compressed PCAP support |
+ | `compress-all` | No | All compression formats |
+ .
+ ## License
+ .
+ MIT
+

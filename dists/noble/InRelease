@@ -1,0 +1,38 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA512
+
+Origin: pcapsql
+Label: pcapsql apt repository
+Codename: noble
+Date: Tue, 27 Oct 2026 18:00:59 UTC
+Architectures: amd64
+Components: main
+Description: pcapsql packages built for Ubuntu 24.04
+MD5Sum:
+ 21647c9a881769aecf94bed0fcb31431 4420 main/binary-amd64/Packages
+ dba1a9afedf350fd57b575915c604705 2115 main/binary-amd64/Packages.gz
+ 07ff7bbbe7d38514d6f270e2c427f7fc 135 main/binary-amd64/Release
+SHA1:
+ 587d40f942be7a07a0ba2bdb3e32c2402cc853df 4420 main/binary-amd64/Packages
+ cde6c184c6ed3ef68aaaef83b60545b526629ea1 2115 main/binary-amd64/Packages.gz
+ b18fdbf5578bf3a0239b19931f06f5f4486bb0c8 135 main/binary-amd64/Release
+SHA256:
+ d8a005795ac3f3da1af9e57aa3409a1a63e247a542da32c9e3e0536c345b618b 4420 main/binary-amd64/Packages
+ 881833489d97c57daf4bf7f53ae6ea22598b2267e1fa24bfeec3e09cbf406152 2115 main/binary-amd64/Packages.gz
+ 5a0b60665b3319cfe372b79170d6f7031949b38172200000336d569619fc78eb 135 main/binary-amd64/Release
+-----BEGIN PGP SIGNATURE-----
+
+iQIzBAEBCgAdFiEEBDW9/bJRnRIQRSe3tg95UKgkh9sFAmrg5tsACgkQtg95UKgk
+h9tIjxAAuLrqhesPsGDARwuUv/zwiDdbSwkjCuZ/cWoxoF3SYrydrNvGLPaeud9P
+w1mlf7AKFxB3mAZJdFSkoo8TrErZ23KIhzbOFzoM6MzIqBKq0SASpuujHaZ5E6fH
+S5CcWa13yAT0qrg9khQ6y5D4fyfXSZBgKcQJogn9Pg1HUXrZyZ8blvHaDZqAk/kk
+/x7rmDTlrCvS2n+ZOAm3Wjf6xiceYrYkL+Fe2YAVUavsncFEeL3ICeqq8JwOVweX
+j7x9CX2FzAvODnSMhQvGzbUL3JDVtBk5yb039Dr3ACrqNjOBsIVzo18fiKuepn6P
+KiWZdh6jHlk/NlMNOXSmE7aSSd+SBbmoUORnzAsn/oihVXpVMQpuRhJdlv/BpUEm
+94L5+VfkbHmTR0mOlPiFNQuB/ZxFpMzrVC1KuiHVYKm3CiFTaXIEpOBYPUmRh8I0
+gAZI2hlU/rY4mydIDg4nY64iNwmc3+2OwNGOclr2GBiCR6Hp7Q01OwWtsroqcJ1E
+g2TFN4G3t9t0n/zEXTNkoyf28khFTz4m51oaUAarjAkAjQeUDQp57H0CJvJGbJrr
+JnnYtM6z9YJxAsD1R0vyVu0kPg5hq8JUVjHJjvt/efSVSJdRUqghZG2ih5ugfTBp
+//esHGBbEF+2JCOzQJ3msNXR69L8f30Aq2si1AvMpXEioskwmPM=
+=ohzQ
+-----END PGP SIGNATURE-----

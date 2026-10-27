@@ -1,0 +1,5 @@
+Component: main
+Origin: pcapsql
+Label: pcapsql apt repository
+Architecture: amd64
+Description: pcapsql packages built for Ubuntu 24.04

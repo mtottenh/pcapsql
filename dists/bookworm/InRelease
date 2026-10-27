@@ -1,0 +1,38 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA512
+
+Origin: pcapsql
+Label: pcapsql apt repository
+Codename: bookworm
+Date: Tue, 27 Oct 2026 18:00:59 UTC
+Architectures: amd64
+Components: main
+Description: pcapsql packages built for Debian 12
+MD5Sum:
+ 3564fcb3032bc613a0b393e32e0b1090 4426 main/binary-amd64/Packages
+ 0bc9c0e7140f1a72f907b1f56456301a 2121 main/binary-amd64/Packages.gz
+ 79b37bdd31b79919d1ad38cbf705b6d5 132 main/binary-amd64/Release
+SHA1:
+ 7eaae683396daee701dc29a6fee071c971a462cd 4426 main/binary-amd64/Packages
+ 713683d9ac7bdde085db54f6ed8c95dc7d4c0dae 2121 main/binary-amd64/Packages.gz
+ a7113093270bd72d5b832ace1f576786b76fa616 132 main/binary-amd64/Release
+SHA256:
+ 3a37d99c04d0c6d5aeb2554147d61f222f43543619a7c7af2d592022b1152697 4426 main/binary-amd64/Packages
+ d73e039e12d7957f773ea8cc5459c30b761133032434fa76bbeac745b9f55daf 2121 main/binary-amd64/Packages.gz
+ 5ff9a8905566823aed4eb2fc92c0696fa7c77950d3d70f7e85e37bc1ab8b2caf 132 main/binary-amd64/Release
+-----BEGIN PGP SIGNATURE-----
+
+iQIzBAEBCgAdFiEEBDW9/bJRnRIQRSe3tg95UKgkh9sFAmrg5tsACgkQtg95UKgk
+h9s5rw/7Bd2x4I2xBKcEgO8MhuBIx93GOshFK/PGBNLG3dsOkulH3doVpVWwi3u/
+qnr+WReeh/57o6A8/ZBYLSZjXwsi3xipUSikuEnzyqmh1A4Ezl+gDR0cupDiLUNG
+7UQnRW5E2bDeD2mQwwrlb9+QFxlMYGOfLa0bwRobWx5kMp2AnK/2PHEXwScFqZID
+PtsoJw16Qj8spOvLX6rcHA2DXQxu2rre80omssLCI5Gmxfx39ecHZpEYpANAfQ3O
+T0+R9+qpa7agZUWquRSOEw0A2tiGkRBMnGHJmcpx34N3r3vZ8etpjG5jGK0TvUSj
+IFjUt1KIOGf+MVE6je/xcrTB5aaxs6FE3Qgp1J+NiZ5/R3rPiXbxSXAxM5Q91/kX
+R9sPVY2lpA0iTTlsucSMuAyO+hCuFSdOr74lwRmhYPMsK3LJ/DGgWyBL9r/+6YNm
+aEiV9KqUNjNn76olsLiRaphCfm7ZLKwLERBXsrHSfe8C72+UdVMAz3DgAG2iLx50
+/kmGx3yRfAZ6Z6QRrvXluvWfFRKtGisEn8GtkBkW24eRU9DOjPajZCdnAOdL9qWm
+FI7OD6iNFUDBthW0/rc/39/2n4yJ6V4Dgp8mH0A7YHLyrtlm1qVPw3sJv8Il7BLv
+s6bM5ltDkp6MvPPo5zyzHWvD8OqqE3ucZYELbBxFSjybjpQ7dOE=
+=dRMK
+-----END PGP SIGNATURE-----

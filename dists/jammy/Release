@@ -1,0 +1,19 @@
+Origin: pcapsql
+Label: pcapsql apt repository
+Codename: jammy
+Date: Tue, 27 Oct 2026 18:00:59 UTC
+Architectures: amd64
+Components: main
+Description: pcapsql packages built for Ubuntu 22.04
+MD5Sum:
+ 7a93066d705de26260032169f8919ae7 4420 main/binary-amd64/Packages
+ 352a59b12b1fabb195b946b4506e9318 2117 main/binary-amd64/Packages.gz
+ cc63734102aebc2ade1be54722951a76 135 main/binary-amd64/Release
+SHA1:
+ d81f4b6f711df17d6489f7d8dc62e827dea20151 4420 main/binary-amd64/Packages
+ aacc882f89812356094d3381c6d3e24c8660549f 2117 main/binary-amd64/Packages.gz
+ c9399038a6573ec5a6301d6e6f281c73036abfaf 135 main/binary-amd64/Release
+SHA256:
+ b640b1be81b5e6df1d72e2fdc0fc1565c6b371129dfb7864f8a0fb35deb0262d 4420 main/binary-amd64/Packages
+ 6214e00d938c04c6110f1d1a159eee48dce255ee972ff4963f893573a2c9c8e1 2117 main/binary-amd64/Packages.gz
+ 7279c0fcc7d84a0cd075405c1b1272075951ea9b5b94081588f120c8a89f0b3e 135 main/binary-amd64/Release
