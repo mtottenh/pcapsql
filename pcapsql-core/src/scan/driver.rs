@@ -73,7 +73,8 @@ use super::plan::{CompiledScan, OutputId};
 use super::route::{Routed, Router};
 use super::sink::RowSink;
 use crate::io::{PacketReader, PacketRef, Pause};
-use crate::{parse_packet, Error, ParseResult, ProtocolRegistry};
+use crate::protocol::{parse_packet_into, LayerBuf};
+use crate::{Error, ParseResult, ProtocolRegistry};
 
 /// Why [`PartitionScan::step`] returned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,7 +158,8 @@ impl Default for ScanStats {
 /// between steps and [`PartitionScan::finish`] gives it back.
 pub trait FrameObserver {
     /// `packet` and its parsed `layers`, in the order
-    /// [`parse_packet`] returns them (parsed with the plan's scope).
+    /// [`parse_packet`](crate::parse_packet) returns them (parsed with the
+    /// plan's scope).
     ///
     /// Called exactly once per frame, in capture order, also for a frame
     /// that is shown to the scan several times because its rows did not fit
@@ -210,6 +212,9 @@ pub struct PartitionScan<R: PacketReader, O: FrameObserver = NoObserver> {
     registry: Arc<ProtocolRegistry>,
     router: Router,
     observer: O,
+    /// Storage for the layers of the packet being routed, reused from one
+    /// packet to the next.
+    layers: LayerBuf,
     /// The number of the last frame the observer saw (frames are numbered
     /// from 1). A frame shown again has this number.
     observed_frame: u64,
@@ -247,6 +252,7 @@ impl<R: PacketReader, O: FrameObserver> PartitionScan<R, O> {
             registry,
             router,
             observer,
+            layers: LayerBuf::new(),
             observed_frame: 0,
             filtered,
             ended,
@@ -294,6 +300,7 @@ impl<R: PacketReader, O: FrameObserver> PartitionScan<R, O> {
             registry,
             router,
             observer,
+            layers,
             observed_frame,
             filtered,
             ended,
@@ -329,7 +336,8 @@ impl<R: PacketReader, O: FrameObserver> PartitionScan<R, O> {
                 }
             }
             // Per-packet link type is correct even for PCAPNG multi-interface.
-            let layers = parse_packet(registry, packet.link_type, packet.data, scope);
+            let mut layers = layers.for_packet();
+            parse_packet_into(registry, packet.link_type, packet.data, scope, &mut layers);
             if packet.frame_number != *observed_frame {
                 // The first time this frame is shown.
                 *observed_frame = packet.frame_number;

@@ -486,6 +486,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `NormalizedBatchSet::take_fused_pending` with them (a fused join's
   partial batch is in its `ArrowSink`, like a table's);
   `FrameJoinSpec::to_fused_scan` is unchanged.
+- **Performance: a scan no longer allocates for every packet.**
+  `parse_packet` returned the layers in a new `Vec` with room for eight
+  (7,808 bytes), also for a scan of `frames` alone, which parses nothing. A
+  partition scan now keeps that storage from packet to packet
+  (`protocol::LayerBuf` with the new `parse_packet_into`; `parse_packet` is
+  unchanged for other callers) and asks for none when nothing is parsed.
+  Measured through `PartitionScan` into a sink that stores nothing: 1.00
+  allocation per packet before, 0 after (`tests/parse_alloc.rs` counts);
+  `frames` 51 → 31 ns and 972 → 430 instructions per packet, `udp` 5,750 →
+  5,230 instructions per packet. Results are unchanged.
 
 ### Fixed
 
