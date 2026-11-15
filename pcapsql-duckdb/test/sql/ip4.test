@@ -1,0 +1,91 @@
+# name: test/sql/ip4.test
+# description: ip4() and ip4_to_string() convert between IPv4 text and its UINTEGER value
+# group: [pcapsql]
+
+require pcapsql
+
+query TT
+SELECT typeof(ip4('10.0.0.1')), typeof(ip4_to_string(1));
+----
+UINTEGER	VARCHAR
+
+query IIII
+SELECT ip4('192.168.1.1'), ip4('0.0.0.0'), ip4('255.255.255.255'), ip4('10.0.0.1');
+----
+3232235777	0	4294967295	167772161
+
+query TTT
+SELECT ip4_to_string(3232235777), ip4_to_string(0), ip4_to_string(4294967295);
+----
+192.168.1.1	0.0.0.0	255.255.255.255
+
+# Text that is not an IPv4 address is NULL, not an error
+query IIII
+SELECT ip4('192.168.1'), ip4('256.0.0.1'), ip4('::1'), ip4('');
+----
+NULL	NULL	NULL	NULL
+
+query IT
+SELECT ip4(NULL), ip4_to_string(NULL);
+----
+NULL	NULL
+
+# The argument is UINTEGER. A literal that fits is accepted; other integer types need a cast
+statement error
+SELECT ip4_to_string(4294967296);
+----
+No function matches
+
+statement error
+SELECT ip4_to_string(x) FROM (SELECT 1::BIGINT AS x);
+----
+No function matches
+
+query T
+SELECT ip4_to_string(x::UINTEGER) FROM (SELECT 3232235777::BIGINT AS x);
+----
+192.168.1.1
+
+# NULLs are kept row by row
+query I
+SELECT ip4(x) FROM (VALUES ('1.2.3.4'), (NULL), ('bogus'), ('0.0.1.0')) t(x);
+----
+16909060
+NULL
+NULL
+256
+
+query T
+SELECT ip4_to_string(x) FROM (VALUES (16909060::UINTEGER), (NULL), (256)) t(x);
+----
+1.2.3.4
+NULL
+0.0.1.0
+
+# Round trip over more rows than one vector holds, with a NULL every seventh row
+query IIII
+SELECT count(*), count(s), count(DISTINCT s), bool_and(ip4(s) = x)
+FROM (SELECT x, ip4_to_string(x) AS s
+      FROM (SELECT CASE WHEN i % 7 <> 0 THEN (i * 65537)::UINTEGER END AS x FROM range(10000) t(i)));
+----
+10000	8571	8571	true
+
+# A constant argument next to a column: the one-row side of a cross join arrives as a constant vector
+statement ok
+CREATE TABLE one AS SELECT 3232235777::UINTEGER AS n, '10.1.2.3' AS s;
+
+query ITTII
+SELECT count(*), min(ip4_to_string(n)), max(ip4_to_string(n)), min(ip4(s)), max(ip4(s)) FROM one, range(3000);
+----
+3000	192.168.1.1	192.168.1.1	167838211	167838211
+
+# The functions compose with ordinary SQL
+query T
+SELECT ip4_to_string(ip4('172.16.254.3') + 1);
+----
+172.16.254.4
+
+query I
+SELECT count(*) FROM range(256) t(i) WHERE ip4('10.0.0.' || i) BETWEEN ip4('10.0.0.16') AND ip4('10.0.0.31');
+----
+16

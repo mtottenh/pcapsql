@@ -41,6 +41,26 @@ impl PanicIn {
     }
 }
 
+/// Keep the panics these tests cause on purpose out of the test output; DuckDB's worker threads
+/// are not covered by the test harness's output capture.
+fn quiet_deliberate_panics() {
+    static HOOK: std::sync::Once = std::sync::Once::new();
+    HOOK.call_once(|| {
+        let default_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let payload = info.payload();
+            let message = payload
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| payload.downcast_ref::<&str>().copied());
+            let deliberate = message.is_some_and(|text| text.starts_with("deliberate panic"));
+            if !deliberate {
+                default_hook(info);
+            }
+        }));
+    });
+}
+
 impl TableFunctionCallbacks for PanicIn {
     type BindData = ();
     type GlobalState = ();
@@ -162,6 +182,7 @@ fn assert_usable(connection: &Connection) {
 
 #[test]
 fn guarded_table_function_panic_is_an_ordinary_error() -> Result<()> {
+    quiet_deliberate_panics();
     let connection = connect()?;
     for (name, callback, label) in [
         ("panic_in_bind", Callback::Bind, "bind"),
@@ -204,6 +225,7 @@ fn guarded_table_function_panic_is_an_ordinary_error() -> Result<()> {
 
 #[test]
 fn guarded_table_function_without_a_panic_returns_rows() -> Result<()> {
+    quiet_deliberate_panics();
     let connection = connect()?;
     guard::table_function(
         "guarded_ok",
@@ -218,6 +240,7 @@ fn guarded_table_function_without_a_panic_returns_rows() -> Result<()> {
 
 #[test]
 fn guarded_scalar_panic_is_an_ordinary_error() -> Result<()> {
+    quiet_deliberate_panics();
     let connection = connect()?;
     guard::scalar_function(
         "guarded_scalar_panic",
@@ -246,6 +269,7 @@ fn guarded_scalar_panic_is_an_ordinary_error() -> Result<()> {
 /// then refuses every later query on the database.
 #[test]
 fn unguarded_panic_invalidates_the_database() -> Result<()> {
+    quiet_deliberate_panics();
     let connection = connect()?;
     TableFunctionBuilder::new(
         "unguarded_panic",
