@@ -7,13 +7,12 @@
 //! 3GPP TS 29.281: GPRS Tunnelling Protocol User Plane (GTPv1-U)
 //! 3GPP TS 29.274: GPRS Tunnelling Protocol version 2 (GTPv2-C)
 
-use compact_str::CompactString;
-use smallvec::SmallVec;
-
 use super::ethernet::ethertype;
+use std::fmt::Write as _;
+
 use super::{
-    Cond, Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult, Protocol,
-    TunnelType,
+    Cond, Dispatch, DispatchRule, FieldSink, FieldValue, HintKey, Hints, ParseContext, Parsed,
+    Protocol, TunnelType,
 };
 use crate::schema::{DataKind, FieldDescriptor};
 
@@ -153,13 +152,16 @@ impl Protocol for GtpProtocol {
         }
     }
 
-    fn parse<'a>(&self, data: &'a [u8], context: &ParseContext) -> ParseResult<'a> {
+    fn parse_into<'a>(
+        &self,
+        data: &'a [u8],
+        context: &ParseContext,
+        fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
         // Minimum GTP header is 8 bytes (without optional fields)
         if data.len() < 8 {
-            return ParseResult::error("GTP header too short".to_string(), data);
+            return Parsed::error("GTP header too short", data);
         }
-
-        let mut fields = SmallVec::new();
 
         // Byte 0: Flags
         // Bits 7-5: Version (1 for GTPv1, 2 for GTPv2)
@@ -170,12 +172,12 @@ impl Protocol for GtpProtocol {
         // Bit 0: PN (N-PDU number flag)
         let flags = data[0];
         let version = (flags >> 5) & 0x07;
-        fields.push(("version", FieldValue::UInt8(version)));
 
-        // Handle GTPv2-C differently
+        // Handle GTPv2-C differently (it writes its own `version`)
         if version == 2 {
-            return self.parse_gtpv2(data, context);
+            return self.parse_gtpv2(data, context, fields);
         }
+        fields.push(("version", FieldValue::UInt8(version)));
 
         // GTPv1 parsing
         let protocol_type = (flags >> 4) & 0x01;
@@ -202,7 +204,7 @@ impl Protocol for GtpProtocol {
         // If any of the E, S, or PN flags are set, there are 4 more bytes
         if extension_header_flag || sequence_flag || npdu_flag {
             if data.len() < offset + 4 {
-                return ParseResult::error("GTP: optional header fields missing".to_string(), data);
+                return Parsed::error("GTP: optional header fields missing", data);
             }
 
             // Bytes 8-9: Sequence Number
@@ -225,7 +227,7 @@ impl Protocol for GtpProtocol {
 
             // Parse extension headers if present
             if extension_header_flag && next_ext_type != 0 {
-                let mut ext_headers = Vec::new();
+                let mut ext_headers = fields.text_builder();
                 let mut ext_count = 0u8;
 
                 while next_ext_type != extension_header_type::NO_MORE
@@ -245,11 +247,16 @@ impl Protocol for GtpProtocol {
                     }
 
                     // Store the extension header type name
-                    ext_headers.push(format!(
+                    if ext_count > 0 {
+                        ext_headers.push_str(",");
+                    }
+                    // Writing to an arena string does not fail.
+                    let _ = write!(
+                        ext_headers,
                         "{}(0x{:02X})",
                         extension_header_type_name(next_ext_type),
                         next_ext_type
-                    ));
+                    );
 
                     // Next extension header type is at the last byte of this extension
                     next_ext_type = data[offset + ext_len - 1];
@@ -258,10 +265,7 @@ impl Protocol for GtpProtocol {
                 }
 
                 if !ext_headers.is_empty() {
-                    fields.push((
-                        "extension_headers",
-                        FieldValue::OwnedString(CompactString::new(ext_headers.join(","))),
-                    ));
+                    fields.push(("extension_headers", ext_headers.finish()));
                     fields.push(("extension_header_count", FieldValue::UInt8(ext_count)));
                 }
             }
@@ -301,7 +305,7 @@ impl Protocol for GtpProtocol {
         child_hints.insert(HintKey::TunnelType, TunnelType::Gtp as u64);
         child_hints.insert(HintKey::TunnelId, teid as u64); // TEID is the tunnel identifier
 
-        ParseResult::success(fields, &data[offset..], child_hints)
+        Parsed::ok(&data[offset..], child_hints)
     }
 
     fn schema_fields(&self) -> Vec<FieldDescriptor> {
@@ -350,12 +354,15 @@ impl GtpProtocol {
     /// |          Sequence Number                      |    Spare     |
     /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
     /// ```
-    fn parse_gtpv2<'a>(&self, data: &'a [u8], context: &ParseContext) -> ParseResult<'a> {
+    fn parse_gtpv2<'a>(
+        &self,
+        data: &'a [u8],
+        context: &ParseContext,
+        fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
         if data.len() < 8 {
-            return ParseResult::error("GTPv2 header too short".to_string(), data);
+            return Parsed::error("GTPv2 header too short", data);
         }
-
-        let mut fields = SmallVec::new();
 
         let flags = data[0];
         let version = (flags >> 5) & 0x07;
@@ -379,7 +386,7 @@ impl GtpProtocol {
         // TEID is present if T flag is set
         if teid_present {
             if data.len() < offset + 4 {
-                return ParseResult::error("GTPv2: missing TEID field".to_string(), data);
+                return Parsed::error("GTPv2: missing TEID field", data);
             }
             let teid = u32::from_be_bytes([
                 data[offset],
@@ -393,7 +400,7 @@ impl GtpProtocol {
 
         // Sequence Number (3 bytes) + Spare (1 byte)
         if data.len() < offset + 4 {
-            return ParseResult::error("GTPv2: missing sequence number".to_string(), data);
+            return Parsed::error("GTPv2: missing sequence number", data);
         }
         let sequence = ((data[offset] as u32) << 16)
             | ((data[offset + 1] as u32) << 8)
@@ -409,7 +416,7 @@ impl GtpProtocol {
             }
         }
 
-        ParseResult::success(fields, &data[offset..], child_hints)
+        Parsed::ok(&data[offset..], child_hints)
     }
 }
 
@@ -708,7 +715,7 @@ mod tests {
             Some(&FieldValue::UInt8(1))
         );
 
-        if let Some(FieldValue::OwnedString(ext)) = result.get("extension_headers") {
+        if let Some(FieldValue::Str(ext)) = result.get("extension_headers") {
             assert!(ext.contains("PDCP PDU Number"));
             assert!(ext.contains("0xC0"));
         } else {
@@ -757,7 +764,7 @@ mod tests {
             Some(&FieldValue::UInt8(2))
         );
 
-        if let Some(FieldValue::OwnedString(ext)) = result.get("extension_headers") {
+        if let Some(FieldValue::Str(ext)) = result.get("extension_headers") {
             assert!(ext.contains("UDP Port"));
             assert!(ext.contains("PDU Session Container"));
         } else {
@@ -978,7 +985,7 @@ mod tests {
             let result = parser.parse_layer(&header, &context);
             assert!(result.is_ok());
 
-            if let Some(FieldValue::OwnedString(ext)) = result.get("extension_headers") {
+            if let Some(FieldValue::Str(ext)) = result.get("extension_headers") {
                 assert!(
                     ext.contains(expected_name),
                     "Expected '{}' in '{}'",

@@ -6,11 +6,9 @@
 //! RFC 2328: OSPF Version 2
 //! RFC 5340: OSPF for IPv6
 
-use compact_str::CompactString;
-use smallvec::SmallVec;
-
 use super::{
-    Cond, Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult, Protocol,
+    Cond, Dispatch, DispatchRule, FieldSink, FieldValue, HintKey, Hints, ParseContext, Parsed,
+    Protocol,
 };
 use crate::schema::{DataKind, FieldDescriptor};
 
@@ -115,13 +113,16 @@ impl Protocol for OspfProtocol {
         }
     }
 
-    fn parse<'a>(&self, data: &'a [u8], _context: &ParseContext) -> ParseResult<'a> {
+    fn parse_into<'a>(
+        &self,
+        data: &'a [u8],
+        _context: &ParseContext,
+        fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
         // OSPF header is 24 bytes minimum
         if data.len() < 24 {
-            return ParseResult::error("OSPF header too short".to_string(), data);
+            return Parsed::error("OSPF header too short", data);
         }
-
-        let mut fields = SmallVec::new();
 
         // Byte 0: Version
         let version = data[0];
@@ -141,17 +142,11 @@ impl Protocol for OspfProtocol {
 
         // Bytes 4-7: Router ID
         let router_id = format!("{}.{}.{}.{}", data[4], data[5], data[6], data[7]);
-        fields.push((
-            "router_id",
-            FieldValue::OwnedString(CompactString::new(router_id)),
-        ));
+        fields.push(("router_id", fields.str(&router_id)));
 
         // Bytes 8-11: Area ID
         let area_id = format!("{}.{}.{}.{}", data[8], data[9], data[10], data[11]);
-        fields.push((
-            "area_id",
-            FieldValue::OwnedString(CompactString::new(area_id)),
-        ));
+        fields.push(("area_id", fields.str(&area_id)));
 
         // Bytes 12-13: Checksum
         let checksum = u16::from_be_bytes([data[12], data[13]]);
@@ -177,16 +172,16 @@ impl Protocol for OspfProtocol {
 
         match (msg_type, version) {
             (packet_type::HELLO, 2) => {
-                self.parse_hello_v2(packet_data, &mut fields);
+                self.parse_hello_v2(packet_data, fields);
             }
             (packet_type::DATABASE_DESCRIPTION, 2) => {
-                self.parse_db_description_v2(packet_data, &mut fields);
+                self.parse_db_description_v2(packet_data, fields);
             }
             (packet_type::LINK_STATE_UPDATE, 2) => {
-                self.parse_ls_update_v2(packet_data, &mut fields);
+                self.parse_ls_update_v2(packet_data, fields);
             }
             (packet_type::LINK_STATE_ACK, 2) => {
-                self.parse_ls_ack_v2(packet_data, &mut fields);
+                self.parse_ls_ack_v2(packet_data, fields);
             }
             _ => {
                 // Unknown packet type or version
@@ -195,7 +190,7 @@ impl Protocol for OspfProtocol {
 
         // Calculate remaining data
         let consumed = std::cmp::min(length as usize, data.len());
-        ParseResult::success(fields, &data[consumed..], Hints::new())
+        Parsed::ok(&data[consumed..], Hints::new())
     }
 
     fn schema_fields(&self) -> Vec<FieldDescriptor> {
@@ -246,7 +241,7 @@ impl Protocol for OspfProtocol {
 
 impl OspfProtocol {
     /// Parse OSPF v2 Hello packet.
-    fn parse_hello_v2(&self, data: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) {
+    fn parse_hello_v2(&self, data: &[u8], fields: &mut FieldSink<'_, '_>) {
         if data.len() < 20 {
             return;
         }
@@ -265,17 +260,11 @@ impl OspfProtocol {
 
         // Bytes 12-15: Designated Router
         let dr = format!("{}.{}.{}.{}", data[12], data[13], data[14], data[15]);
-        fields.push((
-            "designated_router",
-            FieldValue::OwnedString(CompactString::new(dr)),
-        ));
+        fields.push(("designated_router", fields.str(&dr)));
 
         // Bytes 16-19: Backup Designated Router
         let bdr = format!("{}.{}.{}.{}", data[16], data[17], data[18], data[19]);
-        fields.push((
-            "backup_dr",
-            FieldValue::OwnedString(CompactString::new(bdr)),
-        ));
+        fields.push(("backup_dr", fields.str(&bdr)));
 
         // Count neighbors (remaining data is list of neighbor router IDs)
         let neighbor_data = &data[20..];
@@ -286,11 +275,7 @@ impl OspfProtocol {
     }
 
     /// Parse OSPF v2 Database Description packet.
-    fn parse_db_description_v2(
-        &self,
-        data: &[u8],
-        fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
-    ) {
+    fn parse_db_description_v2(&self, data: &[u8], fields: &mut FieldSink<'_, '_>) {
         if data.len() < 8 {
             return;
         }
@@ -322,11 +307,7 @@ impl OspfProtocol {
     }
 
     /// Parse OSPF v2 LS Update packet.
-    fn parse_ls_update_v2(
-        &self,
-        data: &[u8],
-        fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
-    ) {
+    fn parse_ls_update_v2(&self, data: &[u8], fields: &mut FieldSink<'_, '_>) {
         if data.len() < 4 {
             return;
         }
@@ -343,11 +324,7 @@ impl OspfProtocol {
     }
 
     /// Parse OSPF v2 LS Acknowledgment packet.
-    fn parse_ls_ack_v2(
-        &self,
-        data: &[u8],
-        fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
-    ) {
+    fn parse_ls_ack_v2(&self, data: &[u8], fields: &mut FieldSink<'_, '_>) {
         // LS Ack contains a list of LSA headers (each 20 bytes)
         let lsa_count = (data.len() / 20) as u16;
         if lsa_count > 0 {
@@ -375,11 +352,7 @@ impl OspfProtocol {
     /// |         LS Checksum           |             Length            |
     /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
     /// ```
-    fn parse_lsa_header(
-        &self,
-        data: &[u8],
-        fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
-    ) {
+    fn parse_lsa_header(&self, data: &[u8], fields: &mut FieldSink<'_, '_>) {
         if data.len() < 20 {
             return;
         }
@@ -396,14 +369,11 @@ impl OspfProtocol {
 
         // Bytes 4-7: Link State ID
         let ls_id = format!("{}.{}.{}.{}", data[4], data[5], data[6], data[7]);
-        fields.push(("lsa_id", FieldValue::OwnedString(CompactString::new(ls_id))));
+        fields.push(("lsa_id", fields.str(&ls_id)));
 
         // Bytes 8-11: Advertising Router
         let adv_router = format!("{}.{}.{}.{}", data[8], data[9], data[10], data[11]);
-        fields.push((
-            "lsa_advertising_router",
-            FieldValue::OwnedString(CompactString::new(adv_router)),
-        ));
+        fields.push(("lsa_advertising_router", fields.str(&adv_router)));
 
         // Bytes 12-15: LS Sequence Number
         let ls_sequence = u32::from_be_bytes([data[12], data[13], data[14], data[15]]);
