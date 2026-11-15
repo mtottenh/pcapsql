@@ -151,6 +151,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`enable_external_access`, `allowed_directories`) decide what may be
   opened. The extension's sources use no `std::fs`; a `clippy.toml` scoped to
   the extension and `make check` enforce it.
+- **`pcapsql-core`: scans restricted to a range of frames or of time.** A
+  plan's `scan::FramePredicate` (bounds on the frame number and on the
+  packet timestamp, each inclusive, exclusive or absent) is now applied by
+  the scan driver, exactly: `PartitionScan::step` gives rows for the packets
+  the predicate accepts and for no others, so an engine can treat a filter
+  it turned into one as done. A rejected packet is consumed without being
+  parsed, routed, counted against a row cap or shown to the `FrameObserver`.
+  Frame numbers ascend, so the scan ends (`Step::End`) once the last frame
+  the upper bound admits is consumed, without reading the packet behind it
+  (on a live capture that packet might never arrive); timestamps need not
+  ascend, so a time bound selects packets but never ends a scan. A predicate
+  nothing can satisfy (`FramePredicate::is_empty`) reads nothing.
+  `ScanStats::packets` still counts every packet consumed, `skipped` (new)
+  those of them the predicate rejected, and the timestamp range is that of
+  the accepted packets. `CompiledScan::frames` exposes the predicate.
+  A plan with stream tables cannot have one
+  (`PlanError::StreamFramePredicate`): a stream table is assembled from
+  every packet of the capture.
+- **`pcapsql-core`: partition trimming.** `scan::plan_ranges(index, want,
+  frames)` gives the ranges to scan for a frame predicate: the boundary
+  index's partition ranges, each shrunk to the checkpoint windows that can
+  hold a matching packet and left out when none can. Frame bounds trim
+  exactly; time bounds by the smallest and largest timestamp the index
+  recorded per window, each window on its own since timestamps need not
+  ascend. The last window of a capture is ruled out by the upper frame bound
+  only (a capture that grew since it was indexed has packets there the index
+  knows nothing of). Trimmed ranges still start and end on checkpoints. The
+  result is unchanged for a predicate that accepts everything, and is the
+  whole capture as one range without an index. `pcapsql-datafusion` has no
+  frame predicate yet and behaves as before.
 
 ### Changed
 
