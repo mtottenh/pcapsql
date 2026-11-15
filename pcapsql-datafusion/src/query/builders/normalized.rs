@@ -8,13 +8,13 @@ use std::collections::HashMap;
 
 use super::fused::FusedBatchBuilder;
 use super::protocol::ProtocolBatchBuilder;
-use crate::error::{Error, QueryError};
+use crate::error::Error;
 use arrow::record_batch::RecordBatch;
 use std::sync::Arc;
 
-use crate::query::providers::{BatchSender, OverflowStats, Pacer, ParseSubscription};
+use crate::query::providers::{BatchSender, CompiledSubscription, OverflowStats, Pacer};
 use pcapsql_core::io::PacketRef;
-use pcapsql_core::scan::{Catalog, CompiledPredicate};
+use pcapsql_core::scan::CompiledPredicate;
 use pcapsql_core::ParseResult;
 
 /// Where a table's completed batches go.
@@ -95,7 +95,7 @@ impl TableSlot {
 ///
 /// Usage:
 /// ```ignore
-/// let mut batch_set = NormalizedBatchSet::new(1000, &subscription)?;
+/// let mut batch_set = NormalizedBatchSet::new(1000, &subscription.compile(&registry)?);
 ///
 /// // For each packet (borrowed, zero-copy):
 /// batch_set.add_packet_from_ref(packet_ref, &parsed_results)?;
@@ -123,7 +123,7 @@ pub struct NormalizedBatchSet {
 impl NormalizedBatchSet {
     /// Create builders for exactly the subscribed tables (materialize mode:
     /// completed batches accumulate in memory).
-    pub fn new(batch_size: usize, subscription: &ParseSubscription) -> Result<Self, Error> {
+    pub fn new(batch_size: usize, subscription: &CompiledSubscription) -> Self {
         Self::build(batch_size, subscription, |_| {
             BatchSink::Accumulate(Vec::new())
         })
@@ -134,74 +134,63 @@ impl NormalizedBatchSet {
     /// table without a sender accumulates (and is dropped on finish).
     pub fn new_streaming(
         batch_size: usize,
-        subscription: &ParseSubscription,
+        subscription: &CompiledSubscription,
         mut senders: HashMap<String, BatchSender>,
         pacer: Arc<Pacer>,
-    ) -> Result<Self, Error> {
+    ) -> Self {
         let mut set = Self::build(batch_size, subscription, |name| {
             match senders.remove(name) {
                 Some(tx) => BatchSink::Stream(tx),
                 None => BatchSink::Accumulate(Vec::new()),
             }
-        })?;
+        });
         set.pacer = Some(pacer);
-        Ok(set)
+        set
     }
 
     fn build(
         batch_size: usize,
-        subscription: &ParseSubscription,
+        subscription: &CompiledSubscription,
         mut sink_for: impl FnMut(&str) -> BatchSink,
-    ) -> Result<Self, Error> {
-        let mut slots = Vec::with_capacity(subscription.tables.len() + subscription.fused.len());
-        for (name, sub) in &subscription.tables {
-            let schema = subscription.table_schema(name).ok_or_else(|| {
-                Error::Query(QueryError::Execution(format!("Unknown table: {name}")))
-            })?;
-            slots.push(TableSlot {
-                name: name.clone(),
-                builder: RowBuilder::Protocol(ProtocolBatchBuilder::with_schema(
-                    name.clone(),
-                    schema,
+    ) -> Self {
+        let mut slots = Vec::new();
+        let mut fused = Vec::new();
+        // The protocol tables, then the fused joins: each with its schema,
+        // and its predicate and row cap from the compiled plan.
+        for (output, plan) in subscription.outputs() {
+            let builder = match &output.spec {
+                Some(spec) => {
+                    fused.push(slots.len());
+                    RowBuilder::Fused(FusedBatchBuilder::new(Arc::clone(spec), batch_size))
+                }
+                None => RowBuilder::Protocol(ProtocolBatchBuilder::with_schema(
+                    output.name.clone(),
+                    Arc::clone(&output.schema),
                     batch_size,
                 )),
-                sink: sink_for(name),
-                predicate: sub.predicate.as_ref().and_then(|predicate| {
-                    let (_, table) = Catalog::builtin().table(name)?;
-                    predicate.compile(table)
-                }),
-                fetch: sub.fetch,
-                rows_added: 0,
-                consumer_gone: false,
-            });
-        }
-        let mut fused_names: Vec<&String> = subscription.fused.keys().collect();
-        fused_names.sort();
-        let mut fused = Vec::with_capacity(fused_names.len());
-        for name in fused_names {
-            let sub = &subscription.fused[name];
-            fused.push(slots.len());
+            };
             slots.push(TableSlot {
-                name: name.clone(),
-                builder: RowBuilder::Fused(FusedBatchBuilder::new(
-                    Arc::clone(&sub.spec),
-                    batch_size,
-                )),
-                sink: sink_for(name),
-                predicate: None,
-                fetch: sub.fetch,
+                name: output.name.clone(),
+                builder,
+                sink: sink_for(&output.name),
+                // The predicate remembers where it found each field in the
+                // previous row: every batch set has its own copy.
+                predicate: plan.predicate().cloned(),
+                fetch: plan
+                    .fetch()
+                    .map(|rows| usize::try_from(rows).unwrap_or(usize::MAX)),
                 rows_added: 0,
                 consumer_gone: false,
             });
         }
         let frames = slots.iter().position(|s| s.name == "frames");
-        Ok(Self {
+        Self {
             slots,
             frames,
             fused,
             layer_slots: Vec::new(),
             pacer: None,
-        })
+        }
     }
 
     /// The slot of the table a parsed layer named `layer` goes to.
@@ -439,9 +428,11 @@ impl NormalizedBatchSet {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::query::providers::{ParseSubscription, TableSubscription};
     use compact_str::CompactString;
     use datafusion::logical_expr::col;
     use datafusion::prelude::lit;
+    use pcapsql_core::scan::Catalog;
     use pcapsql_core::{FieldValue, TunnelType};
     use smallvec::SmallVec;
     use std::collections::HashSet;
@@ -517,13 +508,19 @@ mod tests {
         }
     }
 
+    /// A batch set for `subscription`, compiled for the default registry.
+    fn batch_set(batch_size: usize, subscription: &ParseSubscription) -> NormalizedBatchSet {
+        let registry = pcapsql_core::default_registry();
+        NormalizedBatchSet::new(batch_size, &subscription.compile(&registry).unwrap())
+    }
+
     fn sub_full(names: &[&str]) -> ParseSubscription {
-        ParseSubscription::tables_full(names.iter().map(|s| s.to_string()))
+        ParseSubscription::tables_full(names).unwrap()
     }
 
     #[test]
     fn builds_only_subscribed_tables() {
-        let mut bs = NormalizedBatchSet::new(1000, &sub_full(&["frames", "tcp"])).unwrap();
+        let mut bs = batch_set(1000, &sub_full(&["frames", "tcp"]));
         let parsed = vec![
             ("ethernet", create_ethernet_result()),
             ("tcp", create_tcp_result(80)),
@@ -546,13 +543,20 @@ mod tests {
 
     #[test]
     fn column_subset_schema_is_materialized() {
-        let mut sub = sub_full(&["tcp"]);
-        sub.tables.get_mut("tcp").unwrap().columns = Some(HashSet::from([
-            "frame_number".to_string(),
-            "dst_port".to_string(),
-        ]));
+        let mut sub = ParseSubscription::default();
+        sub.subscribe_table(
+            "tcp",
+            TableSubscription {
+                columns: Some(HashSet::from([
+                    "frame_number".to_string(),
+                    "dst_port".to_string(),
+                ])),
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
-        let mut bs = NormalizedBatchSet::new(1000, &sub).unwrap();
+        let mut bs = batch_set(1000, &sub);
         let parsed = vec![("tcp", create_tcp_result(80))];
         bs.add_packet_from_ref(create_test_packet(1), &parsed)
             .unwrap();
@@ -569,27 +573,45 @@ mod tests {
 
     #[test]
     fn predicate_drops_only_positively_false_rows() {
-        let mut sub = sub_full(&["tcp"]);
         let (_, tcp) = Catalog::builtin().table("tcp").unwrap();
-        sub.tables.get_mut("tcp").unwrap().predicate =
+        let predicate =
             crate::query::filter::row_predicate(&[col("dst_port").eq(lit(443i32))], tcp);
-        assert!(sub.tables["tcp"].predicate.is_some());
+        assert!(predicate.is_some());
+        let mut sub = ParseSubscription::default();
+        sub.subscribe_table(
+            "tcp",
+            TableSubscription {
+                predicate,
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
-        let mut bs = NormalizedBatchSet::new(1000, &sub).unwrap();
+        let mut bs = batch_set(1000, &sub);
         bs.add_packet_from_ref(create_test_packet(1), &[("tcp", create_tcp_result(80))])
             .unwrap();
         bs.add_packet_from_ref(create_test_packet(2), &[("tcp", create_tcp_result(443))])
             .unwrap();
+        // The field is absent: undecided, so the row is kept.
+        bs.add_packet_from_ref(create_test_packet(3), &[("tcp", create_dns_result())])
+            .unwrap();
 
-        assert_eq!(bs.row_count("tcp"), 1);
+        assert_eq!(bs.row_count("tcp"), 2);
     }
 
     #[test]
     fn fetch_caps_rows_and_reports_all_capped() {
-        let mut sub = sub_full(&["frames"]);
-        sub.tables.get_mut("frames").unwrap().fetch = Some(2);
+        let mut sub = ParseSubscription::default();
+        sub.subscribe_table(
+            "frames",
+            TableSubscription {
+                fetch: Some(2),
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
-        let mut bs = NormalizedBatchSet::new(1000, &sub).unwrap();
+        let mut bs = batch_set(1000, &sub);
         for i in 1..=5 {
             bs.add_packet_from_ref(create_test_packet(i), &[]).unwrap();
         }
@@ -599,7 +621,7 @@ mod tests {
 
     #[test]
     fn batch_size_triggers_intermediate_batches() {
-        let mut bs = NormalizedBatchSet::new(2, &sub_full(&["frames"])).unwrap();
+        let mut bs = batch_set(2, &sub_full(&["frames"]));
         for i in 1..=5 {
             bs.add_packet_from_ref(create_test_packet(i), &[]).unwrap();
         }
@@ -613,7 +635,6 @@ mod tests {
 
     #[test]
     fn unknown_table_errors() {
-        let result = NormalizedBatchSet::new(1000, &sub_full(&["nonexistent"]));
-        assert!(result.is_err());
+        assert!(ParseSubscription::tables_full(["nonexistent"]).is_err());
     }
 }

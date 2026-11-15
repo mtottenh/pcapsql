@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
-use pcapsql_core::scan::{ColKind, TableDef, TimestampUnit};
+use pcapsql_core::scan::{ColKind, OutColumn, TableDef, TimestampUnit};
 use pcapsql_core::schema::{DataKind, FieldDescriptor};
 use pcapsql_core::Protocol;
 
@@ -72,6 +72,23 @@ pub fn table_def_to_arrow_schema(table: &TableDef) -> Schema {
             Field::new(
                 column.name,
                 col_kind_to_arrow_type(column.kind_in(TimestampUnit::Micros)),
+                column.nullable,
+            )
+        })
+        .collect();
+    Schema::new(fields)
+}
+
+/// The Arrow schema of one output of a compiled scan plan: its columns in
+/// output order, each in the kind the plan resolved (timestamps in the
+/// plan's unit).
+pub fn out_columns_to_arrow_schema(columns: &[OutColumn]) -> Schema {
+    let fields: Vec<Field> = columns
+        .iter()
+        .map(|column| {
+            Field::new(
+                column.name,
+                col_kind_to_arrow_type(column.kind),
                 column.nullable,
             )
         })

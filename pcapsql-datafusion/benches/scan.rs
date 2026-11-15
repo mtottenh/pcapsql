@@ -175,7 +175,7 @@ fn parse_pass<S: SeekablePacketSource>(
     tables: &[&str],
     partitions: usize,
 ) -> usize {
-    let subscription = ParseSubscription::tables_full(tables.iter().copied());
+    let subscription = ParseSubscription::tables_full(tables).expect("known tables");
     let (tables, _stats) = run_shared_parse(
         source,
         registry,

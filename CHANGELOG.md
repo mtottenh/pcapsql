@@ -48,6 +48,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   registration stay with the engine. Also new: `write_ipv4`, `write_ipv6`
   and `write_mac` (the `format_*` functions without the `String`), and
   `dns_opcode_name`, which no SQL function uses yet.
+- **`pcapsql-core`: the scan plan and its predicates.** `scan::ScanPlan`
+  says what one pass over a capture must produce: table scans (output
+  columns as `ColId`s in output order, an optional row predicate, an
+  optional row cap), fused joins on `frame_number` (`FusedScan`), stream
+  tables, and the unit of timestamp columns. `ScanPlan::compile` checks it
+  against the catalogue (`PlanError`) and resolves what a packet loop must
+  not look up per packet (`CompiledScan`): the `ParseScope`, each output's
+  columns with their kind in the plan's timestamp unit, and whether the pass
+  must run as one partition (stream tables). `scan::RowPredicate` is the
+  conservative parse-time filter (`column <op> literal` joined by `AND`,
+  bound to a table's columns): it drops a row only on a positively false
+  comparison, and compiles to a `CompiledPredicate` that looks fields up by
+  remembered position. `scan::FramePredicate` is an exact range of frame
+  numbers and timestamps; no scan applies it yet. `ParseScope` gains the
+  `required()` and `projections()` accessors, `Catalog` gains `try_get`.
 
 ### Changed
 
@@ -67,6 +82,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pcapsql_core::format`, with the same result for every input. The name
   functions no longer allocate a `String` per row for a known value, and
   `tcp_flags_str()` and `hex()` write into the output column directly.
+- **`pcapsql-datafusion`: the parse subscription and the pushed-down filters
+  are built on the core scan plan.** Queries and their results are
+  unchanged. In the library:
+  - `FilterEvaluator` is gone. `query::row_predicate(exprs, table)` converts
+    a scan's filter expressions into a `scan::RowPredicate` for a catalogue
+    table and `query::is_pushable(expr, table)` says whether an expression
+    contributes to one. `CompareOp` and `SimplePredicate` are replaced by
+    `scan::CmpOp`, `scan::Literal` and `scan::RowPredicate`.
+  - `ParseSubscription` wraps a `scan::ScanPlan` (`plan()`) and no longer
+    has public fields. It is filled with `subscribe_table`,
+    `subscribe_fused` and `subscribe_stream_table`, which fail on an unknown
+    table or column and on a table subscribed twice; `tables_full` returns a
+    `Result` for the same reason. `table_schema` moved to
+    `CompiledSubscription`, which `ParseSubscription::compile(registry)`
+    returns and `NormalizedBatchSet::new` and `new_streaming` now take
+    (both are infallible).
+  - `TableSubscription::predicate` is an `Option<scan::RowPredicate>`.
+  - `fusion::JoinKind` and `fusion::MemberJoin` are re-exports of the core
+    types; `FrameJoinSpec::to_fused_scan` replaces `member_fields`.
+  - A pushed-down comparison on `encap_depth`, `tunnel_type` or `tunnel_id`
+    is now evaluated at parse time, from the layer's encapsulation context.
+    Before, it was accepted and never dropped a row. DataFusion applies the
+    filter again either way.
+  - A table subscribed with every one of its field columns named is parsed
+    unprojected, as one subscribed without a column list already was.
 
 ## [0.4.1] - 2026-10-24
 
