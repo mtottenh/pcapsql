@@ -5,7 +5,9 @@
 //! next packet. A message of a stream is assembled from many packets and
 //! kept until its table is built, so its values own what they hold.
 
-use compact_str::CompactString;
+use compact_str::{format_compact, CompactString};
+
+use crate::format::names::Name;
 
 /// A field value that outlives the packets it was parsed from: what
 /// [`ParsedMessage::fields`](super::ParsedMessage::fields) holds.
@@ -42,6 +44,17 @@ impl OwnedFieldValue {
 
 // Not derived: a static string and a copied one with the same text are the
 // same value.
+/// The text of a name table: the table's own string for a number with a
+/// name, the text made of the number otherwise.
+impl From<Name> for OwnedFieldValue {
+    fn from(name: Name) -> Self {
+        match name.as_static() {
+            Some(text) => Self::Str(text),
+            None => Self::OwnedString(format_compact!("{name}")),
+        }
+    }
+}
+
 impl PartialEq for OwnedFieldValue {
     fn eq(&self, other: &Self) -> bool {
         use OwnedFieldValue as V;

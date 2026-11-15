@@ -78,7 +78,7 @@ impl ScalarUDFImpl for OspfPacketTypeNameUdf {
 
         let result: StringArray = values
             .iter()
-            .map(|opt| opt.map(ospf_packet_type_name))
+            .map(|opt| opt.map(|code| ospf_packet_type_name(code).into_cow()))
             .collect();
         Ok(ColumnarValue::Array(Arc::new(result)))
     }
@@ -127,7 +127,7 @@ impl ScalarUDFImpl for OspfLsaTypeNameUdf {
 
         let result: StringArray = values
             .iter()
-            .map(|opt| opt.map(ospf_lsa_type_name))
+            .map(|opt| opt.map(|code| ospf_lsa_type_name(code).into_cow()))
             .collect();
         Ok(ColumnarValue::Array(Arc::new(result)))
     }

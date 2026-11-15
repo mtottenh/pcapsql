@@ -15,15 +15,16 @@
 //! functions (`ip_proto_name()`, `tcp_flags_str()`, `ip_in_cidr()`, ...), so
 //! that every query engine built on this crate gives the same answer:
 //!
-//! - [`names`]: protocol numbers to names
+//! - [`names`]: protocol numbers to names, for the functions and for the
+//!   parsers' name columns alike
 //! - [`flags`]: TCP flag formatting and tests
 //! - [`cidr`]: IP address parsing, CIDR membership, address classes
 //! - [`mac`]: MAC address parsing and classes
 //! - [`hex`]: hex encoding and decoding
 //!
 //! A kernel takes one value (a scalar or a byte slice) and returns a scalar,
-//! a [`Cow<'static, str>`](std::borrow::Cow) that borrows whenever the text
-//! is a fixed name, or writes to a [`fmt::Write`](std::fmt::Write) sink. None
+//! a [`Name`] (a name of a table or text made of the number, without
+//! allocating either), or writes to a [`fmt::Write`](std::fmt::Write) sink. None
 //! takes or returns a column, and none knows about NULL: the engine's wrapper
 //! owns null handling, constant arguments and registration. Where a function
 //! has an invalid-input case (`parse_*`), it returns `None` and the wrapper

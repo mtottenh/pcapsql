@@ -8,10 +8,11 @@ use super::{
     Cond, Dispatch, DispatchRule, FieldSink, FieldValue, HintKey, Hints, ParseContext, Parsed,
     Protocol,
 };
+use crate::format::names::quic_version_name;
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// QUIC versions.
-mod version {
+pub mod version {
     pub const VERSION_NEGOTIATION: u32 = 0x00000000;
     pub const QUIC_V1: u32 = 0x00000001;
     pub const QUIC_V2: u32 = 0x6b3343cf;
@@ -164,7 +165,7 @@ fn parse_long_header<'a>(data: &'a [u8], fields: &mut FieldSink<'_, 'a>) -> Pars
     // Version (4 bytes)
     let quic_version = u32::from_be_bytes([data[1], data[2], data[3], data[4]]);
     fields.push(("version", FieldValue::UInt32(quic_version)));
-    fields.push(("version_name", fields.str(&format_version(quic_version))));
+    fields.push(("version_name", fields.name(quic_version_name(quic_version))));
 
     // DCID Length
     let dcid_len = data[5] as usize;
@@ -405,22 +406,6 @@ fn parse_varint(data: &[u8]) -> Option<(usize, usize)> {
             Some((value, 8))
         }
         _ => None,
-    }
-}
-
-/// Format QUIC version as a readable name.
-fn format_version(ver: u32) -> String {
-    match ver {
-        version::VERSION_NEGOTIATION => "Version Negotiation".to_string(),
-        version::QUIC_V1 => "QUIC v1".to_string(),
-        version::QUIC_V2 => "QUIC v2".to_string(),
-        version::DRAFT_29 => "Draft-29".to_string(),
-        version::DRAFT_32 => "Draft-32".to_string(),
-        version::DRAFT_34 => "Draft-34".to_string(),
-        v if (v & 0xff000000) == 0xff000000 => {
-            format!("Draft-{}", v & 0xff)
-        }
-        _ => format!("0x{ver:08x}"),
     }
 }
 
@@ -765,17 +750,5 @@ mod tests {
 
         // Empty data
         assert_eq!(parse_varint(&[]), None);
-    }
-
-    #[test]
-    fn test_version_formatting() {
-        assert_eq!(format_version(version::QUIC_V1), "QUIC v1");
-        assert_eq!(format_version(version::QUIC_V2), "QUIC v2");
-        assert_eq!(
-            format_version(version::VERSION_NEGOTIATION),
-            "Version Negotiation"
-        );
-        assert_eq!(format_version(0xff00001d), "Draft-29");
-        assert_eq!(format_version(0x12345678), "0x12345678");
     }
 }

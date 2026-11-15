@@ -10,6 +10,7 @@ use super::{
     Cond, Dispatch, DispatchRule, FieldSink, FieldValue, HintKey, Hints, ParseContext, Parsed,
     Protocol,
 };
+use crate::format::names::{ospf_lsa_type_name, ospf_packet_type_name};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// IP protocol number for OSPF.
@@ -48,36 +49,6 @@ pub mod lsa_type {
     pub const OPAQUE_AREA: u8 = 10;
     /// Opaque-AS-LSA (RFC 5250): AS scope opaque LSA.
     pub const OPAQUE_AS: u8 = 11;
-}
-
-/// Get the name of an LSA type.
-fn lsa_type_name(ls_type: u8) -> &'static str {
-    match ls_type {
-        lsa_type::ROUTER => "Router-LSA",
-        lsa_type::NETWORK => "Network-LSA",
-        lsa_type::SUMMARY_NETWORK => "Summary-LSA-Network",
-        lsa_type::SUMMARY_ASBR => "Summary-LSA-ASBR",
-        lsa_type::AS_EXTERNAL => "AS-External-LSA",
-        lsa_type::GROUP_MEMBERSHIP => "Group-Membership-LSA",
-        lsa_type::NSSA_EXTERNAL => "NSSA-External-LSA",
-        lsa_type::EXTERNAL_ATTRIBUTES => "External-Attributes-LSA",
-        lsa_type::OPAQUE_LINK => "Opaque-Link-LSA",
-        lsa_type::OPAQUE_AREA => "Opaque-Area-LSA",
-        lsa_type::OPAQUE_AS => "Opaque-AS-LSA",
-        _ => "Unknown",
-    }
-}
-
-/// Get the name of an OSPF packet type.
-fn packet_type_name(pkt_type: u8) -> &'static str {
-    match pkt_type {
-        packet_type::HELLO => "Hello",
-        packet_type::DATABASE_DESCRIPTION => "Database Description",
-        packet_type::LINK_STATE_REQUEST => "Link State Request",
-        packet_type::LINK_STATE_UPDATE => "Link State Update",
-        packet_type::LINK_STATE_ACK => "Link State Acknowledgment",
-        _ => "Unknown",
-    }
 }
 
 /// OSPF protocol parser.
@@ -133,7 +104,7 @@ impl Protocol for OspfProtocol {
         fields.push(("message_type", FieldValue::UInt8(msg_type)));
         fields.push((
             "message_type_name",
-            FieldValue::Str(packet_type_name(msg_type)),
+            fields.name(ospf_packet_type_name(msg_type)),
         ));
 
         // Bytes 2-3: Packet Length
@@ -365,7 +336,7 @@ impl OspfProtocol {
         // Byte 3: LS Type
         let ls_type = data[3];
         fields.push(("lsa_type", FieldValue::UInt8(ls_type)));
-        fields.push(("lsa_type_name", FieldValue::Str(lsa_type_name(ls_type))));
+        fields.push(("lsa_type_name", fields.name(ospf_lsa_type_name(ls_type))));
 
         // Bytes 4-7: Link State ID
         let ls_id = format!("{}.{}.{}.{}", data[4], data[5], data[6], data[7]);

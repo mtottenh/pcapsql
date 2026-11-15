@@ -1,64 +1,64 @@
 //! DNS record type, class, response code and opcode names.
 
-use std::borrow::Cow;
+use super::Name;
 
 use crate::protocol::{rcode, record_type};
 
 /// Convert DNS type number to name.
-pub fn dns_type_name(qtype: u16) -> Cow<'static, str> {
+pub fn dns_type_name(qtype: u16) -> Name {
     match qtype {
-        record_type::A => Cow::Borrowed("A"),
-        record_type::NS => Cow::Borrowed("NS"),
-        record_type::CNAME => Cow::Borrowed("CNAME"),
-        record_type::SOA => Cow::Borrowed("SOA"),
-        record_type::PTR => Cow::Borrowed("PTR"),
-        record_type::MX => Cow::Borrowed("MX"),
-        record_type::TXT => Cow::Borrowed("TXT"),
-        17 => Cow::Borrowed("RP"),
-        18 => Cow::Borrowed("AFSDB"),
-        24 => Cow::Borrowed("SIG"),
-        25 => Cow::Borrowed("KEY"),
-        record_type::AAAA => Cow::Borrowed("AAAA"),
-        29 => Cow::Borrowed("LOC"),
-        record_type::SRV => Cow::Borrowed("SRV"),
-        35 => Cow::Borrowed("NAPTR"),
-        36 => Cow::Borrowed("KX"),
-        37 => Cow::Borrowed("CERT"),
-        39 => Cow::Borrowed("DNAME"),
-        record_type::OPT => Cow::Borrowed("OPT"),
-        42 => Cow::Borrowed("APL"),
-        43 => Cow::Borrowed("DS"),
-        44 => Cow::Borrowed("SSHFP"),
-        45 => Cow::Borrowed("IPSECKEY"),
-        46 => Cow::Borrowed("RRSIG"),
-        47 => Cow::Borrowed("NSEC"),
-        48 => Cow::Borrowed("DNSKEY"),
-        49 => Cow::Borrowed("DHCID"),
-        50 => Cow::Borrowed("NSEC3"),
-        51 => Cow::Borrowed("NSEC3PARAM"),
-        52 => Cow::Borrowed("TLSA"),
-        53 => Cow::Borrowed("SMIMEA"),
-        55 => Cow::Borrowed("HIP"),
-        59 => Cow::Borrowed("CDS"),
-        60 => Cow::Borrowed("CDNSKEY"),
-        61 => Cow::Borrowed("OPENPGPKEY"),
-        62 => Cow::Borrowed("CSYNC"),
-        63 => Cow::Borrowed("ZONEMD"),
-        64 => Cow::Borrowed("SVCB"),
-        65 => Cow::Borrowed("HTTPS"),
-        99 => Cow::Borrowed("SPF"),
-        108 => Cow::Borrowed("EUI48"),
-        109 => Cow::Borrowed("EUI64"),
-        249 => Cow::Borrowed("TKEY"),
-        250 => Cow::Borrowed("TSIG"),
-        251 => Cow::Borrowed("IXFR"),
-        252 => Cow::Borrowed("AXFR"),
-        record_type::ANY => Cow::Borrowed("ANY"),
-        256 => Cow::Borrowed("URI"),
-        257 => Cow::Borrowed("CAA"),
-        32768 => Cow::Borrowed("TA"),
-        32769 => Cow::Borrowed("DLV"),
-        _ => Cow::Owned(format!("TYPE{qtype}")),
+        record_type::A => Name::fixed("A"),
+        record_type::NS => Name::fixed("NS"),
+        record_type::CNAME => Name::fixed("CNAME"),
+        record_type::SOA => Name::fixed("SOA"),
+        record_type::PTR => Name::fixed("PTR"),
+        record_type::MX => Name::fixed("MX"),
+        record_type::TXT => Name::fixed("TXT"),
+        17 => Name::fixed("RP"),
+        18 => Name::fixed("AFSDB"),
+        24 => Name::fixed("SIG"),
+        25 => Name::fixed("KEY"),
+        record_type::AAAA => Name::fixed("AAAA"),
+        29 => Name::fixed("LOC"),
+        record_type::SRV => Name::fixed("SRV"),
+        35 => Name::fixed("NAPTR"),
+        36 => Name::fixed("KX"),
+        37 => Name::fixed("CERT"),
+        39 => Name::fixed("DNAME"),
+        record_type::OPT => Name::fixed("OPT"),
+        42 => Name::fixed("APL"),
+        43 => Name::fixed("DS"),
+        44 => Name::fixed("SSHFP"),
+        45 => Name::fixed("IPSECKEY"),
+        46 => Name::fixed("RRSIG"),
+        47 => Name::fixed("NSEC"),
+        48 => Name::fixed("DNSKEY"),
+        49 => Name::fixed("DHCID"),
+        50 => Name::fixed("NSEC3"),
+        51 => Name::fixed("NSEC3PARAM"),
+        52 => Name::fixed("TLSA"),
+        53 => Name::fixed("SMIMEA"),
+        55 => Name::fixed("HIP"),
+        59 => Name::fixed("CDS"),
+        60 => Name::fixed("CDNSKEY"),
+        61 => Name::fixed("OPENPGPKEY"),
+        62 => Name::fixed("CSYNC"),
+        63 => Name::fixed("ZONEMD"),
+        64 => Name::fixed("SVCB"),
+        65 => Name::fixed("HTTPS"),
+        99 => Name::fixed("SPF"),
+        108 => Name::fixed("EUI48"),
+        109 => Name::fixed("EUI64"),
+        249 => Name::fixed("TKEY"),
+        250 => Name::fixed("TSIG"),
+        251 => Name::fixed("IXFR"),
+        252 => Name::fixed("AXFR"),
+        record_type::ANY => Name::fixed("ANY"),
+        256 => Name::fixed("URI"),
+        257 => Name::fixed("CAA"),
+        32768 => Name::fixed("TA"),
+        32769 => Name::fixed("DLV"),
+        _ => Name::numbered("TYPE", qtype, ""),
     }
 }
 
@@ -67,44 +67,44 @@ pub fn dns_type_name(qtype: u16) -> Cow<'static, str> {
 /// Takes `u16` because the extended RCODE (header bits plus the EDNS OPT
 /// extension) is 12 bits wide. Every assigned name is below 256; anything
 /// else gives `RCODE{n}` with the full value.
-pub fn dns_rcode_name(rcode_val: u16) -> Cow<'static, str> {
+pub fn dns_rcode_name(rcode_val: u16) -> Name {
     let Ok(low) = u8::try_from(rcode_val) else {
-        return Cow::Owned(format!("RCODE{rcode_val}"));
+        return Name::numbered("RCODE", rcode_val, "");
     };
     match low {
-        rcode::NOERROR => Cow::Borrowed("NOERROR"),
-        rcode::FORMERR => Cow::Borrowed("FORMERR"),
-        rcode::SERVFAIL => Cow::Borrowed("SERVFAIL"),
-        rcode::NXDOMAIN => Cow::Borrowed("NXDOMAIN"),
-        rcode::NOTIMP => Cow::Borrowed("NOTIMP"),
-        rcode::REFUSED => Cow::Borrowed("REFUSED"),
-        rcode::YXDOMAIN => Cow::Borrowed("YXDOMAIN"),
-        rcode::YXRRSET => Cow::Borrowed("YXRRSET"),
-        rcode::NXRRSET => Cow::Borrowed("NXRRSET"),
-        rcode::NOTAUTH => Cow::Borrowed("NOTAUTH"),
-        rcode::NOTZONE => Cow::Borrowed("NOTZONE"),
-        rcode::DSOTYPENI => Cow::Borrowed("DSOTYPENI"),
-        rcode::BADVERS => Cow::Borrowed("BADVERS"),
-        rcode::BADKEY => Cow::Borrowed("BADKEY"),
-        rcode::BADTIME => Cow::Borrowed("BADTIME"),
-        rcode::BADMODE => Cow::Borrowed("BADMODE"),
-        rcode::BADNAME => Cow::Borrowed("BADNAME"),
-        rcode::BADALG => Cow::Borrowed("BADALG"),
-        rcode::BADTRUNC => Cow::Borrowed("BADTRUNC"),
-        rcode::BADCOOKIE => Cow::Borrowed("BADCOOKIE"),
-        _ => Cow::Owned(format!("RCODE{rcode_val}")),
+        rcode::NOERROR => Name::fixed("NOERROR"),
+        rcode::FORMERR => Name::fixed("FORMERR"),
+        rcode::SERVFAIL => Name::fixed("SERVFAIL"),
+        rcode::NXDOMAIN => Name::fixed("NXDOMAIN"),
+        rcode::NOTIMP => Name::fixed("NOTIMP"),
+        rcode::REFUSED => Name::fixed("REFUSED"),
+        rcode::YXDOMAIN => Name::fixed("YXDOMAIN"),
+        rcode::YXRRSET => Name::fixed("YXRRSET"),
+        rcode::NXRRSET => Name::fixed("NXRRSET"),
+        rcode::NOTAUTH => Name::fixed("NOTAUTH"),
+        rcode::NOTZONE => Name::fixed("NOTZONE"),
+        rcode::DSOTYPENI => Name::fixed("DSOTYPENI"),
+        rcode::BADVERS => Name::fixed("BADVERS"),
+        rcode::BADKEY => Name::fixed("BADKEY"),
+        rcode::BADTIME => Name::fixed("BADTIME"),
+        rcode::BADMODE => Name::fixed("BADMODE"),
+        rcode::BADNAME => Name::fixed("BADNAME"),
+        rcode::BADALG => Name::fixed("BADALG"),
+        rcode::BADTRUNC => Name::fixed("BADTRUNC"),
+        rcode::BADCOOKIE => Name::fixed("BADCOOKIE"),
+        _ => Name::numbered("RCODE", rcode_val, ""),
     }
 }
 
 /// Convert DNS class to name.
-pub fn dns_class_name(class: u16) -> Cow<'static, str> {
+pub fn dns_class_name(class: u16) -> Name {
     match class {
-        1 => Cow::Borrowed("IN"),
-        3 => Cow::Borrowed("CH"),
-        4 => Cow::Borrowed("HS"),
-        254 => Cow::Borrowed("NONE"),
-        255 => Cow::Borrowed("ANY"),
-        _ => Cow::Owned(format!("CLASS{class}")),
+        1 => Name::fixed("IN"),
+        3 => Name::fixed("CH"),
+        4 => Name::fixed("HS"),
+        254 => Name::fixed("NONE"),
+        255 => Name::fixed("ANY"),
+        _ => Name::numbered("CLASS", class, ""),
     }
 }
 
@@ -112,15 +112,15 @@ pub fn dns_class_name(class: u16) -> Cow<'static, str> {
 ///
 /// An unassigned opcode gives `OPCODE{n}`, in the style of `TYPE{n}`,
 /// `CLASS{n}` and `RCODE{n}`.
-pub fn dns_opcode_name(opcode: u8) -> Cow<'static, str> {
+pub fn dns_opcode_name(opcode: u8) -> Name {
     match opcode {
-        0 => Cow::Borrowed("QUERY"),
-        1 => Cow::Borrowed("IQUERY"),
-        2 => Cow::Borrowed("STATUS"),
-        4 => Cow::Borrowed("NOTIFY"),
-        5 => Cow::Borrowed("UPDATE"),
-        6 => Cow::Borrowed("DSO"),
-        _ => Cow::Owned(format!("OPCODE{opcode}")),
+        0 => Name::fixed("QUERY"),
+        1 => Name::fixed("IQUERY"),
+        2 => Name::fixed("STATUS"),
+        4 => Name::fixed("NOTIFY"),
+        5 => Name::fixed("UPDATE"),
+        6 => Name::fixed("DSO"),
+        _ => Name::numbered("OPCODE", opcode, ""),
     }
 }
 
@@ -194,9 +194,9 @@ mod tests {
 
     #[test]
     fn known_names_do_not_allocate() {
-        assert!(matches!(dns_type_name(1), Cow::Borrowed("A")));
-        assert!(matches!(dns_rcode_name(3), Cow::Borrowed("NXDOMAIN")));
-        assert!(matches!(dns_class_name(1), Cow::Borrowed("IN")));
-        assert!(matches!(dns_type_name(999), Cow::Owned(_)));
+        assert_eq!(dns_type_name(1).as_static(), Some("A"));
+        assert_eq!(dns_rcode_name(3).as_static(), Some("NXDOMAIN"));
+        assert_eq!(dns_class_name(1).as_static(), Some("IN"));
+        assert_eq!(dns_type_name(999).as_static(), None);
     }
 }

@@ -21,6 +21,7 @@ use arrow::array::{
 use arrow::datatypes::{DataType, Schema};
 use arrow::record_batch::RecordBatch;
 
+use pcapsql_core::format::tls_version_name;
 use pcapsql_core::io::PacketRef;
 use pcapsql_core::stream::{
     cipher_suite_name, Connection, ConnectionState, Http2StreamParser, HttpStreamParser,
@@ -336,17 +337,6 @@ impl MinNonZero for u64 {
     }
 }
 
-fn tls_version_name(v: u16) -> &'static str {
-    match v {
-        0x0300 => "SSL 3.0",
-        0x0301 => "TLS 1.0",
-        0x0302 => "TLS 1.1",
-        0x0303 => "TLS 1.2",
-        0x0304 => "TLS 1.3",
-        _ => "Unknown",
-    }
-}
-
 /// Encapsulation columns every table carries: stream rows are not
 /// attributed to a tunnel, so depth 0 / no tunnel.
 fn push_encap_columns(columns: &mut Vec<ArrayRef>, rows: usize) {
@@ -458,7 +448,11 @@ fn build_tls_sessions_batch(
     for s in sessions {
         frame_number.append_value(s.frame_number);
         connection_id.append_value(s.connection_id);
-        version.append_option(s.server_version.or(s.client_version).map(tls_version_name));
+        version.append_option(
+            s.server_version
+                .or(s.client_version)
+                .map(|v| tls_version_name(v).into_cow()),
+        );
         cipher_suite.append_option(s.cipher_suite.as_deref());
         cipher_suite_id.append_option(s.cipher_suite_id);
         sni.append_option(s.sni.as_deref());

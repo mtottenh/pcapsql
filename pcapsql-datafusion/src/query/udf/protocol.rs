@@ -99,7 +99,7 @@ impl ScalarUDFImpl for IpProtoNameUdf {
 
         let result: StringArray = proto_values
             .iter()
-            .map(|opt| opt.map(ip_proto_name))
+            .map(|opt| opt.map(|code| ip_proto_name(code).into_cow()))
             .collect();
 
         Ok(ColumnarValue::Array(Arc::new(result)))
@@ -149,7 +149,7 @@ impl ScalarUDFImpl for EthertypeNameUdf {
 
         let result: StringArray = ethertype_values
             .iter()
-            .map(|opt| opt.map(ethertype_name))
+            .map(|opt| opt.map(|code| ethertype_name(code).into_cow()))
             .collect();
 
         Ok(ColumnarValue::Array(Arc::new(result)))
@@ -197,7 +197,10 @@ impl ScalarUDFImpl for DscpNameUdf {
             .downcast_ref::<UInt8Array>()
             .expect("dscp_name: expected uint8 array");
 
-        let result: StringArray = dscp_values.iter().map(|opt| opt.map(dscp_name)).collect();
+        let result: StringArray = dscp_values
+            .iter()
+            .map(|opt| opt.map(|code| dscp_name(code).into_cow()))
+            .collect();
 
         Ok(ColumnarValue::Array(Arc::new(result)))
     }

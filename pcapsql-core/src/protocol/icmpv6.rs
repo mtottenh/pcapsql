@@ -4,6 +4,7 @@ use super::{
     Cond, Dispatch, DispatchRule, FieldSink, FieldValue, HintKey, Hints, ParseContext, Parsed,
     Protocol,
 };
+use crate::format::names::icmpv6_type_name;
 use crate::format::{ipv6_text, mac_text, IPV6_TEXT_LEN, MAC_TEXT_LEN};
 use crate::schema::{DataKind, FieldDescriptor};
 
@@ -138,8 +139,7 @@ impl Protocol for Icmpv6Protocol {
         fields.push(("checksum", FieldValue::UInt16(checksum)));
 
         // Add type name
-        let type_name = get_type_name(icmpv6_type);
-        fields.push(("type_name", FieldValue::Str(type_name)));
+        fields.push(("type_name", fields.name(icmpv6_type_name(icmpv6_type))));
 
         // Parse type-specific fields
         let consumed = match icmpv6_type {
@@ -215,28 +215,6 @@ impl Protocol for Icmpv6Protocol {
 
     fn dependencies(&self) -> &'static [&'static str] {
         &["ipv6"]
-    }
-}
-
-/// Get ICMPv6 type name.
-fn get_type_name(icmpv6_type: u8) -> &'static str {
-    match icmpv6_type {
-        icmpv6_type::DESTINATION_UNREACHABLE => "Destination Unreachable",
-        icmpv6_type::PACKET_TOO_BIG => "Packet Too Big",
-        icmpv6_type::TIME_EXCEEDED => "Time Exceeded",
-        icmpv6_type::PARAMETER_PROBLEM => "Parameter Problem",
-        icmpv6_type::ECHO_REQUEST => "Echo Request",
-        icmpv6_type::ECHO_REPLY => "Echo Reply",
-        icmpv6_type::MLD_QUERY => "MLD Query",
-        icmpv6_type::MLDV1_REPORT => "MLDv1 Report",
-        icmpv6_type::MLDV1_DONE => "MLDv1 Done",
-        icmpv6_type::MLDV2_REPORT => "MLDv2 Report",
-        icmpv6_type::ROUTER_SOLICITATION => "Router Solicitation",
-        icmpv6_type::ROUTER_ADVERTISEMENT => "Router Advertisement",
-        icmpv6_type::NEIGHBOR_SOLICITATION => "Neighbor Solicitation",
-        icmpv6_type::NEIGHBOR_ADVERTISEMENT => "Neighbor Advertisement",
-        icmpv6_type::REDIRECT => "Redirect",
-        _ => "Unknown",
     }
 }
 
@@ -1036,7 +1014,7 @@ mod tests {
         assert_eq!(result.get("type"), Some(&FieldValue::UInt8(131)));
         assert_eq!(
             result.get("type_name"),
-            Some(&FieldValue::Str("MLDv1 Report"))
+            Some(&FieldValue::Str("Multicast Listener Report"))
         );
     }
 
@@ -1058,7 +1036,7 @@ mod tests {
         assert_eq!(result.get("type"), Some(&FieldValue::UInt8(132)));
         assert_eq!(
             result.get("type_name"),
-            Some(&FieldValue::Str("MLDv1 Done"))
+            Some(&FieldValue::Str("Multicast Listener Done"))
         );
     }
 
@@ -1085,7 +1063,7 @@ mod tests {
         );
         assert_eq!(
             result.get("type_name"),
-            Some(&FieldValue::Str("MLDv2 Report"))
+            Some(&FieldValue::Str("Version 2 Multicast Listener Report"))
         );
     }
 

@@ -17,6 +17,8 @@
 //! This parser extracts `client_random`, `server_random`, and `session_id` fields
 //! which are essential for TLS decryption when used with SSLKEYLOGFILE.
 
+use std::fmt::Write as _;
+
 use tls_parser::{
     parse_tls_extensions, parse_tls_plaintext, TlsCipherSuite, TlsExtension, TlsMessage,
     TlsMessageHandshake, TlsVersion,
@@ -25,6 +27,10 @@ use tls_parser::{
 use super::{
     Cond, Dispatch, DispatchRule, FieldSink, FieldValue, HintKey, Hints, ParseContext, Parsed,
     Protocol,
+};
+use crate::format::names::{
+    tls_alert_description_name, tls_compression_method_name, tls_ec_point_format_name,
+    tls_named_group_name, tls_signature_scheme_name, tls_version_name, Name,
 };
 use crate::schema::{DataKind, FieldDescriptor};
 
@@ -176,7 +182,7 @@ impl Protocol for TlsProtocol {
                 fields.push(("record_version", FieldValue::UInt16(record.hdr.version.0)));
                 fields.push((
                     "version",
-                    fields.str(&format_tls_version(record.hdr.version)),
+                    fields.name(tls_version_name(record.hdr.version.0)),
                 ));
 
                 // Process messages in the record
@@ -190,7 +196,7 @@ impl Protocol for TlsProtocol {
                             fields.push(("alert_description", FieldValue::UInt8(alert.code.0)));
                             fields.push((
                                 "alert_description_str",
-                                FieldValue::Str(format_alert_description(alert.code.0)),
+                                fields.name(tls_alert_description_name(alert.code.0)),
                             ));
                         }
                         TlsMessage::Heartbeat(hb) => {
@@ -220,7 +226,7 @@ impl Protocol for TlsProtocol {
 
                 let version = TlsVersion(u16::from_be_bytes([data[1], data[2]]));
                 fields.push(("record_version", FieldValue::UInt16(version.0)));
-                fields.push(("version", fields.str(&format_tls_version(version))));
+                fields.push(("version", fields.name(tls_version_name(version.0))));
 
                 Parsed::partial(&data[5..], "TLS record incomplete")
             }
@@ -335,13 +341,9 @@ fn parse_handshake<'a>(handshake: &TlsMessageHandshake<'a>, fields: &mut FieldSi
             }
 
             // Compression methods
-            let comp_names: Vec<String> = ch
-                .comp
-                .iter()
-                .map(|c| format_compression_method(c.0))
-                .collect();
-            if !comp_names.is_empty() {
-                fields.push(("compression_methods", fields.str(&comp_names.join(";"))));
+            let methods = ch.comp.iter().map(|c| tls_compression_method_name(c.0));
+            if let Some(methods) = name_list(fields, methods) {
+                fields.push(("compression_methods", methods));
             }
 
             // Parse extensions
@@ -488,33 +490,27 @@ fn parse_extensions(ext_data: &[u8], fields: &mut FieldSink<'_, '_>, _is_client:
                     }
                 }
                 TlsExtension::SupportedVersions(versions) => {
-                    let vers: Vec<String> =
-                        versions.iter().map(|v| format_tls_version(*v)).collect();
-                    if !vers.is_empty() {
-                        fields.push(("supported_versions", fields.str(&vers.join(";"))));
+                    let versions = versions.iter().map(|v| tls_version_name(v.0));
+                    if let Some(versions) = name_list(fields, versions) {
+                        fields.push(("supported_versions", versions));
                     }
                 }
                 TlsExtension::SignatureAlgorithms(algs) => {
-                    let alg_names: Vec<String> = algs
-                        .iter()
-                        .map(|a| format_signature_algorithm(*a))
-                        .collect();
-                    if !alg_names.is_empty() {
-                        fields.push(("signature_algorithms", fields.str(&alg_names.join(";"))));
+                    let schemes = algs.iter().map(|a| tls_signature_scheme_name(*a));
+                    if let Some(schemes) = name_list(fields, schemes) {
+                        fields.push(("signature_algorithms", schemes));
                     }
                 }
                 TlsExtension::EllipticCurves(curves) => {
-                    let curve_names: Vec<String> =
-                        curves.iter().map(|c| format_named_group(c.0)).collect();
-                    if !curve_names.is_empty() {
-                        fields.push(("supported_groups", fields.str(&curve_names.join(";"))));
+                    let groups = curves.iter().map(|c| tls_named_group_name(c.0));
+                    if let Some(groups) = name_list(fields, groups) {
+                        fields.push(("supported_groups", groups));
                     }
                 }
                 TlsExtension::EcPointFormats(formats) => {
-                    let format_names: Vec<String> =
-                        formats.iter().map(|f| format_ec_point_format(*f)).collect();
-                    if !format_names.is_empty() {
-                        fields.push(("ec_point_formats", fields.str(&format_names.join(";"))));
+                    let formats = formats.iter().map(|f| tls_ec_point_format_name(*f));
+                    if let Some(formats) = name_list(fields, formats) {
+                        fields.push(("ec_point_formats", formats));
                     }
                 }
                 _ => {}
@@ -666,18 +662,21 @@ fn is_grease_value(val: u16) -> bool {
     val & 0x0f0f == 0x0a0a
 }
 
-/// Format TLS version from TlsVersion.
-fn format_tls_version(ver: TlsVersion) -> String {
-    match ver.0 {
-        version::SSL_2_0 => "SSL 2.0".to_string(),
-        version::SSL_3_0 => "SSL 3.0".to_string(),
-        version::TLS_1_0 => "TLS 1.0".to_string(),
-        version::TLS_1_1 => "TLS 1.1".to_string(),
-        version::TLS_1_2 => "TLS 1.2".to_string(),
-        version::TLS_1_3 => "TLS 1.3".to_string(),
-        v if is_grease_value(v) => "GREASE".to_string(),
-        v => format!("Unknown (0x{v:04x})"),
+/// The names joined by `;`, written into the arena; `None` when there are
+/// none.
+fn name_list<'a>(
+    fields: &FieldSink<'_, 'a>,
+    names: impl Iterator<Item = Name>,
+) -> Option<FieldValue<'a>> {
+    let mut list = fields.text_builder();
+    for name in names {
+        if !list.is_empty() {
+            list.push_str(";");
+        }
+        // Writing to an arena string does not fail.
+        let _ = write!(list, "{name}");
     }
+    (!list.is_empty()).then(|| list.finish())
 }
 
 /// Get cipher suite name from ID using tls-parser's IANA database.
@@ -689,134 +688,6 @@ fn cipher_suite_name(id: u16) -> String {
     TlsCipherSuite::from_id(id)
         .map(|cs| cs.name.to_string())
         .unwrap_or_else(|| format!("0x{id:04X}"))
-}
-
-/// Format compression method.
-fn format_compression_method(method: u8) -> String {
-    match method {
-        0 => "null".to_string(),
-        1 => "DEFLATE".to_string(),
-        64 => "LZS".to_string(),
-        _ => format!("0x{method:02x}"),
-    }
-}
-
-/// Format signature algorithm.
-fn format_signature_algorithm(alg: u16) -> String {
-    match alg {
-        0x0201 => "rsa_pkcs1_sha1".to_string(),
-        0x0203 => "ecdsa_sha1".to_string(),
-        0x0401 => "rsa_pkcs1_sha256".to_string(),
-        0x0403 => "ecdsa_secp256r1_sha256".to_string(),
-        0x0501 => "rsa_pkcs1_sha384".to_string(),
-        0x0503 => "ecdsa_secp384r1_sha384".to_string(),
-        0x0601 => "rsa_pkcs1_sha512".to_string(),
-        0x0603 => "ecdsa_secp521r1_sha512".to_string(),
-        0x0804 => "rsa_pss_rsae_sha256".to_string(),
-        0x0805 => "rsa_pss_rsae_sha384".to_string(),
-        0x0806 => "rsa_pss_rsae_sha512".to_string(),
-        0x0807 => "ed25519".to_string(),
-        0x0808 => "ed448".to_string(),
-        0x0809 => "rsa_pss_pss_sha256".to_string(),
-        0x080a => "rsa_pss_pss_sha384".to_string(),
-        0x080b => "rsa_pss_pss_sha512".to_string(),
-        v if is_grease_value(v) => "GREASE".to_string(),
-        _ => format!("0x{alg:04x}"),
-    }
-}
-
-/// Format named group (elliptic curve).
-fn format_named_group(group: u16) -> String {
-    match group {
-        1 => "sect163k1".to_string(),
-        2 => "sect163r1".to_string(),
-        3 => "sect163r2".to_string(),
-        4 => "sect193r1".to_string(),
-        5 => "sect193r2".to_string(),
-        6 => "sect233k1".to_string(),
-        7 => "sect233r1".to_string(),
-        8 => "sect239k1".to_string(),
-        9 => "sect283k1".to_string(),
-        10 => "sect283r1".to_string(),
-        11 => "sect409k1".to_string(),
-        12 => "sect409r1".to_string(),
-        13 => "sect571k1".to_string(),
-        14 => "sect571r1".to_string(),
-        15 => "secp160k1".to_string(),
-        16 => "secp160r1".to_string(),
-        17 => "secp160r2".to_string(),
-        18 => "secp192k1".to_string(),
-        19 => "secp192r1".to_string(),
-        20 => "secp224k1".to_string(),
-        21 => "secp224r1".to_string(),
-        22 => "secp256k1".to_string(),
-        23 => "secp256r1".to_string(),
-        24 => "secp384r1".to_string(),
-        25 => "secp521r1".to_string(),
-        26 => "brainpoolP256r1".to_string(),
-        27 => "brainpoolP384r1".to_string(),
-        28 => "brainpoolP512r1".to_string(),
-        29 => "x25519".to_string(),
-        30 => "x448".to_string(),
-        256 => "ffdhe2048".to_string(),
-        257 => "ffdhe3072".to_string(),
-        258 => "ffdhe4096".to_string(),
-        259 => "ffdhe6144".to_string(),
-        260 => "ffdhe8192".to_string(),
-        v if is_grease_value(v) => "GREASE".to_string(),
-        _ => format!("0x{group:04x}"),
-    }
-}
-
-/// Format EC point format.
-fn format_ec_point_format(fmt: u8) -> String {
-    match fmt {
-        0 => "uncompressed".to_string(),
-        1 => "ansiX962_compressed_prime".to_string(),
-        2 => "ansiX962_compressed_char2".to_string(),
-        _ => format!("0x{fmt:02x}"),
-    }
-}
-
-/// Format TLS alert description.
-fn format_alert_description(code: u8) -> &'static str {
-    match code {
-        alert::CLOSE_NOTIFY => "close_notify",
-        alert::UNEXPECTED_MESSAGE => "unexpected_message",
-        alert::BAD_RECORD_MAC => "bad_record_mac",
-        alert::DECRYPTION_FAILED => "decryption_failed",
-        alert::RECORD_OVERFLOW => "record_overflow",
-        alert::DECOMPRESSION_FAILURE => "decompression_failure",
-        alert::HANDSHAKE_FAILURE => "handshake_failure",
-        alert::NO_CERTIFICATE => "no_certificate",
-        alert::BAD_CERTIFICATE => "bad_certificate",
-        alert::UNSUPPORTED_CERTIFICATE => "unsupported_certificate",
-        alert::CERTIFICATE_REVOKED => "certificate_revoked",
-        alert::CERTIFICATE_EXPIRED => "certificate_expired",
-        alert::CERTIFICATE_UNKNOWN => "certificate_unknown",
-        alert::ILLEGAL_PARAMETER => "illegal_parameter",
-        alert::UNKNOWN_CA => "unknown_ca",
-        alert::ACCESS_DENIED => "access_denied",
-        alert::DECODE_ERROR => "decode_error",
-        alert::DECRYPT_ERROR => "decrypt_error",
-        alert::EXPORT_RESTRICTION => "export_restriction",
-        alert::PROTOCOL_VERSION => "protocol_version",
-        alert::INSUFFICIENT_SECURITY => "insufficient_security",
-        alert::INTERNAL_ERROR => "internal_error",
-        alert::INAPPROPRIATE_FALLBACK => "inappropriate_fallback",
-        alert::USER_CANCELED => "user_canceled",
-        alert::NO_RENEGOTIATION => "no_renegotiation",
-        alert::MISSING_EXTENSION => "missing_extension",
-        alert::UNSUPPORTED_EXTENSION => "unsupported_extension",
-        alert::CERTIFICATE_UNOBTAINABLE => "certificate_unobtainable",
-        alert::UNRECOGNIZED_NAME => "unrecognized_name",
-        alert::BAD_CERTIFICATE_STATUS_RESPONSE => "bad_certificate_status_response",
-        alert::BAD_CERTIFICATE_HASH_VALUE => "bad_certificate_hash_value",
-        alert::UNKNOWN_PSK_IDENTITY => "unknown_psk_identity",
-        alert::CERTIFICATE_REQUIRED => "certificate_required",
-        alert::NO_APPLICATION_PROTOCOL => "no_application_protocol",
-        _ => "unknown",
-    }
 }
 
 #[cfg(test)]
@@ -1091,15 +962,6 @@ mod tests {
             result.get("alert_description_str"),
             Some(&FieldValue::Str("handshake_failure"))
         );
-    }
-
-    #[test]
-    fn test_tls_version_detection() {
-        assert_eq!(format_tls_version(TlsVersion(0x0300)), "SSL 3.0");
-        assert_eq!(format_tls_version(TlsVersion(0x0301)), "TLS 1.0");
-        assert_eq!(format_tls_version(TlsVersion(0x0302)), "TLS 1.1");
-        assert_eq!(format_tls_version(TlsVersion(0x0303)), "TLS 1.2");
-        assert_eq!(format_tls_version(TlsVersion(0x0304)), "TLS 1.3");
     }
 
     #[test]

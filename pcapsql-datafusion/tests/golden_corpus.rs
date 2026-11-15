@@ -395,6 +395,125 @@ async fn ntp_table_materializes_with_real_units() {
 }
 
 // ---------------------------------------------------------------------------
+// Name columns against the `*_name()` functions
+// ---------------------------------------------------------------------------
+
+/// A parser's name column is the text the `*_name()` function gives for the
+/// number beside it: both read the tables of `pcapsql_core::format::names`.
+/// That holds for numbers the parsers used to name differently (ICMP 13,
+/// the MLD messages) and for numbers without a name, which carry the number.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn name_columns_equal_the_name_functions() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("names.pcap");
+
+    let icmp = |icmp_type: u8| {
+        let mut message = vec![icmp_type];
+        message.extend_from_slice(&[0; 15]);
+        eth(
+            MAC_B,
+            MAC_A,
+            ETH_IP4,
+            &ipv4([10, 0, 0, 1], [10, 0, 0, 2], 1, 1, &message),
+        )
+    };
+    let icmpv6 = |icmpv6_type: u8| {
+        let mut message = vec![icmpv6_type];
+        message.extend_from_slice(&[0; 27]);
+        eth(MAC_B, MAC_A, ETH_IP6, &ipv6(IP6_A, IP6_B, 58, &message))
+    };
+    let frames = vec![
+        icmp(8),
+        icmp(13),
+        icmp(42),
+        icmp(99),
+        icmpv6(128),
+        icmpv6(130),
+        icmpv6(131),
+        icmpv6(132),
+        icmpv6(143),
+        icmpv6(99),
+    ];
+    std::fs::write(&path, to_capture(frames, LINKTYPE_ETHERNET)).unwrap();
+    let eng = engine(&path, 1).await;
+
+    let rows = |sql: &'static str| {
+        let eng = &eng;
+        async move {
+            let batches = eng
+                .query(sql)
+                .await
+                .unwrap_or_else(|e| panic!("query failed: {sql}\n{e}"));
+            row_texts(&batches)
+        }
+    };
+    let expect = |rows: Vec<Vec<String>>, expected: &[(&str, &str)]| {
+        let expected: Vec<Vec<String>> = expected
+            .iter()
+            .map(|(number, name)| vec![number.to_string(), name.to_string(), name.to_string()])
+            .collect();
+        assert_eq!(rows, expected);
+    };
+
+    expect(
+        rows("SELECT type, type_name, icmp_type_name(type) FROM icmp ORDER BY frame_number").await,
+        &[
+            ("8", "Echo Request"),
+            ("13", "Timestamp"),
+            ("42", "Extended Echo Request"),
+            ("99", "Type 99"),
+        ],
+    );
+    expect(
+        rows("SELECT type, type_name, icmpv6_type_name(type) FROM icmpv6 ORDER BY frame_number")
+            .await,
+        &[
+            ("128", "Echo Request"),
+            ("130", "Multicast Listener Query"),
+            ("131", "Multicast Listener Report"),
+            ("132", "Multicast Listener Done"),
+            ("143", "Version 2 Multicast Listener Report"),
+            ("99", "Type 99"),
+        ],
+    );
+
+    // The same over the hand-made corpus, for every name column that has a
+    // function.
+    let routing_path = dir.path().join("corpus_routing.pcap");
+    std::fs::write(&routing_path, routing_capture()).unwrap();
+    let routing = engine(&routing_path, 1).await;
+    for (table, column, function) in [
+        (
+            "bgp",
+            "message_type_name",
+            "bgp_message_type_name(message_type)",
+        ),
+        ("bgp", "origin_name", "bgp_origin_name(origin)"),
+        (
+            "ospf",
+            "message_type_name",
+            "ospf_packet_type_name(message_type)",
+        ),
+        ("ospf", "lsa_type_name", "ospf_lsa_type_name(lsa_type)"),
+    ] {
+        let sql = format!(
+            "SELECT count(*), count({column}), \
+             count(*) FILTER (WHERE {column} IS DISTINCT FROM {function}) FROM {table}"
+        );
+        let batches = routing
+            .query(&sql)
+            .await
+            .unwrap_or_else(|e| panic!("query failed: {sql}\n{e}"));
+        let counts = &row_texts(&batches)[0];
+        assert_ne!(
+            counts[1], "0",
+            "{table}.{column} is never set in the corpus"
+        );
+        assert_eq!(counts[2], "0", "{table}.{column} differs from {function}");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The `*_packets` views against the shared fused scans
 // ---------------------------------------------------------------------------
 
