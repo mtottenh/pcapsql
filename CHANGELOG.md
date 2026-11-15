@@ -73,7 +73,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a protocol table or of `frames` with a `FieldResolver`, which remembers
   per column where its field was in the previous row. Every frontend
   therefore stores the same cells. Formatting an address or a number into a
-  string column no longer allocates.
+  string column no longer allocates for text of up to 64 bytes.
 - **`pcapsql-core`: routing.** `scan::Router` writes one frame's rows to
   the sinks of a `CompiledScan`'s `frames` and protocol-table outputs, with
   each output's row predicate and row cap. It works with sinks of any size:
