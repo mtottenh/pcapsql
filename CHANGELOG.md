@@ -96,8 +96,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an output whose sink is full, or that reached its row cap, is handed to
   the caller (`take_flush`), and a frame whose rows did not all fit
   (`Routed::Redeliver`; a tunnelled packet has several rows in one table) is
-  routed again without losing or repeating a row. Fused joins are not routed
-  yet.
+  routed again without losing or repeating a row. Fused joins are routed
+  too (see "fused joins" below).
 - **`pcapsql-core`: `scan::testing`.** `RecordingSink` records rows as
   engine-neutral `Cell`s and checks how it is called, and
   `run_conformance` is the suite a `RowSink` implementation runs from its
@@ -298,6 +298,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   extension to a new DuckDB release, with `make check_pins` (every place that
   names the DuckDB release agrees) and `make canary` (build against the
   newest `duckdb-neo`, also a weekly workflow).
+- **`pcapsql-core`: fused joins.** A `scan::FusedScan` (a join of `frames`
+  and protocol tables on `frame_number`, optionally on `encap_depth` too,
+  inner or left) is now an output of a pass like a table: `scan::Router`
+  evaluates the join over each frame's own layers and writes the joined rows
+  to the output's `RowSink`, with the output's row cap, into sinks of any
+  size (a frame with more joined rows than a sink holds is redelivered and
+  continues where it stopped), in partitions, under the plan's frame
+  predicate. The rows are exactly those of the SQL join, every match
+  included, in capture order. A fused scan's columns are `FusedColumn`s: a
+  member's column (optionally renamed), `FusedValue::Coalesce` (the first
+  member column that is not NULL) or `FusedValue::Present` (a label by which
+  left-joined members have a row), and it can carry an exact `FusedFilter`
+  (`member.column IN (...)`). The evaluator is the one the DataFusion engine
+  had (`FusedBatchBuilder`), made generic over the sink; a plan without a
+  fused scan pays one test per frame for it.
+- **`pcapsql-core`: the `*_packets` views, in `scan::views`.**
+  `PacketsView::all()` defines 21 views (`tcp_packets`, `udp_packets`,
+  `dns_packets`, `http_packets`, `tls_packets`, `ssh_packets`,
+  `quic_packets`, `arp_packets`, `icmp_packets`, `icmpv6_packets`,
+  `ndp_packets`, `mld_packets`, `dhcp_packets`, `ntp_packets`,
+  `gre_packets`, `mpls_packets`, `vxlan_packets`, `gtp_packets`,
+  `ipsec_packets`, `bgp_packets`, `ospf_packets`) as fixed fused scans with
+  named columns, so that an engine that cannot fuse joins itself still gets
+  each of them in one pass (`PacketsView::scan`). They are the SQL views of
+  the same names of the DataFusion engine, column for column and row for
+  row; that engine's SQL stays the reference and its tests compare the two
+  over 23 captures. `packets`, `tunneled_packets`, `ip4_in_ip6` and
+  `ip6_in_ip6` are not defined here: they join layers of different
+  encapsulation levels or need a full join.
+- **DuckDB extension (C API v2): `read_<proto>_packets(files)` and
+  `pcap_views()`.** One table function per view of `scan::views`, with the
+  arguments and the behaviour of every scan function (`strict`, `filename`,
+  lists and patterns of files, partitioned scans that keep capture order,
+  filters on `frame_number` and `timestamp` applied while reading):
+  `read_tcp_packets('x.pcap')` returns each TCP segment with the frame's
+  timestamp and the MAC and IP addresses of its own encapsulation level, in
+  one pass over the capture, where the join of `read_frames`, `read_tcp`,
+  `read_ethernet`, `read_ipv4` and `read_ipv6` reads it five times. The rows
+  are those of that join, which the tests run in DuckDB and compare.
+  `read_pcap(files, protocol := 'tcp_packets')` reads a view by name,
+  `pcap_schema('tcp_packets')` lists its columns, and `pcap_views()` lists
+  the views (`name`, `description`, `protocol`, `column_count`).
+  `pcap_protocols()` is unchanged: it lists the tables. An unknown name's
+  error now also points to `pcap_views()`.
 
 ### Changed
 
@@ -390,8 +434,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     a frame with several rows in one table straddles the boundary.
   - `query::arrow_schema::arrow_type_to_col_kind` is the inverse of
     `col_kind_to_arrow_type`.
-  - Fused joins (`FusedBatchBuilder`) still build their own columns, with
-    the same conversion rules as the tables.
+  - Fused joins are built through the scan layer too (see "fused joins are
+    built by the core scan layer" below).
 - **`pcapsql-datafusion`: a parse pass runs on the core scan driver.** Each
   partition of a pass, materialized or streamed, is a `scan::PartitionScan`
   that the engine steps, delivering a table's batch when the scan hands it
@@ -405,8 +449,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     such a query, and on a live stream the producer no longer waits for
     packets nobody wants.
   - `NormalizedBatchSet` is reduced to what is specific to DataFusion:
-    delivery (`deliver`), the fused joins and the stream subscriber, which
-    it feeds as the scan's `FrameObserver`. `new` and `new_streaming` also
+    delivery (`deliver`) and the stream subscriber, which it feeds as the
+    scan's `FrameObserver`. `new` and `new_streaming` also
     return the `ArrowSink`s the scan writes to, and `finish` /
     `finish_streaming` take them back. `add_packet_from_ref`,
     `flush_partial`, `all_capped` and `row_count` are gone (the scan's
@@ -416,6 +460,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `Arc`.
   - The partition count comes from `scan::partition_target`, with the same
     decisions as before; `auto_target_partitions` is unchanged.
+- **`pcapsql-datafusion`: fused joins are built by the core scan layer.** A
+  join the optimizer fuses (a `*_packets` view under `--stdin`, a one-shot
+  or a continuous query) is a `scan::FusedScan` output of the pass, written
+  by the scan's `Router` into an `ArrowSink` like a table's rows. Query
+  results are unchanged (the golden corpus compares fused results with
+  DataFusion's own joins). What differs: a fused batch is never larger than
+  the batch size (it could exceed it by the rows of one frame), and a fused
+  join with a pushed-down `LIMIT` stops at the row that fills it instead of
+  after the frame that does. In the library, `query::builders::
+  FusedBatchBuilder` and the internal `DynamicBuilder` are gone, and
+  `NormalizedBatchSet::take_fused_pending` with them (a fused join's
+  partial batch is in its `ArrowSink`, like a table's);
+  `FrameJoinSpec::to_fused_scan` is unchanged.
 
 ### Fixed
 

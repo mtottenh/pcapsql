@@ -135,7 +135,9 @@ Notes:
 |---|---|
 | `read_pcap(files, protocol := 'frames', ...)` | Generic entry; schema depends on `protocol` |
 | `read_<table>(files, ...)` for every protocol table in the catalogue | Generated from the catalogue at load, not a hand-kept list |
-| `pcap_protocols()`, `pcap_schema(protocol)` | Read the same catalogue the scans use |
+| `read_<proto>_packets(files, ...)` for every view of `pcapsql_core::scan::views` (P8) | The DataFusion `*_packets` views, each one fused scan: one pass, no join. Generated from the view definitions at load |
+| `pcap_protocols()`, `pcap_schema(protocol)` | Read the same catalogue the scans use. `pcap_schema` also takes a view |
+| `pcap_views()` (P8) | The views: `name`, `description`, `protocol`, `column_count`. Not rows of `pcap_protocols()`, whose result is unchanged |
 
 `files` is a path, a glob, or a list of either (P5). `protocol` moves from
 the second positional argument to a named parameter, leaving the files as
@@ -328,7 +330,8 @@ of P1. P3 to P6 are independent of each other after P2 and can be reordered.
 | P5 Multi-file, replacement scan, remote | done except the remote tests: lists, globs, `filename`, and `FROM 'x.pcap'`, with the partition queue spanning the files. `httpfs` could not be installed where this was built, so no `https://` or `s3://` capture has been read and remote buffer sizes are untuned |
 | P6 Filter pushdown | done, with two limits found on the way. DuckDB 2.0.0 hands two bounds on one column to the scan as a single `BETWEEN` node whose inclusivity the C API does not expose, so a range is used to narrow the read but not accepted: `EXPLAIN` still shows the filter for a time window. And `plan_ranges` keeps the last checkpoint window of an indexed capture unless an upper frame bound excludes it, so a time window never rules out a whole file |
 | P7 Distribution and documentation | done as far as it can be without running on GitHub or submitting anything. Workflows for `linux_amd64`, `linux_arm64` and `osx_arm64` (build through `extension-ci-tools`, then a load test of each artifact), release assets on a tag, the community descriptor, the function reference with a check against the artifact, the upgrade runbook with its dry run, and a canary. None of the new workflows has run on GitHub, and the descriptor has not been submitted, so the exit check is open. `windows_amd64` is not built: `pcapsql-core` does not compile for Windows (U13). WebAssembly is not built (U10) |
-| P8, P9 | not started |
+| P8 Backlog | first item done: `read_<proto>_packets(files)` for the 21 `*_packets` views that are a join within one encapsulation level, as fused scans of the shared layer (S4b), with `pcap_views()`. Each equals the DataFusion SQL view of its name (DataFusion test over 23 captures) and the DuckDB join of the `read_<table>` functions (itest over 24 captures, 1 and 4 threads, split and not, pushdown on and off); the 14 golden-corpus queries over these views now match the DataFusion snapshots too (59 compared in all). `packets`, `tunneled_packets`, `ip4_in_ip6` and `ip6_in_ip6` are not fusable shapes and are not offered. Not benchmarked. The other items are not started |
+| P9 Follow V2 to stability | not started |
 
 ### P0: Spike and scaffolding
 
@@ -466,9 +469,29 @@ As built:
 
 Not scheduled.
 
-- `read_<proto>_packets(files)`: the DataFusion `*_packets` views as fused
-  scans (S4b). One pass, no join; this is also how several protocol tables
-  share one parse in DuckDB.
+- **Done.** `read_<proto>_packets(files)`: the DataFusion `*_packets` views
+  as fused scans (S4b). One pass, no join; this is also how several protocol
+  tables share one parse in DuckDB. Decisions taken on the way:
+  - The view definitions live in `pcapsql_core::scan::views`
+    (`PacketsView`), not in the extension: members, joins, column names and
+    the three computed columns (`COALESCE`, the `transport` label, the
+    `icmpv6.type IN (...)` filter of `ndp_packets` and `mld_packets`) are
+    data the fused evaluator understands. DataFusion's SQL views are
+    unchanged and remain the reference; a test on that side fails if the two
+    drift.
+  - Column names and collisions follow the DataFusion views exactly
+    (`src_ip_v4`, `udp_length`, ...). The only difference is the engine's
+    timestamp unit (`TIMESTAMP_NS`).
+  - `pcap_protocols()` keeps listing tables only; views are listed by the
+    new `pcap_views()`, and `pcap_schema()` and `read_pcap(protocol := ...)`
+    accept a view name.
+  - The four DataFusion views that join across encapsulation levels or need
+    a full join (`packets`, `tunneled_packets`, `ip4_in_ip6`, `ip6_in_ip6`)
+    are left out rather than approximated. They would need non-equi depth
+    conditions (`depth = depth - 1`) and full joins in the fused evaluator.
+  - Open: a benchmark of a view scan against the join it replaces; an
+    arbitrary set of tables in one pass (a user-defined fused scan) is not
+    exposed.
 - Stream tables and TLS decryption (S4c, plus a keylog named parameter or
   secret).
 - Remaining DataFusion UDFs, as wrappers once their kernels are in core.

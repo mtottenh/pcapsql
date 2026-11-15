@@ -887,7 +887,7 @@ benchmark numbers of S0.
 | **S4a** Sink, coercion, routing (protocol tables and `frames`) | `RowSink`, `row.rs`, `route.rs`; `ProtocolBatchBuilder` becomes `ArrowSink`; `NormalizedBatchSet` keeps only delivery | S0 coercion snapshot (must be byte-identical except the two listed changes); golden corpus; `builders` unit tests; **S0 scan bench: no regression** | sink conformance suite (5.3) | P2 |
 | **S5** Driver and partitioning | `PartitionScan`, `Step`; `parse_partition` and `stream_partition` become the push loop; `partition_target`, `PartitionQueue` | `engine_shared_parse.rs` (one pass, 1-vs-N, `streaming_limit_stops_scan_early`, `streaming_hash_join_completes_without_deadlock`, ordering tests at 499 and 575); `streaming_memory.rs`; `continuous.rs`; `stdin_source.rs` (timeouts, cancellation); S0 bench | pull-equivalence (5.3) | P2, P4 |
 | **S6** Kernels | Move the shared kernels to `core::format`; DataFusion UDFs call them | UDF unit tests in each `udf/*.rs`; golden corpus queries using UDFs | kernel unit tests move with the kernels | P2 ("port scalars") |
-| **S4b** Fused | `scan/fused.rs`; delete `builders/fused.rs` | golden `f01`..`f06` and the view snapshots (fused under `RetentionPolicy::None` vs joins under `CacheOnTouch`) | conformance: fused rows at chunk capacity 1 | P8 only |
+| **S4b** Fused (**done**, see 5.1.1) | `scan/fused.rs`; delete `builders/fused.rs` | golden `f01`..`f06` and the view snapshots (fused under `RetentionPolicy::None` vs joins under `CacheOnTouch`) | conformance: fused rows at chunk capacity 1 | P8 only |
 | **S4c** Stream tables | `scan/stream.rs`; `stream_tables.rs` shrinks to the `ArrowSink` call | `e2e_tls_http2.rs`; `http2_stream_table_is_on_demand`; golden stream snapshots | none beyond conformance | P8 only |
 | **S7** Frame predicate and trimming | `plan_ranges` trimming; `FramePredicate` in the driver; optionally let DataFusion push `frame_number`/`timestamp` ranges on `frames` | golden corpus | results with trimming equal results without, over random ranges and strides | P6 |
 
@@ -895,6 +895,56 @@ Order: S0, S1, S2, S3, S4a, S5 are sequential. S6 is independent and can
 start any time. S4b, S4c, S7 follow S5 in any order. DuckDB P0 (spike,
 scaffolding, section 9 questions) depends on none of this and runs in
 parallel.
+
+### 5.1.1 S4b as built
+
+Status: done. What was built, and where it departs from the sketch in 3.8:
+
+- `scan/fused.rs` holds the evaluator moved from `builders/fused.rs`:
+  `FusedState::join` (non-generic: member rows and join tuples of one frame)
+  and `FusedState::write_row` (generic over the sink, inlined into the
+  router). `Router` routes fused outputs after the frame's table rows, with
+  the same cursor, row cap and redelivery as a table; the cursor of a fused
+  output is the index of the frame's next joined row. `builders/fused.rs` and
+  `builders/dynamic.rs` are deleted; DataFusion gives a fused output an
+  `ArrowSink`.
+- `FusedScan::columns` is a list of `FusedColumn { name, value }`, not of
+  `(member, column)` pairs. A value is a member's column, a `Coalesce` of
+  member columns or a `Present` label; a scan can carry an exact
+  `FusedFilter`. These are what the `*_packets` views have beyond a plain
+  join (`COALESCE(ip4.ttl, ip6.hop_limit)`, the `transport` label of
+  `dns_packets`, `WHERE icmpv6.type IN (...)`), and with them a view is one
+  `FusedScan` and nothing else. `COALESCE` asks the ordinary cell writer
+  whether an argument is NULL (a probe sink), so it cannot disagree with what
+  the argument's own column would hold.
+- `scan/views.rs` defines the 21 views (`PacketsView`) once, for every
+  frontend. DataFusion keeps its SQL views and its optimizer rule; its test
+  `packets_views_equal_the_shared_fused_scans` compares each SQL view,
+  evaluated by DataFusion's joins and by its fused path, with the core
+  definition: same columns, same rows, same order by `(frame_number,
+  encap_depth)`. No difference was found, so no view is defined differently
+  in core. The four views that are not a join within one encapsulation level
+  (`packets`, `tunneled_packets`, `ip4_in_ip6`, `ip6_in_ip6`) are not in
+  core.
+- Member tables are matched by name per frame (a `&'static str` compare per
+  member and layer), not by a resolved id: the layer names of a parse result
+  are names, and the compare is of a few bytes. A plan without fused scans
+  tests one `Vec::is_empty` per frame.
+- The table path was kept as it was, and that took two attributes. With a
+  second caller of `write_value` for the same sink (the fused writer) the
+  compiler stopped inlining it into `write_layer_row`, and a scan of four
+  tables ran 11% more instructions; the row writer now calls an
+  `#[inline(always)]` copy (`row::coerce`). And `Router::route_frame` is
+  `#[inline(never)]`: inlined into the driver's packet callback it cost
+  another 2%. Measured with a counting sink over 100,000 packets under
+  `cachegrind`, against the commit before S4b: `frames` +0.6%, `udp` -0.3%,
+  four tables +0.8%, six tables +0.2% instructions; wall-clock times do not
+  differ beyond the noise of a shared machine. The S0 scan benchmark of the
+  DataFusion crate was not run.
+- Tests: `pcapsql-core/tests/fused_scan.rs` (every view and three made-up
+  joins against a nested-loop join over the tables' rows; sink capacities 1,
+  2, 3, 7, 2048; partitions; row caps and frame predicates), unit tests in
+  `scan/plan.rs` and `scan/views.rs`.
 
 ### 5.2 Mapping to the DuckDB roadmap phases
 

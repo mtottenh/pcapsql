@@ -401,6 +401,7 @@ is the reference, checked against the built artifact by
 `make check_reference_release`. This section adds where each part is
 implemented and how it relates to the DataFusion engine.
 
+The scan functions, one implementation registered under 50 names:
 
 | Function | Result |
 |---|---|
