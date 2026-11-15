@@ -60,11 +60,13 @@
 //! - `not`, `!` - Logical NOT
 //! - Parentheses for grouping: `(tcp or udp) and port 80`
 
+mod apply;
 mod ast;
 mod error;
 mod parser;
 mod sql;
 
+pub use apply::apply_bpf_filter;
 pub use ast::{BpfExpr, Cidr, Direction, IpAddress, Primitive, Protocol};
 pub use error::BpfError;
 pub use parser::parse_filter;
