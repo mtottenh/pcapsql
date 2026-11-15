@@ -1,0 +1,110 @@
+name: DuckDB extension
+
+# Builds the loadable extension and tests it against the DuckDB release it targets. Every job
+# calls the targets of pcapsql-duckdb/Makefile, so a failure reproduces locally with the same
+# command. DuckDB itself comes from the GitHub release (scripts/fetch-duckdb.sh) and from PyPI.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  extension:
+    name: Build, SQL tests and LOAD in the DuckDB shell
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-duckdb-ext-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache DuckDB release
+        uses: actions/cache@v4
+        with:
+          path: pcapsql-duckdb/.duckdb-release
+          key: ${{ runner.os }}-duckdb-release-${{ hashFiles('pcapsql-duckdb/scripts/duckdb-release.sha256') }}
+
+      - name: Configure (Python venv with DuckDB and its SQL test runner)
+        run: make -C pcapsql-duckdb configure
+
+      - name: Build pcapsql.duckdb_extension
+        run: make -C pcapsql-duckdb release
+
+      - name: SQL tests (test/sql)
+        run: make -C pcapsql-duckdb test_release
+
+      - name: LOAD in the DuckDB command-line shell
+        run: make -C pcapsql-duckdb load_test_release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pcapsql-duckdb-extension-linux_amd64
+          path: pcapsql-duckdb/build/release/pcapsql.duckdb_extension
+          if-no-files-found: error
+
+  itest:
+    name: In-process tests against libduckdb
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            pcapsql-duckdb/itest/target/
+          key: ${{ runner.os }}-cargo-duckdb-itest-${{ hashFiles('pcapsql-duckdb/itest/Cargo.lock') }}
+
+      - name: Cache DuckDB release
+        uses: actions/cache@v4
+        with:
+          path: pcapsql-duckdb/.duckdb-release
+          key: ${{ runner.os }}-duckdb-release-${{ hashFiles('pcapsql-duckdb/scripts/duckdb-release.sha256') }}
+
+      - name: Run itest
+        run: make -C pcapsql-duckdb itest
+
+      # itest/ is outside the cargo workspace, so the fmt and clippy jobs of ci.yml do not cover it.
+      - name: Formatting and clippy for itest
+        run: make -C pcapsql-duckdb lint_itest
+
+  containment:
+    name: duckdb_neo stays inside the engine glue
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # What `make check_containment` runs; called directly so that the job needs no submodule.
+      - name: Check that duckdb_neo is only used in src/engine, ext and itest
+        run: pcapsql-duckdb/scripts/check-neo-containment.sh

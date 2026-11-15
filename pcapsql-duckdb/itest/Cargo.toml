@@ -1,0 +1,20 @@
+[package]
+name = "pcapsql-duckdb-itest"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.88"
+description = "In-process tests of the pcapsql DuckDB extension, against a linked libduckdb"
+publish = false
+
+# A workspace of its own: this crate needs `duckdb-neo`'s `build-extension-static`, which excludes
+# the `build-extension` feature the loadable extension is built with, and cargo unifies features
+# within a workspace invocation. The root manifest lists this directory under `exclude`.
+[workspace]
+
+[dependencies]
+pcapsql-duckdb = { path = "..", default-features = false, features = ["static"] }
+# Links libduckdb from DUCKDB_LIB_DIR; `make itest` fetches the matching release.
+duckdb-neo = { version = "=0.20000.2", default-features = false, features = ["build-extension-static"] }
+
+[dev-dependencies]
+tempfile = "3"

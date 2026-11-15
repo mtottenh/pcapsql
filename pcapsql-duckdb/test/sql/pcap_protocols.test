@@ -1,0 +1,60 @@
+# name: test/sql/pcap_protocols.test
+# description: pcap_protocols() lists the protocol tables of the extension
+# group: [pcapsql]
+
+statement error
+SELECT * FROM pcap_protocols();
+----
+pcap_protocols
+
+require pcapsql
+
+query TT
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM pcap_protocols());
+----
+name	VARCHAR
+description	VARCHAR
+field_count	UINTEGER
+
+# The parsers of pcapsql-core's default registry, plus the frames pseudo-protocol
+query I
+SELECT count(*) FROM pcap_protocols();
+----
+28
+
+query TTI
+SELECT name, description, field_count FROM pcap_protocols() WHERE name = 'frames';
+----
+frames	Raw frame metadata (timestamp, length, etc.)	5
+
+query TT
+SELECT name, description FROM pcap_protocols() WHERE name IN ('dns', 'ethernet', 'ipv6', 'tcp', 'tls');
+----
+dns	Domain Name System
+ethernet	Ethernet II frames (Layer 2)
+ipv6	Internet Protocol version 6
+tcp	Transmission Control Protocol
+tls	Transport Layer Security
+
+# Rows come back sorted by name
+query I
+SELECT list(name) = list_sort(list(name)) FROM pcap_protocols();
+----
+true
+
+query I
+SELECT count(*) FROM pcap_protocols() WHERE field_count = 0 OR description = '';
+----
+0
+
+# The function takes no arguments
+statement error
+SELECT * FROM pcap_protocols('tcp');
+----
+pcap_protocols
+
+# Two scans of the function in one query are independent
+query I
+SELECT count(*) FROM pcap_protocols() a JOIN pcap_protocols() b USING (name);
+----
+28
