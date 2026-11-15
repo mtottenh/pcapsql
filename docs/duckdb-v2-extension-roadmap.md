@@ -300,11 +300,12 @@ of P1. P3 to P6 are independent of each other after P2 and can be reordered.
 | Phase | State |
 |---|---|
 | P0 Spike and scaffolding | done. The CI workflow is written and has not yet run on GitHub |
-| P1 Core seams and shared scan layer | done: S0 to S5, S6 and S7. Open: the scan benchmark gate. A first comparison of the pre-S1 code against S5 on a loaded machine was within a few percent on most single-partition cases, with the TCP-options case 8 to 16 percent slower on very few samples; a clean run is still to be taken |
+| P1 Core seams and shared scan layer | done: S0 to S5, S6 and S7. Scan benchmark, pre-S1 code against S5, three interleaved runs each on an idle machine (thin LTO on both sides): one-shot queries equal or up to 10 percent faster; parse passes within the run-to-run spread, with the plain UDP pass 4 to 7 percent slower at the median and one VXLAN case 10 percent slower against a baseline that itself varied by 19 percent. No change was made in response; restoring per-batch pre-allocation in `ArrowSink` is the first thing to try if this matters |
 | P2 Sequential reader | done: `read_<table>` and `read_pcap`, scalars, macros, `pcap_schema`, `pcap_protocols`. 45 golden-corpus queries match the DataFusion snapshots; every table matches the core driver cell by cell |
 | P3 Projection, cardinality, progress | done except the benchmark exit check. The cardinality is an estimate from the file size |
-| P4 Parallel scans | in progress |
-| P5 to P9 | not started |
+| P4 Parallel scans | done for local uncompressed captures; the index is rebuilt per scan (no cache: the file API exposes no modification time to validate one) |
+| P5 Multi-file, replacement scan; P6 Filter pushdown | in progress |
+| P7 to P9 | not started |
 
 ### P0: Spike and scaffolding
 
