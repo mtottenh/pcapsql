@@ -724,6 +724,162 @@ mod tests {
     use pcapsql_core::TunnelType;
     use smallvec::SmallVec;
 
+    /// What each column type stores for each kind of `FieldValue`, one line
+    /// per pair.
+    fn coercion_table() -> String {
+        use arrow::datatypes::Field;
+        use arrow::util::display::{ArrayFormatter, FormatOptions};
+        use std::net::IpAddr;
+
+        let list = |inner: DataType| DataType::List(Arc::new(Field::new("item", inner, true)));
+        let columns = [
+            ("UInt8", DataType::UInt8),
+            ("UInt16", DataType::UInt16),
+            ("UInt32", DataType::UInt32),
+            ("UInt64", DataType::UInt64),
+            ("Int8", DataType::Int8),
+            ("Int32", DataType::Int32),
+            ("Int64", DataType::Int64),
+            ("Float64", DataType::Float64),
+            ("Boolean", DataType::Boolean),
+            ("Utf8", DataType::Utf8),
+            ("Binary", DataType::Binary),
+            ("FixedSizeBinary(6)", DataType::FixedSizeBinary(6)),
+            ("FixedSizeBinary(16)", DataType::FixedSizeBinary(16)),
+            (
+                "Timestamp(us)",
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+            ),
+            ("List<UInt16>", list(DataType::UInt16)),
+            ("List<UInt32>", list(DataType::UInt32)),
+            ("List<Utf8>", list(DataType::Utf8)),
+            ("List<Binary>", list(DataType::Binary)),
+            (
+                "List<FixedSizeBinary(16)>",
+                list(DataType::FixedSizeBinary(16)),
+            ),
+        ];
+
+        let v4: IpAddr = "192.0.2.1".parse().unwrap();
+        let v6: IpAddr = "2001:db8::1".parse().unwrap();
+        let mac = [0x02, 0, 0, 0, 0, 0x01];
+        let b3: &[u8] = &[1, 2, 3];
+        let b6: &[u8] = &[1, 2, 3, 4, 5, 6];
+        let b16: &[u8] = &[0xAA; 16];
+        let values = [
+            ("Null", FieldValue::Null),
+            ("Bool(true)", FieldValue::Bool(true)),
+            ("UInt8(7)", FieldValue::UInt8(7)),
+            ("UInt16(7)", FieldValue::UInt16(7)),
+            ("UInt16(300)", FieldValue::UInt16(300)),
+            ("UInt32(7)", FieldValue::UInt32(7)),
+            ("UInt32(70000)", FieldValue::UInt32(70_000)),
+            ("UInt32(3000000000)", FieldValue::UInt32(3_000_000_000)),
+            ("UInt64(7)", FieldValue::UInt64(7)),
+            ("UInt64(5000000000)", FieldValue::UInt64(5_000_000_000)),
+            ("UInt64(MAX)", FieldValue::UInt64(u64::MAX)),
+            ("Int8(-3)", FieldValue::Int8(-3)),
+            ("Int64(7)", FieldValue::Int64(7)),
+            ("Int64(-5)", FieldValue::Int64(-5)),
+            ("Int64(5000000000)", FieldValue::Int64(5_000_000_000)),
+            ("Float64(1.5)", FieldValue::Float64(1.5)),
+            ("Str(abc)", FieldValue::Str("abc")),
+            ("OwnedString(xyz)", FieldValue::OwnedString("xyz".into())),
+            ("Bytes(3)", FieldValue::Bytes(b3)),
+            ("Bytes(6)", FieldValue::Bytes(b6)),
+            ("Bytes(16)", FieldValue::Bytes(b16)),
+            ("OwnedBytes(6)", FieldValue::OwnedBytes(b6.to_vec())),
+            ("IpAddr(v4)", FieldValue::IpAddr(v4)),
+            ("IpAddr(v6)", FieldValue::IpAddr(v6)),
+            ("MacAddr", FieldValue::MacAddr(mac)),
+            ("List[]", FieldValue::List(vec![])),
+            ("List[Null]", FieldValue::List(vec![FieldValue::Null])),
+            (
+                "List[UInt8(1), UInt16(2), UInt32(3), UInt64(4)]",
+                FieldValue::List(vec![
+                    FieldValue::UInt8(1),
+                    FieldValue::UInt16(2),
+                    FieldValue::UInt32(3),
+                    FieldValue::UInt64(4),
+                ]),
+            ),
+            (
+                "List[Str(a), OwnedString(b), UInt16(5)]",
+                FieldValue::List(vec![
+                    FieldValue::Str("a"),
+                    FieldValue::OwnedString("b".into()),
+                    FieldValue::UInt16(5),
+                ]),
+            ),
+            (
+                "List[Bytes(3), Bytes(16), OwnedBytes(6)]",
+                FieldValue::List(vec![
+                    FieldValue::Bytes(b3),
+                    FieldValue::Bytes(b16),
+                    FieldValue::OwnedBytes(b6.to_vec()),
+                ]),
+            ),
+            (
+                "List[IpAddr(v4), IpAddr(v6), MacAddr]",
+                FieldValue::List(vec![
+                    FieldValue::IpAddr(v4),
+                    FieldValue::IpAddr(v6),
+                    FieldValue::MacAddr(mac),
+                ]),
+            ),
+        ];
+
+        let options = FormatOptions::default().with_null("NULL");
+        let mut out = String::new();
+        for (column, data_type) in &columns {
+            for (label, value) in &values {
+                let mut builder = DynamicBuilder::new(data_type, 1);
+                builder.append_field_value(value);
+                let array = builder.finish();
+                let cell = if array.is_empty() {
+                    // The append failed and its error was dropped: the
+                    // column is one row short, which fails the batch.
+                    "(no value appended)".to_string()
+                } else {
+                    ArrayFormatter::try_new(array.as_ref(), &options)
+                        .unwrap()
+                        .value(0)
+                        .to_string()
+                };
+                out.push_str(&format!("{column} <- {label} = {cell}\n"));
+            }
+        }
+        out
+    }
+
+    /// The value each column type stores for each kind of `FieldValue` is
+    /// part of the tables' contract, and the reference any other writer of
+    /// these columns has to reproduce. Pinned in `coercion.snap`; regenerate
+    /// after an intentional change with
+    /// `PCAPSQL_GOLDEN_UPDATE=1 cargo test -p pcapsql-datafusion --lib coercion_matches_snapshot`
+    /// and review the diff.
+    #[test]
+    fn coercion_matches_snapshot() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/query/builders/coercion.snap"
+        );
+        let actual = coercion_table();
+        if std::env::var("PCAPSQL_GOLDEN_UPDATE").is_ok() {
+            std::fs::write(path, &actual).unwrap();
+            return;
+        }
+        let expected = std::fs::read_to_string(path).expect("coercion.snap is missing");
+        for (n, (want, got)) in expected.lines().zip(actual.lines()).enumerate() {
+            assert_eq!(got, want, "coercion.snap line {}", n + 1);
+        }
+        assert_eq!(
+            actual.lines().count(),
+            expected.lines().count(),
+            "coercion.snap has a different number of lines"
+        );
+    }
+
     /// An integer wider than its column is NULL, not a wrapped value.
     #[test]
     fn out_of_range_integers_become_null_not_wrapped() {
