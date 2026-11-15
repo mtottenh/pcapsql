@@ -16,8 +16,9 @@
 //!
 //! | Callback | Work | State |
 //! |---|---|---|
-//! | `bind` | Resolve the table, declare its columns, expand the files argument through DuckDB's file system, open and probe every file, estimate the row count | [`Bound`]: the files with their sizes, table, `strict`, `filename` |
-//! | `init_global_state` | Map the projected columns to a `ScanPlan` and compile it; decide the partitions of every file, which for a capture worth splitting takes one pass over it | [`Shared`]: the compiled plan, the partition queue over all files and the indexes it was cut from, the progress counter |
+//! | `bind` | Resolve the table, declare its columns, expand the files argument through DuckDB's file system, open and probe every file, estimate the row count | [`Bound`]: the files, table, `strict`, `filename`, and the predicate `pushdown_filter` fills in |
+//! | `pushdown_filter` | Accept the filters on `frame_number` and `timestamp` that are exactly a `FramePredicate` (`engine::pushdown`) | The predicate, in [`Bound`] |
+//! | `init_global_state` | Map the projected columns and the predicate to a `ScanPlan` and compile it; decide the partitions of every file, which for a capture worth splitting takes one pass over it, and leave out those the predicate rules out | [`Shared`]: the compiled plan, the partition queue over all files and the indexes it was cut from, the progress counter |
 //! | `max_threads` | The number of partitions | |
 //! | `init_local_state` | Number the worker; no file yet | [`Worker`] |
 //! | `claim_batch` | Claim the next partition, open its file at its offset, build the reader and the `PartitionScan` | [`Scanning`], in the worker: the scan, which owns the reader and through it the open file |
@@ -83,6 +84,38 @@
 //! runs up to as many workers as there are partitions. Work is therefore spread across files
 //! and within a large one alike: eight small captures are read by eight workers, one each.
 //!
+//! # Filters
+//!
+//! DuckDB offers the scan the filters above it, and [`engine::pushdown`](super::pushdown)
+//! turns what they say about `frame_number` and `timestamp` into one predicate: a range of
+//! frame numbers and a range of timestamps. It accepts the filters that say exactly that, and
+//! DuckDB does not evaluate an accepted filter, so the scan must: the predicate goes into the
+//! plan (`ScanPlan::frames`), and core's driver gives rows for exactly the packets it accepts,
+//! whatever the partitions are. Rejected packets are read and not parsed. A filter that only
+//! narrows the predicate (a `BETWEEN`, whose bounds the scan cannot tell inclusive from
+//! exclusive) stays in DuckDB's plan and is applied there to the rows the scan returns.
+//!
+//! The predicate also saves reading, which is the point of it:
+//!
+//! - A predicate no frame satisfies (`frame_number < 1`, an inverted range) reads nothing: no
+//!   file is opened.
+//! - A capture that is split is split by `plan_ranges` with the predicate: partitions are
+//!   shrunk to the checkpoint windows that can hold a matching frame, by frame number and by
+//!   the smallest and largest timestamp the index recorded for each window, and partitions
+//!   with no such window are left out. `plan_ranges` keeps the window at the end of a
+//!   capture unless an upper bound on `frame_number` rules it out (packets may have been
+//!   appended since the index was built, and nothing is known of them), so a bound on
+//!   `timestamp` never leaves a whole file unread.
+//! - A capture that is read as one partition (compressed, remote, small, one thread) is read
+//!   from its first byte, since nothing says where a frame is. The read ends after the last
+//!   frame an upper bound on `frame_number` admits. A bound on `timestamp` ends nothing:
+//!   timestamps need not ascend.
+//!
+//! With several files the predicate applies to each file, whose frames are numbered from 1.
+//!
+//! A read that ends early does not get to the end of the capture, so it does not find a
+//! capture truncated, as with `LIMIT` (see below).
+//!
 //! # Row order
 //!
 //! A scan returns its rows in file order, and within a file in capture order, without an
@@ -137,7 +170,8 @@ use duckdb_neo::{
     signature::{FunctionParameter, FunctionParameterKind, SignatureBuilder},
     table_function::{
         BindFunctionHandle, ExecColumnInfo, InitColumnData, OrderPreservation, PartitionData,
-        TableClaimBatchCallbacks, TableFunctionCallbacks, TablePartitioningCallbacks,
+        PushdownData, TableClaimBatchCallbacks, TableFilterPushdownCallbacks,
+        TableFunctionCallbacks, TablePartitioningCallbacks,
     },
     types::{Any, DuckDBType},
     Error, Result,
@@ -147,14 +181,17 @@ use pcapsql_core::io::{
     PacketRange, PacketReader, ReadPacketReader, SeekCost, StreamHeader,
 };
 use pcapsql_core::scan::{
-    partition_target, plan_ranges, Catalog, ColId, CompiledScan, FramePredicate, OutColumn,
-    PartitionPolicy, PartitionQueue, PartitionScan, ScanPlan, Step, TableDef, TableId, TableScan,
+    partition_target, plan_ranges, Catalog, ColId, ColumnSource, CompiledScan, FramePredicate,
+    OutColumn, PartitionPolicy, PartitionQueue, PartitionScan, ScanPlan, Step, TableDef, TableId,
+    TableScan,
 };
 use pcapsql_core::{default_registry, ProtocolRegistry};
 
 use super::{
     fs::{self, DuckFile},
-    guard, registry,
+    guard,
+    pushdown::{self, Pushed},
+    registry,
     settings::{self, ScanSettings},
     types,
     writer::ChunkWriter,
@@ -212,6 +249,7 @@ fn builder(name: &str, table: Option<TableId>) -> Builder {
     };
     guard::table_function(name, scan.signature(), scan)
         .with_projection_pushdown(true)
+        .with_filter_pushdown()
         .with_progress()
         .with_claim_batch()
         .with_partitioning()
@@ -391,6 +429,9 @@ struct Bound {
     /// asked for it.
     filename: Option<usize>,
     strict: bool,
+    /// What the filters DuckDB offered the scan say about the frames to read, as one
+    /// predicate.
+    pushed: Pushed,
 }
 
 /// What a projection DuckDB reports asks for.
@@ -510,9 +551,16 @@ impl TableFunctionCallbacks for PcapScan {
         let filename: bool = self.named(&arguments, positions.filename, FILENAME)?;
 
         let mut columns = Vec::new();
+        // Where the two columns a pushed-down filter can be about are declared.
+        let (mut frame_number, mut timestamp) = (None, None);
         for (id, column) in registry::exposed_columns(definition) {
             let logical_type = types::logical_type(context, types::column_kind(column))?;
             bind_handle.add_result_column(column.name, &logical_type)?;
+            match column.source {
+                ColumnSource::FrameNumber => frame_number = Some(columns.len()),
+                ColumnSource::Timestamp => timestamp = Some(columns.len()),
+                _ => {}
+            }
             columns.push(id);
         }
         // After the table's columns, where DuckDB's own readers put theirs.
@@ -549,6 +597,7 @@ impl TableFunctionCallbacks for PcapScan {
             columns: columns.into(),
             filename,
             strict,
+            pushed: Pushed::new(frame_number, timestamp),
         })
     }
 
@@ -562,8 +611,12 @@ impl TableFunctionCallbacks for PcapScan {
             .map(|position| column_data.get_column_index(position))
             .collect::<Result<Vec<_>>>()?;
         let projection = self.projection(bound, &projected)?;
+        // The frames the filters above the scan leave: it returns rows of these only. For the
+        // filters it accepted, nobody else will see to that.
+        let frames = bound.pushed.predicate();
         let plan = ScanPlan {
             tables: vec![TableScan::new(bound.table, projection.columns)],
+            frames: frames.clone(),
             timestamps: types::TIMESTAMPS,
             ..ScanPlan::default()
         }
@@ -578,7 +631,7 @@ impl TableFunctionCallbacks for PcapScan {
         let (mut ranges, mut owners) = (Vec::new(), Vec::new());
         let mut files = Vec::with_capacity(bound.files.len());
         for (number, path) in bound.files.iter().enumerate() {
-            let layout = self.layout(context, &settings, path, bound.strict)?;
+            let layout = self.layout(context, &settings, path, bound.strict, &frames)?;
             // What the scan will do, for whoever asks DuckDB's log (`enable_logging`) why a
             // query is slow. As for the truncation warning, the log is not worth failing a
             // query for.
@@ -748,6 +801,23 @@ impl TableClaimBatchCallbacks for PcapScan {
     }
 }
 
+impl TableFilterPushdownCallbacks for PcapScan {
+    /// Narrow the scan by the filters that are about its frames, and accept those it applies
+    /// exactly (see [`engine::pushdown`](super::pushdown)). DuckDB calls this while it plans
+    /// the statement, and may call it more than once.
+    fn pushdown_filter(
+        &self,
+        context: &Context,
+        bound: &Bound,
+        offered: PushdownData<'_>,
+    ) -> Result<()> {
+        if !settings::filter_pushdown(context)? {
+            return Ok(());
+        }
+        bound.pushed.accept(&offered)
+    }
+}
+
 impl TablePartitioningCallbacks for PcapScan {
     /// The batch index of the chunk `exec` just returned on this worker: the ordinal of the
     /// partition its rows are from (see the module documentation on row order).
@@ -819,7 +889,16 @@ impl PcapScan {
         settings: &ScanSettings,
         path: &str,
         strict: bool,
+        frames: &FramePredicate,
     ) -> Result<Layout> {
+        if frames.is_empty() {
+            // Nothing to read, and so nothing to open.
+            return Ok(Layout {
+                ranges: Vec::new(),
+                index: None,
+                note: "0 (the filter accepts no frame)".to_owned(),
+            });
+        }
         if !settings.parallel {
             return Ok(Layout::sequential(format_args!(
                 "{} is off",
@@ -874,8 +953,8 @@ impl PcapScan {
                 )))
             }
         };
-        let ranges = plan_ranges(Some(&index), want, &FramePredicate::all());
-        if ranges.len() <= 1 {
+        let whole = plan_ranges(Some(&index), want, &FramePredicate::all()).len();
+        if whole <= 1 {
             return Ok(Layout::sequential(format_args!(
                 "{} frames give no place to split at, with a checkpoint every {} frames",
                 index.packet_count, index.stride
@@ -889,9 +968,30 @@ impl PcapScan {
                 return Err(self.truncation_error(path, last_frame));
             }
         }
+        // The partitions, without those the filter rules out and each shrunk to the checkpoint
+        // windows that may hold a frame it accepts. There may be none left.
+        let ranges = plan_ranges(Some(&index), want, frames);
+        let filtered = if frames.is_all() {
+            String::new()
+        } else {
+            let covered: u64 = ranges
+                .iter()
+                .map(|range| {
+                    let end = range
+                        .end
+                        .as_ref()
+                        .map_or(index.packet_count + 1, |end| end.frame_number);
+                    end.saturating_sub(range.start.frame_number)
+                })
+                .sum();
+            format!(
+                "; the filter leaves {covered} frames in {} of {whole} partitions",
+                ranges.len()
+            )
+        };
         Ok(Layout {
             note: format!(
-                "{} (of {} frames, cut at checkpoints {} frames apart)",
+                "{} (of {} frames, cut at checkpoints {} frames apart{filtered})",
                 ranges.len(),
                 index.packet_count,
                 index.stride
@@ -978,8 +1078,13 @@ impl PcapScan {
         } else {
             columns.join(", ")
         };
+        let filter = if plan.frames().is_all() {
+            String::new()
+        } else {
+            format!("; filter: {}", pushdown::describe(plan.frames()))
+        };
         format!(
-            "{}: scanning '{}': partitions: {}; columns: {columns}; protocols parsed: {}",
+            "{}: scanning '{}': partitions: {}; columns: {columns}; protocols parsed: {}{filter}",
             self.name,
             path,
             layout.note,
@@ -1050,17 +1155,24 @@ impl PcapScan {
             return Err(self.read_error(path, last_frame, &error));
         }
         // Which worker read what, for whoever asks the log how a scan was spread.
+        let stats = finished.scan.stats();
+        let skipped = if shared.plan.frames().is_all() {
+            String::new()
+        } else {
+            format!(", {} of them not accepted by the filter", stats.skipped)
+        };
         let _ = Log::log_on_context(
             context,
             LogLevel::Debug,
             &format!(
-                "{}: worker {} finished partition {} of {} of '{}': {} packets from frame {}",
+                "{}: worker {} finished partition {} of {} of '{}': {} packets from frame \
+                 {}{skipped}",
                 self.name,
                 worker.id,
                 worker.ordinal.map_or(0, |ordinal| ordinal + 1),
                 shared.queue.len(),
                 path,
-                finished.scan.stats().packets,
+                stats.packets,
                 finished.first_frame,
             ),
             LOG_TYPE,
@@ -1237,6 +1349,7 @@ mod tests {
                 .collect(),
             filename: None,
             strict: false,
+            pushed: Pushed::new(Some(0), Some(1)),
         };
         (bound, definition)
     }

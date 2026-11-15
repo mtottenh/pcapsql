@@ -7,6 +7,7 @@
 pub mod fs;
 pub mod guard;
 mod macros;
+pub mod pushdown;
 mod registry;
 pub mod replacement;
 mod scalar;

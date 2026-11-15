@@ -1,0 +1,198 @@
+# name: test/sql/filter_pushdown.test
+# description: filters on frame_number and timestamp are applied by the scan, with the same rows
+# group: [pcapsql]
+
+# The in-process tests (itest/tests/filter_pushdown.rs) compare every kind of filter with
+# DuckDB's own evaluation; this file checks that the built artifact has the setting, takes
+# filters over and reads less for them. The capture is a small real one (38 frames).
+
+require pcapsql
+
+query T
+SELECT current_setting('pcapsql_filter_pushdown');
+----
+true
+
+statement error
+SET pcapsql_filter_pushdown = NULL;
+----
+pcapsql_filter_pushdown must not be NULL
+
+statement ok
+CALL enable_logging(level = 'debug');
+
+# An upper bound on the frame number: the rows, and a read that ends at the bound
+query II
+SELECT frame_number, length FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dns.cap') WHERE frame_number <= 3;
+----
+1	70
+2	98
+3	70
+
+query I
+SELECT count(*) FROM duckdb_logs WHERE type = 'pcapsql'
+AND message LIKE '%filter: frame_number in (.., 3]'
+AND message LIKE '%partitions: 1 %';
+----
+1
+
+query I
+SELECT count(*) FROM duckdb_logs WHERE type = 'pcapsql'
+AND message LIKE '%: 3 packets from frame 1, 0 of them not accepted by the filter';
+----
+1
+
+statement ok
+CALL truncate_duckdb_logs();
+
+# A time window, on a protocol table: four frames of the 38, and the rest not parsed
+query IT
+SELECT frame_number, query_name FROM read_dns('../fuzz/corpus/fuzz_pcap_reader/dns.cap')
+WHERE timestamp >= TIMESTAMP '2005-03-30 08:47:50' AND timestamp < TIMESTAMP '2005-03-30 08:48:00';
+----
+3	google.com
+4	google.com
+5	google.com
+6	google.com
+
+query I
+SELECT count(*) FROM duckdb_logs WHERE type = 'pcapsql'
+AND message LIKE '%filter: timestamp in [1112172470000000000, 1112172480000000000] ns';
+----
+1
+
+query I
+SELECT count(*) FROM duckdb_logs WHERE type = 'pcapsql'
+AND message LIKE '%: 38 packets from frame 1, 34 of them not accepted by the filter';
+----
+1
+
+statement ok
+CALL truncate_duckdb_logs();
+
+# Timestamps to the nanosecond, and bounds that are and are not inclusive
+query I
+SELECT frame_number FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dns.cap')
+WHERE timestamp = TIMESTAMP '2005-03-30 08:49:18.734862';
+----
+10
+
+query I
+SELECT count(*) FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dns.cap')
+WHERE timestamp = make_timestamp_ns(1112172558734862001);
+----
+0
+
+query I
+SELECT frame_number FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dns.cap')
+WHERE timestamp > TIMESTAMP '2005-03-30 08:49:18.734862' AND timestamp <= TIMESTAMP '2005-03-30 08:49:35.461181';
+----
+11
+
+query I
+SELECT frame_number FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dns.cap')
+WHERE frame_number > 36 AND frame_number < 40;
+----
+37
+38
+
+query I
+SELECT count(*) FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dns.cap') WHERE frame_number > 5 AND frame_number < 6;
+----
+0
+
+query I
+SELECT count(*) FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dns.cap') WHERE frame_number > -1;
+----
+38
+
+# What the scan does not take over is still applied
+query I
+SELECT frame_number FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dns.cap')
+WHERE frame_number < 10 AND (frame_number % 4 = 0 OR length > 180);
+----
+4
+8
+
+query I
+SELECT frame_number FROM read_dns('../fuzz/corpus/fuzz_pcap_reader/dns.cap')
+WHERE frame_number IN (1, 5, 38) AND frame_number <> 5;
+----
+1
+38
+
+# A capture in partitions: only the checkpoint window the filter leaves is read
+statement ok
+SET threads = 4;
+
+statement ok
+SET pcapsql_parallel_min_file_size = 0;
+
+statement ok
+SET pcapsql_index_stride = 5;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT frame_number FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dns.cap') WHERE frame_number BETWEEN 12 AND 14;
+----
+12
+13
+14
+
+query I
+SELECT count(*) FROM duckdb_logs WHERE type = 'pcapsql'
+AND message LIKE '%partitions: 1 (of 38 frames, cut at checkpoints 5 frames apart; the filter leaves 5 frames in 1 of 4 partitions)%';
+----
+1
+
+query I
+SELECT count(*) FROM duckdb_logs WHERE type = 'pcapsql'
+AND message LIKE '%: 4 packets from frame 11, 1 of them not accepted by the filter';
+----
+1
+
+# With several files the frame number counts in each
+query TI
+SELECT parse_filename(filename), frame_number
+FROM read_frames(['../fuzz/corpus/fuzz_pcap_reader/dns.cap', '../fuzz/corpus/fuzz_pcap_reader/v6.pcap'], filename := true)
+WHERE frame_number >= 38 AND frame_number < 40;
+----
+dns.cap	38
+v6.pcap	38
+v6.pcap	39
+
+# The same rows with every filter left to DuckDB, which then reads the whole capture
+statement ok
+SET pcapsql_filter_pushdown = false;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT frame_number FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dns.cap') WHERE frame_number BETWEEN 12 AND 14;
+----
+12
+13
+14
+
+query I
+SELECT count(*) FROM duckdb_logs WHERE type = 'pcapsql' AND message LIKE '%filter%';
+----
+0
+
+query I
+SELECT count(*) FROM duckdb_logs WHERE type = 'pcapsql'
+AND message LIKE '%partitions: 4 (of 38 frames, cut at checkpoints 5 frames apart)%';
+----
+1
+
+query IT
+SELECT frame_number, query_name FROM read_dns('../fuzz/corpus/fuzz_pcap_reader/dns.cap')
+WHERE timestamp >= TIMESTAMP '2005-03-30 08:47:50' AND timestamp < TIMESTAMP '2005-03-30 08:48:00';
+----
+3	google.com
+4	google.com
+5	google.com
+6	google.com

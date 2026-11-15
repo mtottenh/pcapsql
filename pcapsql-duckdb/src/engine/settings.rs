@@ -5,6 +5,7 @@
 //! | `pcapsql_parallel_scan` | `BOOLEAN` | `true` | Split a large local capture into partitions that several threads scan. `false` reads every capture on one thread |
 //! | `pcapsql_parallel_min_file_size` | `UBIGINT` | 4194304 | The size in bytes from which a capture is split. Below it the index pass costs more than it saves |
 //! | `pcapsql_index_stride` | `UBIGINT` | 65536 | Frames between two places a capture can be split at. A capture has at most one partition per stride |
+//! | `pcapsql_filter_pushdown` | `BOOLEAN` | `true` | Let a scan take over the filters on `frame_number` and `timestamp` it can apply exactly (`engine::pushdown`). `false` leaves every filter to DuckDB, which then applies it to the rows of a full scan |
 //!
 //! They are ordinary DuckDB settings (`SET`, `RESET`, `current_setting`, global or per session).
 //! The two numbers are there for tests and for experiments: with a stride of a few frames and a
@@ -24,6 +25,7 @@ use pcapsql_core::scan::PartitionPolicy;
 pub const PARALLEL_SCAN: &str = "pcapsql_parallel_scan";
 pub const PARALLEL_MIN_FILE_SIZE: &str = "pcapsql_parallel_min_file_size";
 pub const INDEX_STRIDE: &str = "pcapsql_index_stride";
+pub const FILTER_PUSHDOWN: &str = "pcapsql_filter_pushdown";
 
 /// DuckDB's own setting: the number of threads a query may run on.
 const THREADS: &str = "threads";
@@ -65,6 +67,15 @@ impl ScanSettings {
     }
 }
 
+/// `pcapsql_filter_pushdown`, as it is for the statement `context` belongs to.
+///
+/// It is read when DuckDB's optimizer offers a scan its filters, which is when a statement is
+/// planned: a prepared statement keeps what was decided when it was prepared.
+pub fn filter_pushdown(context: &Context) -> Result<bool> {
+    let (value, _scope) = context.config()?.get_value(FILTER_PUSHDOWN)?;
+    Ok(value.get::<bool>()?.unwrap_or(true))
+}
+
 /// A setting that takes any value of its type but NULL.
 struct NotNull {
     name: &'static str,
@@ -97,17 +108,26 @@ impl CustomOptionCallbacks for NotNull {
 }
 
 pub(super) fn register(extension: &Extension) -> Result<()> {
-    CustomOptionBuilder::new(
-        PARALLEL_SCAN,
-        "Scan a large local capture in partitions, on several threads",
-        bool::logical_type(extension)?,
-        NotNull {
-            name: PARALLEL_SCAN,
-            min: None,
-        },
-    )
-    .default_value(true.value(extension)?)
-    .register(extension)?;
+    let switches: [(&'static str, &str); 2] = [
+        (
+            PARALLEL_SCAN,
+            "Scan a large local capture in partitions, on several threads",
+        ),
+        (
+            FILTER_PUSHDOWN,
+            "Apply filters on frame_number and timestamp in the scan of a capture",
+        ),
+    ];
+    for (name, description) in switches {
+        CustomOptionBuilder::new(
+            name,
+            description,
+            bool::logical_type(extension)?,
+            NotNull { name, min: None },
+        )
+        .default_value(true.value(extension)?)
+        .register(extension)?;
+    }
 
     let numbers: [(&'static str, &str, u64, u64); 2] = [
         (
