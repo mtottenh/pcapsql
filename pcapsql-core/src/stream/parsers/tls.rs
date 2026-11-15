@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use compact_str::CompactString;
 
+use crate::format::names::tls_version_name;
 use crate::schema::{DataKind, FieldDescriptor};
 use crate::stream::OwnedFieldValue;
 use crate::stream::{ParsedMessage, StreamContext, StreamParseResult, StreamParser};
@@ -251,18 +252,6 @@ impl TlsStreamParser {
         }
         None
     }
-
-    /// Get TLS version name.
-    fn version_name(version: u16) -> &'static str {
-        match version {
-            0x0300 => "SSL 3.0",
-            0x0301 => "TLS 1.0",
-            0x0302 => "TLS 1.1",
-            0x0303 => "TLS 1.2",
-            0x0304 => "TLS 1.3",
-            _ => "Unknown",
-        }
-    }
 }
 
 /// Standard TLS ports.
@@ -327,7 +316,7 @@ impl StreamParser for TlsStreamParser {
         }
 
         let mut fields = HashMap::new();
-        fields.insert("version", OwnedFieldValue::Str(Self::version_name(version)));
+        fields.insert("version", tls_version_name(version).into());
         fields.insert("version_raw", OwnedFieldValue::UInt16(version));
 
         match content_type {

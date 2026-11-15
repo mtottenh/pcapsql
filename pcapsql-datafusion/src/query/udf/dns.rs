@@ -88,7 +88,7 @@ impl ScalarUDFImpl for DnsTypeNameUdf {
 
         let result: StringArray = type_values
             .iter()
-            .map(|opt| opt.map(dns_type_name))
+            .map(|opt| opt.map(|code| dns_type_name(code).into_cow()))
             .collect();
 
         Ok(ColumnarValue::Array(Arc::new(result)))
@@ -138,7 +138,7 @@ impl ScalarUDFImpl for DnsRcodeNameUdf {
 
         let result: StringArray = rcode_values
             .iter()
-            .map(|opt| opt.map(|rcode| dns_rcode_name(u16::from(rcode))))
+            .map(|opt| opt.map(|rcode| dns_rcode_name(u16::from(rcode)).into_cow()))
             .collect();
 
         Ok(ColumnarValue::Array(Arc::new(result)))
@@ -188,7 +188,7 @@ impl ScalarUDFImpl for DnsClassNameUdf {
 
         let result: StringArray = class_values
             .iter()
-            .map(|opt| opt.map(dns_class_name))
+            .map(|opt| opt.map(|code| dns_class_name(code).into_cow()))
             .collect();
 
         Ok(ColumnarValue::Array(Arc::new(result)))

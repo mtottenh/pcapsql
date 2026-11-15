@@ -7,6 +7,7 @@
 use super::{
     Dispatch, DispatchRule, FieldSink, FieldValue, HintKey, Hints, ParseContext, Parsed, Protocol,
 };
+use crate::format::names::{arphrd_name, sll_packet_type_name};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// PCAP link type for Linux SLL captures.
@@ -33,32 +34,6 @@ pub mod packet_type {
     pub const MULTICAST: u16 = 2; // Multicast by another host
     pub const OTHERHOST: u16 = 3; // Sent to someone else
     pub const OUTGOING: u16 = 4; // Sent by us
-}
-
-/// Get the name of a packet type.
-pub(super) fn packet_type_name(pkt_type: u16) -> &'static str {
-    match pkt_type {
-        packet_type::HOST => "HOST",
-        packet_type::BROADCAST => "BROADCAST",
-        packet_type::MULTICAST => "MULTICAST",
-        packet_type::OTHERHOST => "OTHERHOST",
-        packet_type::OUTGOING => "OUTGOING",
-        _ => "UNKNOWN",
-    }
-}
-
-/// Get the name of an ARPHRD type.
-pub(super) fn arphrd_name(arphrd: u16) -> &'static str {
-    match arphrd {
-        arphrd::ETHER => "ETHER",
-        arphrd::LOOPBACK => "LOOPBACK",
-        arphrd::FRAD => "FRAD",
-        arphrd::IPGRE => "IPGRE",
-        arphrd::IEEE80211_RADIOTAP => "IEEE80211_RADIOTAP",
-        arphrd::IP6GRE => "IP6GRE",
-        arphrd::NETLINK => "NETLINK",
-        _ => "UNKNOWN",
-    }
 }
 
 /// Linux SLL protocol parser.
@@ -130,10 +105,10 @@ impl Protocol for LinuxSllProtocol {
         fields.push(("packet_type", FieldValue::UInt16(pkt_type)));
         fields.push((
             "packet_type_name",
-            FieldValue::Str(packet_type_name(pkt_type)),
+            fields.name(sll_packet_type_name(pkt_type)),
         ));
         fields.push(("arphrd_type", FieldValue::UInt16(arphrd_type)));
-        fields.push(("arphrd_name", FieldValue::Str(arphrd_name(arphrd_type))));
+        fields.push(("arphrd_name", fields.name(arphrd_name(arphrd_type))));
         fields.push(("addr_len", FieldValue::UInt16(addr_len)));
 
         // Extract the valid portion of the link-layer address
@@ -330,30 +305,6 @@ mod tests {
 
         assert!(!result.is_ok());
         assert!(result.error.is_some());
-    }
-
-    // ==========================================================================
-    // Test 7: Packet type name resolution
-    // ==========================================================================
-    #[test]
-    fn test_packet_type_names() {
-        assert_eq!(packet_type_name(packet_type::HOST), "HOST");
-        assert_eq!(packet_type_name(packet_type::BROADCAST), "BROADCAST");
-        assert_eq!(packet_type_name(packet_type::MULTICAST), "MULTICAST");
-        assert_eq!(packet_type_name(packet_type::OTHERHOST), "OTHERHOST");
-        assert_eq!(packet_type_name(packet_type::OUTGOING), "OUTGOING");
-        assert_eq!(packet_type_name(99), "UNKNOWN");
-    }
-
-    // ==========================================================================
-    // Test 8: ARPHRD name resolution
-    // ==========================================================================
-    #[test]
-    fn test_arphrd_names() {
-        assert_eq!(arphrd_name(arphrd::ETHER), "ETHER");
-        assert_eq!(arphrd_name(arphrd::NETLINK), "NETLINK");
-        assert_eq!(arphrd_name(arphrd::LOOPBACK), "LOOPBACK");
-        assert_eq!(arphrd_name(999), "UNKNOWN");
     }
 
     // ==========================================================================

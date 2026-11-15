@@ -8,9 +8,14 @@
 //! RFC 6793: BGP Support for Four-Octet Autonomous System (AS) Number Space
 //! RFC 2918: Route Refresh Capability for BGP-4
 
+use std::fmt::Write as _;
+
 use super::{
     Cond, Dispatch, DispatchRule, FieldSink, FieldValue, HintKey, Hints, ParseContext, Parsed,
     Protocol,
+};
+use crate::format::names::{
+    bgp_capability_name, bgp_error_code_name, bgp_message_type_name, bgp_origin_name,
 };
 use crate::schema::{DataKind, FieldDescriptor};
 
@@ -82,42 +87,6 @@ pub const AS_TRANS: u16 = 23456;
 
 /// BGP Marker: 16 bytes of 0xFF.
 const BGP_MARKER: [u8; 16] = [0xFF; 16];
-
-/// Get the name of a BGP message type.
-fn message_type_name(msg_type: u8) -> &'static str {
-    match msg_type {
-        message_type::OPEN => "OPEN",
-        message_type::UPDATE => "UPDATE",
-        message_type::NOTIFICATION => "NOTIFICATION",
-        message_type::KEEPALIVE => "KEEPALIVE",
-        message_type::ROUTE_REFRESH => "ROUTE-REFRESH",
-        _ => "UNKNOWN",
-    }
-}
-
-/// Get the name of a BGP ORIGIN value.
-fn origin_name(origin: u8) -> &'static str {
-    match origin {
-        origin_type::IGP => "IGP",
-        origin_type::EGP => "EGP",
-        origin_type::INCOMPLETE => "INCOMPLETE",
-        _ => "UNKNOWN",
-    }
-}
-
-/// Get the name of a BGP error code.
-fn error_code_name(code: u8) -> &'static str {
-    match code {
-        error_code::MESSAGE_HEADER_ERROR => "Message Header Error",
-        error_code::OPEN_MESSAGE_ERROR => "OPEN Message Error",
-        error_code::UPDATE_MESSAGE_ERROR => "UPDATE Message Error",
-        error_code::HOLD_TIMER_EXPIRED => "Hold Timer Expired",
-        error_code::FSM_ERROR => "Finite State Machine Error",
-        error_code::CEASE => "Cease",
-        error_code::ROUTE_REFRESH_ERROR => "ROUTE-REFRESH Message Error",
-        _ => "Unknown",
-    }
-}
 
 /// BGP protocol parser.
 #[derive(Debug, Clone, Copy)]
@@ -195,7 +164,7 @@ impl Protocol for BgpProtocol {
         fields.push(("message_type", FieldValue::UInt8(msg_type)));
         fields.push((
             "message_type_name",
-            FieldValue::Str(message_type_name(msg_type)),
+            fields.name(bgp_message_type_name(msg_type)),
         ));
 
         // Parse message-specific fields
@@ -341,8 +310,7 @@ impl BgpProtocol {
         my_as_2byte: u16,
     ) {
         let mut offset = 0;
-        // Typical OPEN has 2-5 capabilities
-        let mut capabilities = Vec::with_capacity(4);
+        let mut capabilities = fields.text_builder();
         let mut four_byte_asn: Option<u32> = None;
 
         while offset + 2 <= data.len() {
@@ -369,16 +337,11 @@ impl BgpProtocol {
                         break;
                     }
 
-                    // Extract capability name
-                    let cap_name = match cap_code {
-                        capability_code::MULTIPROTOCOL => "MULTIPROTOCOL",
-                        capability_code::ROUTE_REFRESH => "ROUTE_REFRESH",
-                        capability_code::FOUR_OCTET_AS => "4-BYTE-AS",
-                        capability_code::ADD_PATH => "ADD_PATH",
-                        capability_code::ENHANCED_ROUTE_REFRESH => "ENHANCED_ROUTE_REFRESH",
-                        _ => "UNKNOWN",
-                    };
-                    capabilities.push(cap_name);
+                    if !capabilities.is_empty() {
+                        capabilities.push_str(",");
+                    }
+                    // Writing to an arena string does not fail.
+                    let _ = write!(capabilities, "{}", bgp_capability_name(cap_code));
 
                     // Extract 4-byte ASN if present (capability 65)
                     if cap_code == capability_code::FOUR_OCTET_AS && cap_len == 4 {
@@ -399,7 +362,7 @@ impl BgpProtocol {
         }
 
         if !capabilities.is_empty() {
-            fields.push(("capabilities", fields.str(&capabilities.join(","))));
+            fields.push(("capabilities", capabilities.finish()));
         }
 
         // If 4-byte ASN capability was found, store it
@@ -572,7 +535,7 @@ impl BgpProtocol {
                     if !attr_data.is_empty() {
                         let origin = attr_data[0];
                         fields.push(("origin", FieldValue::UInt8(origin)));
-                        fields.push(("origin_name", FieldValue::Str(origin_name(origin))));
+                        fields.push(("origin_name", fields.name(bgp_origin_name(origin))));
                     }
                 }
                 path_attr_type::AS_PATH => {
@@ -738,7 +701,7 @@ impl BgpProtocol {
         fields.push(("error_code", FieldValue::UInt8(error_code)));
         fields.push((
             "error_code_name",
-            FieldValue::Str(error_code_name(error_code)),
+            fields.name(bgp_error_code_name(error_code)),
         ));
 
         // Byte 1: Error Subcode

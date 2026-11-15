@@ -5,9 +5,10 @@
 //! values a parser constructs), and a scan of `frames` alone parses nothing.
 //! With a sink that stores nothing, what is left to allocate per packet is
 //! what a third-party parser allocates for itself: nothing for `frames`,
-//! `udp`, `tcp` (options and SACK blocks included) and `http`; for `dns`,
-//! what `simple_dns::Packet::parse` allocates and not one allocation more.
-//! This test counts.
+//! `udp`, `tcp` (options and SACK blocks included), `http` and `icmp` (a
+//! name column, for a type without a name too); for `dns`, what
+//! `simple_dns::Packet::parse` allocates and not one allocation more. This
+//! test counts.
 //!
 //! The count is taken as a slope: a capture of `2N` packets may not cost
 //! more allocations than one of `N`. What a scan allocates once (the reader's
@@ -287,6 +288,16 @@ fn http_request(i: usize) -> Vec<u8> {
     tcp_segment(i, 80, &[], request)
 }
 
+/// ICMP messages whose `type_name` is a name of the table (echo request,
+/// timestamp) and ones whose type has no name, so that the text carries the
+/// number and has to be written.
+fn icmp_message(i: usize) -> Vec<u8> {
+    let icmp_type = [8u8, 13, 99, 200][i % 4];
+    let mut message = vec![icmp_type, 0, 0, 0];
+    message.extend_from_slice(&(i as u32).to_be_bytes());
+    eth(&ipv4(1, i as u16, &message))
+}
+
 /// The payload of a DNS response: `www.example.com A`, answered with a
 /// CNAME and two addresses, the names compressed.
 fn dns_response(id: u16) -> Vec<u8> {
@@ -323,6 +334,7 @@ fn a_partition_scan_does_not_allocate_per_packet() {
     }
     scan_cost(&["tcp"], tcp_with_options, 16, &registry);
     scan_cost(&["http"], http_request, 16, &registry);
+    scan_cost(&["icmp"], icmp_message, 16, &registry);
     scan_cost(&["dns"], dns_frame, 16, &registry);
 
     // `frames` alone: nothing is parsed, nothing is stored.
@@ -357,6 +369,10 @@ fn a_partition_scan_does_not_allocate_per_packet() {
     // HTTP: `httparse` allocates nothing, and neither does the layer.
     assert_eq!(slope(&["http"], http_request, 1, &registry), (0, 0));
     assert_eq!(slope(&["tcp", "http"], http_request, 2, &registry), (0, 0));
+
+    // A name column: the table's own string for a number with a name, and
+    // text written into the arena for one without (`Type 99`).
+    assert_eq!(slope(&["icmp"], icmp_message, 1, &registry), (0, 0));
 
     // DNS: `simple_dns` allocates for the message it decodes (its record
     // vectors and the labels of every name). The scan allocates exactly

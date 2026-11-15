@@ -66,22 +66,22 @@ fn names_of_every_value() -> Result<()> {
     assert_same(
         "ip_proto_name",
         over_range(&connection, "ip_proto_name(i::UTINYINT)", 256)?,
-        (0..=u8::MAX).map(|i| format::ip_proto_name(i).into_owned()),
+        (0..=u8::MAX).map(|i| format::ip_proto_name(i).to_string()),
     );
     assert_same(
         "dns_type_name",
         over_range(&connection, "dns_type_name(i::USMALLINT)", 65536)?,
-        (0..=u16::MAX).map(|i| format::dns_type_name(i).into_owned()),
+        (0..=u16::MAX).map(|i| format::dns_type_name(i).to_string()),
     );
     assert_same(
         "dns_rcode_name",
         over_range(&connection, "dns_rcode_name(i::USMALLINT)", 65536)?,
-        (0..=u16::MAX).map(|i| format::dns_rcode_name(i).into_owned()),
+        (0..=u16::MAX).map(|i| format::dns_rcode_name(i).to_string()),
     );
     assert_same(
         "ethertype_name",
         over_range(&connection, "ethertype_name(i::USMALLINT)", 65536)?,
-        (0..=u16::MAX).map(|i| format::ethertype_name(i).into_owned()),
+        (0..=u16::MAX).map(|i| format::ethertype_name(i).to_string()),
     );
     Ok(())
 }

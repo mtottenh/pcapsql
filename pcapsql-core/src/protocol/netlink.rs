@@ -8,13 +8,11 @@ use super::{
     Cond, Dispatch, DispatchRule, FieldSink, FieldValue, HintKey, Hints, ParseContext, Parsed,
     Protocol,
 };
+use crate::format::names::{netlink_family_name, netlink_msg_type_name};
 use crate::schema::{DataKind, FieldDescriptor};
 
 // Re-export constants from netlink-packet-core for use elsewhere
 pub use netlink_packet_core::constants::{NLM_F_ACK, NLM_F_ECHO, NLM_F_MULTIPART, NLM_F_REQUEST};
-
-// Message type constants from netlink-packet-core
-pub use netlink_packet_core::{NLMSG_DONE, NLMSG_ERROR, NLMSG_NOOP, NLMSG_OVERRUN};
 
 /// Netlink header length in bytes.
 pub const NETLINK_HEADER_LEN: usize = 16;
@@ -45,44 +43,6 @@ pub mod family {
     pub const ECRYPTFS: u8 = 19;
     pub const RDMA: u8 = 20;
     pub const CRYPTO: u8 = 21;
-}
-
-/// Get the name of a netlink family.
-fn family_name(family: u8) -> &'static str {
-    match family {
-        family::ROUTE => "ROUTE",
-        family::USERSOCK => "USERSOCK",
-        family::FIREWALL => "FIREWALL",
-        family::SOCK_DIAG => "SOCK_DIAG",
-        family::NFLOG => "NFLOG",
-        family::XFRM => "XFRM",
-        family::SELINUX => "SELINUX",
-        family::ISCSI => "ISCSI",
-        family::AUDIT => "AUDIT",
-        family::FIB_LOOKUP => "FIB_LOOKUP",
-        family::CONNECTOR => "CONNECTOR",
-        family::NETFILTER => "NETFILTER",
-        family::IP6_FW => "IP6_FW",
-        family::DNRTMSG => "DNRTMSG",
-        family::KOBJECT_UEVENT => "KOBJECT_UEVENT",
-        family::GENERIC => "GENERIC",
-        family::SCSITRANSPORT => "SCSITRANSPORT",
-        family::ECRYPTFS => "ECRYPTFS",
-        family::RDMA => "RDMA",
-        family::CRYPTO => "CRYPTO",
-        _ => "UNKNOWN",
-    }
-}
-
-/// Get the name of a netlink message type.
-fn msg_type_name(msg_type: u16) -> &'static str {
-    match msg_type {
-        NLMSG_NOOP => "NLMSG_NOOP",
-        NLMSG_ERROR => "NLMSG_ERROR",
-        NLMSG_DONE => "NLMSG_DONE",
-        NLMSG_OVERRUN => "NLMSG_OVERRUN",
-        _ => "PROTOCOL_SPECIFIC",
-    }
 }
 
 /// Netlink protocol parser.
@@ -168,7 +128,10 @@ impl Protocol for NetlinkProtocol {
         fields.push(("msg_pid", FieldValue::UInt32(msg_pid)));
 
         // Message type name
-        fields.push(("msg_type_name", FieldValue::Str(msg_type_name(msg_type))));
+        fields.push((
+            "msg_type_name",
+            FieldValue::Str(netlink_msg_type_name(msg_type)),
+        ));
 
         // Flag extraction using crate constants
         let is_request = (msg_flags & NLM_F_REQUEST) != 0;
@@ -189,7 +152,7 @@ impl Protocol for NetlinkProtocol {
             .unwrap_or(family::ROUTE);
 
         fields.push(("family", FieldValue::UInt8(nl_family)));
-        fields.push(("family_name", FieldValue::Str(family_name(nl_family))));
+        fields.push(("family_name", fields.name(netlink_family_name(nl_family))));
 
         // Calculate remaining payload
         let payload_start = NETLINK_HEADER_LEN;
@@ -236,6 +199,8 @@ impl Protocol for NetlinkProtocol {
 
 #[cfg(test)]
 mod tests {
+    use netlink_packet_core::NLMSG_DONE;
+
     use super::*;
     use crate::protocol::test_utils::ParseLayer as _;
 

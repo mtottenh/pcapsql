@@ -8,6 +8,7 @@ use super::{
     Cond, Dispatch, DispatchRule, FieldSink, FieldValue, HintKey, Hints, ParseContext, Parsed,
     Protocol,
 };
+use crate::format::names::{address_family_name, rtnetlink_msg_type_name};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// RTNetlink message type constants.
@@ -25,26 +26,6 @@ pub mod msg_type {
     pub const RTM_NEWNEIGH: u16 = 28;
     pub const RTM_DELNEIGH: u16 = 29;
     pub const RTM_GETNEIGH: u16 = 30;
-}
-
-/// Get the name of an RTNetlink message type.
-fn msg_type_name(msg_type: u16) -> &'static str {
-    match msg_type {
-        msg_type::RTM_NEWLINK => "RTM_NEWLINK",
-        msg_type::RTM_DELLINK => "RTM_DELLINK",
-        msg_type::RTM_GETLINK => "RTM_GETLINK",
-        msg_type::RTM_SETLINK => "RTM_SETLINK",
-        msg_type::RTM_NEWADDR => "RTM_NEWADDR",
-        msg_type::RTM_DELADDR => "RTM_DELADDR",
-        msg_type::RTM_GETADDR => "RTM_GETADDR",
-        msg_type::RTM_NEWROUTE => "RTM_NEWROUTE",
-        msg_type::RTM_DELROUTE => "RTM_DELROUTE",
-        msg_type::RTM_GETROUTE => "RTM_GETROUTE",
-        msg_type::RTM_NEWNEIGH => "RTM_NEWNEIGH",
-        msg_type::RTM_DELNEIGH => "RTM_DELNEIGH",
-        msg_type::RTM_GETNEIGH => "RTM_GETNEIGH",
-        _ => "UNKNOWN",
-    }
 }
 
 /// RTNetlink protocol parser.
@@ -103,7 +84,10 @@ impl Protocol for RtnetlinkProtocol {
             .unwrap_or(0);
 
         fields.push(("msg_type", FieldValue::UInt16(nl_msg_type)));
-        fields.push(("msg_type_name", FieldValue::Str(msg_type_name(nl_msg_type))));
+        fields.push((
+            "msg_type_name",
+            fields.name(rtnetlink_msg_type_name(nl_msg_type)),
+        ));
 
         // Parse based on message type range
         match nl_msg_type {
@@ -292,14 +276,7 @@ fn parse_addr_header(data: &[u8], fields: &mut FieldSink<'_, '_>) {
     ]);
 
     fields.push(("addr_family", FieldValue::UInt8(family)));
-    fields.push((
-        "addr_family_name",
-        FieldValue::Str(match family {
-            2 => "IPv4",  // AF_INET
-            10 => "IPv6", // AF_INET6
-            _ => "Unknown",
-        }),
-    ));
+    fields.push(("addr_family_name", fields.name(address_family_name(family))));
     fields.push(("prefix_len", FieldValue::UInt8(prefix_len)));
     fields.push(("addr_index", FieldValue::UInt32(index)));
 
@@ -605,7 +582,7 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(
             result.get("msg_type_name"),
-            Some(&FieldValue::Str("UNKNOWN"))
+            Some(&FieldValue::Str("Unknown (999)"))
         );
     }
 

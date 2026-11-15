@@ -360,6 +360,7 @@ Done:
 | Scalars | DataFusion UDFs parse a constant argument once; DuckDB's scalar loops are generic over their kernel, and a constant-pattern match is a SIMD compare over the rows of a chunk that are not NULL, a 64-row word of the validity mask at a time (the second of two audited `unsafe` places) |
 | Reader | No `BufReader` under the parser's own buffer |
 | Benchmarks | A thin-LTO bench profile, so they link on a small machine; the `with_payload` case runs again |
+| One set of name tables | The parsers' name columns read the tables of `pcapsql_core::format::names` and keep none of their own, so `icmp.type_name` is `icmp_type_name(type)`; a number without a name carries the number (`Unknown (n)`, `Type n`), which changes column values (CHANGELOG). A lookup returns a `Copy` `Name` and allocates nothing; `protocol/name_columns_tests.rs` checks every name column against its table over every number |
 
 Remaining, in the order intended:
 
@@ -381,9 +382,6 @@ Remaining, in the order intended:
 
 Open decisions for the maintainer:
 
-- The parsers' own name tables and `pcapsql_core::format::names` disagree
-  for unknown codes (`UNKNOWN` against `Unknown (n)`); making the parsers
-  use the shared tables changes existing column values.
 - A constant-pattern match over a chunk with NULLs falls back to the
   per-row loop; covering it needs a second kind of `unsafe` (slices over
   all-valid words).

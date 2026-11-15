@@ -79,6 +79,8 @@ mod vxlan;
 
 // Test utilities (only compiled for tests)
 #[cfg(test)]
+mod name_columns_tests;
+#[cfg(test)]
 pub mod test_utils;
 
 pub use context::{FieldEntry, HintKey, Hints, ParseContext, TunnelLayer, TunnelType};
@@ -126,9 +128,14 @@ pub use vlan::VlanProtocol;
 pub use vxlan::VxlanProtocol;
 
 // Re-export protocol constants for use in UDFs and other crates
-pub use bgp::{message_type as bgp_message_type, origin_type as bgp_origin_type};
+pub use arp::operation as arp_operation;
+pub use bgp::{
+    capability_code as bgp_capability_code, error_code as bgp_error_code,
+    message_type as bgp_message_type, origin_type as bgp_origin_type,
+};
 pub use dns::{rcode, record_type};
 pub use ethernet::ethertype;
+pub use gre::gre_version;
 pub use gtp::message_type as gtp_message_type;
 pub use icmp::{
     dest_unreachable_code as icmp_dest_unreachable_code, icmp_type,
@@ -141,10 +148,15 @@ pub use icmpv6::{
     time_exceeded_code as icmpv6_time_exceeded_code,
 };
 pub use ipv6::next_header;
+pub use linux_sll::{arphrd as sll_arphrd, packet_type as sll_packet_type};
+pub use mpls::special_label as mpls_special_label;
 pub use netlink::family as netlink_family;
 pub use ntp::{mode as ntp_mode, stratum as ntp_stratum};
 pub use ospf::{lsa_type as ospf_lsa_type, packet_type as ospf_packet_type};
-pub use tls::{record_type as tls_record_type, version as tls_version};
+pub use quic::version as quic_version;
+pub use rtnetlink::msg_type as rtnetlink_msg_type;
+pub use ssh::msg_type as ssh_msg_type;
+pub use tls::{alert as tls_alert, record_type as tls_record_type, version as tls_version};
 
 // IPv4 header field constants
 pub use ipv4::{dscp, ecn};

@@ -75,36 +75,6 @@ pub mod dscp {
     pub const VA: u8 = 44;
     /// Lower Effort (LE) - RFC 8622 - DSCP 1
     pub const LE: u8 = 1;
-
-    /// Convert DSCP value to human-readable name.
-    pub fn to_name(value: u8) -> &'static str {
-        match value & 0x3F {
-            CS0 => "CS0/BE",
-            CS1 => "CS1",
-            CS2 => "CS2",
-            CS3 => "CS3",
-            CS4 => "CS4",
-            CS5 => "CS5",
-            CS6 => "CS6",
-            CS7 => "CS7",
-            AF11 => "AF11",
-            AF12 => "AF12",
-            AF13 => "AF13",
-            AF21 => "AF21",
-            AF22 => "AF22",
-            AF23 => "AF23",
-            AF31 => "AF31",
-            AF32 => "AF32",
-            AF33 => "AF33",
-            AF41 => "AF41",
-            AF42 => "AF42",
-            AF43 => "AF43",
-            EF => "EF",
-            VA => "VA",
-            LE => "LE",
-            _ => "", // Return empty string for unknown, caller can format
-        }
-    }
 }
 
 /// Explicit Congestion Notification (ECN) values.
@@ -120,17 +90,6 @@ pub mod ecn {
     pub const ECT0: u8 = 2;
     /// Congestion Experienced
     pub const CE: u8 = 3;
-
-    /// Convert ECN value to human-readable name.
-    pub fn to_name(value: u8) -> &'static str {
-        match value & 0x03 {
-            NOT_ECT => "Not-ECT",
-            ECT1 => "ECT(1)",
-            ECT0 => "ECT(0)",
-            CE => "CE",
-            _ => unreachable!(),
-        }
-    }
 }
 
 /// IPv4 protocol parser.

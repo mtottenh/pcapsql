@@ -13,6 +13,7 @@ use tls_parser::{
 };
 
 use super::tls::is_tls_port;
+use crate::format::names::tls_version_name;
 use crate::schema::{DataKind, FieldDescriptor};
 use crate::stream::OwnedFieldValue;
 use crate::stream::{Direction, ParsedMessage, StreamContext, StreamParseResult, StreamParser};
@@ -308,10 +309,7 @@ impl StreamParser for DecryptingTlsStreamParser {
             let payload = &record_data[5..];
 
             let mut fields = HashMap::new();
-            fields.insert(
-                "version",
-                OwnedFieldValue::OwnedString(CompactString::new(version_name(version))),
-            );
+            fields.insert("version", tls_version_name(version).into());
 
             match content_type {
                 22 => {
@@ -503,18 +501,6 @@ impl StreamParser for DecryptingTlsStreamParser {
     }
 }
 
-/// Get human-readable TLS version name.
-fn version_name(version: u16) -> &'static str {
-    match version {
-        0x0300 => "SSL 3.0",
-        0x0301 => "TLS 1.0",
-        0x0302 => "TLS 1.1",
-        0x0303 => "TLS 1.2",
-        0x0304 => "TLS 1.3",
-        _ => "Unknown",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -700,13 +686,5 @@ mod tests {
             DecryptingTlsStreamParser::to_tls_direction(Direction::ToClient),
             TlsDirection::ServerToClient
         );
-    }
-
-    #[test]
-    fn test_version_name() {
-        assert_eq!(version_name(0x0301), "TLS 1.0");
-        assert_eq!(version_name(0x0303), "TLS 1.2");
-        assert_eq!(version_name(0x0304), "TLS 1.3");
-        assert_eq!(version_name(0x0000), "Unknown");
     }
 }

@@ -56,8 +56,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`write_tcp_flags`, `has_tcp_flag`, `tcp_flag_mask`), IPv4/IPv6 parsing,
   CIDR membership and address classes (`cidr`), MAC parsing and classes
   (`mac`), and hex (`write_hex`, `parse_hex`). A kernel takes one value and
-  returns a scalar, a `Cow<'static, str>` that borrows whenever the text is a
-  fixed name, or writes to a `fmt::Write` sink; null handling and
+  returns a scalar, a `Name` (a name of a table, or text made of the number,
+  without allocating either), or writes to a `fmt::Write` sink; null handling and
   registration stay with the engine. Also new: `write_ipv4`, `write_ipv6`
   and `write_mac` (the `format_*` functions without the `String`), and
   `dns_opcode_name`, which no SQL function uses yet.
@@ -359,6 +359,85 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Behaviour change: one set of protocol name tables; the parsers' name
+  columns follow it.** A parser used to carry its own table for each name
+  column (`icmp.type_name`, `bgp.message_type_name`, ...), next to the tables
+  of `pcapsql_core::format::names` behind the `*_name()` SQL functions, and
+  the two had drifted: `icmpv6.type_name` was `MLD Query` where
+  `icmpv6_type_name(type)` was `Multicast Listener Query`, and a number
+  without a name was `Unknown`, `UNKNOWN`, `unknown` or `UNKNOWN(n)`
+  depending on the parser, against the function's `Unknown (n)`. The parsers
+  now read the tables of `format::names` and have none of their own, so a
+  name column and the function applied to the number beside it are the same
+  text, and a test (`protocol/name_columns_tests.rs`) parses a layer for
+  every number of every name column and compares it with its table; a new
+  `*_name` column that is not listed there fails it.
+
+  A number without a name now gives text that carries the number, as the
+  functions always did. What changed, column by column:
+
+  | Column | Number | Before | After |
+  |---|---|---|---|
+  | `icmp.type_name` | 13 | `Timestamp Request` | `Timestamp` |
+  | `icmp.type_name` | 6, 30 to 43 | `Unknown` | the IANA name (`Alternate Host Address`, `Traceroute`, ... `Extended Echo Reply`) |
+  | `icmp.type_name` | no name | `Unknown` | `Type 99` |
+  | `icmpv6.type_name` | 130 | `MLD Query` | `Multicast Listener Query` |
+  | `icmpv6.type_name` | 131 | `MLDv1 Report` | `Multicast Listener Report` |
+  | `icmpv6.type_name` | 132 | `MLDv1 Done` | `Multicast Listener Done` |
+  | `icmpv6.type_name` | 143 | `MLDv2 Report` | `Version 2 Multicast Listener Report` |
+  | `icmpv6.type_name` | 100, 101, 127, 138 to 142, 144 to 161, 200, 201, 255 | `Unknown` | the IANA name (`Router Renumbering`, `RPL Control`, ...) |
+  | `icmpv6.type_name` | no name | `Unknown` | `Type 99` |
+  | `arp.operation_name` | no name | `Unknown` | `Unknown (3)` |
+  | `bgp.message_type_name`, `bgp.origin_name` | no name | `UNKNOWN` | `Unknown (9)` |
+  | `bgp.error_code_name` | no name | `Unknown` | `Unknown (9)` |
+  | `bgp.capabilities` (each item) | no name | `UNKNOWN` | `Unknown (64)` |
+  | `gre.version_name` | 2 to 7 | `Unknown` | `Unknown (2)` |
+  | `linux_sll.packet_type_name`, `sll2.packet_type_name` | no name | `UNKNOWN` | `Unknown (7)` |
+  | `linux_sll.arphrd_name`, `sll2.arphrd_name` | no name | `UNKNOWN` | `Unknown (776)` |
+  | `netlink.family_name` | no name | `UNKNOWN` | `Unknown (22)` |
+  | `rtnetlink.msg_type_name` | no name | `UNKNOWN` | `Unknown (36)` |
+  | `rtnetlink.addr_family_name` | no name | `Unknown` | `Unknown (17)` |
+  | `ospf.message_type_name`, `ospf.lsa_type_name` | no name | `Unknown` | `Unknown (12)` |
+  | `ssh.msg_type_name` | no name | `UNKNOWN(60)` | `Unknown (60)` |
+  | `tls.alert_description_str` | no name | `unknown` | `Unknown (255)` |
+  | `tls_sessions.version` (and the `version` of a TLS stream message) | `0x0200` | `Unknown` | `SSL 2.0` |
+  | the same | a GREASE value | `Unknown` | `GREASE` |
+  | the same | no name | `Unknown` | `Unknown (0x0305)` |
+
+  Where the two tables named a number differently, the IANA registry's name
+  was taken: ICMP type 13 is `Timestamp`, and the MLD messages have their
+  registry names. For ICMPv6 type 143 neither table had it (`MLDv2 Report`
+  in the parser, `MLDv2 Multicast Listener Report` in the function), so
+  `icmpv6_type_name(143)` changes as well, to `Version 2 Multicast Listener
+  Report`; no other result of a `*_name()` function changes. A query that
+  compares one of these columns with the old text
+  (`WHERE type_name = 'MLD Query'`, `WHERE message_type_name = 'UNKNOWN'`)
+  has to be updated; comparing the number is unaffected.
+
+  Unchanged: `netlink.msg_type_name` (`PROTOCOL_SPECIFIC` for a type that is
+  not a control message), `mpls.special_label_name` (NULL for an ordinary
+  label), `quic.version_name`, `tls.version` and the TLS list columns
+  (`supported_versions`, `signature_algorithms`, `supported_groups`,
+  `ec_point_formats`, `compression_methods`), whose text was already that of
+  the tables they now share, and `gtp.extension_headers`, which writes the
+  number after every name.
+
+  In `pcapsql-core`, the `*_name` functions of `format` return a `Name`
+  instead of a `Cow<'static, str>`: `Copy`, `Display`, comparable with a
+  `str`, `as_static()` for a name of the table and `into_cow()` for the old
+  value. Looking a name up no longer allocates for a number without one, and
+  a parser writes it with `FieldSink::name`, into the packet's arena when it
+  is not a name of the table. New tables, with no SQL function yet:
+  `arp_operation_name`, `bgp_error_code_name`, `bgp_capability_name`,
+  `gre_version_name`, `sll_packet_type_name`, `arphrd_name`,
+  `address_family_name`, `netlink_family_name`, `netlink_msg_type_name`,
+  `rtnetlink_msg_type_name`, `mpls_special_label_name`, `quic_version_name`,
+  `ssh_msg_type_name`, `tls_alert_description_name`,
+  `tls_compression_method_name`, `tls_signature_scheme_name`,
+  `tls_named_group_name` and `tls_ec_point_format_name`. `dscp::to_name` and
+  `ecn::to_name` of `pcapsql_core::protocol` are gone: `dscp_name` and
+  `ecn_name` hold those tables. The TLS parser no longer builds a `String`
+  per item of its list columns, nor the QUIC parser one for the version.
 - **Performance: parsers write their fields in place.** A parser used to
   return a `ParseResult`: 1,000 bytes with a `SmallVec` of sixteen fields
   that the walk moved into a list of layers and the scan dropped field by

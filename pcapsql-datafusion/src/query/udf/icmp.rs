@@ -99,7 +99,7 @@ impl ScalarUDFImpl for IcmpTypeNameUdf {
 
         let result: StringArray = type_values
             .iter()
-            .map(|opt| opt.map(icmp_type_name))
+            .map(|opt| opt.map(|code| icmp_type_name(code).into_cow()))
             .collect();
 
         Ok(ColumnarValue::Array(Arc::new(result)))
@@ -149,7 +149,7 @@ impl ScalarUDFImpl for Icmpv6TypeNameUdf {
 
         let result: StringArray = type_values
             .iter()
-            .map(|opt| opt.map(icmpv6_type_name))
+            .map(|opt| opt.map(|code| icmpv6_type_name(code).into_cow()))
             .collect();
 
         Ok(ColumnarValue::Array(Arc::new(result)))
@@ -208,7 +208,7 @@ impl ScalarUDFImpl for IcmpCodeNameUdf {
             .iter()
             .zip(code_values.iter())
             .map(|(t, c)| match (t, c) {
-                (Some(t), Some(c)) => Some(icmp_code_name(t, c)),
+                (Some(t), Some(c)) => Some(icmp_code_name(t, c).into_cow()),
                 _ => None,
             })
             .collect();
@@ -269,7 +269,7 @@ impl ScalarUDFImpl for Icmpv6CodeNameUdf {
             .iter()
             .zip(code_values.iter())
             .map(|(t, c)| match (t, c) {
-                (Some(t), Some(c)) => Some(icmpv6_code_name(t, c)),
+                (Some(t), Some(c)) => Some(icmpv6_code_name(t, c).into_cow()),
                 _ => None,
             })
             .collect();

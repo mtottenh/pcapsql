@@ -163,28 +163,28 @@ pub(super) fn register(extension: &Extension) -> Result<()> {
         .example("dns_type_name(28)")
         .register::<String, _>(
             extension,
-            Name::<u16, _>::new(|qtype| Some(format::dns_type_name(*qtype))),
+            Name::<u16, _>::new(|qtype| Some(format::dns_type_name(*qtype).into_cow())),
         )?;
     Function::new("dns_rcode_name", "The name of a DNS response code.")
         .parameter::<u16>("rcode")
         .example("dns_rcode_name(3)")
         .register::<String, _>(
             extension,
-            Name::<u16, _>::new(|rcode| Some(format::dns_rcode_name(*rcode))),
+            Name::<u16, _>::new(|rcode| Some(format::dns_rcode_name(*rcode).into_cow())),
         )?;
     Function::new("ip_proto_name", "The name of an IP protocol number.")
         .parameter::<u8>("protocol")
         .example("ip_proto_name(6)")
         .register::<String, _>(
             extension,
-            Name::<u8, _>::new(|protocol| Some(format::ip_proto_name(*protocol))),
+            Name::<u8, _>::new(|protocol| Some(format::ip_proto_name(*protocol).into_cow())),
         )?;
     Function::new("ethertype_name", "The name of an EtherType.")
         .parameter::<u16>("ethertype")
         .example("ethertype_name(2048)")
         .register::<String, _>(
             extension,
-            Name::<u16, _>::new(|ethertype| Some(format::ethertype_name(*ethertype))),
+            Name::<u16, _>::new(|ethertype| Some(format::ethertype_name(*ethertype).into_cow())),
         )?;
 
     // Hex.

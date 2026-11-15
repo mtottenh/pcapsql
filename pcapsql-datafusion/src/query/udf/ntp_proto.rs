@@ -76,7 +76,10 @@ impl ScalarUDFImpl for NtpModeNameUdf {
             .downcast_ref::<UInt8Array>()
             .expect("ntp_mode_name: expected uint8 array");
 
-        let result: StringArray = values.iter().map(|opt| opt.map(ntp_mode_name)).collect();
+        let result: StringArray = values
+            .iter()
+            .map(|opt| opt.map(|code| ntp_mode_name(code).into_cow()))
+            .collect();
         Ok(ColumnarValue::Array(Arc::new(result)))
     }
 }
@@ -122,7 +125,10 @@ impl ScalarUDFImpl for NtpStratumNameUdf {
             .downcast_ref::<UInt8Array>()
             .expect("ntp_stratum_name: expected uint8 array");
 
-        let result: StringArray = values.iter().map(|opt| opt.map(ntp_stratum_name)).collect();
+        let result: StringArray = values
+            .iter()
+            .map(|opt| opt.map(|code| ntp_stratum_name(code).into_cow()))
+            .collect();
         Ok(ColumnarValue::Array(Arc::new(result)))
     }
 }

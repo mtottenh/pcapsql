@@ -18,10 +18,11 @@
 //! | 11     | 1    | link-layer address length   |
 //! | 12     | 8    | link-layer address          |
 
-use super::linux_sll::{arphrd, arphrd_name, packet_type_name};
+use super::linux_sll::arphrd;
 use super::{
     Dispatch, DispatchRule, FieldSink, FieldValue, HintKey, Hints, ParseContext, Parsed, Protocol,
 };
+use crate::format::names::{arphrd_name, sll_packet_type_name};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// PCAP link type for Linux SLL2 captures.
@@ -97,11 +98,11 @@ impl Protocol for Sll2Protocol {
         fields.push(("protocol", FieldValue::UInt16(protocol)));
         fields.push(("interface_index", FieldValue::UInt32(interface_index)));
         fields.push(("arphrd_type", FieldValue::UInt16(arphrd_type)));
-        fields.push(("arphrd_name", FieldValue::Str(arphrd_name(arphrd_type))));
+        fields.push(("arphrd_name", fields.name(arphrd_name(arphrd_type))));
         fields.push(("packet_type", FieldValue::UInt8(pkt_type)));
         fields.push((
             "packet_type_name",
-            FieldValue::Str(packet_type_name(pkt_type as u16)),
+            fields.name(sll_packet_type_name(u16::from(pkt_type))),
         ));
         fields.push(("addr_len", FieldValue::UInt8(addr_len)));
 
