@@ -30,14 +30,13 @@ use std::{
     num::NonZeroUsize,
     ops::Range,
     sync::{
-        Arc, Mutex,
         atomic::{AtomicI64, AtomicUsize, Ordering},
+        Arc, Mutex,
     },
     time::Duration,
 };
 
 use duckdb_neo::{
-    DuckDBType, Parameters, Result, ToValue,
     bind_arguments::BindArgument,
     connection::{Connection, Context},
     data_chunk::DataChunkRef,
@@ -54,6 +53,7 @@ use duckdb_neo::{
         TableFilterPushdownCallbacks, TableFunctionBuilder, TableFunctionCallbacks,
     },
     types::Any,
+    DuckDBType, Parameters, Result, ToValue,
 };
 use pcapsql_duckdb_itest::{column, connect, rows, value};
 

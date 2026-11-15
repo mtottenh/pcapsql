@@ -8,7 +8,7 @@ pub mod guard;
 mod registry;
 mod scalar;
 
-use duckdb_neo::{Result, extension::Extension};
+use duckdb_neo::{extension::Extension, Result};
 
 /// Register every pcapsql function with the extension that is being loaded.
 pub fn register(extension: &Extension) -> Result<()> {

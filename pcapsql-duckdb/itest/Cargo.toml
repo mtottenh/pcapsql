@@ -1,7 +1,7 @@
 [package]
 name = "pcapsql-duckdb-itest"
 version = "0.0.0"
-edition = "2024"
+edition = "2021"
 rust-version = "1.88"
 description = "In-process tests of the pcapsql DuckDB extension, against a linked libduckdb"
 publish = false

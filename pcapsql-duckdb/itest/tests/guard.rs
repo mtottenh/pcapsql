@@ -3,7 +3,6 @@
 use std::num::NonZeroUsize;
 
 use duckdb_neo::{
-    DuckDBType, Parameters, Result,
     bind_arguments::BindArgument,
     connection::{Connection, Context},
     data_chunk::{DataChunkRef, VectorCollection},
@@ -18,6 +17,7 @@ use duckdb_neo::{
         TablePartitionInfo, TablePartitioningCallbacks,
     },
     vector::{Unknown, Vector},
+    DuckDBType, Parameters, Result,
 };
 use pcapsql_duckdb::engine::guard;
 use pcapsql_duckdb_itest::{connect, value};
