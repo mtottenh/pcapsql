@@ -57,6 +57,9 @@ Non-goals for this roadmap:
 | D7 | Coercion change: a value of the wrong length for a fixed-size binary column becomes NULL, and so does a wrong-length item of a fixed-size binary list | Today the Arrow append error is discarded: for a column the batch then fails later with a length mismatch, and for a list the item silently disappears, shortening the list. One malformed field should not fail a query or shift a list |
 | D8 | Coercion change: an unsigned 64-bit value above `i64::MAX` written to a timestamp column becomes NULL | Today it wraps to a negative timestamp. This matches the rule the builders already apply to integer narrowing: out of range is NULL, never wrapped |
 
+| D9 | The extension does its own multi-file handling; DuckDB's multi-file wrapper is not used in 2.0.0 | The P0 spike showed the wrapper does not forward named parameters to the wrapped function (so `protocol :=` and `strict :=` would be lost) and never calls its `pushdown_filter` (so frame and time pushdown would be lost). Both matter more than `hive_partitioning` and `union_by_name` |
+| D10 | The DuckDB crates stay on edition 2021 with `rust-version = "1.88"` | `duckdb-neo` does not require edition 2024 of its dependents |
+
 D7 and D8 change DataFusion output in corner cases only. They land in S4a
 with a regression test each and a CHANGELOG entry. The S0 coercion snapshot
 (`pcapsql-datafusion/src/query/builders/coercion.snap`) records today's
@@ -130,23 +133,24 @@ Notes:
 | `read_<table>(files, ...)` for every protocol table in the catalogue | Generated from the catalogue at load, not a hand-kept list |
 | `pcap_protocols()`, `pcap_schema(protocol)` | Read the same catalogue the scans use |
 
-`files` is a path, a glob, or a list of either (multi-file wrapper, P5).
-`protocol` moves from the second positional argument to a named parameter;
-the multi-file wrapper requires the file to be the only positional parameter.
-This is a breaking change to an extension that has no releases.
+`files` is a path, a glob, or a list of either (P5). `protocol` moves from
+the second positional argument to a named parameter, leaving the files as
+the only positional one. This is a breaking change to an extension that has
+no releases.
 
 Named parameter common to all scan functions:
 
 | Parameter | Default | Meaning |
 |---|---|---|
 | `strict` | `false` | `true` turns a truncated capture into an error; default matches core and the CLI (warn and stop) |
+| `filename` | `false` | `true` adds a `filename` VARCHAR column (P5) |
 
 Every occurrence of a protocol in a frame is a row, as in DataFusion; the
 outermost one is `WHERE encap_depth = 0`. This resolves the old extension's
 `read_pcap` / `read_tcp` inconsistency without a parameter.
 
-Engine-provided once wrapped: `filename`, `hive_partitioning`,
-`union_by_name`.
+`hive_partitioning` and `union_by_name` are not offered (D9); every file of
+one call has the same schema by construction.
 
 ### 5.2 Columns
 
@@ -241,8 +245,9 @@ read and written through DuckDB's file system, keyed by path, size and
 header hash as core already does, so no file is written next to a capture
 without the user asking.
 
-Across files, the multi-file wrapper distributes files to threads; within a
-file our `claim_batch` distributes partitions.
+With several files (D9), the partition queue holds every file's partitions
+in file order, so `claim_batch` distributes work across and within files and
+the batch index keeps the output in file-then-frame order.
 
 ### 6.5 Filter pushdown
 
@@ -258,9 +263,7 @@ The predicate is used in two ways:
 - **Exact row filter.** `FramePredicate::accepts` checks each packet before
   parsing, so accepted predicates are enforced exactly, as V2 requires.
 
-When the function is wrapped by a multi-file function, DuckDB offers the
-filters as hints and reapplies them itself; the same code path then only
-skips work. Predicates on parsed protocol fields are not accepted in this
+Predicates on parsed protocol fields are not accepted in this
 roadmap: the shared `RowPredicate` is conservative, and V2 requires accepted
 filters to be exact.
 
@@ -296,8 +299,8 @@ of P1. P3 to P6 are independent of each other after P2 and can be reordered.
 
 | Phase | State |
 |---|---|
-| P0 Spike and scaffolding | in progress |
-| P1 Core seams and shared scan layer | in progress (S0, S1) |
+| P0 Spike and scaffolding | done: artifact builds and loads in the DuckDB 2.0.0 CLI, 35 in-process tests, CI workflow written (not yet run on GitHub) |
+| P1 Core seams and shared scan layer | S0, S1, S2, S3, S6 done; S4a in progress; S5 next. Scan benchmark numbers for S1 onward still to be taken |
 | P2 to P9 | not started |
 
 ### P0: Spike and scaffolding
@@ -375,10 +378,11 @@ a large uncompressed capture.
 
 ### P5: Multi-file, replacement scan, remote
 
-- Register single-file functions as `read_<table>_file`; wrap each with
-  `MultiFileFunctionBuilder` under the public name; `TableGetBindInfoCallbacks`
-  if the wrapper needs it for column mapping.
-- Replacement scan.
+- Own multi-file handling (D9): the positional argument accepts a VARCHAR or
+  a LIST of VARCHAR; each entry is expanded with `FileSystem::glob` at bind;
+  every file is probed; the partition queue spans the files; `filename :=
+  true` adds the column.
+- Replacement scan targeting our function directly.
 - Remote tests: `httpfs` against a local HTTP server and an S3-compatible
   store, reusing the setup of the existing cloud-integration workflow;
   buffer-size tuning for remote reads.
@@ -446,20 +450,23 @@ Not scheduled.
 
 ## 10. Things to verify in the P0 spike
 
-| ID | Question | Status |
+Answers marked "ran" are backed by a test in `pcapsql-duckdb/itest/tests/` or
+by the make targets in `pcapsql-duckdb/Makefile`.
+
+| ID | Question | Answer |
 |---|---|---|
-| U1 | Does a `C_STRUCT_UNSTABLE` neo extension built with `extension-ci-tools` load in the stock DuckDB 2.0.0 CLI on our CI image? | open |
-| U2 | Can `itest/` link DuckDB without compiling it from source, and how long does the job take? | partly answered: `buildtime-download` fails where `install.duckdb.org` is unreachable; the shared library from the GitHub release works through `DUCKDB_LIB_DIR` with `DUCKDB_DOWNLOAD_LIB=0`. CI time not measured |
-| U3 | Does the workspace build cleanly with `ext/` and `itest/` selecting different `duckdb-neo` features, when built in separate invocations? | open |
-| U4 | May a `File` opened in `claim_batch` or `init_local_state` be used from later `exec` calls on that worker? | open |
-| U5 | Are several chunks with the same batch index accepted by `partition_data`, or must each chunk have its own? | open |
-| U6 | Does the multi-file wrapper call our single-file `pushdown_filter` with hint filters, and does it use our `claim_batch` for intra-file parallelism? | open |
-| U7 | Do `s3://` and `https://` opens through `FileSystem` pick up secrets, and what read sizes perform acceptably? | open |
-| U8 | Which vector writers does `duckdb-neo` expose for TIMESTAMP_NS, BLOB and LIST columns, is arena allocation available from `DataChunkRef`, and are data and validity pointers stable for one `exec`? | partly answered: the Arrow benchmark's direct path wrote UBIGINT, TIMESTAMP_NS, VARCHAR, BLOB and LIST columns from `exec` through `duckdb-neo`; pointer stability not examined |
-| U9 | Can a replacement scan pass through a default `protocol` and still allow the multi-file options? | open |
-| U10 | Does the neo crate compile for `wasm32-unknown-emscripten` with core's compression dependencies? | open |
-| U11 | Does `pcap_parser` re-deliver a block that was not consumed (needed by `Pause::Before`)? | open; S1 tests it first |
-| U12 | Is the Arrow importer a better way to emit rows than direct writes? | answered: no (D3) |
+| U1 | Does a `C_STRUCT_UNSTABLE` neo extension built with `extension-ci-tools` load in the stock DuckDB 2.0.0 CLI? | Yes (ran: `make release load_test_release`). Without `-unsigned` the load is refused, as expected until the extension is signed by the community repository |
+| U2 | Can `itest/` link DuckDB without compiling it from source, and how long does it take? | Yes (ran). `buildtime-download` needs `install.duckdb.org`; instead `scripts/fetch-duckdb.sh` takes the checksum-pinned shared library from the GitHub release. About 40 s from clean on 4 cores; 972 MB of build output |
+| U3 | Can `ext/` and `itest/` select different `duckdb-neo` features? | Yes (ran). The library crate has features `loadable` (default) and `static`; `itest/` is excluded from the workspace and uses `static`. The workspace commands CI runs need no DuckDB library |
+| U4 | May a `File` opened in `claim_batch` or `init_local_state` be used from later `exec` calls on that worker? | Yes (ran, 1 and 4 threads). `enable_external_access = false` refuses the open |
+| U5 | May several chunks share a batch index? | Yes (ran). With indices reported, `SELECT *`, `CREATE TABLE AS`, `INSERT` and `LIMIT` keep batch order on 4 threads. A decreasing index on one worker is an ordinary error; the same index on two workers corrupts order silently or raises INTERNAL. Without `partition_data`, an ordered query scans on one thread |
+| U6 | Does the multi-file wrapper pass through our `pushdown_filter`, `claim_batch` and named parameters? | Partly (ran). It claims our batches, honours `max_threads` and forwards the projection; glob, list, directory and `filename` work. It does not forward named parameters and never calls `pushdown_filter`. Hence D9 |
+| U7 | Do `s3://` and `https://` opens through `FileSystem` pick up secrets? | Not answered: `httpfs` cannot be installed where `extensions.duckdb.org` is unreachable. Opens of such paths correctly report that `httpfs` is needed. To be tested in CI or on a machine with access (P5) |
+| U8 | Which vector writers exist, and are pointers stable for one `exec`? | Ran. Checked writers for UBIGINT, TIMESTAMP_NS, VARCHAR, BLOB, BOOLEAN, UINTEGER, LIST(UINTEGER), LIST(VARCHAR) and NULLs; a raw path (`as_mut_ptr`, `validity_mut`, `arena()`). Data pointers stay put while a chunk is written; growing a LIST child moves the child's. Chunk capacity is 2,048; the row count is the first vector's size; setting it past capacity is not refused and can invalidate the database |
+| U9 | Can a replacement scan pass a named parameter? | Yes when it targets our function directly (ran); not through the multi-file wrapper |
+| U10 | Does the stack compile for `wasm32-unknown-emscripten`? | Partly: `duckdb-neo` and `libduckdb-sys` type-check; `ring` and `zstd-sys` need `emcc`, which was not installed, so `pcapsql-core` was not checked |
+| U11 | Does `pcap_parser` re-deliver a block that was not consumed? | Yes (ran: `pause_before_redelivers_the_same_packet`, for legacy records, EPBs and SPBs) |
+| U12 | Is the Arrow importer a better way to emit rows than direct writes? | No (D3) |
 
 ## 11. Risks
 
@@ -469,7 +476,8 @@ Not scheduled.
 | The shared-layer steps precede P2, and a regression there affects the released DataFusion CLI | Per-step gates: full DataFusion suite, golden corpus, S0 scan benchmark; one step per commit |
 | The hot path gets slower behind the sink abstraction | S0 first; generics and `#[inline]` on the per-value path; compare at S4a and S5 |
 | Filter-pushdown API is redesigned | Only `pushdown.rs` depends on it; P6 is last of the reader phases and can wait for 2.1 |
-| Multi-file wrapper is immature (no in-tree test upstream) | P5 keeps the single-file functions public as `read_<table>_file`, so the reader works without the wrapper |
+| DuckDB's multi-file wrapper cannot carry our named parameters or filter pushdown in 2.0.0 | D9: own multi-file handling; revisit the wrapper when a DuckDB release forwards both |
+| A chunk reported larger than its capacity, or one batch index used by two workers, raises INTERNAL and invalidates the database (seen in the spike) | `ChunkWriter` reports `Full` at the chunk's capacity and the shared driver never overfills; batch indices come from one `PartitionQueue` |
 | A panic invalidates the user's database | `guard.rs`; fuzz corpus run through `itest/` |
 | Index build over a remote file is a full sequential read | Remote files partition only from a cached index (6.4) |
 | DuckDB 2.1 changes arrive mid-roadmap | Canary job; finish P2 before chasing new API |
