@@ -359,6 +359,8 @@ impl PcapScan {
             }
             Ok(path)
         };
+        // The type by its text, which is also what the last message quotes. Its id would not
+        // tell a VARCHAR from a type defined on top of one (JSON), which is not a path.
         let declared = argument.logical_type.to_text()?;
         match declared.as_str() {
             "VARCHAR" => Ok(vec![entry(value)?]),
