@@ -1,7 +1,16 @@
 # Design: one engine-neutral scan layer for the DataFusion and DuckDB frontends
 
-Status: proposal, 2026-11-15, against HEAD `7290dd0`. Nothing here has been
-compiled. Signatures were checked by reading the core types they use
+Status: adopted 2026-11-15. Decisions taken on the points this document left
+open are recorded in
+[`duckdb-v2-extension-roadmap.md`](duckdb-v2-extension-roadmap.md) section 2:
+the Arrow-import route is not used (DuckDB gets its own `ChunkWriter` sink, no
+`pcapsql-arrow` crate), the per-table `timestamp` column is exposed by DuckDB
+only, the two coercion changes of section 3.5 are accepted, and the `Layers`
+option of section 3.3 is not needed in the first version. Where this document
+and the roadmap differ, the roadmap wins.
+
+Written as a proposal against HEAD `7290dd0`. Nothing here had been compiled
+when it was written. Signatures were checked by reading the core types they use
 (`PacketReader`, `PacketRef`, `PacketRange`, `ParseResult`, `FieldValue`,
 `FieldHint`, `ParseScope`, `ProtocolRegistry`, `DataKind`, `BoundaryIndex`,
 `StreamHeader`). All `path:line` references are to that commit.
