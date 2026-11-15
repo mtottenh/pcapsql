@@ -93,7 +93,7 @@ pub struct ParseSubscription {
     /// Fused joins (see [`crate::query::fusion`]), by synthetic table name:
     /// built per packet from the frame's layers, served like a table.
     pub fused: HashMap<String, FusedSubscription>,
-    /// Stream-analysis tables (`tables::STREAM_TABLES`) built by the stream
+    /// Stream-analysis tables (`tables::stream_table_names`) built by the stream
     /// subscriber of the same pass. Non-empty pins the pass to one partition.
     pub stream_tables: HashSet<String>,
 }

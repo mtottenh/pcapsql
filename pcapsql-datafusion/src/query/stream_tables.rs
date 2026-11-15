@@ -697,15 +697,15 @@ fn get_bool(fields: &HashMap<&'static str, FieldValue>, key: &str) -> Option<boo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query::tables::{get_table_schema, STREAM_TABLES};
+    use crate::query::tables::{get_table_schema, stream_table_names};
 
     /// Every stream table's builder must produce exactly the registered
     /// schema, or `SELECT *` fails as soon as a capture has rows.
     #[test]
     fn stream_table_batches_match_registered_schemas() {
-        for name in STREAM_TABLES {
+        for name in stream_table_names() {
             let schema = Arc::new(get_table_schema(name).expect("registered"));
-            let batch = match *name {
+            let batch = match name {
                 "http2" => build_http2_batch(&schema, &[]),
                 "http_messages" => build_http_messages_batch(&schema, &[]),
                 "tcp_connections" => build_tcp_connections_batch(&schema, &[]),
@@ -719,7 +719,7 @@ mod tests {
 
     #[test]
     fn finish_emits_one_empty_batch_per_wanted_table() {
-        let wanted: HashSet<String> = STREAM_TABLES.iter().map(|s| s.to_string()).collect();
+        let wanted: HashSet<String> = stream_table_names().iter().map(|s| s.to_string()).collect();
         let tables = StreamSubscriber::new(wanted.clone(), None)
             .finish(1000)
             .unwrap();

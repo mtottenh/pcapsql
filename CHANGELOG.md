@@ -42,6 +42,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `process_packets_flow`.** `process_packets` is now a provided method on top
   of it, with its behaviour unchanged. `FilePacketReader` is an alias of
   `ReadPacketReader<File>`.
+- **`pcapsql-datafusion`: table schemas come from the core catalogue.**
+  `query::tables::get_table_schema` and its siblings render
+  `scan::Catalog::builtin()` as Arrow; the tables, their columns and
+  `SELECT *` are unchanged. The per-table `*_table_schema()` functions,
+  `encap_fields`, `frame_number_field` and the `STREAM_TABLES` constant
+  (now `stream_table_names()`) are gone from the library.
 
 ## [0.4.1] - 2026-10-24
 
