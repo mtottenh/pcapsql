@@ -203,7 +203,7 @@ use super::{
     fs::{self, DuckFile},
     guard,
     pushdown::{self, Pushed},
-    registry::{self, FrameColumn, Relation},
+    relation::{self, FrameColumn, Relation},
     settings::{self, ScanSettings},
     types,
     writer::ChunkWriter,
@@ -246,7 +246,7 @@ fn protocols() -> &'static Arc<ProtocolRegistry> {
 
 pub(super) fn register(extension: &Extension) -> Result<()> {
     // No view has the name of a table (a test in core says so), so no two functions collide.
-    for relation in registry::relations() {
+    for relation in relation::relations() {
         let name = format!("read_{}", relation.name());
         builder(&name, Some(relation)).register(extension)?;
     }
@@ -430,7 +430,7 @@ impl PcapScan {
         Relation::find(&protocol.to_ascii_lowercase()).ok_or_else(|| {
             self.invalid(format_args!(
                 "there is no protocol table '{protocol}'; {}",
-                registry::WHERE_TO_LOOK
+                relation::WHERE_TO_LOOK
             ))
         })
     }
@@ -1525,7 +1525,7 @@ mod tests {
 
     #[test]
     fn a_view_declares_the_frame_s_number_and_time_for_pushdown() {
-        for relation in registry::relations() {
+        for relation in relation::relations() {
             let columns = relation.columns();
             let of = |frame: FrameColumn| {
                 let found: Vec<usize> = columns
@@ -1607,7 +1607,7 @@ mod tests {
 
     #[test]
     fn no_relation_has_a_column_called_filename() {
-        for relation in registry::relations() {
+        for relation in relation::relations() {
             for column in relation.columns() {
                 assert_ne!(column.name, FILENAME, "{}", relation.name());
             }
@@ -1628,9 +1628,9 @@ mod tests {
     fn every_scan_table_gets_a_function_and_none_is_called_pcap() {
         // `read_pcap` is the generic function; a table of that name would collide with it.
         assert!(Relation::find("pcap").is_none());
-        assert!(registry::scan_table(DEFAULT_PROTOCOL).is_some());
+        assert!(relation::scan_table(DEFAULT_PROTOCOL).is_some());
         let mut names = std::collections::HashSet::new();
-        for relation in registry::relations() {
+        for relation in relation::relations() {
             assert!(names.insert(relation.name()), "{} twice", relation.name());
             let function = PcapScan {
                 name: String::new(),
@@ -1642,7 +1642,7 @@ mod tests {
         // The tables, then the views.
         assert_eq!(
             names.len(),
-            registry::scan_tables().count() + registry::views().len()
+            relation::scan_tables().count() + relation::views().len()
         );
         assert!(names.contains("tcp") && names.contains("tcp_packets"));
     }
