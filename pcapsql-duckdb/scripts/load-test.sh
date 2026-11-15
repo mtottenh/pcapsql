@@ -61,6 +61,14 @@ SELECT count(*) FROM '$scratch/*.cap.gz' WHERE length > 100;
 SELECT current_setting('pcapsql_filter_pushdown'), count(*), min(frame_number), max(frame_number) FROM read_frames('$scratch/dns.cap.gz') WHERE frame_number > 4 AND frame_number < 10;
 SELECT frame_number FROM read_dns('$captures/dns.cap') WHERE timestamp >= TIMESTAMP '2005-03-30 08:47:50' AND timestamp < TIMESTAMP '2005-03-30 08:48:00';
 SELECT count(*) FROM read_udp('$scratch/cut.cap', strict := true) WHERE frame_number <= 10;
+SELECT count(*), count(*) FILTER (name IN (SELECT name FROM pcap_protocols())) FROM pcap_views();
+SELECT name, protocol, column_count FROM pcap_views() WHERE name = 'tcp_packets';
+SELECT column_name, column_type, nullable FROM pcap_schema('tcp_packets') WHERE column_name IN ('timestamp', 'src_ip_v4', 'ttl');
+SELECT frame_number, ip4_to_string(src_ip_v4), src_port, dst_port, transport, query_name, typeof(timestamp) FROM read_dns_packets('$captures/dns.cap') WHERE frame_number = 1;
+SELECT count(*), count(DISTINCT transport), max(src_port) FROM read_pcap('$scratch/dns.cap.gz', protocol := 'dns_packets', strict := true);
+SELECT parse_filename(filename), count(*), min(ttl) FROM read_tcp_packets(['$captures/http.pcap', '$captures/v6-http.cap'], filename := true) GROUP BY ALL ORDER BY ALL;
+SELECT count(*), min(frame_number), max(frame_number) FROM read_dns_packets('$captures/dns.cap') WHERE frame_number > 4 AND frame_number < 10;
+SELECT (SELECT count(*) FROM read_ndp_packets('$captures/v6.pcap')), (SELECT count(*) FROM read_icmpv6('$captures/v6.pcap') WHERE type BETWEEN 133 AND 137);
 "
 expected="pcapsql,true,$extension_version
 28
@@ -97,7 +105,18 @@ true,5,5,9
 4
 5
 6
-10"
+10
+21,0
+tcp_packets,tcp,20
+timestamp,TIMESTAMP_NS,false
+src_ip_v4,UINTEGER,true
+ttl,UTINYINT,true
+1,192.168.170.8,32795,53,UDP,google.com,TIMESTAMP_NS
+38,1,32797
+http.pcap,1,128
+v6-http.cap,10,64
+5,5,9
+20,20"
 
 actual=$("$duckdb" -unsigned -csv -noheader -c "$sql")
 if [ "$actual" != "$expected" ]; then

@@ -24,6 +24,11 @@ include!(concat!(env!("OUT_DIR"), "/golden_corpus_extract.rs"));
 /// The names of the corpus captures, as [`capture`] takes them.
 pub const CAPTURES: [&str; 6] = ["eth", "sll", "sll2", "http", "routing", "tunnels"];
 
+/// The corpus captures and `views`, the capture the DataFusion frontend compares its
+/// `*_packets` views over besides them: the protocols no corpus capture has (ESP, MPLS, QUIC).
+/// No corpus query reads it.
+pub const VIEW_CAPTURES: [&str; 7] = ["eth", "sll", "sll2", "http", "routing", "tunnels", "views"];
+
 fn capture_name(capture: Capture) -> &'static str {
     match capture {
         Capture::Eth => "eth",
@@ -44,6 +49,7 @@ pub fn capture(name: &str) -> Vec<u8> {
         "http" => http_capture(),
         "routing" => routing_capture(),
         "tunnels" => tunnels_capture(),
+        "views" => views_capture(),
         other => panic!("there is no corpus capture '{other}'"),
     }
 }

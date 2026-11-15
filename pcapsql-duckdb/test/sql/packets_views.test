@@ -1,0 +1,208 @@
+# name: test/sql/packets_views.test
+# description: read_<proto>_packets(files) return a protocol's rows with the frame's and the lower layers' columns
+# group: [pcapsql]
+
+# The in-process tests (itest/tests/packets_views.rs) compare every view with the join it stands
+# for; this file checks that the built artifact has the functions and that they read captures.
+# The captures are the seeds of the reader fuzzer, relative to pcapsql-duckdb/.
+
+statement error
+SELECT * FROM read_tcp_packets('../fuzz/corpus/fuzz_pcap_reader/http.pcap');
+----
+read_tcp_packets
+
+require pcapsql
+
+# The views, with the protocol table each has a row per row of
+query TTTI
+SELECT name, description, protocol, column_count FROM pcap_views() WHERE name IN ('dns_packets', 'ndp_packets', 'tcp_packets');
+----
+dns_packets	DNS queries and responses with transport detection (UDP/TCP/DoT/DoH)	dns	33
+ndp_packets	NDP messages (Router/Neighbor Solicitation/Advertisement, Redirect)	icmpv6	24
+tcp_packets	TCP packets with IP addresses and frame metadata	tcp	20
+
+query I
+SELECT count(*) FROM pcap_views();
+----
+21
+
+# Sorted by name; none is a table of pcap_protocols(), which lists what it always did
+query II
+SELECT list(name) = list_sort(list(name)), count(*) FILTER (name IN (SELECT name FROM pcap_protocols())) FROM pcap_views();
+----
+true	0
+
+query I
+SELECT count(*) FROM pcap_protocols();
+----
+28
+
+# One function per view, with the parameters of every scan function
+query I
+SELECT count(*) FROM duckdb_functions()
+WHERE function_type = 'table' AND function_name IN (SELECT 'read_' || name FROM pcap_views());
+----
+21
+
+query TTT
+SELECT function_name, parameters, parameter_types FROM duckdb_functions() WHERE function_name = 'read_tcp_packets';
+----
+read_tcp_packets	[files, strict, filename]	[ANY, BOOLEAN, BOOLEAN]
+
+# pcap_schema() describes a view as it describes a table: the columns a scan returns, in order.
+# The frame's number and time, the lower layers under the view's names, the protocol's fields,
+# the level of the row. Columns of a layer that may be absent are nullable
+query TTT
+SELECT * FROM pcap_schema('tcp_packets');
+----
+frame_number	UBIGINT	false
+timestamp	TIMESTAMP_NS	false
+length	UINTEGER	false
+src_mac	BLOB	true
+dst_mac	BLOB	true
+src_ip_v4	UINTEGER	true
+dst_ip_v4	UINTEGER	true
+src_ip_v6	BLOB	true
+dst_ip_v6	BLOB	true
+ttl	UTINYINT	true
+src_port	USMALLINT	true
+dst_port	USMALLINT	true
+seq	UINTEGER	true
+ack	UINTEGER	true
+flags	USMALLINT	true
+window	USMALLINT	true
+checksum	USMALLINT	true
+urgent_ptr	USMALLINT	true
+encap_depth	UTINYINT	false
+tunnel_type	VARCHAR	true
+
+query I
+SELECT count(*) FROM (
+    SELECT row_number() OVER () AS position, column_name, column_type
+    FROM (DESCRIBE SELECT * FROM read_dns_packets('../fuzz/corpus/fuzz_pcap_reader/dns.cap'))
+) described
+FULL JOIN (
+    SELECT row_number() OVER () AS position, column_name, column_type FROM pcap_schema('dns_packets')
+) listed USING (position)
+WHERE described.column_name IS DISTINCT FROM listed.column_name
+   OR described.column_type IS DISTINCT FROM listed.column_type;
+----
+0
+
+# DNS messages with their addresses, ports and transport: one scan, no join
+query ITTTIITTI
+SELECT frame_number, timestamp, ip4_to_string(src_ip_v4), ip4_to_string(dst_ip_v4), src_port, dst_port,
+       transport, query_name, encap_depth
+FROM read_dns_packets('../fuzz/corpus/fuzz_pcap_reader/dns.cap') WHERE frame_number <= 4;
+----
+1	2005-03-30 08:47:46.496046	192.168.170.8	192.168.170.20	32795	53	UDP	google.com	0
+2	2005-03-30 08:47:46.496576	192.168.170.20	192.168.170.8	53	32795	UDP	google.com	0
+3	2005-03-30 08:47:50.501268	192.168.170.8	192.168.170.20	32795	53	UDP	google.com	0
+4	2005-03-30 08:47:51.333401	192.168.170.20	192.168.170.8	53	32795	UDP	google.com	0
+
+# The view is the join it stands for
+query I
+SELECT count(*) FROM (
+    SELECT * FROM read_dns_packets('../fuzz/corpus/fuzz_pcap_reader/dns.cap')
+    EXCEPT ALL
+    SELECT f.frame_number, f.timestamp, ip4.src_ip, ip4.dst_ip, ip6.src_ip, ip6.dst_ip,
+           COALESCE(tcp.src_port, udp.src_port), COALESCE(tcp.dst_port, udp.dst_port),
+           CASE WHEN http.frame_number IS NOT NULL THEN 'DoH' WHEN tls.frame_number IS NOT NULL THEN 'DoT'
+                WHEN tcp.frame_number IS NOT NULL THEN 'TCP' ELSE 'UDP' END,
+           dns.* EXCLUDE (frame_number, timestamp, tunnel_id)
+    FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dns.cap') f
+    JOIN read_dns('../fuzz/corpus/fuzz_pcap_reader/dns.cap') dns ON dns.frame_number = f.frame_number
+    LEFT JOIN read_ipv4('../fuzz/corpus/fuzz_pcap_reader/dns.cap') ip4 ON ip4.frame_number = dns.frame_number AND ip4.encap_depth = dns.encap_depth
+    LEFT JOIN read_ipv6('../fuzz/corpus/fuzz_pcap_reader/dns.cap') ip6 ON ip6.frame_number = dns.frame_number AND ip6.encap_depth = dns.encap_depth
+    LEFT JOIN read_tcp('../fuzz/corpus/fuzz_pcap_reader/dns.cap') tcp ON tcp.frame_number = dns.frame_number AND tcp.encap_depth = dns.encap_depth
+    LEFT JOIN read_udp('../fuzz/corpus/fuzz_pcap_reader/dns.cap') udp ON udp.frame_number = dns.frame_number AND udp.encap_depth = dns.encap_depth
+    LEFT JOIN read_tls('../fuzz/corpus/fuzz_pcap_reader/dns.cap') tls ON tls.frame_number = dns.frame_number AND tls.encap_depth = dns.encap_depth
+    LEFT JOIN read_http('../fuzz/corpus/fuzz_pcap_reader/dns.cap') http ON http.frame_number = dns.frame_number AND http.encap_depth = dns.encap_depth
+);
+----
+0
+
+query II
+SELECT (SELECT count(*) FROM read_dns_packets('../fuzz/corpus/fuzz_pcap_reader/dns.cap')),
+       (SELECT count(*) FROM read_dns('../fuzz/corpus/fuzz_pcap_reader/dns.cap'));
+----
+38	38
+
+# TCP over IPv4 and over IPv6: the addresses of the family the segment has, and one ttl
+query ITTIITI
+SELECT frame_number, ip4_to_string(src_ip_v4), ip6_to_string(src_ip_v6), src_port, dst_port, tcp_flags_str(flags), ttl
+FROM read_tcp_packets(['../fuzz/corpus/fuzz_pcap_reader/http.pcap', '../fuzz/corpus/fuzz_pcap_reader/v6-http.cap']) LIMIT 3;
+----
+1	10.0.0.5	NULL	3267	80	PSH,ACK	128
+46	NULL	2001:6f8:102d:0:2d0:9ff:fee3:e8de	59201	80	SYN	64
+47	NULL	2001:6f8:900:7c0::2	80	59201	SYN,ACK	64
+
+# A row per occurrence, with the layers of its own level: a VXLAN frame's outer UDP header
+# stands beside the outer addresses
+query ITTIIIIT
+SELECT frame_number, format_mac(src_mac), ip4_to_string(src_ip_v4), src_port, dst_port, udp_length, encap_depth, tunnel_type
+FROM read_udp_packets('../fuzz/corpus/fuzz_pcap_reader/vxlan_simple.pcap') WHERE frame_number <= 2;
+----
+1	00:aa:bb:cc:dd:01	10.1.1.1	54321	4789	85	0	NULL
+2	00:aa:bb:cc:dd:01	10.1.1.1	54321	4789	85	0	NULL
+
+# The subsets of ICMPv6 are views of their own
+query ITTIT
+SELECT frame_number, ip6_to_string(src_ip), ip6_to_string(dst_ip), type, type_name
+FROM read_ndp_packets('../fuzz/corpus/fuzz_pcap_reader/v6.pcap') LIMIT 3;
+----
+3	fe80::200:86ff:fe05:80da	fe80::260:97ff:fe07:69ea	135	Neighbor Solicitation
+4	fe80::260:97ff:fe07:69ea	fe80::200:86ff:fe05:80da	136	Neighbor Advertisement
+5	3ffe:507:0:1:260:97ff:fe07:69ea	3ffe:507:0:1:200:86ff:fe05:80da	135	Neighbor Solicitation
+
+query III
+SELECT (SELECT count(*) FROM read_icmpv6_packets('../fuzz/corpus/fuzz_pcap_reader/v6.pcap')),
+       (SELECT count(*) FROM read_ndp_packets('../fuzz/corpus/fuzz_pcap_reader/v6.pcap')),
+       (SELECT count(*) FROM read_icmpv6('../fuzz/corpus/fuzz_pcap_reader/v6.pcap') WHERE type BETWEEN 133 AND 137);
+----
+49	20	20
+
+# Several files, and the filename column
+query TI
+SELECT parse_filename(filename), count(*)
+FROM read_tcp_packets('../fuzz/corpus/fuzz_pcap_reader/*http*', filename := true) GROUP BY ALL ORDER BY ALL;
+----
+http-chunked-gzip.pcap	28
+http.pcap	1
+http_gzip.cap	10
+v6-http.cap	10
+
+# read_pcap takes a view for its protocol
+query I
+SELECT count(*) FROM read_pcap('../fuzz/corpus/fuzz_pcap_reader/dns.cap', protocol := 'dns_packets', strict := true);
+----
+38
+
+# A filter on the frame is taken over by the scan
+query III
+SELECT count(*), min(frame_number), max(frame_number)
+FROM read_dns_packets('../fuzz/corpus/fuzz_pcap_reader/dns.cap') WHERE frame_number > 4 AND frame_number < 10;
+----
+5	5	9
+
+query I
+SELECT count(*) FROM read_dns_packets('../fuzz/corpus/fuzz_pcap_reader/dns.cap')
+WHERE timestamp >= TIMESTAMP '2005-03-30 08:47:50' AND timestamp < TIMESTAMP '2005-03-30 08:48:00';
+----
+4
+
+# The views that are not a join within one encapsulation level are not offered
+statement error
+SELECT * FROM read_pcap('../fuzz/corpus/fuzz_pcap_reader/dns.cap', protocol := 'tunneled_packets');
+----
+read_pcap: there is no protocol table 'tunneled_packets'; pcap_protocols() lists the tables and pcap_views() the views
+
+statement error
+SELECT * FROM pcap_schema('packets');
+----
+pcap_views() the views
+
+statement error
+SELECT * FROM read_packets('../fuzz/corpus/fuzz_pcap_reader/dns.cap');
+----
+read_packets

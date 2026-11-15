@@ -106,7 +106,9 @@ A capture is read with a table function: `read_<table>(files)` for one table,
 or `read_pcap(files, protocol := '<table>')`, which reads `frames` unless a
 protocol is named. `files` is a path, a glob pattern, or a list of either.
 `pcap_protocols()` lists the tables and `pcap_schema('<table>')` the columns
-of one.
+of one. `read_<proto>_packets(files)` reads a protocol with the frame's
+metadata and the addresses of the layers under it, in one pass
+(`pcap_views()` lists these; see "Packets views" below).
 
 ```sql
 -- One row per packet: frame_number, timestamp, length, original_length, link_type, raw_data
@@ -136,6 +138,18 @@ SELECT d.query_name, format_ip4(i.src_ip) AS client
 FROM read_dns('capture.pcap') d
 JOIN read_ipv4('capture.pcap') i USING (frame_number)
 WHERE d.is_query AND i.encap_depth = d.encap_depth;
+
+-- The same without the join and with one read of the capture: a packets view
+SELECT query_name, format_ip4(src_ip_v4) AS client, transport
+FROM read_dns_packets('capture.pcap')
+WHERE is_query;
+
+-- TCP segments with their addresses, IPv4 or IPv6
+SELECT timestamp, coalesce(format_ip4(src_ip_v4), format_ip6(src_ip_v6)) AS src, src_port,
+       coalesce(format_ip4(dst_ip_v4), format_ip6(dst_ip_v6)) AS dst, dst_port,
+       tcp_flags_str(flags) AS flags, ttl
+FROM read_tcp_packets('captures/*.pcap')
+WHERE dst_port = 443 AND encap_depth = 0;
 
 -- Views make a capture look like a database
 CREATE VIEW tcp AS SELECT * FROM read_tcp('capture.pcap');
@@ -216,6 +230,50 @@ threads.
 needs no join with `frames` for the time of a packet. Only the columns a query
 uses are produced, and only the protocols and fields they need are parsed: a
 query of `frames`, or `count(*)` and `frame_number` of it, parses no protocol.
+
+**Packets views.** `read_<proto>_packets(files)` returns one row per
+occurrence of a protocol, as `read_<proto>` does, with more beside it: the
+frame's `frame_number`, `timestamp` and (in some views) `length`, and columns
+of the layers the protocol sits on, taken from the **same encapsulation
+level** as the row. `read_tcp_packets` is every TCP segment with the MAC and
+IP addresses it travels between and its ports and flags; for a segment inside
+a tunnel those are the inner addresses. There are 21 of them, one per row of
+`pcap_views()`: `tcp`, `udp`, `dns`, `http`, `tls`, `ssh`, `quic`, `arp`,
+`icmp`, `icmpv6`, `ndp`, `mld`, `dhcp`, `ntp`, `gre`, `mpls`, `vxlan`, `gtp`,
+`ipsec`, `bgp` and `ospf`, each followed by `_packets`.
+
+- A view is a join, written once and evaluated by the scan: `tcp_packets` is
+  `read_frames` joined with `read_tcp` on `frame_number`, and left-joined with
+  `read_ethernet`, `read_ipv4` and `read_ipv6` on `(frame_number,
+  encap_depth)`. The function returns exactly the rows of that join, in the
+  order of the capture, from **one** read of the capture and without a join
+  operator: every layer of a frame is at hand when the frame is parsed. Run as
+  a join, the capture is read and parsed once per table.
+- A layer a view joins as optional leaves NULL where a level has none (the
+  MAC addresses inside an IP-in-IP tunnel, `src_ip_v6` of an IPv4 packet). A
+  layer a view requires gives no row where it is missing: `tls_packets` is the
+  TLS records over TCP.
+- Where two layers have a column of the same name the view renames one, and
+  the names are the view's own: `src_ip_v4` / `src_ip_v6` for the addresses,
+  `udp_length` beside the frame's `length`, `tcp_flags` in `tls_packets`.
+  `tcp_packets.ttl` is the TTL of an IPv4 packet and the hop limit of an IPv6
+  one. `dns_packets.transport` is `UDP`, `TCP`, `DoT` or `DoH`, by the layers
+  beside the DNS message, and its `src_port` / `dst_port` are those of
+  whichever transport carries it. `ndp_packets` and `mld_packets` are the
+  rows of `icmpv6_packets` with the message types of those protocols.
+- A view function is a scan function: `files` is a path, a pattern or a list,
+  `strict` and `filename` do what they do for a table, the rows keep capture
+  order on any number of threads, captures are split into partitions, and
+  filters on `frame_number` and `timestamp` are applied while the capture is
+  read. `read_pcap(files, protocol := 'tcp_packets')` reads a view by name,
+  and `pcap_schema('tcp_packets')` lists its columns.
+- The views are those of the DataFusion engine, with the same names, columns
+  and rows; the definitions are in `pcapsql_core::scan::views` and both
+  engines' tests compare against them. (Timestamps are `TIMESTAMP_NS` here,
+  as everywhere in the extension.) Four of DataFusion's views are **not**
+  offered: `packets`, `tunneled_packets`, `ip4_in_ip6` and `ip6_in_ip6` join
+  layers of different levels, or need a full join, and are not of the shape
+  the scan evaluates.
 
 **Filters.** A scan applies filters on `frame_number` and `timestamp` itself,
 before a packet is parsed, and reads less of the capture for them. Everything
@@ -343,12 +401,12 @@ is the reference, checked against the built artifact by
 `make check_reference_release`. This section adds where each part is
 implemented and how it relates to the DataFusion engine.
 
-The scan functions, one implementation registered under 29 names:
 
 | Function | Result |
 |---|---|
-| `read_pcap(files, protocol := 'frames', strict := false, filename := false)` | The rows of the table `protocol` names (any case); an unknown one is an error |
+| `read_pcap(files, protocol := 'frames', strict := false, filename := false)` | The rows of the table or view `protocol` names (any case); an unknown one is an error |
 | `read_<table>(files, strict := false, filename := false)` for each of the 28 tables of `pcap_protocols()` | The rows of that table: `read_frames`, `read_ethernet`, `read_ipv4`, `read_tcp`, `read_dns`, ... |
+| `read_<view>(files, strict := false, filename := false)` for each of the 21 views of `pcap_views()` | The rows of that view (see "Packets views"): `read_tcp_packets`, `read_udp_packets`, `read_dns_packets`, ... |
 
 `files` is the only positional argument: a `VARCHAR` path or pattern, or a
 list of them. `protocol`, `strict` and `filename` are named parameters.
@@ -363,17 +421,22 @@ Four settings: `pcapsql_parallel_scan`, `pcapsql_parallel_min_file_size` and
 `pcapsql_index_stride`, described under "Parallel scans" above, and
 `pcapsql_filter_pushdown`, under "Filters".
 
-Two table functions, which list what the shared catalogue
-(`pcapsql_core::scan::Catalog`) says the extension reads:
+Three table functions, which list what the shared scan layer
+(`pcapsql_core::scan`: its `Catalog` of tables and its `PacketsView`s) says
+the extension reads:
 
 | Function | Result |
 |---|---|
 | `pcap_protocols()` | One row per table, sorted by name: `name`, `description`, `field_count` (the number of columns), `kind` (`frames` for the table of packets, `protocol` for a table of one protocol's layers) |
-| `pcap_schema(protocol)` | One row per column of the table, in order: `column_name`, `column_type` (the DuckDB type), `nullable`. The name is matched in any case; an unknown one is an error |
+| `pcap_views()` | One row per packets view, sorted by name: `name`, `description`, `protocol` (the table the view has one row per row of), `column_count` |
+| `pcap_schema(protocol)` | One row per column of the table or view, in order: `column_name`, `column_type` (the DuckDB type), `nullable`. The name is matched in any case; an unknown one is an error |
 
 The tables are `frames` and the 27 protocol tables. The catalogue's stream
 tables (`tcp_connections`, `tls_sessions`, `http_messages`, `http2`) are not
-listed: the extension does not read them yet.
+listed: the extension does not read them yet. The views are not rows of
+`pcap_protocols()`, which lists one table per parser and returns what it did
+before there were views; they have a function of their own because a view is
+not a table (it has no `field_count` of a parser, and it has a `protocol`).
 
 Columns have the names and order of the DataFusion engine's tables, with two
 differences. Timestamps are `TIMESTAMP_NS`, where DataFusion has microseconds.
@@ -444,7 +507,7 @@ the DuckDB side of it.
 
 | Module | What it does |
 |---|---|
-| `table.rs` | `PcapScan`, the table function behind every scan function: binds the table, expands the files argument (`FileSystem::glob`) and probes every file, maps DuckDB's projection and the pushed-down predicate to a `ScanPlan`, cuts each capture into partitions and leaves out what the predicate rules out (core's `BoundaryIndex`, `partition_target` and `PartitionQueue`, one queue over all files), has each worker claim a partition, and in each `exec` steps core's `PartitionScan` into a `ChunkWriter` until the chunk is full; reports the partition's ordinal as DuckDB's batch index |
+| `table.rs` | `PcapScan`, the table function behind every scan function: binds the table or view (a view is one fused scan of the plan, `PacketsView::scan`, where a table is one table scan; nothing else differs), expands the files argument (`FileSystem::glob`) and probes every file, maps DuckDB's projection and the pushed-down predicate to a `ScanPlan`, cuts each capture into partitions and leaves out what the predicate rules out (core's `BoundaryIndex`, `partition_target` and `PartitionQueue`, one queue over all files), has each worker claim a partition, and in each `exec` steps core's `PartitionScan` into a `ChunkWriter` until the chunk is full; reports the partition's ordinal as DuckDB's batch index |
 | `replacement.rs` | The replacement scan: which table names are capture paths, and `read_pcap` as the answer |
 | `pushdown.rs` | Filter pushdown: reads the filter expressions DuckDB offers a scan, turns what they say about `frame_number` and `timestamp` into core's `FramePredicate`, and accepts the ones that say exactly that. Its header lists every accepted shape with the reason it is exact, and what is not accepted |
 | `settings.rs` | The four settings, and what a scan reads of DuckDB's (`threads`) |
@@ -509,9 +572,22 @@ Tests, in `itest/`:
   window and for a frame range (from the scan's log records), where the read
   of a gzip capture ends, prepared statements with parameters, and what a
   filter does to the report of a truncated capture.
+- `tests/packets_views.rs` compares every `read_<proto>_packets` with the join
+  it stands for, run by DuckDB over `read_<table>` functions (the SQL is
+  generated from the view's definition), and cell by cell with the view read
+  by the shared scan layer alone (`reference_view_rows`): over the corpus
+  captures, a capture of the protocols the corpus lacks, 16 real captures and
+  generated ones of several chunks, at 1 and 4 threads, split and not, whole
+  and under filters on `frame_number` and `timestamp`, with the filters taken
+  over by the scan and with DuckDB applying them. It also covers several
+  files and `filename`, `strict`, `LIMIT`, what a filter saves, `pcap_views()`
+  and `pcap_schema()` of a view. (That the definitions are DataFusion's views
+  is checked on that side: `packets_views_equal_the_shared_fused_scans` in
+  `pcapsql-datafusion/tests/golden_corpus.rs`.)
 - `tests/golden_differential.rs` runs the queries of the DataFusion golden
   corpus over the same captures and compares with the snapshots committed in
-  `pcapsql-datafusion/tests/golden/`. `build.rs` takes the captures and the
+  `pcapsql-datafusion/tests/golden/`, the queries over `*_packets` views
+  included (a view is `read_<proto>_packets` here). `build.rs` takes the captures and the
   queries from `pcapsql-datafusion/tests/golden_corpus.rs` itself. The file
   lists which queries are compared, which are not and why, and what is
   normalised (how NULL, BLOBs, lists and timestamps are printed, and the
@@ -551,6 +627,7 @@ The scan functions:
 - Several captures are read by one call (a list, a glob pattern), with a
   `filename` column on request, and `FROM 'x.pcap'` reads a capture.
 - Filters on `frame_number` and `timestamp` are applied by the scan.
+- `read_<proto>_packets` and `pcap_views()` are new.
 - The file is opened through DuckDB's file system, so
   `enable_external_access = false` now stops a scan.
 

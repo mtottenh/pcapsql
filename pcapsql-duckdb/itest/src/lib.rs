@@ -12,8 +12,9 @@
 //! [`replay`] holds `chunk_rows`, the test-only table function that drives the extension's
 //! `ChunkWriter` from a list of rows, for the tests of the writer. [`golden`] holds the captures
 //! and queries of the DataFusion frontend's golden corpus and the frame builders they are made
-//! with. [`Fixture`] writes captures to files, and [`reference_rows`] reads a capture with the
-//! shared scan layer alone, which is what a scan function must return.
+//! with. [`Fixture`] writes captures to files, and [`reference_rows`] and
+//! [`reference_view_rows`] read a capture with the shared scan layer alone, which is what a scan
+//! function must return.
 
 pub mod golden;
 pub mod replay;
@@ -32,7 +33,7 @@ use duckdb_neo::{
 use pcapsql_core::io::{ReadPacketReader, StreamHeader};
 use pcapsql_core::scan::{
     testing::{Cell, RecordingSink},
-    Catalog, OutColumn, PartitionScan, ScanPlan, Step, TableScan, TimestampUnit,
+    Catalog, OutColumn, PacketsView, PartitionScan, ScanPlan, Step, TableScan, TimestampUnit,
 };
 
 /// A directory of capture files that is removed when the value is dropped.
@@ -72,16 +73,40 @@ impl Fixture {
 pub fn reference_rows(bytes: &[u8], table: &str) -> (Vec<OutColumn>, Vec<Vec<Cell>>) {
     let catalog = Catalog::builtin();
     let (id, definition) = catalog.table(table).expect("the table is in the catalogue");
+    reference(
+        bytes,
+        ScanPlan {
+            tables: vec![TableScan::new(
+                id,
+                definition.columns().map(|(column, _)| column).collect(),
+            )],
+            ..ScanPlan::default()
+        },
+    )
+}
+
+/// The rows of the `*_packets` view `view` in the capture `bytes`, every column, as the shared
+/// scan layer produces them without DuckDB: the view's fused scan as the one output of a pass
+/// of core's driver. Timestamps are in nanoseconds, as in the extension.
+pub fn reference_view_rows(bytes: &[u8], view: &PacketsView) -> (Vec<OutColumn>, Vec<Vec<Cell>>) {
+    reference(
+        bytes,
+        ScanPlan {
+            fused: vec![view.full_scan()],
+            ..ScanPlan::default()
+        },
+    )
+}
+
+/// The rows of the one output of `plan` over the capture `bytes`, with timestamps in
+/// nanoseconds.
+fn reference(bytes: &[u8], plan: ScanPlan) -> (Vec<OutColumn>, Vec<Vec<Cell>>) {
     let registry = Arc::new(pcapsql_core::default_registry());
     let plan = ScanPlan {
-        tables: vec![TableScan::new(
-            id,
-            definition.columns().map(|(column, _)| column).collect(),
-        )],
         timestamps: TimestampUnit::Nanos,
-        ..ScanPlan::default()
+        ..plan
     }
-    .compile(catalog, &registry)
+    .compile(Catalog::builtin(), &registry)
     .expect("the plan compiles");
     let columns = plan.outputs()[0].columns.to_vec();
 

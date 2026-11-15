@@ -1,5 +1,6 @@
-//! The scan table functions: `read_pcap(files, protocol := 'frames')` and one
-//! `read_<table>(files)` per table of the catalogue this engine reads.
+//! The scan table functions: `read_pcap(files, protocol := 'frames')`, one
+//! `read_<table>(files)` per table of the catalogue this engine reads, and one
+//! `read_<proto>_packets(files)` per `*_packets` view of the shared scan layer.
 //!
 //! ```sql
 //! SELECT * FROM read_tcp('capture.pcap') WHERE dst_port = 443;
@@ -7,18 +8,22 @@
 //! SELECT count(*) FROM read_frames('capture.pcap', strict := true);
 //! SELECT filename, count(*) FROM read_dns(['monday/*.pcap', 'tuesday.pcapng.gz'], filename := true)
 //! GROUP BY ALL;
+//! SELECT timestamp, ip4_to_string(src_ip_v4), dst_port FROM read_tcp_packets('capture.pcap');
 //! ```
 //!
 //! All of them are one implementation, [`PcapScan`], which holds no scan logic: which columns a
 //! table has, what a cell holds, which rows a frame adds, where a chunk ends and where a capture
 //! can be split are decided by `pcapsql_core::scan`, the layer the DataFusion frontend runs too.
+//! What a function reads is a [`Relation`]: a table, or a view, which is a join of tables that
+//! the scan layer evaluates frame by frame (a fused scan: one pass, one output, no join
+//! operator). Everything below is the same for both.
 //! What is here is the DuckDB side of that layer:
 //!
 //! | Callback | Work | State |
 //! |---|---|---|
-//! | `bind` | Resolve the table, declare its columns, expand the files argument through DuckDB's file system, open and probe every file, estimate the row count | [`Bound`]: the files, table, `strict`, `filename`, and the predicate `pushdown_filter` fills in |
+//! | `bind` | Resolve the table or view, declare its columns, expand the files argument through DuckDB's file system, open and probe every file, estimate the row count | [`Bound`]: the files, table, `strict`, `filename`, and the predicate `pushdown_filter` fills in |
 //! | `pushdown_filter` | Accept the filters on `frame_number` and `timestamp` that are exactly a `FramePredicate` (`engine::pushdown`) | The predicate, in [`Bound`] |
-//! | `init_global_state` | Map the projected columns and the predicate to a `ScanPlan` and compile it; decide the partitions of every file, which for a capture worth splitting takes one pass over it, and leave out those the predicate rules out | [`Shared`]: the compiled plan, the partition queue over all files and the indexes it was cut from, the progress counter |
+//! | `init_global_state` | Map the projected columns and the predicate to a `ScanPlan` (a table scan, or a view's fused scan) and compile it; decide the partitions of every file, which for a capture worth splitting takes one pass over it, and leave out those the predicate rules out | [`Shared`]: the compiled plan, the partition queue over all files and the indexes it was cut from, the progress counter |
 //! | `max_threads` | The number of partitions | |
 //! | `init_local_state` | Number the worker; no file yet | [`Worker`] |
 //! | `claim_batch` | Claim the next partition, open its file at its offset, build the reader and the `PartitionScan` | [`Scanning`], in the worker: the scan, which owns the reader and through it the open file |
@@ -181,9 +186,8 @@ use pcapsql_core::io::{
     PacketRange, PacketReader, ReadPacketReader, SeekCost, StreamHeader,
 };
 use pcapsql_core::scan::{
-    partition_target, plan_ranges, Catalog, ColId, ColumnSource, CompiledScan, FramePredicate,
-    OutColumn, PartitionPolicy, PartitionQueue, PartitionScan, ScanPlan, Step, TableDef, TableId,
-    TableScan,
+    partition_target, plan_ranges, Catalog, CompiledScan, FramePredicate, OutColumn,
+    PartitionPolicy, PartitionQueue, PartitionScan, Step,
 };
 use pcapsql_core::{default_registry, ProtocolRegistry};
 
@@ -191,7 +195,7 @@ use super::{
     fs::{self, DuckFile},
     guard,
     pushdown::{self, Pushed},
-    registry,
+    registry::{self, FrameColumn, Relation},
     settings::{self, ScanSettings},
     types,
     writer::ChunkWriter,
@@ -233,19 +237,20 @@ fn protocols() -> &'static Arc<ProtocolRegistry> {
 }
 
 pub(super) fn register(extension: &Extension) -> Result<()> {
-    for (table, definition) in registry::scan_tables() {
-        let name = format!("read_{}", definition.name);
-        builder(&name, Some(table)).register(extension)?;
+    // No view has the name of a table (a test in core says so), so no two functions collide.
+    for relation in registry::relations() {
+        let name = format!("read_{}", relation.name());
+        builder(&name, Some(relation)).register(extension)?;
     }
     builder("read_pcap", None).register(extension)
 }
 
 type Builder = duckdb_neo::table_function::TableFunctionBuilder<guard::Guarded<PcapScan>>;
 
-fn builder(name: &str, table: Option<TableId>) -> Builder {
+fn builder(name: &str, relation: Option<Relation>) -> Builder {
     let scan = PcapScan {
         name: name.to_owned(),
-        table,
+        relation,
     };
     guard::table_function(name, scan.signature(), scan)
         .with_projection_pushdown(true)
@@ -255,13 +260,13 @@ fn builder(name: &str, table: Option<TableId>) -> Builder {
         .with_partitioning()
 }
 
-/// A scan function: `read_<table>` when the table is fixed, `read_pcap` when the `protocol`
-/// parameter names it.
+/// A scan function: `read_<table>` or `read_<view>` when what it reads is fixed, `read_pcap`
+/// when the `protocol` parameter names it.
 #[derive(Debug)]
 struct PcapScan {
     /// The SQL name of the function, for messages.
     name: String,
-    table: Option<TableId>,
+    relation: Option<Relation>,
 }
 
 /// Where each argument is in the list `bind` is handed: the positional parameters, then the
@@ -276,7 +281,7 @@ impl PcapScan {
     const FILE: usize = 0;
 
     fn positions(&self) -> ArgumentPositions {
-        match self.table {
+        match self.relation {
             Some(_) => ArgumentPositions {
                 protocol: None,
                 strict: 1,
@@ -292,7 +297,7 @@ impl PcapScan {
 
     fn signature(&self) -> SignatureBuilder {
         let mut signature = SignatureBuilder::new().param(FunctionParameter::new::<Any>("files"));
-        if self.table.is_none() {
+        if self.relation.is_none() {
             signature = signature.param(
                 FunctionParameter::with_default::<String>("protocol", DEFAULT_PROTOCOL.to_owned())
                     .kind(FunctionParameterKind::Named),
@@ -397,17 +402,19 @@ impl PcapScan {
             })
     }
 
-    fn table(&self, arguments: &[BindArgument]) -> Result<(TableId, &'static TableDef)> {
-        if let Some(table) = self.table {
-            return Ok((table, Catalog::builtin().get(table)));
+    /// What the call reads: the function's own table or view, or the one `protocol` names.
+    fn relation(&self, arguments: &[BindArgument]) -> Result<Relation> {
+        if let Some(relation) = self.relation {
+            return Ok(relation);
         }
         let index = self.positions().protocol.expect("read_pcap has protocol");
         let protocol: String = self.named(arguments, index, "protocol")?;
-        // Table names are lower case; any case is accepted, as `pcap_schema` does.
-        registry::scan_table(&protocol.to_ascii_lowercase()).ok_or_else(|| {
+        // The names are lower case; any case is accepted, as `pcap_schema` does.
+        Relation::find(&protocol.to_ascii_lowercase()).ok_or_else(|| {
             Error::invalid_input(format!(
-                "{}: there is no protocol table '{protocol}'; pcap_protocols() lists the tables",
-                self.name
+                "{}: there is no protocol table '{protocol}'; {}",
+                self.name,
+                registry::WHERE_TO_LOOK
             ))
         })
     }
@@ -421,11 +428,12 @@ struct Bound {
     files: Box<[String]>,
     /// The sum of the sizes of the files at bind.
     total_size: u64,
-    table: TableId,
-    /// The table's columns declared to DuckDB, in declaration order: a projected column index
-    /// below `columns.len()` is an index into this.
-    columns: Box<[ColId]>,
-    /// The index of the `filename` column, which is declared after the table's, if the call
+    /// The table or view the call reads.
+    relation: Relation,
+    /// The number of columns of `relation` declared to DuckDB, in the order of
+    /// [`Relation::columns`]: a projected column index below it is an index into those.
+    columns: usize,
+    /// The index of the `filename` column, which is declared after the relation's, if the call
     /// asked for it.
     filename: Option<usize>,
     strict: bool,
@@ -437,10 +445,11 @@ struct Bound {
 /// What a projection DuckDB reports asks for.
 #[derive(Debug, PartialEq, Eq)]
 struct Projection {
-    /// The table's columns, in the order of the output chunk.
-    columns: Vec<ColId>,
-    /// The vector of the output chunk that is the `filename` column. The table's columns are
-    /// the other vectors.
+    /// The relation's columns (indices into [`Relation::columns`]), in the order of the output
+    /// chunk.
+    columns: Vec<usize>,
+    /// The vector of the output chunk that is the `filename` column. The relation's columns
+    /// are the other vectors.
     filename: Option<usize>,
 }
 
@@ -545,28 +554,29 @@ impl TableFunctionCallbacks for PcapScan {
         bind_handle: BindFunctionHandle<'_>,
     ) -> Result<Bound> {
         let entries = self.file_argument(&arguments)?;
-        let (table, definition) = self.table(&arguments)?;
+        let relation = self.relation(&arguments)?;
         let positions = self.positions();
         let strict: bool = self.named(&arguments, positions.strict, "strict")?;
         let filename: bool = self.named(&arguments, positions.filename, FILENAME)?;
 
-        let mut columns = Vec::new();
-        // Where the two columns a pushed-down filter can be about are declared.
+        // Where the two columns a pushed-down filter can be about are declared. In a view they
+        // are the frame's own, so a filter on them says which frames to read, as for a table.
         let (mut frame_number, mut timestamp) = (None, None);
-        for (id, column) in registry::exposed_columns(definition) {
-            let logical_type = types::logical_type(context, types::column_kind(column))?;
+        let declared = relation.columns();
+        for (index, column) in declared.iter().enumerate() {
+            let logical_type = types::logical_type(context, column.kind)?;
             bind_handle.add_result_column(column.name, &logical_type)?;
-            match column.source {
-                ColumnSource::FrameNumber => frame_number = Some(columns.len()),
-                ColumnSource::Timestamp => timestamp = Some(columns.len()),
-                _ => {}
+            match column.frame {
+                Some(FrameColumn::Number) => frame_number = Some(index),
+                Some(FrameColumn::Timestamp) => timestamp = Some(index),
+                None => {}
             }
-            columns.push(id);
         }
-        // After the table's columns, where DuckDB's own readers put theirs.
+        let columns = declared.len();
+        // After the relation's columns, where DuckDB's own readers put theirs.
         let filename = if filename {
             bind_handle.add_result_column(FILENAME, &String::logical_type(context)?)?;
-            Some(columns.len())
+            Some(columns)
         } else {
             None
         };
@@ -593,8 +603,8 @@ impl TableFunctionCallbacks for PcapScan {
         Ok(Bound {
             files: files.into(),
             total_size,
-            table,
-            columns: columns.into(),
+            relation,
+            columns,
             filename,
             strict,
             pushed: Pushed::new(frame_number, timestamp),
@@ -614,17 +624,15 @@ impl TableFunctionCallbacks for PcapScan {
         // The frames the filters above the scan leave: it returns rows of these only. For the
         // filters it accepted, nobody else will see to that.
         let frames = bound.pushed.predicate();
-        let plan = ScanPlan {
-            tables: vec![TableScan::new(bound.table, projection.columns)],
-            frames: frames.clone(),
-            timestamps: types::TIMESTAMPS,
-            ..ScanPlan::default()
-        }
-        .compile(Catalog::builtin(), protocols())
-        .map_err(|error| Error {
-            code: DuckDBError::QueryPlanner,
-            message: format!("{}: {error}", self.name),
-        })?;
+        // One output either way: the table's rows, or the view's joined rows.
+        let plan = bound
+            .relation
+            .plan(&projection.columns, frames.clone())
+            .compile(Catalog::builtin(), protocols())
+            .map_err(|error| Error {
+                code: DuckDBError::QueryPlanner,
+                message: format!("{}: {error}", self.name),
+            })?;
         let columns = plan.outputs()[0].columns.clone();
 
         let settings = ScanSettings::read(context)?;
@@ -845,7 +853,7 @@ impl TablePartitioningCallbacks for PcapScan {
 }
 
 impl PcapScan {
-    /// The catalogue columns of a projection DuckDB reports, in its order, and where in it the
+    /// The relation's columns of a projection DuckDB reports, in its order, and where in it the
     /// `filename` column is.
     ///
     /// DuckDB always projects at least one column. For a query that needs no column
@@ -857,11 +865,11 @@ impl PcapScan {
         let filename = bound
             .filename
             .and_then(|declared| projected.iter().position(|&index| index == declared));
-        let declared: Vec<Option<ColId>> = projected
+        let declared: Vec<Option<usize>> = projected
             .iter()
             .enumerate()
             .filter(|(position, _)| Some(*position) != filename)
-            .map(|(_, &index)| bound.columns.get(index).copied())
+            .map(|(_, &index)| (index < bound.columns).then_some(index))
             .collect();
         if declared.iter().all(Option::is_none) {
             return Ok(Projection {
@@ -869,14 +877,14 @@ impl PcapScan {
                 filename,
             });
         }
-        let all: Option<Vec<ColId>> = declared.into_iter().collect();
+        let all: Option<Vec<usize>> = declared.into_iter().collect();
         let columns = all.ok_or_else(|| Error {
             code: DuckDBError::QueryNotImplemented,
             message: format!(
                 "{}: DuckDB asked for a column the function did not declare \
                  (columns {projected:?} of {})",
                 self.name,
-                bound.columns.len() + usize::from(bound.filename.is_some())
+                bound.columns + usize::from(bound.filename.is_some())
             ),
         })?;
         Ok(Projection { columns, filename })
@@ -1338,53 +1346,58 @@ impl Read for Tracked {
 mod tests {
     use super::*;
 
-    fn bound(table: &str) -> (Bound, &'static TableDef) {
-        let (id, definition) = registry::scan_table(table).unwrap();
-        let bound = Bound {
+    fn bound(relation: &str) -> Bound {
+        let relation = Relation::find(relation).unwrap();
+        Bound {
             files: Box::new(["x.pcap".to_owned()]),
             total_size: 0,
-            table: id,
-            columns: registry::exposed_columns(definition)
-                .map(|(id, _)| id)
-                .collect(),
+            relation,
+            columns: relation.columns().len(),
             filename: None,
             strict: false,
             pushed: Pushed::new(Some(0), Some(1)),
-        };
-        (bound, definition)
+        }
     }
 
-    fn scan(table: &str) -> PcapScan {
+    fn scan(relation: &str) -> PcapScan {
         PcapScan {
-            name: format!("read_{table}"),
-            table: registry::scan_table(table).map(|(id, _)| id),
+            name: format!("read_{relation}"),
+            relation: Relation::find(relation),
         }
+    }
+
+    /// Where the column `name` of `relation` is declared.
+    fn index(relation: &str, name: &str) -> usize {
+        Relation::find(relation)
+            .unwrap()
+            .columns()
+            .iter()
+            .position(|column| column.name == name)
+            .unwrap_or_else(|| panic!("{relation}.{name}"))
     }
 
     /// The plan `init_global_state` compiles for a projection.
-    fn compiled(table: &str, projected: &[usize]) -> CompiledScan {
-        let (bound, _) = bound(table);
-        let projection = scan(table).projection(&bound, projected).unwrap();
-        ScanPlan {
-            tables: vec![TableScan::new(bound.table, projection.columns)],
-            timestamps: types::TIMESTAMPS,
-            ..ScanPlan::default()
-        }
-        .compile(Catalog::builtin(), protocols())
-        .unwrap()
+    fn compiled(relation: &str, projected: &[usize]) -> CompiledScan {
+        let bound = bound(relation);
+        let projection = scan(relation).projection(&bound, projected).unwrap();
+        bound
+            .relation
+            .plan(&projection.columns, FramePredicate::all())
+            .compile(Catalog::builtin(), protocols())
+            .unwrap()
     }
 
     #[test]
     fn a_frames_projection_parses_no_protocol() {
-        let (bound, definition) = bound("frames");
-        let all: Vec<usize> = (0..bound.columns.len()).collect();
+        let bound = bound("frames");
+        let all: Vec<usize> = (0..bound.columns).collect();
         // frame_number alone, every column, and no column at all (a row count).
         for projection in [&[0][..], &all[..], &[usize::MAX][..]] {
             let plan = compiled("frames", projection);
             assert_eq!(parsed_protocols(&plan), "none", "{projection:?}");
             assert!(plan.scope().projections().is_empty());
         }
-        assert_eq!(definition.columns[0].name, "frame_number");
+        assert_eq!(index("frames", "frame_number"), 0);
     }
 
     #[test]
@@ -1406,34 +1419,21 @@ mod tests {
         );
 
         // A field column extracts that field and no other.
-        let (bound, definition) = bound("tcp");
-        let dst_port = bound
-            .columns
-            .iter()
-            .position(|id| definition.get(*id).name == "dst_port")
-            .unwrap();
-        let plan = compiled("tcp", &[0, dst_port]);
+        let plan = compiled("tcp", &[0, index("tcp", "dst_port")]);
         let fields = &plan.scope().projections()["tcp"];
         assert_eq!(fields.len(), 1);
         assert!(fields.contains("dst_port"));
         assert!(parsed_protocols(&plan).contains("tcp (fields: dst_port)"));
 
         // Every column: the parser runs unprojected.
-        let all: Vec<usize> = (0..bound.columns.len()).collect();
+        let all: Vec<usize> = (0..bound("tcp").columns).collect();
         let protocols = parsed_protocols(&compiled("tcp", &all));
         assert!(protocols.contains("tcp, "), "{protocols}");
     }
 
     #[test]
     fn the_output_columns_follow_the_projection_order() {
-        let (bound, definition) = bound("tcp");
-        let index = |name: &str| {
-            bound
-                .columns
-                .iter()
-                .position(|id| definition.get(*id).name == name)
-                .unwrap()
-        };
+        let index = |name: &str| index("tcp", name);
         let plan = compiled("tcp", &[index("dst_port"), index("timestamp"), 0]);
         let names: Vec<&str> = plan.outputs()[0].columns.iter().map(|c| c.name).collect();
         assert_eq!(names, ["dst_port", "timestamp", "frame_number"]);
@@ -1445,8 +1445,86 @@ mod tests {
     }
 
     #[test]
+    fn a_view_is_one_fused_output_that_parses_what_its_columns_need() {
+        let index = |name: &str| index("tcp_packets", name);
+        // The frame's columns and the anchor's level: every member is parsed (its rows decide
+        // which joined rows there are), none has a field extracted.
+        let plan = compiled(
+            "tcp_packets",
+            &[index("encap_depth"), index("timestamp"), 0],
+        );
+        assert_eq!(plan.outputs().len(), 1);
+        assert_eq!(plan.outputs()[0].table, None);
+        let names: Vec<&str> = plan.outputs()[0].columns.iter().map(|c| c.name).collect();
+        assert_eq!(names, ["encap_depth", "timestamp", "frame_number"]);
+        assert_eq!(
+            types::sql_name(plan.outputs()[0].columns[1].kind),
+            "TIMESTAMP_NS"
+        );
+        let protocols = parsed_protocols(&plan);
+        for member in ["ethernet", "ipv4", "ipv6", "tcp"] {
+            assert!(
+                protocols.contains(&format!("{member} (no fields)")),
+                "{protocols}"
+            );
+        }
+        for other in ["dns", "http", "tls"] {
+            assert!(!protocols.contains(other), "{protocols}");
+        }
+
+        // The view's own names; a computed column extracts each of its arguments.
+        let plan = compiled("tcp_packets", &[index("src_ip_v4"), index("ttl")]);
+        let fields = |protocol: &str| {
+            let mut fields: Vec<&str> = plan.scope().projections()[protocol]
+                .iter()
+                .map(String::as_str)
+                .collect();
+            fields.sort_unstable();
+            fields
+        };
+        assert_eq!(fields("ipv4"), ["src_ip", "ttl"]);
+        assert_eq!(fields("ipv6"), ["hop_limit"]);
+        assert!(fields("tcp").is_empty() && fields("ethernet").is_empty());
+
+        // A row count still needs the join: a view has a row per anchor row that the required
+        // layers stand beside.
+        let plan = compiled("tls_packets", &[usize::MAX]);
+        assert!(plan.outputs()[0].columns.is_empty());
+        let protocols = parsed_protocols(&plan);
+        assert!(protocols.contains("tls (no fields)"), "{protocols}");
+        assert!(protocols.contains("tcp (no fields)"), "{protocols}");
+    }
+
+    #[test]
+    fn a_view_declares_the_frame_s_number_and_time_for_pushdown() {
+        for relation in registry::relations() {
+            let columns = relation.columns();
+            let of = |frame: FrameColumn| {
+                let found: Vec<usize> = columns
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, column)| column.frame == Some(frame))
+                    .map(|(index, _)| index)
+                    .collect();
+                assert_eq!(found.len(), 1, "{}: {frame:?}", relation.name());
+                found[0]
+            };
+            assert_eq!(of(FrameColumn::Number), 0, "{}", relation.name());
+            assert_eq!(of(FrameColumn::Timestamp), 1, "{}", relation.name());
+            assert_eq!(columns[0].name, "frame_number", "{}", relation.name());
+            assert_eq!(columns[1].name, "timestamp", "{}", relation.name());
+            assert_eq!(
+                types::sql_name(columns[1].kind),
+                "TIMESTAMP_NS",
+                "{}",
+                relation.name()
+            );
+        }
+    }
+
+    #[test]
     fn a_projection_of_no_declared_column_counts_rows() {
-        let (bound, _) = bound("udp");
+        let bound = bound("udp");
         let scan = scan("udp");
         let columns = |projected: &[usize]| scan.projection(&bound, projected).unwrap().columns;
         assert!(columns(&[usize::MAX]).is_empty());
@@ -1459,50 +1537,51 @@ mod tests {
 
     #[test]
     fn the_filename_column_is_taken_out_of_the_projection() {
-        let (mut bound, _) = bound("udp");
-        let scan = scan("udp");
-        let filename = bound.columns.len();
-        let (first, second) = (bound.columns[0], bound.columns[1]);
-        // Not declared: its index is no column of the function.
-        assert_eq!(
-            scan.projection(&bound, &[filename]).unwrap(),
-            Projection {
-                columns: Vec::new(),
-                filename: None
-            }
-        );
-        assert!(scan.projection(&bound, &[0, filename]).is_err());
-
-        bound.filename = Some(filename);
-        let projection = |projected: &[usize]| scan.projection(&bound, projected).unwrap();
-        // Wherever it is among the projected columns, the others keep their order.
-        for (projected, columns, vector) in [
-            (&[0, 1, filename][..], vec![first, second], Some(2)),
-            (&[filename, 1, 0][..], vec![second, first], Some(0)),
-            (&[1, filename, 0][..], vec![second, first], Some(1)),
-            (&[1, 0][..], vec![second, first], None),
-            // Alone, or with DuckDB's row identifier: the rows are counted.
-            (&[filename][..], vec![], Some(0)),
-            (&[usize::MAX, filename][..], vec![], Some(1)),
-            (&[usize::MAX][..], vec![], None),
-        ] {
+        for relation in ["udp", "udp_packets"] {
+            let mut bound = bound(relation);
+            let scan = scan(relation);
+            let filename = bound.columns;
+            // Not declared: its index is no column of the function.
             assert_eq!(
-                projection(projected),
+                scan.projection(&bound, &[filename]).unwrap(),
                 Projection {
-                    columns,
-                    filename: vector
-                },
-                "{projected:?}"
+                    columns: Vec::new(),
+                    filename: None
+                }
             );
+            assert!(scan.projection(&bound, &[0, filename]).is_err());
+
+            bound.filename = Some(filename);
+            let projection = |projected: &[usize]| scan.projection(&bound, projected).unwrap();
+            // Wherever it is among the projected columns, the others keep their order.
+            for (projected, columns, vector) in [
+                (&[0, 1, filename][..], vec![0, 1], Some(2)),
+                (&[filename, 1, 0][..], vec![1, 0], Some(0)),
+                (&[1, filename, 0][..], vec![1, 0], Some(1)),
+                (&[1, 0][..], vec![1, 0], None),
+                // Alone, or with DuckDB's row identifier: the rows are counted.
+                (&[filename][..], vec![], Some(0)),
+                (&[usize::MAX, filename][..], vec![], Some(1)),
+                (&[usize::MAX][..], vec![], None),
+            ] {
+                assert_eq!(
+                    projection(projected),
+                    Projection {
+                        columns,
+                        filename: vector
+                    },
+                    "{relation} {projected:?}"
+                );
+            }
+            assert!(scan.projection(&bound, &[0, usize::MAX, filename]).is_err());
         }
-        assert!(scan.projection(&bound, &[0, usize::MAX, filename]).is_err());
     }
 
     #[test]
-    fn no_table_has_a_column_called_filename() {
-        for (_, table) in registry::scan_tables() {
-            for (_, column) in registry::exposed_columns(table) {
-                assert_ne!(column.name, FILENAME, "{}", table.name);
+    fn no_relation_has_a_column_called_filename() {
+        for relation in registry::relations() {
+            for column in relation.columns() {
+                assert_ne!(column.name, FILENAME, "{}", relation.name());
             }
         }
     }
@@ -1520,16 +1599,24 @@ mod tests {
     #[test]
     fn every_scan_table_gets_a_function_and_none_is_called_pcap() {
         // `read_pcap` is the generic function; a table of that name would collide with it.
-        assert!(registry::scan_table("pcap").is_none());
+        assert!(Relation::find("pcap").is_none());
         assert!(registry::scan_table(DEFAULT_PROTOCOL).is_some());
-        for (id, _) in registry::scan_tables() {
+        let mut names = std::collections::HashSet::new();
+        for relation in registry::relations() {
+            assert!(names.insert(relation.name()), "{} twice", relation.name());
             let function = PcapScan {
                 name: String::new(),
-                table: Some(id),
+                relation: Some(relation),
             };
             assert_eq!(function.positions().strict, 1);
             assert_eq!(function.positions().filename, 2);
         }
+        // The tables, then the views.
+        assert_eq!(
+            names.len(),
+            registry::scan_tables().count() + registry::views().len()
+        );
+        assert!(names.contains("tcp") && names.contains("tcp_packets"));
     }
 
     #[test]
