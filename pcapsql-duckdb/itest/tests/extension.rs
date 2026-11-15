@@ -1,10 +1,10 @@
 //! The functions the extension registers, queried in-process.
 
 use duckdb_neo::{
-    Result,
     connection::Connection,
     scalar::MicroScalar,
     vector::{StorageKind, Vector},
+    Result,
 };
 use pcapsql_duckdb_itest::{column, connect, rows, value};
 

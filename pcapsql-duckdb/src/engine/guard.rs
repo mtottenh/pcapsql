@@ -13,10 +13,9 @@
 use std::any::Any;
 use std::fmt::Display;
 use std::num::NonZeroUsize;
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use duckdb_neo::{
-    Error, Result,
     bind_arguments::BindArgument,
     connection::Context,
     data_chunk::{DataChunkRef, VectorCollection},
@@ -30,6 +29,7 @@ use duckdb_neo::{
         TablePartitionInfo, TablePartitioningCallbacks,
     },
     vector::{Unknown, Vector},
+    Error, Result,
 };
 
 /// Run a callback body, converting a panic into an error that names `callback`.

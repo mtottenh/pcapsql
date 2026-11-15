@@ -5,13 +5,13 @@
 //! does a value the kernel rejects.
 
 use duckdb_neo::{
-    DuckDBType, Result,
     connection::Context,
     data_chunk::VectorCollection,
     extension::Extension,
     scalar::ScalarCallbacks,
     signature::{FunctionParameter, SignatureBuilder},
     vector::{NativeElement, StorageKind, Unknown, Vector},
+    DuckDBType, Result,
 };
 use pcapsql_core::format::format_ipv4;
 

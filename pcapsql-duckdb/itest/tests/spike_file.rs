@@ -25,13 +25,12 @@ use std::{
     io::Write,
     ops::Range,
     sync::{
-        Arc,
         atomic::{AtomicU64, AtomicUsize, Ordering},
+        Arc,
     },
 };
 
 use duckdb_neo::{
-    DuckDBType, Parameters, Result,
     bind_arguments::BindArgument,
     connection::{Connection, Context},
     data_chunk::DataChunkRef,
@@ -42,6 +41,7 @@ use duckdb_neo::{
         BindFunctionHandle, ExecColumnInfo, InitColumnData, TableClaimBatchCallbacks,
         TableFunctionBuilder, TableFunctionCallbacks,
     },
+    DuckDBType, Parameters, Result,
 };
 use pcapsql_duckdb_itest::{connect, rows, value};
 
@@ -52,8 +52,9 @@ const RANGE: u64 = 4 * BLOCK as u64 + 1000;
 
 fn open(context: &Context, path: &str) -> Result<File> {
     let file_system = FileSystem::new(context)?;
-    FileBuilder::new(&file_system, path)?.read().open()
+    let file = FileBuilder::new(&file_system, path)?.read().open()?;
     // `file_system` is dropped here; the file is not.
+    Ok(file)
 }
 
 fn path_argument(arguments: &[BindArgument]) -> Result<String> {
@@ -112,7 +113,7 @@ impl TableFunctionCallbacks for OpenedInInit {
         _global_state: Option<&()>,
         _column_data: InitColumnData<'_>,
     ) -> Result<Option<File>> {
-        self.0.0.fetch_add(1, Ordering::Relaxed);
+        self.0 .0.fetch_add(1, Ordering::Relaxed);
         open(context, path).map(Some)
     }
 
@@ -261,7 +262,7 @@ impl TableClaimBatchCallbacks for OpenedInClaim {
         worker.range = start..(start + RANGE).min(shared.file_size);
         worker.range_index = index as i64;
         if worker.file.is_none() {
-            self.0.0.fetch_add(1, Ordering::Relaxed);
+            self.0 .0.fetch_add(1, Ordering::Relaxed);
             worker.file = Some(open(context, path)?);
         }
         Ok(true)

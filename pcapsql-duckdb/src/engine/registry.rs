@@ -3,15 +3,15 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use duckdb_neo::{
-    DuckDBType, Result,
     bind_arguments::BindArgument,
     connection::Context,
     data_chunk::DataChunkRef,
     extension::Extension,
     signature::SignatureBuilder,
     table_function::{BindFunctionHandle, ExecColumnInfo, InitColumnData, TableFunctionCallbacks},
+    DuckDBType, Result,
 };
-use pcapsql_core::{Protocol, default_registry};
+use pcapsql_core::{default_registry, Protocol};
 
 use super::guard;
 

@@ -25,12 +25,11 @@
 //!   are kept, but the child's data pointer moves, so element writers must be re-created.
 
 use std::sync::{
-    Arc,
     atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+    Arc,
 };
 
 use duckdb_neo::{
-    DuckDBType, Result,
     bind_arguments::BindArgument,
     connection::{Connection, Context},
     data_chunk::DataChunkRef,
@@ -42,6 +41,7 @@ use duckdb_neo::{
     },
     types::{BlobValue, List, ListIndex, TimestampNsValue},
     vector::{DuckDBBytes, Vector},
+    DuckDBType, Result,
 };
 use pcapsql_duckdb_itest::{connect, rows, value};
 
@@ -281,16 +281,8 @@ fn write_raw(
     capacity: usize,
     observed: &Observed,
 ) -> Result<()> {
-    let [
-        ids,
-        timestamps,
-        texts,
-        blobs,
-        flags,
-        smalls,
-        numbers_list,
-        words_list,
-    ] = output.get_vector_array_mut([0, 1, 2, 3, 4, 5, 6, 7])?;
+    let [ids, timestamps, texts, blobs, flags, smalls, numbers_list, words_list] =
+        output.get_vector_array_mut([0, 1, 2, 3, 4, 5, 6, 7])?;
     let mut ids = ids.cast::<u64>()?;
     let mut timestamps = timestamps.cast::<TimestampNsValue>()?;
     let mut texts = texts.cast::<String>()?;

@@ -10,12 +10,12 @@
 //! test-only table functions, so that an upgrade of either shows what changed.
 
 use duckdb_neo::{
-    Parameters, Result,
     connection::Connection,
     duckdb_entrypoint_c_api_v2,
     environment::{Environment, StorageLocation},
-    extension::{Extension, register_static_extension},
+    extension::{register_static_extension, Extension},
     vector::Unknown,
+    Parameters, Result,
 };
 
 #[duckdb_entrypoint_c_api_v2(extension_name = "pcapsql", api_version = "v2.0.0")]

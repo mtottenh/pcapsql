@@ -25,14 +25,13 @@ use std::{
     collections::BTreeSet,
     num::NonZeroUsize,
     sync::{
-        Arc,
         atomic::{AtomicU64, AtomicUsize, Ordering},
+        Arc,
     },
     time::{Duration, Instant},
 };
 
 use duckdb_neo::{
-    DuckDBType, Parameters, Result,
     bind_arguments::BindArgument,
     connection::{Connection, Context},
     data_chunk::DataChunkRef,
@@ -43,6 +42,7 @@ use duckdb_neo::{
         TableClaimBatchCallbacks, TableFunctionBuilder, TableFunctionCallbacks,
         TablePartitioningCallbacks,
     },
+    DuckDBType, Parameters, Result,
 };
 use pcapsql_duckdb_itest::{connect, rows};
 
