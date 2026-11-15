@@ -676,6 +676,12 @@ fn a_damaged_block_in_the_middle_fails_a_partitioned_scan_as_it_fails_any() -> R
 /// A capture that is damaged after the scan has started: the place is found by the worker that
 /// gets there, not by the pass that cuts the capture. The query fails once, with that worker's
 /// error, and the other workers stop.
+///
+/// The test relies on the workers of a result that is not being read waiting for the reader:
+/// the block is damaged after the first chunk is fetched, 11 MB into the third partition,
+/// where the worker of that partition has not read yet (the progress test above shows about a
+/// quarter of such a capture read by all workers together at that point). A worker that had
+/// read past the block would end the scan without an error, and the test says so.
 #[test]
 fn an_error_in_one_worker_fails_the_query_once() -> Result<()> {
     use std::os::unix::fs::FileExt;
@@ -754,6 +760,62 @@ fn an_error_in_one_worker_fails_the_query_once() -> Result<()> {
             brief(&again)
         );
     }
+    Ok(())
+}
+
+/// The progress of a partitioned scan is what all its workers have read of the file. DuckDB
+/// updates it when the thread that runs the query comes back from a slice of work, which a
+/// result that is read chunk by chunk makes happen often; and the workers of a result that is
+/// not being read wait, once the rows they hold for it are a few megabytes.
+#[test]
+fn a_partitioned_scan_reports_what_all_workers_have_read() -> Result<()> {
+    use duckdb_neo::query_progress::QueryProgressTracker;
+
+    let connection = connect()?;
+    let fixture = Fixture::new();
+    // Records of a kilobyte: 2 MB a chunk.
+    const FRAMES: u32 = 60_000;
+    let frame = |i: u32| {
+        let mut frame = golden::udp_frame(i);
+        frame.resize(1000, 0xa5);
+        frame
+    };
+    let capture = golden::legacy((0..FRAMES).map(frame).collect());
+    let path = fixture.write("long.pcap", &capture);
+    connection.execute("SET progress_bar_time = 0", Parameters::None)?;
+    partitioned(&connection, 4, 1000);
+    let tracker = QueryProgressTracker::new(&connection)?;
+
+    let mut result = connection.query(
+        format!("SELECT * FROM read_frames('{path}')").as_str(),
+        Parameters::None,
+    )?;
+    let mut seen = Vec::new();
+    let mut rows = 0;
+    while let Some(chunk) = result.next_chunk()? {
+        rows += chunk.row_count()?;
+        if let Ok(Some(progress)) = tracker.snapshot() {
+            seen.push(progress.percentage);
+        }
+    }
+    drop(result);
+    assert_eq!(rows, FRAMES as usize);
+
+    let seen: Vec<f64> = seen.into_iter().filter(|p| *p >= 0.0).collect();
+    let summary = || {
+        let step = (seen.len() / 20).max(1);
+        seen.iter().step_by(step).collect::<Vec<_>>()
+    };
+    // A percentage of the file, never more than all of it although every worker reads ahead.
+    assert!(seen.iter().all(|p| *p <= 100.0), "{:?}", summary());
+    // It moves while the result is read: there are values well inside the range.
+    let inside = seen.iter().filter(|p| **p > 10.0 && **p < 95.0).count();
+    assert!(inside >= 3, "{inside} of {}: {:?}", seen.len(), summary());
+    assert!(
+        seen.windows(2).all(|pair| pair[0] <= pair[1]),
+        "progress went backwards: {:?}",
+        summary()
+    );
     Ok(())
 }
 
