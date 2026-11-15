@@ -736,10 +736,10 @@ fn a_function_is_scanned_afresh_by_each_reference_and_each_execution() -> Result
 
     // A view and a prepared statement are bound once and run many times.
     connection.execute(
-        &format!("CREATE VIEW udp AS SELECT * FROM read_udp('{path}')"),
+        format!("CREATE VIEW udp AS SELECT * FROM read_udp('{path}')"),
         Parameters::None,
     )?;
-    connection.execute(&format!("PREPARE counted AS SELECT count(*) FROM read_ethernet('{path}') WHERE encap_depth >= $1"), Parameters::None)?;
+    connection.execute(format!("PREPARE counted AS SELECT count(*) FROM read_ethernet('{path}') WHERE encap_depth >= $1"), Parameters::None)?;
     for _ in 0..3 {
         assert_eq!(
             value(&connection, "SELECT count(*) FROM udp")?,
@@ -753,7 +753,7 @@ fn a_function_is_scanned_afresh_by_each_reference_and_each_execution() -> Result
 
     // The rows can be stored, and are the same rows.
     connection.execute(
-        &format!("CREATE TABLE stored AS SELECT * FROM read_udp('{path}')"),
+        format!("CREATE TABLE stored AS SELECT * FROM read_udp('{path}')"),
         Parameters::None,
     )?;
     assert_table(&connection, "stored", &capture, "udp");
@@ -779,7 +779,7 @@ fn threads_do_not_change_what_a_scan_returns() -> Result<()> {
     let capture = golden::legacy(mixed_frames(20_000));
     let path = fixture.write("mixed.pcap", &capture);
     for threads in [1, 2, 8] {
-        connection.execute(&format!("SET threads = {threads}"), Parameters::None)?;
+        connection.execute(format!("SET threads = {threads}"), Parameters::None)?;
         for table in ["frames", "ethernet", "udp", "vxlan"] {
             assert_table(
                 &connection,
@@ -789,5 +789,58 @@ fn threads_do_not_change_what_a_scan_returns() -> Result<()> {
             );
         }
     }
+    Ok(())
+}
+
+#[test]
+fn a_scan_reports_its_progress_as_the_share_of_the_file_read() -> Result<()> {
+    use duckdb_neo::query_progress::QueryProgressTracker;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let connection = connect()?;
+    let fixture = Fixture::new();
+    // Large enough for the scan to take a while: DuckDB samples the progress as it runs.
+    let capture = golden::legacy(mixed_frames(250_000));
+    let path = fixture.write("long.pcap", &capture);
+    connection.execute("SET progress_bar_time = 0", Parameters::None)?;
+    let tracker = QueryProgressTracker::new(&connection)?;
+
+    let done = Arc::new(AtomicBool::new(false));
+    let sampler = {
+        let done = done.clone();
+        std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            while !done.load(Ordering::Relaxed) {
+                if let Ok(Some(progress)) = tracker.snapshot() {
+                    seen.push(progress.percentage);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            seen
+        })
+    };
+    let rows = value(
+        &connection,
+        &format!("SELECT count(tunnel_id) FROM read_udp('{path}')"),
+    );
+    done.store(true, Ordering::Relaxed);
+    let seen = sampler.join().unwrap();
+    assert!(rows?.parse::<u64>().unwrap() > 50_000);
+
+    let seen: Vec<f64> = seen
+        .into_iter()
+        .filter(|percentage| *percentage >= 0.0)
+        .collect();
+    // A percentage of the file, not a fraction mistaken for one: it gets well past 1.
+    assert!(
+        seen.iter().all(|percentage| *percentage <= 100.0),
+        "{seen:?}"
+    );
+    assert!(seen.iter().any(|percentage| *percentage > 10.0), "{seen:?}");
+    assert!(
+        seen.windows(2).all(|pair| pair[0] <= pair[1]),
+        "progress went backwards"
+    );
     Ok(())
 }

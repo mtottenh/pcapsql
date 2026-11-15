@@ -181,6 +181,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   result is unchanged for a predicate that accepts everything, and is the
   whole capture as one range without an index. `pcapsql-datafusion` has no
   frame predicate yet and behaves as before.
+- **DuckDB extension (C API v2): the scan functions.**
+  `read_<table>(file)` for `frames` and each of the 27 protocol tables, and
+  `read_pcap(file, protocol := 'frames')`, read a capture: legacy pcap or
+  pcapng, plain or compressed with gzip or zstd, opened through DuckDB's file
+  system. They are one table function over the shared scan layer
+  (`pcapsql_core::scan`), so tables, columns, cell values and row order are
+  those of the DataFusion engine, with timestamps as `TIMESTAMP_NS` and a
+  `timestamp` column on every protocol table. Only the columns a query uses
+  are produced and only the protocols and fields they need are parsed
+  (projection pushdown): a query of `frames` parses nothing. A scan runs on
+  one thread and returns rows in capture order; it gives DuckDB a row
+  estimate from the file size and its progress in bytes read. A capture that
+  ends inside a record returns its complete packets and logs a warning
+  through DuckDB's log (the DuckDB shell prints it); the named parameter
+  `strict := true` makes it an error. A read error, a damaged record and a
+  damaged compressed stream fail the query in either mode. A missing file, a
+  file that is not a capture, an unknown protocol and a NULL argument are
+  errors at bind. One file per call: lists and globs are not accepted yet.
 
 ### Changed
 
@@ -204,6 +222,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `MPLS Multicast`, ...); `mac()` accepts the bare 12-digit form and
   surrounding whitespace; `pcap_unhex()` accepts surrounding whitespace and a
   `0x` prefix.
+- **DuckDB extension: the scan functions differ from those for DuckDB 1.x.**
+  `protocol` is a named parameter of `read_pcap`
+  (`read_pcap('x.pcap', protocol := 'tcp')`), no longer its second argument.
+  `read_pcap(..., protocol := 'tcp')` and `read_tcp(...)` return the same
+  rows, one per occurrence of the protocol in a packet (`encap_depth = 0` is
+  the outermost); they used to differ for tunnelled packets. Column names and
+  types are the DataFusion engine's: no protocol prefix, IPv4 addresses as
+  `UINTEGER`, MAC and IPv6 addresses as `BLOB`. Timestamps are `TIMESTAMP_NS`
+  and no longer lose the nanoseconds of a capture that has them.
 - **DuckDB extension: `pcap_protocols()` reads the shared catalogue.** It
   lists `frames` and the 27 protocol tables, as before, and gains a fourth
   column, `kind` (`frames` or `protocol`). `field_count` is now the number of

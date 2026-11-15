@@ -66,7 +66,96 @@ The artifact is unsigned, so DuckDB has to be started with `-unsigned`, and
 duckdb -unsigned -c "LOAD '$PWD/build/release/pcapsql.duckdb_extension'; SELECT * FROM pcap_protocols();"
 ```
 
+## Usage
+
+A capture is read with a table function: `read_<table>(file)` for one table,
+or `read_pcap(file, protocol := '<table>')`, which reads `frames` unless a
+protocol is named. `pcap_protocols()` lists the tables and
+`pcap_schema('<table>')` the columns of one.
+
+```sql
+-- One row per packet: frame_number, timestamp, length, original_length, link_type, raw_data
+SELECT * FROM read_pcap('capture.pcap') LIMIT 10;
+
+-- One row per TCP header, with the frame's number and timestamp
+SELECT frame_number, timestamp, src_port, dst_port, tcp_flags_str(flags) AS flags
+FROM read_tcp('capture.pcap')
+WHERE dst_port = 443;
+
+-- The same table through the generic function
+SELECT count(*) FROM read_pcap('capture.pcap', protocol := 'tcp');
+
+-- Addresses are numbers and bytes; the scalar functions and macros print and test them
+SELECT format_ip4(src_ip) AS src, format_ip4(dst_ip) AS dst, count(*) AS packets
+FROM read_ipv4('capture.pcapng.gz')
+WHERE ip_in_cidr(src_ip, '10.0.0.0/8')
+GROUP BY ALL ORDER BY packets DESC;
+
+-- DNS answers are lists
+SELECT query_name, format_ip4_list(answer_ip4s) AS a, format_ip6_list(answer_ip6s) AS aaaa
+FROM read_dns('capture.pcap')
+WHERE NOT is_query AND answer_count > 0;
+
+-- Tables of one capture join on frame_number
+SELECT d.query_name, format_ip4(i.src_ip) AS client
+FROM read_dns('capture.pcap') d
+JOIN read_ipv4('capture.pcap') i USING (frame_number)
+WHERE d.is_query AND i.encap_depth = d.encap_depth;
+
+-- Views make a capture look like a database
+CREATE VIEW tcp AS SELECT * FROM read_tcp('capture.pcap');
+```
+
+**Files.** The file is opened through DuckDB's file system, so DuckDB's
+access rules apply (`enable_external_access`, `allowed_directories`). Legacy
+pcap and pcapng are read, plain or compressed with gzip or zstd; the format
+and the compression are recognised from the first bytes of the file, not from
+its name. One file per call: a list of files or a glob is not accepted yet.
+
+**Rows.** `frames` has a row per packet. A protocol table has a row per
+occurrence of the protocol in a packet, so a tunnelled packet (VXLAN, GRE,
+GTP, IP-in-IP) has several rows in `ethernet`, `ipv4` or `udp`: `encap_depth`
+is 0 for the outermost and counts up, and `tunnel_type` and `tunnel_id` name
+the enclosing tunnel. `WHERE encap_depth = 0` selects the outermost headers.
+Rows come back in capture order.
+
+**Columns.** Every table starts with `frame_number` and `timestamp`
+(`TIMESTAMP_NS`, as exact as the capture records it), so a protocol table
+needs no join with `frames` for the time of a packet. Only the columns a query
+uses are produced, and only the protocols and fields they need are parsed: a
+query of `frames`, or `count(*)` and `frame_number` of it, parses no protocol.
+
+**Truncated captures.** A capture that ends inside a record (a capture cut
+short, or one still being written) returns the rows of its complete packets
+and writes a warning to DuckDB's log, which the DuckDB shell prints with the
+result. With `strict := true` it is an error instead:
+
+```sql
+SELECT count(*) FROM read_frames('still-being-written.pcap', strict := true);
+-- Invalid Input Error: read_frames: 'still-being-written.pcap' is truncated: the capture ends
+-- inside a record (54 bytes follow frame 17, the last complete one, ...)
+```
+
+Any other problem with the file (it cannot be read, a record or a compressed
+stream is damaged) fails the query in either mode: a scan does not end early
+without saying so.
+
+**Diagnostics.** With `CALL enable_logging(level = 'debug')`, each scan writes
+one record of type `pcapsql` to `duckdb_logs` that names the columns it
+produces and the protocols and fields it parses.
+
 ## What is registered
+
+The scan functions, one implementation registered under 29 names:
+
+| Function | Result |
+|---|---|
+| `read_pcap(file, protocol := 'frames', strict := false)` | The rows of the table `protocol` names (any case); an unknown one is an error |
+| `read_<table>(file, strict := false)` for each of the 28 tables of `pcap_protocols()` | The rows of that table: `read_frames`, `read_ethernet`, `read_ipv4`, `read_tcp`, `read_dns`, ... |
+
+`file` is the only positional argument and must be a `VARCHAR` path;
+`protocol` and `strict` are named parameters. A scan runs on one thread.
+`src/engine/table.rs` describes which callback does what.
 
 Two table functions, which list what the shared catalogue
 (`pcapsql_core::scan::Catalog`) says the extension reads:
@@ -140,16 +229,16 @@ database file):
 | `format_ip6_list(ips)` | `list_transform(ips, lambda x: ip6_to_string(x))` |
 | `format_mac_list(macs)` | `list_transform(macs, lambda x: mac_to_string(x))` |
 
-The packet readers (`read_pcap`, `read_<protocol>`) arrive with phase P2 of
-the roadmap.
+## How a scan is built
 
-## Building blocks of the packet readers
-
-The readers are not registered yet; what they are made of is in `src/engine/`
-and tested on its own.
+The scan functions hold no scan logic. Which columns a table has, what a cell
+holds, which rows a packet adds and where an output chunk ends are decided by
+`pcapsql_core::scan`, which the DataFusion engine runs too; `src/engine/` is
+the DuckDB side of it.
 
 | Module | What it does |
 |---|---|
+| `table.rs` | `PcapScan`, the table function behind every scan function: binds the table and the file, maps DuckDB's projection to a `ScanPlan`, and in each `exec` steps core's `PartitionScan` into a `ChunkWriter` until the chunk is full |
 | `types.rs` | The DuckDB logical type of each column kind of the catalogue (the table above), and the name DuckDB prints for it |
 | `writer.rs` | `ChunkWriter`: stores the rows the shared scan layer produces (`pcapsql_core::scan::RowSink`) in the output chunk of one `exec` call |
 | `fs.rs` | `DuckFile`: a buffered `std::io::Read` over a file opened through DuckDB's file system, for core's `ReadPacketReader` |
@@ -175,6 +264,25 @@ fails with DuckDB's error.
 
 Tests, in `itest/`:
 
+- `tests/scan.rs` compares what every scan function returns, cell by cell and
+  in order, with the same capture read by the shared scan layer alone
+  (`reference_rows` in `src/lib.rs`): every table over the six captures of the
+  DataFusion golden corpus, and generated captures that span many chunks, are
+  gzip- or zstd-compressed, are pcapng, or have nanosecond timestamps. It also
+  covers the columns of every function against `pcap_schema()`, the arguments
+  and their errors, projection, what a scan parses, and the progress it
+  reports.
+- `tests/golden_differential.rs` runs the queries of the DataFusion golden
+  corpus over the same captures and compares with the snapshots committed in
+  `pcapsql-datafusion/tests/golden/`. `build.rs` takes the captures and the
+  queries from `pcapsql-datafusion/tests/golden_corpus.rs` itself. The file
+  lists which queries are compared, which are not and why, and what is
+  normalised (how NULL, BLOBs, lists and timestamps are printed, and the
+  `timestamp` column DataFusion's protocol tables do not have).
+- `tests/scan_regressions.rs` holds the regression tests for three defects of
+  the extension for DuckDB 1.x: DNS AAAA answers lost from `answer_ip6s`, rows
+  lost or repeated when a tunnelled packet met the end of a chunk, and a
+  truncated or damaged capture read as if it were complete.
 - `tests/chunk_writer.rs` runs the sink conformance suite of
   `pcapsql_core::scan::testing` against `ChunkWriter` through the test-only
   table function `chunk_rows` (`src/replay.rs`), which writes given rows with
@@ -188,6 +296,23 @@ Tests, in `itest/`:
   local state, and checks offsets, seeks and DuckDB's access rules.
 
 ### Differences from the extension for DuckDB 1.x
+
+The scan functions:
+
+- `protocol` is a named parameter of `read_pcap`, not its second argument:
+  `read_pcap('x.pcap', protocol := 'tcp')`.
+- `read_pcap(file, protocol := 'tcp')` and `read_tcp(file)` return the same
+  rows, one per occurrence of the protocol in a packet. They used to differ
+  for tunnelled packets.
+- Columns are those of the DataFusion engine's tables: names without a
+  protocol prefix, IPv4 addresses as `UINTEGER`, MAC and IPv6 addresses as
+  `BLOB`, `encap_depth` as `UTINYINT`.
+- Timestamps are `TIMESTAMP_NS` and keep the nanoseconds of a capture that
+  has them, and every protocol table has the `timestamp` column.
+- `strict` is new. A truncated capture used to end the scan without a word,
+  and so did a read error.
+- The file is opened through DuckDB's file system, so
+  `enable_external_access = false` now stops a scan.
 
 The scalar functions now answer as the DataFusion engine does:
 
