@@ -1,10 +1,12 @@
-//! The scan table functions: `read_pcap(file, protocol := 'frames')` and one `read_<table>(file)`
-//! per table of the catalogue this engine reads.
+//! The scan table functions: `read_pcap(files, protocol := 'frames')` and one
+//! `read_<table>(files)` per table of the catalogue this engine reads.
 //!
 //! ```sql
 //! SELECT * FROM read_tcp('capture.pcap') WHERE dst_port = 443;
 //! SELECT * FROM read_pcap('capture.pcapng.gz', protocol := 'dns');
 //! SELECT count(*) FROM read_frames('capture.pcap', strict := true);
+//! SELECT filename, count(*) FROM read_dns(['monday/*.pcap', 'tuesday.pcapng.gz'], filename := true)
+//! GROUP BY ALL;
 //! ```
 //!
 //! All of them are one implementation, [`PcapScan`], which holds no scan logic: which columns a
@@ -14,27 +16,54 @@
 //!
 //! | Callback | Work | State |
 //! |---|---|---|
-//! | `bind` | Resolve the table, declare its columns, open the file through DuckDB's file system and probe it, estimate the row count | [`Bound`]: path, table, file size, `strict` |
-//! | `init_global_state` | Map the projected columns to a `ScanPlan` and compile it; decide the partitions, which for a capture worth splitting takes one pass over it | [`Shared`]: the compiled plan, the partition queue and the index it was cut from, the progress counter |
+//! | `bind` | Resolve the table, declare its columns, expand the files argument through DuckDB's file system, open and probe every file, estimate the row count | [`Bound`]: the files with their sizes, table, `strict`, `filename` |
+//! | `init_global_state` | Map the projected columns to a `ScanPlan` and compile it; decide the partitions of every file, which for a capture worth splitting takes one pass over it | [`Shared`]: the compiled plan, the partition queue over all files and the indexes it was cut from, the progress counter |
 //! | `max_threads` | The number of partitions | |
 //! | `init_local_state` | Number the worker; no file yet | [`Worker`] |
-//! | `claim_batch` | Claim the next partition, open the file at its offset, build the reader and the `PartitionScan` | [`Scanning`], in the worker: the scan, which owns the reader and through it the open file |
+//! | `claim_batch` | Claim the next partition, open its file at its offset, build the reader and the `PartitionScan` | [`Scanning`], in the worker: the scan, which owns the reader and through it the open file |
 //! | `exec` | `PartitionScan::step` into a [`ChunkWriter`] over the output chunk until the chunk must be returned; no rows at the end of the partition | |
 //! | `partition_data` | The ordinal of the worker's partition, as the batch index | |
-//! | `progress` | Bytes read from the file by all workers over its size | |
+//! | `progress` | Bytes read from the files by all workers over their total size | |
 //!
 //! # Arguments
 //!
-//! The capture is the only positional argument. It is declared `ANY` so that a later version can
-//! accept a list of files there without a new function; today anything but a `VARCHAR` is
-//! refused. Everything else is a named parameter: `strict` on every function, and `protocol` on
-//! `read_pcap`.
+//! The captures are the only positional argument, declared `ANY` because it is a `VARCHAR` or a
+//! list of them. Everything else is a named parameter: `strict` and `filename` on every
+//! function, and `protocol` on `read_pcap`.
+//!
+//! # Files
+//!
+//! The positional argument is a path, a glob pattern, or a list of either
+//! ([`PcapScan::files`]). DuckDB's multi-file reader is not used (it passes on neither named
+//! parameters nor filters, decision D9 of the roadmap); this is the whole of the multi-file
+//! handling:
+//!
+//! - **Expansion** happens at bind, through `FileSystem::glob` of DuckDB's file system, so a
+//!   pattern is whatever that file system takes for one (`*`, `?`, `[...]`, `**` for a local
+//!   path) and the session's access rules apply.
+//! - **Order.** The files are read in the order of the list. The files one entry expands to are
+//!   in ascending order of their paths, compared byte by byte: `FileSystem::glob` promises no
+//!   order, so they are sorted here, as DuckDB's own readers sort what it returns.
+//! - An entry that names a file twice, or two entries that match the same file, read it twice:
+//!   nothing is removed.
+//! - An entry with a wildcard that matches nothing is an error that names it. An entry without
+//!   one that matches nothing is opened as it is, so the error is the file system's own (no such
+//!   file, or a file system that cannot list).
+//! - **Every file is opened and probed at bind**: one that is missing, out of bounds for the
+//!   session or not a capture fails the statement there, with its path in the message.
+//! - All files of one call are read as the same table, so they have the same columns by
+//!   construction. `frame_number` counts the frames of a file: it starts at 1 in each.
+//! - `filename := true` adds a `filename VARCHAR` column after the table's columns, which
+//!   holds the path of the row's file as it was expanded. It is a column of the call, not of
+//!   the table (`pcap_schema` does not list it), and like any column it is only produced when
+//!   the query uses it: `exec` gives the output chunk's `filename` vector the path of the one
+//!   file the chunk's rows are from ([`ChunkWriter::with_constant`]).
 //!
 //! # Partitions
 //!
-//! A scan reads a capture as one or more partitions: byte ranges that start at a record and
-//! together cover every record once, in capture order. [`PcapScan::layout`] decides them when
-//! the scan starts:
+//! A scan reads each capture as one or more partitions: byte ranges that start at a record and
+//! together cover every record once, in capture order. [`PcapScan::layout`] decides them for
+//! every file when the scan starts:
 //!
 //! - One partition, the whole capture read from its first byte, when the capture is compressed
 //!   (a compressed stream has no place to start reading but its beginning), when DuckDB's file
@@ -48,13 +77,16 @@
 //!   as one partition and the scan reports the damage where it reads it, after the rows before
 //!   it, as it always did.
 //!
-//! The partitions are in a `PartitionQueue`. A worker claims the next one in `claim_batch`,
-//! scans it to its end and claims again; DuckDB runs up to as many workers as there are
-//! partitions.
+//! The partitions of all files are in one `PartitionQueue`, those of the first file first and
+//! each file's in capture order ([`Shared::owners`] says which file a partition is of). A
+//! worker claims the next one in `claim_batch`, scans it to its end and claims again; DuckDB
+//! runs up to as many workers as there are partitions. Work is therefore spread across files
+//! and within a large one alike: eight small captures are read by eight workers, one each.
 //!
 //! # Row order
 //!
-//! A scan returns its rows in capture order without an `ORDER BY`, on any number of threads.
+//! A scan returns its rows in file order, and within a file in capture order, without an
+//! `ORDER BY` and on any number of threads.
 //! The rows of one partition are produced in order by the one worker that scans it, and
 //! `partition_data` tells DuckDB which partition the rows of a chunk are from: the partition's
 //! ordinal is the chunk's batch index, and DuckDB puts the chunks of several workers in
@@ -78,9 +110,10 @@
 //!
 //! A capture that ends inside a record (a capture cut short, or one still being written) is
 //! reported by the packet reader that reads to the end of the file (`PacketReader::truncated`),
-//! which under a partitioned scan is the reader of the last partition. The rows of the complete
-//! records are returned and a warning goes to DuckDB's log, once; with `strict := true` the
-//! query fails instead.
+//! which under a partitioned scan is the reader of the file's last partition. The rows of the
+//! complete records are returned and a warning that names the file goes to DuckDB's log, once
+//! per file; with `strict := true` the query fails instead. With several files each is treated
+//! on its own: the files after a truncated one are read as if it were not there.
 //!
 //! A scan that is not run to the end of the capture (a `LIMIT`) may not get to the broken tail.
 //! A scan of one partition then reports nothing, strict or not. With several partitions the
@@ -106,7 +139,7 @@ use duckdb_neo::{
         BindFunctionHandle, ExecColumnInfo, InitColumnData, OrderPreservation, PartitionData,
         TableClaimBatchCallbacks, TableFunctionCallbacks, TablePartitioningCallbacks,
     },
-    types::Any,
+    types::{Any, DuckDBType},
     Error, Result,
 };
 use pcapsql_core::io::{
@@ -129,6 +162,10 @@ use super::{
 
 /// The table `read_pcap` reads when `protocol` is not given.
 const DEFAULT_PROTOCOL: &str = "frames";
+
+/// The column `filename := true` adds. No table of the catalogue has a column of this name
+/// (a unit test below says so).
+const FILENAME: &str = "filename";
 
 /// The log type of the records this module writes to DuckDB's log.
 const LOG_TYPE: &str = "pcapsql";
@@ -194,6 +231,7 @@ struct PcapScan {
 struct ArgumentPositions {
     protocol: Option<usize>,
     strict: usize,
+    filename: usize,
 }
 
 impl PcapScan {
@@ -204,30 +242,38 @@ impl PcapScan {
             Some(_) => ArgumentPositions {
                 protocol: None,
                 strict: 1,
+                filename: 2,
             },
             None => ArgumentPositions {
                 protocol: Some(1),
                 strict: 2,
+                filename: 3,
             },
         }
     }
 
     fn signature(&self) -> SignatureBuilder {
-        let mut signature = SignatureBuilder::new().param(FunctionParameter::new::<Any>("file"));
+        let mut signature = SignatureBuilder::new().param(FunctionParameter::new::<Any>("files"));
         if self.table.is_none() {
             signature = signature.param(
                 FunctionParameter::with_default::<String>("protocol", DEFAULT_PROTOCOL.to_owned())
                     .kind(FunctionParameterKind::Named),
             );
         }
-        signature.param(
-            FunctionParameter::with_default::<bool>("strict", false)
-                .kind(FunctionParameterKind::Named),
-        )
+        signature
+            .param(
+                FunctionParameter::with_default::<bool>("strict", false)
+                    .kind(FunctionParameterKind::Named),
+            )
+            .param(
+                FunctionParameter::with_default::<bool>(FILENAME, false)
+                    .kind(FunctionParameterKind::Named),
+            )
     }
 
-    /// The capture path: the one positional argument.
-    fn file_argument(&self, arguments: &[BindArgument]) -> Result<String> {
+    /// The entries of the one positional argument: the path or pattern, or those of the list,
+    /// in its order.
+    fn file_argument(&self, arguments: &[BindArgument]) -> Result<Vec<String>> {
         let name = &self.name;
         let argument = arguments
             .get(Self::FILE)
@@ -240,24 +286,56 @@ impl PcapScan {
                 "{name}: the capture file must not be NULL"
             )));
         }
+        let entry = |value: &duckdb_neo::value::Value| -> Result<String> {
+            if value.is_null()? {
+                return Err(Error::invalid_input(format!(
+                    "{name}: the capture file must not be NULL"
+                )));
+            }
+            let path = value.get::<String>()?.unwrap_or_default();
+            if path.is_empty() {
+                return Err(Error::invalid_input(format!(
+                    "{name}: the capture file must not be an empty path"
+                )));
+            }
+            Ok(path)
+        };
         let declared = argument.logical_type.to_text()?;
-        if declared.ends_with(']') {
-            return Err(Error::invalid_input(format!(
-                "{name}: a list of capture files is not supported yet; pass one path"
-            )));
+        match declared.as_str() {
+            "VARCHAR" => Ok(vec![entry(value)?]),
+            // The type of `[]` is not a list of VARCHAR, whatever DuckDB calls it.
+            _ if declared.ends_with("[]") && value.child_count()? == 0 => Err(
+                Error::invalid_input(format!("{name}: the list of capture files is empty")),
+            ),
+            "VARCHAR[]" => value.children()?.iter().map(entry).collect(),
+            _ => Err(Error::invalid_input(format!(
+                "{name}: the capture files must be a VARCHAR path or pattern, or a list of \
+                 them, not {declared}"
+            ))),
         }
-        if declared != "VARCHAR" {
-            return Err(Error::invalid_input(format!(
-                "{name}: the capture file must be a VARCHAR path, not {declared}"
-            )));
+    }
+
+    /// The files of a call: every entry of the argument expanded through DuckDB's file system
+    /// (see the module documentation on files).
+    fn files(&self, context: &Context, entries: &[String]) -> Result<Vec<String>> {
+        let mut files = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let mut matched = fs::glob(context, entry)?;
+            if matched.is_empty() {
+                if has_wildcard(entry) {
+                    return Err(Error {
+                        code: DuckDBError::IoFileNotFound,
+                        message: format!("{}: no file matches the pattern '{entry}'", self.name),
+                    });
+                }
+                // Not a pattern: the open says what is wrong with the path.
+                matched.push(entry.clone());
+            }
+            // `glob` promises no order.
+            matched.sort_unstable();
+            files.append(&mut matched);
         }
-        let path = value.get::<String>()?.unwrap_or_default();
-        if path.is_empty() {
-            return Err(Error::invalid_input(format!(
-                "{name}: the capture file must not be an empty path"
-            )));
-        }
-        Ok(path)
+        Ok(files)
     }
 
     /// A named parameter. DuckDB delivers its default when the call does not give it.
@@ -300,17 +378,32 @@ impl PcapScan {
 /// What `bind` learned.
 #[derive(Debug)]
 struct Bound {
-    path: String,
+    /// The paths of the files, as the file system's `glob` returned them, in the order they
+    /// are read. Never empty.
+    files: Box<[String]>,
+    /// The sum of the sizes of the files at bind.
+    total_size: u64,
     table: TableId,
-    /// The columns declared to DuckDB, in declaration order: a projected column index is an
-    /// index into this.
+    /// The table's columns declared to DuckDB, in declaration order: a projected column index
+    /// below `columns.len()` is an index into this.
     columns: Box<[ColId]>,
-    /// The size of the file in bytes at bind.
-    file_size: u64,
+    /// The index of the `filename` column, which is declared after the table's, if the call
+    /// asked for it.
+    filename: Option<usize>,
     strict: bool,
 }
 
-/// The partitions of one scan: what [`PcapScan::layout`] decided.
+/// What a projection DuckDB reports asks for.
+#[derive(Debug, PartialEq, Eq)]
+struct Projection {
+    /// The table's columns, in the order of the output chunk.
+    columns: Vec<ColId>,
+    /// The vector of the output chunk that is the `filename` column. The table's columns are
+    /// the other vectors.
+    filename: Option<usize>,
+}
+
+/// The partitions of one file: what [`PcapScan::layout`] decided.
 #[derive(Debug)]
 struct Layout {
     /// The byte ranges to scan, in capture order.
@@ -340,18 +433,31 @@ struct Shared {
     /// The columns of the output chunk, in its order; empty when the query needs only the
     /// number of rows.
     columns: Box<[OutColumn]>,
-    /// The partitions. Each is claimed by one worker.
+    /// The vector of the output chunk that is the `filename` column, if the query uses it.
+    filename: Option<usize>,
+    /// The partitions of all files: those of the first file, then those of the second, each
+    /// file's in capture order. Each is claimed by one worker.
     queue: PartitionQueue,
-    /// The index the partitions were cut from; `None` when the one partition is the whole
-    /// capture (see [`Layout::index`]).
-    index: Option<BoundaryIndex>,
-    /// Bytes read from the file so far by all workers, for `progress`.
+    /// The file of every partition of `queue`, as an index into `files` and `Bound::files`.
+    /// It never decreases.
+    owners: Box<[usize]>,
+    /// What the scan keeps per file, in the order of `Bound::files`.
+    files: Box<[ScannedFile]>,
+    /// Bytes read from the files so far by all workers, for `progress`.
     file_bytes: Arc<AtomicU64>,
     /// Workers created so far: the next worker's number.
     workers: AtomicUsize,
     /// Set by the first worker whose scan fails. The others stop.
     failed: AtomicBool,
-    /// Set by the worker that reports a truncated capture, so that it is reported once.
+}
+
+/// What a scan keeps for one of its files.
+#[derive(Debug)]
+struct ScannedFile {
+    /// The index the file's partitions were cut from; `None` when its one partition is the
+    /// whole capture (see [`Layout::index`]).
+    index: Option<BoundaryIndex>,
+    /// Set by the worker that reports the file truncated, so that it is reported once.
     truncation_reported: AtomicBool,
 }
 
@@ -368,6 +474,8 @@ struct Scanning {
     scan: PartitionScan<ReadPacketReader<Tracked>>,
     /// The first read error of the reader stack under `scan`.
     fault: Fault,
+    /// The file the partition is of: an index into `Bound::files`.
+    file: usize,
     /// The number of the partition's first frame.
     first_frame: u64,
 }
@@ -395,9 +503,11 @@ impl TableFunctionCallbacks for PcapScan {
         arguments: Vec<BindArgument>,
         bind_handle: BindFunctionHandle<'_>,
     ) -> Result<Bound> {
-        let path = self.file_argument(&arguments)?;
+        let entries = self.file_argument(&arguments)?;
         let (table, definition) = self.table(&arguments)?;
-        let strict: bool = self.named(&arguments, self.positions().strict, "strict")?;
+        let positions = self.positions();
+        let strict: bool = self.named(&arguments, positions.strict, "strict")?;
+        let filename: bool = self.named(&arguments, positions.filename, FILENAME)?;
 
         let mut columns = Vec::new();
         for (id, column) in registry::exposed_columns(definition) {
@@ -405,24 +515,39 @@ impl TableFunctionCallbacks for PcapScan {
             bind_handle.add_result_column(column.name, &logical_type)?;
             columns.push(id);
         }
+        // After the table's columns, where DuckDB's own readers put theirs.
+        let filename = if filename {
+            bind_handle.add_result_column(FILENAME, &String::logical_type(context)?)?;
+            Some(columns.len())
+        } else {
+            None
+        };
 
-        // Open and probe now, so that a file that is missing, out of bounds for the session or
-        // not a capture fails the statement at bind, with the path in the message.
-        let mut file = DuckFile::open(context, &path)?;
-        let file_size = file.size()?;
-        let header = self.probe(&mut file, &path)?;
+        // Open and probe every file now, so that one that is missing, out of bounds for the
+        // session or not a capture fails the statement at bind, with its path in the message.
+        let mut files = Vec::new();
+        let (mut total_size, mut rows) = (0_u64, 0_usize);
+        for path in self.files(context, &entries)? {
+            let mut file = DuckFile::open(context, &path)?;
+            let size = file.size()?;
+            let header = self.probe(&mut file, &path)?;
+            total_size = total_size.saturating_add(size);
+            rows = rows.saturating_add(estimated_rows(size, &header));
+            files.push(path);
+        }
 
-        // The rows come back in capture order, which `partition_data` lets DuckDB keep on
-        // several threads.
+        // The rows come back in file and capture order, which `partition_data` lets DuckDB
+        // keep on several threads.
         bind_handle.set_order(OrderPreservation::Insertion)?;
         // An estimate: the frames are only counted when the scan starts, and then only for a
         // capture that is split (see `layout`).
-        bind_handle.set_cardinality(estimated_rows(file_size, &header), false)?;
+        bind_handle.set_cardinality(rows, false)?;
         Ok(Bound {
-            path,
+            files: files.into(),
+            total_size,
             table,
             columns: columns.into(),
-            file_size,
+            filename,
             strict,
         })
     }
@@ -436,9 +561,9 @@ impl TableFunctionCallbacks for PcapScan {
         let projected = (0..column_data.count()?)
             .map(|position| column_data.get_column_index(position))
             .collect::<Result<Vec<_>>>()?;
-        let columns = self.projected_columns(bound, &projected)?;
+        let projection = self.projection(bound, &projected)?;
         let plan = ScanPlan {
-            tables: vec![TableScan::new(bound.table, columns)],
+            tables: vec![TableScan::new(bound.table, projection.columns)],
             timestamps: types::TIMESTAMPS,
             ..ScanPlan::default()
         }
@@ -448,24 +573,38 @@ impl TableFunctionCallbacks for PcapScan {
             message: format!("{}: {error}", self.name),
         })?;
         let columns = plan.outputs()[0].columns.clone();
-        let layout = self.layout(context, bound)?;
-        // What the scan will do, for whoever asks DuckDB's log (`enable_logging`) why a query
-        // is slow. As for the truncation warning, the log is not worth failing a query for.
-        let _ = Log::log_on_context(
-            context,
-            LogLevel::Debug,
-            &self.describe(bound, &plan, &layout),
-            LOG_TYPE,
-        );
+
+        let settings = ScanSettings::read(context)?;
+        let (mut ranges, mut owners) = (Vec::new(), Vec::new());
+        let mut files = Vec::with_capacity(bound.files.len());
+        for (number, path) in bound.files.iter().enumerate() {
+            let layout = self.layout(context, &settings, path, bound.strict)?;
+            // What the scan will do, for whoever asks DuckDB's log (`enable_logging`) why a
+            // query is slow. As for the truncation warning, the log is not worth failing a
+            // query for.
+            let _ = Log::log_on_context(
+                context,
+                LogLevel::Debug,
+                &self.describe(path, &plan, &layout),
+                LOG_TYPE,
+            );
+            owners.resize(owners.len() + layout.ranges.len(), number);
+            ranges.extend(layout.ranges);
+            files.push(ScannedFile {
+                index: layout.index,
+                truncation_reported: AtomicBool::new(false),
+            });
+        }
         Ok(Some(Shared {
             plan: Arc::new(plan),
             columns,
-            queue: PartitionQueue::new(layout.ranges),
-            index: layout.index,
+            filename: projection.filename,
+            queue: PartitionQueue::new(ranges),
+            owners: owners.into(),
+            files: files.into(),
             file_bytes: Arc::new(AtomicU64::new(0)),
             workers: AtomicUsize::new(0),
             failed: AtomicBool::new(false),
-            truncation_reported: AtomicBool::new(false),
         }))
     }
 
@@ -507,12 +646,22 @@ impl TableFunctionCallbacks for PcapScan {
     ) -> Result<()> {
         let shared = shared.expect("init_global_state always returns a state");
         let worker = worker.expect("init_local_state always returns a state");
-        let mut writer = ChunkWriter::new(output, &shared.columns)?;
-
         if shared.failed.load(Ordering::Acquire) {
             // Another worker's scan failed, and with it the query: nothing more is wanted.
             worker.scanning = None;
         }
+        let mut writer = match shared.filename {
+            None => ChunkWriter::new(output, &shared.columns)?,
+            // The rows of this chunk are all from the partition the worker holds, and so from
+            // one file: the loop below ends where the partition does.
+            Some(vector) => {
+                let path = worker
+                    .scanning
+                    .as_ref()
+                    .map_or("", |scanning| bound.files[scanning.file].as_str());
+                ChunkWriter::with_constant(output, &shared.columns, vector, path)?
+            }
+        };
         let mut packets_before = None;
         while let Some(scanning) = worker.scanning.as_mut() {
             let scan = &mut scanning.scan;
@@ -521,7 +670,8 @@ impl TableFunctionCallbacks for PcapScan {
                 .step(std::slice::from_mut(&mut writer), PACKETS_PER_STEP)
                 .map_err(|error| {
                     let frame = scan.reader().position().frame_number;
-                    shared.fail(self.read_error(bound, frame, &error))
+                    let path = &bound.files[scanning.file];
+                    shared.fail(self.read_error(path, frame, &error))
                 })?;
             match step {
                 // The chunk is full: it goes back to DuckDB before the scan is stepped again.
@@ -559,12 +709,12 @@ impl TableFunctionCallbacks for PcapScan {
         let Some(shared) = shared else {
             return Ok(None);
         };
-        if bound.file_size == 0 {
+        if bound.total_size == 0 {
             return Ok(None);
         }
         // Every worker reads ahead of the packets it has parsed, so the sum can pass the size.
         let read = shared.file_bytes.load(Ordering::Relaxed);
-        Ok(Some((read as f64 / bound.file_size as f64).min(1.0)))
+        Ok(Some((read as f64 / bound.total_size as f64).min(1.0)))
     }
 }
 
@@ -589,7 +739,7 @@ impl TableClaimBatchCallbacks for PcapScan {
             return Ok(false);
         };
         let scanning = self
-            .open(context, bound, shared, range)
+            .open(context, bound, shared, shared.owners[ordinal], range)
             .map_err(|error| shared.fail(error))?;
         worker.scanning = Some(scanning);
         // Larger than the worker's last ordinal, and no other worker's: see `PartitionQueue`.
@@ -625,35 +775,51 @@ impl TablePartitioningCallbacks for PcapScan {
 }
 
 impl PcapScan {
-    /// The catalogue columns of a projection DuckDB reports, in its order.
+    /// The catalogue columns of a projection DuckDB reports, in its order, and where in it the
+    /// `filename` column is.
     ///
     /// DuckDB always projects at least one column. For a query that needs no column
     /// (`count(*)`) it is either a declared column of DuckDB's choosing, which is then read like
     /// any other, or DuckDB's row identifier, which is not a declared column: the plan then has
-    /// no columns, and the scan layer only counts the rows.
-    fn projected_columns(&self, bound: &Bound, projected: &[usize]) -> Result<Vec<ColId>> {
+    /// no columns, and the scan layer only counts the rows. The same goes for a query that
+    /// uses no column but `filename`.
+    fn projection(&self, bound: &Bound, projected: &[usize]) -> Result<Projection> {
+        let filename = bound
+            .filename
+            .and_then(|declared| projected.iter().position(|&index| index == declared));
         let declared: Vec<Option<ColId>> = projected
             .iter()
-            .map(|&index| bound.columns.get(index).copied())
+            .enumerate()
+            .filter(|(position, _)| Some(*position) != filename)
+            .map(|(_, &index)| bound.columns.get(index).copied())
             .collect();
         if declared.iter().all(Option::is_none) {
-            return Ok(Vec::new());
+            return Ok(Projection {
+                columns: Vec::new(),
+                filename,
+            });
         }
         let all: Option<Vec<ColId>> = declared.into_iter().collect();
-        all.ok_or_else(|| Error {
+        let columns = all.ok_or_else(|| Error {
             code: DuckDBError::QueryNotImplemented,
             message: format!(
                 "{}: DuckDB asked for a column the function did not declare \
                  (columns {projected:?} of {})",
                 self.name,
-                bound.columns.len()
+                bound.columns.len() + usize::from(bound.filename.is_some())
             ),
-        })
+        })?;
+        Ok(Projection { columns, filename })
     }
 
-    /// Decide the partitions of a scan (see the module documentation).
-    fn layout(&self, context: &Context, bound: &Bound) -> Result<Layout> {
-        let settings = ScanSettings::read(context)?;
+    /// Decide the partitions of one file of a scan (see the module documentation).
+    fn layout(
+        &self,
+        context: &Context,
+        settings: &ScanSettings,
+        path: &str,
+        strict: bool,
+    ) -> Result<Layout> {
         if !settings.parallel {
             return Ok(Layout::sequential(format_args!(
                 "{} is off",
@@ -663,13 +829,13 @@ impl PcapScan {
         if settings.threads == 1 {
             return Ok(Layout::sequential("DuckDB has one thread"));
         }
-        if fs::is_remote(context, &bound.path)? {
+        if fs::is_remote(context, path)? {
             return Ok(Layout::sequential("a remote file is not indexed"));
         }
         // The file as it is now, which is not that of `bind` when a prepared statement is run
         // again.
-        let mut file = DuckFile::open(context, &bound.path)?;
-        let header = self.probe(&mut file, &bound.path)?;
+        let mut file = DuckFile::open(context, path)?;
+        let header = self.probe(&mut file, path)?;
         if header.compression.is_compressed() {
             return Ok(Layout::sequential("a compressed capture cannot be split"));
         }
@@ -715,12 +881,12 @@ impl PcapScan {
                 index.packet_count, index.stride
             )));
         }
-        if bound.strict {
+        if strict {
             // Workers do not wait for each other, so the one at the end of the capture could
             // find a broken tail before or after a `LIMIT` is filled by the others. Whether a
             // strict scan fails must not depend on that: the tail is looked at now.
             if let Some(last_frame) = self.truncated_tail(&mut file, &index) {
-                return Err(self.truncation_error(bound, last_frame));
+                return Err(self.truncation_error(path, last_frame));
             }
         }
         Ok(Layout {
@@ -753,25 +919,27 @@ impl PcapScan {
         reader.truncated().then(|| reader.position().frame_number)
     }
 
-    /// Open the capture for the partition `range` and build its scan.
+    /// Open file `number` of the scan for its partition `range` and build the partition's scan.
     fn open(
         &self,
         context: &Context,
         bound: &Bound,
         shared: &Shared,
+        number: usize,
         range: &PacketRange,
     ) -> Result<Scanning> {
         let fault = Fault::default();
         let first_frame = range.start.frame_number;
+        let path = bound.files[number].as_str();
         let failed = |error: &dyn std::fmt::Display| {
-            self.read_error(bound, first_frame.saturating_sub(1), error)
+            self.read_error(path, first_frame.saturating_sub(1), error)
         };
-        let reader = match &shared.index {
+        let reader = match &shared.files[number].index {
             // The whole capture, from its first byte.
             None => {
-                let mut file = DuckFile::open(context, &bound.path)?;
+                let mut file = DuckFile::open(context, path)?;
                 // Probed again: the header that counts is that of the file as it is read.
-                let header = self.probe(&mut file, &bound.path)?;
+                let header = self.probe(&mut file, path)?;
                 file.seek(0)?;
                 // The decompressor is ours rather than the reader's, so that a read error
                 // can be remembered between the two (`Tracked`).
@@ -786,7 +954,7 @@ impl PcapScan {
             // A range of an uncompressed capture: the file is read from the range's first
             // record, and the reader is told by the index what the capture's header said.
             Some(index) => {
-                let file = DuckFile::open_at(context, &bound.path, range.start.byte_offset)?;
+                let file = DuckFile::open_at(context, path, range.start.byte_offset)?;
                 let tracked = Tracked::new(file, Compression::None, shared, &fault)
                     .map_err(|error| failed(&error))?;
                 ReadPacketReader::at(tracked, index.format, index, range)
@@ -797,12 +965,13 @@ impl PcapScan {
         Ok(Scanning {
             scan,
             fault,
+            file: number,
             first_frame,
         })
     }
 
-    /// One line on what a scan reads and parses.
-    fn describe(&self, bound: &Bound, plan: &CompiledScan, layout: &Layout) -> String {
+    /// One line on what a scan reads of one of its files, and parses.
+    fn describe(&self, path: &str, plan: &CompiledScan, layout: &Layout) -> String {
         let columns: Vec<&str> = plan.outputs()[0].columns.iter().map(|c| c.name).collect();
         let columns = if columns.is_empty() {
             "none (row count)".to_owned()
@@ -812,7 +981,7 @@ impl PcapScan {
         format!(
             "{}: scanning '{}': partitions: {}; columns: {columns}; protocols parsed: {}",
             self.name,
-            bound.path,
+            path,
             layout.note,
             parsed_protocols(plan)
         )
@@ -833,33 +1002,33 @@ impl PcapScan {
         }
     }
 
-    /// The error of a read that failed after `frame` complete frames.
-    fn read_error(&self, bound: &Bound, frame: u64, error: &dyn std::fmt::Display) -> Error {
+    /// The error of a read of the capture `path` that failed after `frame` complete frames.
+    fn read_error(&self, path: &str, frame: u64, error: &dyn std::fmt::Display) -> Error {
         Error {
             code: DuckDBError::IoReadFailure,
             message: format!(
-                "{}: cannot read '{}' after frame {frame}: {error}",
-                self.name, bound.path
+                "{}: cannot read '{path}' after frame {frame}: {error}",
+                self.name
             ),
         }
     }
 
-    /// What is wrong with a capture that ends inside the record after `last_frame`.
-    fn truncation(&self, bound: &Bound, last_frame: u64) -> String {
+    /// What is wrong with the capture `path`, which ends inside the record after `last_frame`.
+    fn truncation(&self, path: &str, last_frame: u64) -> String {
         format!(
-            "{}: '{}' is truncated: the capture ends inside the record that follows frame \
+            "{}: '{path}' is truncated: the capture ends inside the record that follows frame \
              {last_frame}, the last complete one",
-            self.name, bound.path
+            self.name
         )
     }
 
     /// The error of a strict scan of such a capture.
-    fn truncation_error(&self, bound: &Bound, last_frame: u64) -> Error {
+    fn truncation_error(&self, path: &str, last_frame: u64) -> Error {
         Error {
             code: DuckDBError::IoEof,
             message: format!(
                 "{}; without strict := true the complete frames are returned",
-                self.truncation(bound, last_frame)
+                self.truncation(path, last_frame)
             ),
         }
     }
@@ -876,8 +1045,9 @@ impl PcapScan {
     ) -> Result<()> {
         let reader = finished.scan.reader();
         let last_frame = reader.position().frame_number;
+        let path = bound.files[finished.file].as_str();
         if let Some(error) = finished.fault.get() {
-            return Err(self.read_error(bound, last_frame, &error));
+            return Err(self.read_error(path, last_frame, &error));
         }
         // Which worker read what, for whoever asks the log how a scan was spread.
         let _ = Log::log_on_context(
@@ -889,7 +1059,7 @@ impl PcapScan {
                 worker.id,
                 worker.ordinal.map_or(0, |ordinal| ordinal + 1),
                 shared.queue.len(),
-                bound.path,
+                path,
                 finished.scan.stats().packets,
                 finished.first_frame,
             ),
@@ -899,11 +1069,12 @@ impl PcapScan {
             return Ok(());
         }
         if bound.strict {
-            return Err(self.truncation_error(bound, last_frame));
+            return Err(self.truncation_error(path, last_frame));
         }
         // Only a reader that gets to the end of the file sees this, which is one reader unless
         // the file shrank under the scan.
-        if shared.truncation_reported.swap(true, Ordering::AcqRel) {
+        let reported = &shared.files[finished.file].truncation_reported;
+        if reported.swap(true, Ordering::AcqRel) {
             return Ok(());
         }
         // The rows are what the query asked for; a log that cannot take the record is no
@@ -913,7 +1084,7 @@ impl PcapScan {
             LogLevel::Warn,
             &format!(
                 "{}; the complete frames were returned (strict := true makes this an error)",
-                self.truncation(bound, last_frame)
+                self.truncation(path, last_frame)
             ),
             LOG_TYPE,
         );
@@ -954,7 +1125,13 @@ fn parsed_protocols(plan: &CompiledScan) -> String {
         .join(", ")
 }
 
-/// The number of rows a scan is estimated to return. It is a guess from the file size: only
+/// Whether an entry of the files argument is a pattern rather than a path: the characters
+/// DuckDB's file systems take for wildcards (`FileSystem::HasGlob`).
+fn has_wildcard(entry: &str) -> bool {
+    entry.contains(['*', '?', '['])
+}
+
+/// The number of rows a scan of one file is estimated to return. It is a guess from the file size: only
 /// reading the capture tells how many frames it has, and how many of them a protocol is in.
 fn estimated_rows(file_size: u64, header: &StreamHeader) -> usize {
     let capture_bytes = if header.compression.is_compressed() {
@@ -1052,12 +1229,13 @@ mod tests {
     fn bound(table: &str) -> (Bound, &'static TableDef) {
         let (id, definition) = registry::scan_table(table).unwrap();
         let bound = Bound {
-            path: "x.pcap".to_owned(),
+            files: Box::new(["x.pcap".to_owned()]),
+            total_size: 0,
             table: id,
             columns: registry::exposed_columns(definition)
                 .map(|(id, _)| id)
                 .collect(),
-            file_size: 0,
+            filename: None,
             strict: false,
         };
         (bound, definition)
@@ -1073,9 +1251,9 @@ mod tests {
     /// The plan `init_global_state` compiles for a projection.
     fn compiled(table: &str, projected: &[usize]) -> CompiledScan {
         let (bound, _) = bound(table);
-        let columns = scan(table).projected_columns(&bound, projected).unwrap();
+        let projection = scan(table).projection(&bound, projected).unwrap();
         ScanPlan {
-            tables: vec![TableScan::new(bound.table, columns)],
+            tables: vec![TableScan::new(bound.table, projection.columns)],
             timestamps: types::TIMESTAMPS,
             ..ScanPlan::default()
         }
@@ -1157,17 +1335,73 @@ mod tests {
     fn a_projection_of_no_declared_column_counts_rows() {
         let (bound, _) = bound("udp");
         let scan = scan("udp");
-        assert!(scan
-            .projected_columns(&bound, &[usize::MAX])
-            .unwrap()
-            .is_empty());
-        assert!(scan.projected_columns(&bound, &[]).unwrap().is_empty());
+        let columns = |projected: &[usize]| scan.projection(&bound, projected).unwrap().columns;
+        assert!(columns(&[usize::MAX]).is_empty());
+        assert!(columns(&[]).is_empty());
         // A mix of declared and undeclared columns is refused, not guessed at.
-        let error = scan
-            .projected_columns(&bound, &[0, usize::MAX])
-            .unwrap_err();
+        let error = scan.projection(&bound, &[0, usize::MAX]).unwrap_err();
         assert_eq!(error.code, DuckDBError::QueryNotImplemented);
         assert!(error.message.starts_with("read_udp: "), "{}", error.message);
+    }
+
+    #[test]
+    fn the_filename_column_is_taken_out_of_the_projection() {
+        let (mut bound, _) = bound("udp");
+        let scan = scan("udp");
+        let filename = bound.columns.len();
+        let (first, second) = (bound.columns[0], bound.columns[1]);
+        // Not declared: its index is no column of the function.
+        assert_eq!(
+            scan.projection(&bound, &[filename]).unwrap(),
+            Projection {
+                columns: Vec::new(),
+                filename: None
+            }
+        );
+        assert!(scan.projection(&bound, &[0, filename]).is_err());
+
+        bound.filename = Some(filename);
+        let projection = |projected: &[usize]| scan.projection(&bound, projected).unwrap();
+        // Wherever it is among the projected columns, the others keep their order.
+        for (projected, columns, vector) in [
+            (&[0, 1, filename][..], vec![first, second], Some(2)),
+            (&[filename, 1, 0][..], vec![second, first], Some(0)),
+            (&[1, filename, 0][..], vec![second, first], Some(1)),
+            (&[1, 0][..], vec![second, first], None),
+            // Alone, or with DuckDB's row identifier: the rows are counted.
+            (&[filename][..], vec![], Some(0)),
+            (&[usize::MAX, filename][..], vec![], Some(1)),
+            (&[usize::MAX][..], vec![], None),
+        ] {
+            assert_eq!(
+                projection(projected),
+                Projection {
+                    columns,
+                    filename: vector
+                },
+                "{projected:?}"
+            );
+        }
+        assert!(scan.projection(&bound, &[0, usize::MAX, filename]).is_err());
+    }
+
+    #[test]
+    fn no_table_has_a_column_called_filename() {
+        for (_, table) in registry::scan_tables() {
+            for (_, column) in registry::exposed_columns(table) {
+                assert_ne!(column.name, FILENAME, "{}", table.name);
+            }
+        }
+    }
+
+    #[test]
+    fn a_pattern_is_an_entry_with_a_wildcard() {
+        for pattern in ["*.pcap", "a?.pcap", "day[12].pcap", "captures/**/x.pcap"] {
+            assert!(has_wildcard(pattern), "{pattern}");
+        }
+        for path in ["a.pcap", "/var/captures/a b.pcap.gz", "s3://bucket/a.pcap"] {
+            assert!(!has_wildcard(path), "{path}");
+        }
     }
 
     #[test]
@@ -1181,6 +1415,7 @@ mod tests {
                 table: Some(id),
             };
             assert_eq!(function.positions().strict, 1);
+            assert_eq!(function.positions().filename, 2);
         }
     }
 

@@ -25,8 +25,8 @@ query TTT
 SELECT function_name, parameters, parameter_types FROM duckdb_functions()
 WHERE function_name IN ('read_pcap', 'read_tcp') ORDER BY function_name;
 ----
-read_pcap	[file, protocol, strict]	[ANY, VARCHAR, BOOLEAN]
-read_tcp	[file, strict]	[ANY, BOOLEAN]
+read_pcap	[files, protocol, strict, filename]	[ANY, VARCHAR, BOOLEAN, BOOLEAN]
+read_tcp	[files, strict, filename]	[ANY, BOOLEAN, BOOLEAN]
 
 # read_pcap reads frames unless a protocol is named
 query IIII
@@ -175,9 +175,9 @@ SELECT * FROM read_tcp(NULL);
 read_tcp: the capture file must not be NULL
 
 statement error
-SELECT * FROM read_tcp(['../fuzz/corpus/fuzz_pcap_reader/dns.cap']);
+SELECT * FROM read_tcp([]);
 ----
-read_tcp: a list of capture files is not supported yet
+read_tcp: the list of capture files is empty
 
 statement error
 SELECT * FROM read_tcp('../fuzz/corpus/fuzz_pcap_reader/dns.cap', strict := NULL);

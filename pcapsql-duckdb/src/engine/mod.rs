@@ -8,6 +8,7 @@ pub mod fs;
 pub mod guard;
 mod macros;
 mod registry;
+pub mod replacement;
 mod scalar;
 pub mod settings;
 mod table;
@@ -22,6 +23,8 @@ pub fn register(extension: &Extension) -> Result<()> {
     // Before the scan functions, which read them.
     settings::register(extension)?;
     table::register(extension)?;
+    // After `read_pcap`, which it answers with.
+    replacement::register(extension)?;
     scalar::register(extension)?;
     // After the scalars: the macro bodies call them.
     macros::register(extension)

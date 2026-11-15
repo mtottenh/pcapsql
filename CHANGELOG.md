@@ -232,6 +232,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   logging, a scan logs how it was split and why, and each partition which
   worker scanned it. The index is rebuilt by every scan: the cache of
   `pcapsql_index_cache_dir` is not there yet.
+- **DuckDB extension (C API v2): several captures in one call, `filename`,
+  and `FROM 'capture.pcap'`.** The positional argument of `read_pcap` and of
+  every `read_<table>` is a path, a glob pattern, or a list of either:
+  `read_tcp('captures/*.pcap')`, `read_dns(['a.pcap', 'b/*.pcapng.gz'])`.
+  The entries are expanded through DuckDB's file system when the statement
+  is bound and every file is opened and probed there, so a pattern that
+  matches nothing, a missing file or a file that is not a capture is an
+  error that names it. Files are read in the order of the list, and those of
+  one pattern in ascending order of their paths; a file listed twice is read
+  twice. The partitions of all files form one queue that the threads take
+  from, so the scan is spread across files and within large ones, and the
+  rows still come back in file and capture order without an `ORDER BY`.
+  `frame_number` starts at 1 in each file. `filename := true` adds a
+  `filename VARCHAR` column after the table's columns; like any column it
+  is only produced when the query uses it. A truncated file is reported on
+  its own, by name, and the files after it are read. A replacement scan
+  reads a table name that ends in `.pcap`, `.pcapng` or `.cap` (optionally
+  `.gz` or `.zst`, any case) as `read_pcap` of that path or pattern; a
+  table or view of that name comes first. DuckDB's multi-file reader is not
+  used (it forwards neither named parameters nor filters), so
+  `hive_partitioning` and `union_by_name` are not offered.
 
 ### Changed
 

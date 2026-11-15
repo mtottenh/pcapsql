@@ -54,6 +54,10 @@ SELECT frame_number, ip6_to_string(answer_ip6s[1]) FROM read_pcap('$captures/dns
 SELECT count(*), max(encap_depth), max(tunnel_id) FROM read_ethernet('$captures/vxlan_simple.pcap');
 SELECT count(*), count(DISTINCT frame_number) FROM read_tcp('$captures/ldap-ssl.pcapng', strict := true);
 SELECT count(*), sum(length) FROM read_frames('$scratch/dns.cap.gz', strict := true);
+SELECT parse_filename(filename), count(*), max(frame_number) FROM read_frames(['$scratch/dns.cap.gz', '$captures/v6*'], filename := true) GROUP BY ALL ORDER BY ALL;
+SELECT frame_number FROM read_udp(['$captures/dns.cap', '$scratch/dns.cap.gz'], strict := true) WHERE frame_number IN (1, 38);
+SELECT count(*), sum(length) FROM '$captures/dns.cap';
+SELECT count(*) FROM '$scratch/*.cap.gz' WHERE length > 100;
 "
 expected="pcapsql,true,$extension_version
 28
@@ -75,7 +79,16 @@ true,true,true
 24,2001:4f8:0:2::d
 10,1,200
 36,36
-38,3706"
+38,3706
+dns.cap.gz,38,38
+v6-http.cap,55,55
+v6.pcap,161,161
+1
+38
+1
+38
+38,3706
+11"
 
 actual=$("$duckdb" -unsigned -csv -noheader -c "$sql")
 if [ "$actual" != "$expected" ]; then
@@ -106,4 +119,22 @@ case $truncated in
     exit 1
     ;;
 esac
+# A pattern that matches nothing, and a file among several that is not a capture, are errors
+# that name it.
+for sql in "SELECT count(*) FROM read_frames('$scratch/*.pcapng')" \
+    "SELECT count(*) FROM read_frames(['$captures/dns.cap', '$here/load-test.sh'])"; do
+    if refused=$("$duckdb" -unsigned -csv -noheader -c "LOAD '$extension'; $sql;" 2>&1); then
+        echo "load-test: FAILED: $sql returned $refused" >&2
+        exit 1
+    fi
+    case $refused in
+    *"no file matches the pattern '$scratch/*.pcapng'"* | *"load-test.sh' is not a capture file"*)
+        echo "load-test: refused: ${refused%%$'\n'*}"
+        ;;
+    *)
+        echo "load-test: FAILED: unexpected error for $sql: $refused" >&2
+        exit 1
+        ;;
+    esac
+done
 echo "load-test: ok"
