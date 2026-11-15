@@ -35,7 +35,6 @@ pub mod udf;
 pub mod views;
 pub mod windowing;
 
-pub use arrow_schema::{descriptors_to_arrow_schema, protocol_to_arrow_schema, to_arrow_field};
 pub use builders::NormalizedBatchSet;
 pub use filter::{is_pushable, row_predicate};
 pub use providers::{
