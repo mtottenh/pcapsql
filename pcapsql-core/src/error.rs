@@ -5,6 +5,7 @@
 //! - [`enum@Error`] - Main error enum that wraps all error types
 //! - [`PcapError`] - Errors from PCAP file reading
 //! - [`ProtocolError`] - Errors from protocol parsing
+//! - [`PlanError`](crate::scan::PlanError) - A scan plan that does not compile
 //!
 //! All errors implement `std::error::Error` and can be converted to `anyhow::Error`.
 
@@ -24,6 +25,10 @@ pub enum Error {
     /// I/O error
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+
+    /// A scan plan that does not compile
+    #[error(transparent)]
+    Plan(#[from] crate::scan::PlanError),
 }
 
 /// Errors related to PCAP file reading.

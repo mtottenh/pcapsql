@@ -11,7 +11,6 @@
 //! nullability and source.
 
 use std::collections::{HashMap, HashSet};
-use std::fmt;
 use std::sync::Arc;
 
 use super::catalog::{
@@ -196,11 +195,13 @@ pub struct ScanPlan {
 }
 
 /// Why a [`ScanPlan`] does not compile.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum PlanError {
     /// The catalogue has no table with this id.
+    #[error("the catalogue has no table {}", .0 .0)]
     UnknownTable(TableId),
     /// The table has no column with this id.
+    #[error("table {table} has no column {}", column.0)]
     UnknownColumn {
         /// The table's name.
         table: &'static str,
@@ -209,13 +210,17 @@ pub enum PlanError {
     },
     /// Two scans of the same table in [`ScanPlan::tables`] or in
     /// [`ScanPlan::streams`].
+    #[error("table {0} is scanned twice")]
     DuplicateTable(&'static str),
     /// A stream table in [`ScanPlan::tables`] or as a member of a fused
     /// join.
+    #[error("{0} is a stream table, not built per packet")]
     NotAPacketTable(&'static str),
     /// A table in [`ScanPlan::streams`] that is not a stream table.
+    #[error("{0} is not a stream table")]
     NotAStreamTable(&'static str),
     /// A row predicate on a stream table.
+    #[error("stream table {0} cannot take a row predicate")]
     StreamPredicate(&'static str),
     /// A [frame predicate](ScanPlan::frames) other than
     /// [all](FramePredicate::all) in a plan with stream tables. A stream
@@ -223,8 +228,10 @@ pub enum PlanError {
     /// (a connection whose first segments are skipped is a different
     /// connection), and its rows belong to no single frame, so there is no
     /// set of frames the predicate could soundly restrict it to.
+    #[error("a plan with stream tables cannot restrict the frames it covers")]
     StreamFramePredicate,
     /// A fused join that is not well formed.
+    #[error("fused join {fused}: {reason}")]
     InvalidFused {
         /// Its index in [`ScanPlan::fused`].
         fused: usize,
@@ -233,37 +240,9 @@ pub enum PlanError {
     },
     /// More outputs or output columns than an [`OutputId`] or [`OutCol`]
     /// can number.
+    #[error("the plan has too many outputs or columns")]
     TooLarge,
 }
-
-impl fmt::Display for PlanError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            PlanError::UnknownTable(id) => write!(f, "the catalogue has no table {}", id.0),
-            PlanError::UnknownColumn { table, column } => {
-                write!(f, "table {table} has no column {}", column.0)
-            }
-            PlanError::DuplicateTable(table) => write!(f, "table {table} is scanned twice"),
-            PlanError::NotAPacketTable(table) => {
-                write!(f, "{table} is a stream table, not built per packet")
-            }
-            PlanError::NotAStreamTable(table) => write!(f, "{table} is not a stream table"),
-            PlanError::StreamPredicate(table) => {
-                write!(f, "stream table {table} cannot take a row predicate")
-            }
-            PlanError::StreamFramePredicate => write!(
-                f,
-                "a plan with stream tables cannot restrict the frames it covers"
-            ),
-            PlanError::InvalidFused { fused, reason } => {
-                write!(f, "fused join {fused}: {reason}")
-            }
-            PlanError::TooLarge => write!(f, "the plan has too many outputs or columns"),
-        }
-    }
-}
-
-impl std::error::Error for PlanError {}
 
 /// One column of an output.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
