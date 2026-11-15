@@ -14,6 +14,7 @@ fn bound(relation: &str) -> BindData {
         columns: relation.columns().len(),
         filename: None,
         strict: false,
+        keylog: None,
         pushed: Pushed::new(Some(0), Some(1)),
     }
 }
@@ -155,8 +156,85 @@ fn a_view_is_one_fused_output_that_parses_what_its_columns_need() {
 }
 
 #[test]
-fn a_view_declares_the_frame_s_number_and_time_for_pushdown() {
+fn a_stream_table_is_one_stream_output_and_declares_no_column_for_pushdown() {
+    for relation in relation::relations().filter(|relation| relation.is_stream()) {
+        let name = relation.name();
+        let columns = relation.columns();
+        // `frame_number` is a value of the row here, not the frame the row is of.
+        assert_eq!(columns[0].name, "frame_number", "{name}");
+        assert!(
+            columns.iter().all(|column| column.frame.is_none()),
+            "{name}"
+        );
+
+        // Every column the function declares is one the scan layer has a value for.
+        let all: Vec<usize> = (0..columns.len()).collect();
+        let plan = compiled(name, &all);
+        assert!(plan.requires_single_partition(), "{name}");
+        assert_eq!(plan.outputs().len(), 1, "{name}");
+        let names: Vec<&str> = plan.outputs()[0].columns.iter().map(|c| c.name).collect();
+        let declared: Vec<&str> = columns.iter().map(|column| column.name).collect();
+        assert_eq!(names, declared, "{name}");
+        // A row count is a plan of the stream table without columns.
+        let count = compiled(name, &[usize::MAX]);
+        assert!(count.requires_single_partition(), "{name}");
+        assert!(count.outputs()[0].columns.is_empty(), "{name}");
+
+        // Reassembly follows TCP, whatever the columns.
+        let parsed = parsed_protocols(&plan);
+        assert!(parsed.contains("tcp"), "{name}: {parsed}");
+
+        // A predicate on the frames is refused by the scan layer, which is why none is built.
+        let bounded = FramePredicate::frame_number(pcapsql_core::scan::CmpOp::LtEq, 10).unwrap();
+        let error = relation
+            .plan(&all, bounded)
+            .compile(Catalog::builtin(), protocols())
+            .unwrap_err();
+        assert!(
+            matches!(error, pcapsql_core::scan::PlanError::StreamFramePredicate),
+            "{name}: {error}"
+        );
+    }
+    assert_eq!(
+        relation::relations()
+            .filter(|relation| relation.is_stream())
+            .count(),
+        4
+    );
+    for timestamp in ["start_time", "end_time"] {
+        let plan = compiled("tcp_connections", &[index("tcp_connections", timestamp)]);
+        assert_eq!(
+            types::sql_name(plan.outputs()[0].columns[0].kind),
+            "TIMESTAMP_NS"
+        );
+    }
+}
+
+#[test]
+fn only_read_pcap_and_the_stream_functions_take_a_key_log() {
+    let read_pcap = PcapScan {
+        name: "read_pcap".to_owned(),
+        relation: None,
+    };
+    assert_eq!(read_pcap.positions().protocol, Some(1));
+    assert_eq!(read_pcap.positions().strict, 2);
+    assert_eq!(read_pcap.positions().filename, 3);
+    assert_eq!(read_pcap.positions().keylog, Some(4));
     for relation in relation::relations() {
+        let function = scan(relation.name());
+        assert_eq!(function.takes_keylog(), relation.is_stream());
+        assert_eq!(
+            function.positions().keylog,
+            relation.is_stream().then_some(3),
+            "{}",
+            relation.name()
+        );
+    }
+}
+
+#[test]
+fn a_relation_of_frames_declares_the_frame_s_number_and_time_for_pushdown() {
+    for relation in relation::relations().filter(|relation| !relation.is_stream()) {
         let columns = relation.columns();
         let of = |frame: FrameColumn| {
             let found: Vec<usize> = columns

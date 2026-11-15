@@ -10,8 +10,8 @@
 //!
 //! # What is compared
 //!
-//! Every corpus query over the per-packet tables and the `*_packets` views the extension has:
-//! [`COMPARED`]. A query runs unchanged unless DuckDB's SQL means something else by it; the
+//! Every corpus query over the per-packet tables, the stream tables and the `*_packets` views
+//! the extension has: [`COMPARED`]. A query runs unchanged unless DuckDB's SQL means something else by it; the
 //! two that do are rewritten, with the reason. A view here is one fused scan
 //! (`read_<proto>_packets`), where the snapshot was made by DataFusion from its SQL view: that
 //! the two agree is what `tests/packets_views.rs` and the DataFusion frontend's own test show
@@ -20,9 +20,8 @@
 //! # What is not, and why
 //!
 //! [`NOT_COMPARED`] lists every other corpus query with its reason: it reads a view of the
-//! DataFusion frontend the extension does not offer (`packets`, `tunneled_packets`) or a stream
-//! table, which the extension does not have; it calls a DataFusion-only function; or its row
-//! order is not determined by the query. A corpus query in neither list fails the test, so a query added to the corpus has to
+//! DataFusion frontend the extension does not offer (`packets`, `tunneled_packets`); it calls a
+//! DataFusion-only function; or its row order is not determined by the query. A corpus query in neither list fails the test, so a query added to the corpus has to
 //! be put in one of them.
 //!
 //! # What is normalised
@@ -117,11 +116,17 @@ const COMPARED: &[(&str, Option<(&str, &str)>)] = &[
     // does.
     ("f03_view_limit_offset", None),
     ("f06_view_joined_with_member", None),
+    // The stream tables, alone and joined with per-packet tables.
+    ("u01_tcp_connections", None),
+    ("u02_http_messages", None),
+    ("u03_tls_sessions", None),
+    ("u04_stream_join_packet", None),
+    ("u05_http2_empty", None),
+    ("u09_http_vs_http_messages", None),
 ];
 
 const VIEW: &str = "reads `packets` or `tunneled_packets`, views of the DataFusion frontend that \
                     join across encapsulation levels; the extension does not offer them";
-const STREAM: &str = "reads a stream table, which the extension does not build yet";
 const TIME_UDF: &str = "calls a time function only the DataFusion frontend has";
 const WINDOW: &str = "calls a window table function only the DataFusion frontend has";
 const UNORDERED: &str = "its rows depend on an order the query does not fix";
@@ -134,13 +139,7 @@ const NOT_COMPARED: &[(&str, &str)] = &[
     ("q30_tumble", WINDOW),
     ("q31_hop", WINDOW),
     ("q32_session", WINDOW),
-    ("u01_tcp_connections", STREAM),
-    ("u02_http_messages", STREAM),
-    ("u03_tls_sessions", STREAM),
-    ("u04_stream_join_packet", STREAM),
-    ("u05_http2_empty", STREAM),
     ("u08_packets_view_http_columns", VIEW),
-    ("u09_http_vs_http_messages", STREAM),
     ("t05_packets_levels", VIEW),
     ("t06_packets_one_row_per_level", VIEW),
     ("t07_tunneled_packets", VIEW),
@@ -148,9 +147,9 @@ const NOT_COMPARED: &[(&str, &str)] = &[
     ("f05_left_join_under_limit", UNORDERED),
 ];
 
-/// The per-packet tables the snapshots that are compared read. The test fails if a query stops
-/// covering one of them.
-const TABLES_WITH_A_SNAPSHOT: [&str; 17] = [
+/// The tables the snapshots that are compared read. The test fails if a query stops covering
+/// one of them.
+const TABLES_WITH_A_SNAPSHOT: [&str; 21] = [
     "arp",
     "bgp",
     "dns",
@@ -158,6 +157,8 @@ const TABLES_WITH_A_SNAPSHOT: [&str; 17] = [
     "frames",
     "gtp",
     "http",
+    "http2",
+    "http_messages",
     "icmp",
     "ipv4",
     "ipv6",
@@ -165,6 +166,8 @@ const TABLES_WITH_A_SNAPSHOT: [&str; 17] = [
     "ospf",
     "sll2",
     "tcp",
+    "tcp_connections",
+    "tls_sessions",
     "udp",
     "vlan",
     "vxlan",

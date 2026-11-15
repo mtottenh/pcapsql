@@ -655,9 +655,11 @@ fn the_corpus_captures_filter_the_same_either_way() -> Result<()> {
     for name in golden::CAPTURES {
         let bytes = golden::capture(name);
         let capture = Capture::write(&fixture, &format!("{name}.pcap"), &bytes);
+        // The tables of the frames: a stream table has no `timestamp`, and no filter of it
+        // is taken over (`stream_tables.rs`).
         let tables = column(
             &connection,
-            "SELECT name FROM pcap_protocols() ORDER BY name",
+            "SELECT name FROM pcap_protocols() WHERE kind <> 'stream' ORDER BY name",
         )?;
         for layout in [(1, false), (4, true)] {
             // The corpus captures have a few dozen frames: a window of three.

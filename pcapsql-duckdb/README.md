@@ -172,6 +172,17 @@ SELECT * FROM read_tcp('capture.pcap') WHERE frame_number <= 1000;
 SELECT count(*) FROM read_dns('capture.pcap')
 WHERE timestamp >= TIMESTAMP '2024-05-01 12:00:00' AND timestamp < TIMESTAMP '2024-05-01 12:05:00';
 
+-- TCP connections, TLS sessions, HTTP messages: tables built from reassembled streams
+SELECT client_ip, server_ip, server_port, state, bytes_to_server, bytes_to_client
+FROM read_tcp_connections('capture.pcap');
+SELECT sni, version, cipher_suite FROM read_tls_sessions('capture.pcap');
+
+-- With the TLS key log of the session (SSLKEYLOGFILE), the HTTP/2 inside it
+SELECT h.method, h.authority, h.path, h.status, c.server_ip
+FROM read_http2('capture.pcap', keylog := 'keys.log') h
+JOIN read_tcp_connections('capture.pcap') c USING (connection_id)
+WHERE h.frame_type = 'HEADERS';
+
 -- A capture file named where a table goes is read_pcap of it: its frames
 SELECT count(*), min(timestamp), max(timestamp) FROM 'capture.pcap';
 SELECT * FROM 'captures/*.pcapng.gz' WHERE length > 1400;
@@ -259,7 +270,7 @@ Rows come back in capture order, and the files of a call one after the other
 in the order they are read, without an `ORDER BY` and on any number of
 threads.
 
-**Columns.** Every table starts with `frame_number` and `timestamp`
+**Columns.** Every table of packets starts with `frame_number` and `timestamp`
 (`TIMESTAMP_NS`, as exact as the capture records it), so a protocol table
 needs no join with `frames` for the time of a packet. Only the columns a query
 uses are produced, and only the protocols and fields they need are parsed: a
@@ -308,6 +319,86 @@ a tunnel those are the inner addresses. There are 21 of them, one per row of
   offered: `packets`, `tunneled_packets`, `ip4_in_ip6` and `ip6_in_ip6` join
   layers of different levels, or need a full join, and are not of the shape
   the scan evaluates.
+
+**Stream tables.** `tcp_connections`, `tls_sessions`, `http_messages` and
+`http2` are not rows of a packet: the scan reassembles the TCP streams of a
+capture while it reads it, and these tables are what the streams held when
+the capture ends. `read_tcp_connections(files)` has a row per connection,
+`read_tls_sessions(files)` a row per connection that carried a TLS handshake,
+`read_http_messages(files)` a row per HTTP/1.x request or response however
+many packets it spans, and `read_http2(files)` a row per HTTP/2 frame of a
+TLS stream that a key log decrypted. `pcap_protocols()` lists them with
+`kind = 'stream'`, and `read_pcap(files, protocol := 'http2')` reads them
+too. They are the tables of the same names of the DataFusion engine, built
+by the same code (`pcapsql_core::scan`), and behave like the other tables
+with these differences:
+
+- Their first columns are `frame_number` (where the row begins or was
+  complete: the first frame of a connection, the ClientHello's frame, the
+  frame that completed a message) and `connection_id`. They have no
+  `timestamp`; `tcp_connections` has `start_time` and `end_time`. The four
+  tables of one capture join on `connection_id`, and each joins a packet
+  table on `frame_number`.
+- A capture is read in order, from its first packet, on one thread:
+  reassembly cannot start in the middle. It is never split into partitions,
+  whatever its size and `pcapsql_parallel_scan`. Several files are still read
+  by several threads, one file each.
+- **Each file is a scan of its own.** Connections are numbered within a
+  capture, so `connection_id` starts at 1 in every file, as `frame_number`
+  does. Over several files, add `filename := true` and treat
+  `(filename, connection_id)` as the connection; join on both. A connection
+  whose packets are spread over two files is two connections, each as much
+  as its file shows.
+- The rows come when the capture has been read to its end. A `LIMIT` does not
+  shorten the read, `strict := true` always finds a truncated capture, and a
+  query that is interrupted (Ctrl-C) stops only once the file that is being
+  read has been read: DuckDB looks for an interrupt when rows come back, and
+  the C API gives a scan no way to ask.
+- No filter is taken over by the scan, since every packet goes into
+  reassembly: DuckDB applies the whole `WHERE` clause to the rows.
+  `pcapsql_filter_pushdown` changes nothing here.
+
+**TLS decryption.** A TLS key log is the file a browser, curl or a server
+writes when `SSLKEYLOGFILE` is set (NSS key log format). Given one, a scan of
+a stream table decrypts the sessions the key log has the secrets of:
+`tls_sessions.is_decrypted` says which, and `http2` has the HTTP/2 frames
+they carried (without a key log `http2` is empty).
+
+```sql
+SELECT sni, is_decrypted FROM read_tls_sessions('capture.pcapng', keylog := 'keys.log');
+
+-- For scans that cannot be given the parameter: views, prepared statements
+SET pcapsql_keylog = 'keys.log';
+CREATE VIEW http2 AS SELECT * FROM read_http2('capture.pcapng');
+SELECT method, authority, path FROM http2 WHERE method IS NOT NULL;
+```
+
+- `keylog := 'path'` is a parameter of the four stream functions and of
+  `read_pcap`. When a call does not give it (or gives NULL), the setting
+  `pcapsql_keylog` is used; its default is empty, which is no key log. The
+  parameter wins: `keylog := ''` reads without one whatever the setting is.
+- `read_pcap` uses the parameter when `protocol` names a stream table. For a
+  packet table or a view it accepts and ignores it, and does not open the
+  file, just as the setting does not concern those scans. The functions of
+  packet tables (`read_tcp`, `read_tls`, ...) do not have the parameter, and
+  `FROM 'x.pcap'` reads `frames`, with or without the setting.
+- The key log is opened through DuckDB's file system when the statement is
+  bound, so it can be anywhere DuckDB can read and `enable_external_access`
+  applies. The setting's file is not looked at when the setting is set: a
+  wrong path fails the stream scans that use it, with a message that says the
+  path came from the setting.
+- A file that is not a key log is an error that names the file, the line and
+  what was expected there. It never repeats a label, a client random or a
+  secret: no key material goes into a message or DuckDB's log (the debug
+  record of a scan says how many sessions the key log has secrets of).
+- What is tested is TLS 1.3 (`TLS_AES_128_GCM_SHA256`) carrying HTTP/2, on a
+  generated capture (`pcapsql-testgen/fixtures/tls13_http2.pcap` with its
+  `.keys`). Decrypted application data is parsed as HTTP/2 only. TLS 1.2
+  decryption is untested and should not be relied on.
+- A DuckDB secret (`CREATE SECRET`) would be the natural home for a key log,
+  but the C API v2 of DuckDB 2.0.0 has no function to register a secret type
+  or to look a secret up, and `duckdb-neo` 0.20000.2 none either; hence a
+  path.
 
 **Filters.** A scan applies filters on `frame_number` and `timestamp` itself,
 before a packet is parsed, and reads less of the capture for them. Everything
@@ -435,16 +526,18 @@ is the reference, checked against the built artifact by
 `make check_reference_release`. This section adds where each part is
 implemented and how it relates to the DataFusion engine.
 
-The scan functions, one implementation registered under 50 names:
+The scan functions, one implementation registered under 54 names:
 
 | Function | Result |
 |---|---|
-| `read_pcap(files, protocol := 'frames', strict := false, filename := false)` | The rows of the table or view `protocol` names (any case); an unknown one is an error |
-| `read_<table>(files, strict := false, filename := false)` for each of the 28 tables of `pcap_protocols()` | The rows of that table: `read_frames`, `read_ethernet`, `read_ipv4`, `read_tcp`, `read_dns`, ... |
+| `read_pcap(files, protocol := 'frames', strict := false, filename := false, keylog := NULL)` | The rows of the table or view `protocol` names (any case); an unknown one is an error |
+| `read_<table>(files, strict := false, filename := false)` for each of the 28 tables of packets of `pcap_protocols()` | The rows of that table: `read_frames`, `read_ethernet`, `read_ipv4`, `read_tcp`, `read_dns`, ... |
+| `read_<table>(files, strict := false, filename := false, keylog := NULL)` for each of its 4 stream tables | The rows of that table (see "Stream tables"): `read_tcp_connections`, `read_tls_sessions`, `read_http_messages`, `read_http2` |
 | `read_<view>(files, strict := false, filename := false)` for each of the 21 views of `pcap_views()` | The rows of that view (see "Packets views"): `read_tcp_packets`, `read_udp_packets`, `read_dns_packets`, ... |
 
 `files` is the only positional argument: a `VARCHAR` path or pattern, or a
-list of them. `protocol`, `strict` and `filename` are named parameters.
+list of them. `protocol`, `strict`, `filename` and `keylog` are named
+parameters.
 `src/engine/table/mod.rs` describes which callback does what, how the files are
 expanded, how a capture is split into partitions and why the rows keep their
 order.
@@ -452,9 +545,10 @@ order.
 A replacement scan, which answers a table name that is a capture path
 (`FROM 'x.pcap'`, see "Usage") with `read_pcap` of it.
 
-Four settings: `pcapsql_parallel_scan`, `pcapsql_parallel_min_file_size` and
-`pcapsql_index_stride`, described under "Parallel scans" above, and
-`pcapsql_filter_pushdown`, under "Filters".
+Five settings: `pcapsql_parallel_scan`, `pcapsql_parallel_min_file_size` and
+`pcapsql_index_stride`, described under "Parallel scans" above,
+`pcapsql_filter_pushdown`, under "Filters", and `pcapsql_keylog`, under "TLS
+decryption".
 
 Three table functions, which list what the shared scan layer
 (`pcapsql_core::scan`: its `Catalog` of tables and its `PacketsView`s) says
@@ -462,22 +556,21 @@ the extension reads:
 
 | Function | Result |
 |---|---|
-| `pcap_protocols()` | One row per table, sorted by name: `name`, `description`, `field_count` (the number of columns), `kind` (`frames` for the table of packets, `protocol` for a table of one protocol's layers) |
+| `pcap_protocols()` | One row per table, sorted by name: `name`, `description`, `field_count` (the number of columns), `kind` (`frames` for the table of packets, `protocol` for a table of one protocol's layers, `stream` for a table built from TCP streams) |
 | `pcap_views()` | One row per packets view, sorted by name: `name`, `description`, `protocol` (the table the view has one row per row of), `column_count` |
 | `pcap_schema(protocol)` | One row per column of the table or view, in order: `column_name`, `column_type` (the DuckDB type), `nullable`. The name is matched in any case; an unknown one is an error |
 
-The tables are `frames` and the 27 protocol tables. The catalogue's stream
-tables (`tcp_connections`, `tls_sessions`, `http_messages`, `http2`) are not
-listed: the extension does not read them yet. The views are not rows of
-`pcap_protocols()`, which lists one table per parser and returns what it did
-before there were views; they have a function of their own because a view is
-not a table (it has no `field_count` of a parser, and it has a `protocol`).
+The tables are `frames`, the 27 protocol tables and the 4 stream tables: the
+whole catalogue. The views are not rows of `pcap_protocols()`, which lists
+tables; they have a function of their own because a view is not a table (it
+has no `field_count` of a parser, and it has a `protocol`).
 
 Columns have the names and order of the DataFusion engine's tables, with two
-differences. Timestamps are `TIMESTAMP_NS`, where DataFusion has microseconds.
-And every protocol table has a `timestamp` column after `frame_number`, which
-DataFusion leaves to a join with `frames`; DuckDB cannot turn that join into
-one pass over the capture.
+differences. Timestamps are `TIMESTAMP_NS`, where DataFusion has microseconds
+(`tcp_connections.start_time` and `end_time` included). And every protocol
+table has a `timestamp` column after `frame_number`, which DataFusion leaves
+to a join with `frames`; DuckDB cannot turn that join into one pass over the
+capture. The stream tables have exactly DataFusion's columns.
 
 | Stored value | DuckDB type |
 |---|---|
@@ -611,6 +704,17 @@ Tests, in `itest/`:
   read, the `filename` column and its projection, a truncated file among
   whole ones, how the partitions of several files are spread, the
   replacement scan and what comes before it, and a view over a pattern.
+- `tests/stream_tables.rs` compares the four stream tables with the shared
+  scan layer cell by cell (`reference_rows`, and `reference_rows_decrypted`
+  with a key log): over the corpus captures, the generated TLS 1.3 + HTTP/2
+  capture, and one of 5,000 connections whose tables fill several chunks, at
+  1 and 4 threads; compressed and pcapng captures; that a capture stays one
+  partition under the settings that split a packet table's; projection;
+  filters, which DuckDB applies and `EXPLAIN` still shows; several files and
+  `connection_id` per file; truncation and `strict`; and the key log: the
+  rows it gives, `keylog` against `pcapsql_keylog`, views and prepared
+  statements, `read_pcap` with a packet table, and files that are missing,
+  not text, or not a key log, whose content no message repeats.
 - `tests/filter_pushdown.rs` runs random and chosen filters on `frame_number`
   and `timestamp` (and filters the scan must leave to DuckDB) with
   `pcapsql_filter_pushdown` on and off and compares the rows, at 1 and 4
@@ -636,7 +740,8 @@ Tests, in `itest/`:
 - `tests/golden_differential.rs` runs the queries of the DataFusion golden
   corpus over the same captures and compares with the snapshots committed in
   `pcapsql-datafusion/tests/golden/`, the queries over `*_packets` views
-  included (a view is `read_<proto>_packets` here). The captures and the
+  (a view is `read_<proto>_packets` here) and over the stream tables
+  included. The captures and the
   queries are `pcapsql_testgen::corpus`, which
   `pcapsql-datafusion/tests/golden_corpus.rs` uses too. The file
   lists which queries are compared, which are not and why, and what is

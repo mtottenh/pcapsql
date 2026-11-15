@@ -68,7 +68,11 @@ impl PcapScan {
             }
         }
         .map_err(|error| failed(&error))?;
-        let scan = PartitionScan::new(reader, shared.plan.clone(), protocols().clone());
+        let mut scan = PartitionScan::new(reader, shared.plan.clone(), protocols().clone());
+        // Before its first step. Each file is a scan of its own, with its own TLS sessions.
+        if let Some(keys) = &bound.keylog {
+            scan = scan.with_keylog(keys.keylog());
+        }
         Ok(Scanning {
             scan,
             fault,

@@ -103,11 +103,33 @@ SELECT * FROM pcap_schema('nope');
 ----
 pcap_protocols() lists the tables
 
-# The stream tables are not read by the extension yet
-statement error
-SELECT * FROM pcap_schema('tcp_connections');
+# A stream table: the frame a row is of, the connection, and no frame timestamp
+query TTT
+SELECT column_name, column_type, nullable FROM pcap_schema('tls_sessions');
 ----
-no protocol table 'tcp_connections'
+frame_number	UBIGINT	false
+connection_id	UBIGINT	false
+version	VARCHAR	true
+cipher_suite	VARCHAR	true
+cipher_suite_id	USMALLINT	true
+sni	VARCHAR	true
+alpn	VARCHAR	true
+is_decrypted	BOOLEAN	false
+server_hello_frame	UBIGINT	true
+encap_depth	UTINYINT	false
+tunnel_type	VARCHAR	true
+tunnel_id	UBIGINT	true
+
+query TT
+SELECT column_name, column_type FROM pcap_schema('tcp_connections') WHERE column_type LIKE 'TIMESTAMP%';
+----
+start_time	TIMESTAMP_NS
+end_time	TIMESTAMP_NS
+
+query TTT
+SELECT column_name, column_type, nullable FROM pcap_schema('http2') WHERE column_name = 'connection_id';
+----
+connection_id	UBIGINT	false
 
 statement error
 SELECT * FROM pcap_schema(NULL);

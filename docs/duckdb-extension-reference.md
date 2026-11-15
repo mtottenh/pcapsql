@@ -10,23 +10,24 @@ parameter or a setting is missing here, or is named here and not registered
 (`pcapsql-duckdb/scripts/check-reference.sh`).
 
 How the extension behaves beyond its signatures (file handling, filter
-pushdown, parallel scans, truncated captures) is described in
+pushdown, parallel scans, truncated captures, stream tables and TLS key logs)
+is described in
 [`pcapsql-duckdb/README.md`](../pcapsql-duckdb/README.md).
 
 ## Summary
 
 | Kind | Count | Names |
 |---|---|---|
-| Scan table functions | 50 | `read_pcap`, `read_<table>` for each of the 28 tables, and `read_<view>` for each of the 21 `*_packets` views |
+| Scan table functions | 54 | `read_pcap`, `read_<table>` for each of the 32 tables (28 of packets, 4 of TCP streams), and `read_<view>` for each of the 21 `*_packets` views |
 | Listing table functions | 3 | `pcap_protocols`, `pcap_views`, `pcap_schema` |
 | Scalar functions | 16 | `ip4`, `ip4_to_string`, `ip6`, `ip6_to_string`, `mac`, `mac_to_string`, `ip_in_cidr`, `ip6_in_cidr`, `tcp_flags_str`, `has_tcp_flag`, `dns_type_name`, `dns_rcode_name`, `ip_proto_name`, `ethertype_name`, `pcap_hex`, `pcap_unhex` |
 | Macros | 6 | `format_ip4`, `format_ip6`, `format_mac`, `format_ip4_list`, `format_ip6_list`, `format_mac_list` |
-| Settings | 4 | `pcapsql_parallel_scan`, `pcapsql_parallel_min_file_size`, `pcapsql_index_stride`, `pcapsql_filter_pushdown` |
+| Settings | 5 | `pcapsql_parallel_scan`, `pcapsql_parallel_min_file_size`, `pcapsql_index_stride`, `pcapsql_filter_pushdown`, `pcapsql_keylog` |
 | Replacement scan | 1 | `FROM 'capture.pcap'` |
 
 ## Scan table functions
 
-### `read_pcap(files, protocol := 'frames', strict := false, filename := false)`
+### `read_pcap(files, protocol := 'frames', strict := false, filename := false, keylog := NULL)`
 
 Reads one table or one `*_packets` view from one or more capture files.
 Without `protocol` it reads `frames`, one row per packet.
@@ -34,12 +35,14 @@ Without `protocol` it reads `frames`, one row per packet.
 ```sql
 SELECT * FROM read_pcap('capture.pcap') LIMIT 10;
 SELECT count(*) FROM read_pcap('capture.pcap', protocol := 'tcp');
+SELECT * FROM read_pcap('capture.pcap', protocol := 'http2', keylog := 'keys.log');
 ```
 
 ### `read_<table>(files, strict := false, filename := false)`
 
 One function per table, equal to `read_pcap` with that `protocol`. The 28
-tables and their functions:
+tables of packets and their functions (the four stream tables follow, under
+"Stream tables"):
 
 | Function | Table | Columns | What a row is |
 |---|---|---|---|
@@ -113,8 +116,97 @@ columns, because its rows decide which joined rows exist. The command-line
 tool's views `packets`, `tunneled_packets`, `ip4_in_ip6` and `ip6_in_ip6`
 are not available: they join layers of different encapsulation levels.
 
-The stream tables of the pcapsql command-line tool (`tcp_connections`,
-`tls_sessions`, `http_messages`, `http2`) are not available in the extension.
+### Stream tables: `read_<table>(files, strict := false, filename := false, keylog := NULL)`
+
+Four tables are not rows of a packet. They are built from the TCP streams of
+a capture, which the scan reassembles while it reads, and hold what those
+streams carried when the capture ends:
+
+| Function | Table | Columns | What a row is |
+|---|---|---|---|
+| `read_tcp_connections(files)` | `tcp_connections` | 20 | A TCP connection: endpoints (the client sent the SYN), state, first and last frame, start and end time, packets and payload bytes each way |
+| `read_tls_sessions(files)` | `tls_sessions` | 12 | A connection that carried a TLS handshake: version, cipher suite, SNI, ALPN, and whether a key log decrypted it |
+| `read_http_messages(files)` | `http_messages` | 17 | An HTTP/1.x request or response of a reassembled stream, however many packets it spans |
+| `read_http2(files)` | `http2` | 34 | An HTTP/2 frame of a decrypted TLS stream, with the request and response headers of `HEADERS` frames. Empty without a key log |
+
+```sql
+SELECT client_ip, server_ip, server_port, state, bytes_to_server, bytes_to_client
+FROM read_tcp_connections('capture.pcap');
+SELECT sni, version, is_decrypted FROM read_tls_sessions('capture.pcap', keylog := 'keys.log');
+SELECT h.method, h.path, h.status, c.server_ip
+FROM read_http2('capture.pcap', keylog := 'keys.log') h
+JOIN read_tcp_connections('capture.pcap') c USING (connection_id);
+```
+
+They are read with the same functions and parameters as the other tables,
+and differ in these ways:
+
+- **Columns.** `frame_number` (the first frame of a connection, the frame of
+  the ClientHello, the frame a message or an HTTP/2 frame was complete at),
+  `connection_id`, the table's own columns, then `encap_depth` (always 0),
+  `tunnel_type` and `tunnel_id` (always NULL): reassembly follows the
+  innermost TCP flow. There is no `timestamp` column; `tcp_connections` has
+  `start_time` and `end_time` (`TIMESTAMP_NS`).
+- **`connection_id`** numbers the connections of one capture from 1, in the
+  order they are first seen, and is the same connection in all four tables:
+  they join on it. It starts again in each file: over several files a
+  connection is its `filename` and `connection_id` (`filename := true`). A
+  connection whose packets are in two files is two connections.
+- **`frame_number`** joins a stream table to a packet table of the same
+  capture, as between packet tables.
+- **One thread per file.** A capture is read in order from its first packet,
+  as one partition, whatever `pcapsql_parallel_scan` and its size are.
+  Several files are read by several threads.
+- **Rows come when the capture has been read.** A `LIMIT` does not shorten
+  the read, and a query is cancelled (Ctrl-C) only once the file that is
+  being read has been read.
+- **Filters** are all applied by DuckDB, to the rows of a full read. None is
+  taken over by the scan: every packet goes into reassembly.
+- **`strict`**, compressed captures, patterns and lists, `filename` and
+  projection work as for every scan function. A truncated capture is always
+  found, since it is always read to its end.
+
+### TLS decryption: `keylog`
+
+A TLS key log is the file a TLS client or server writes when the environment
+variable `SSLKEYLOGFILE` is set (NSS key log format: `CLIENT_RANDOM ...` lines
+for TLS 1.2, `CLIENT_HANDSHAKE_TRAFFIC_SECRET ...` and its siblings for
+TLS 1.3). With one, a scan of a stream table decrypts the TLS sessions the
+key log has secrets of: `tls_sessions.is_decrypted` is true for them, and
+`http2` has the HTTP/2 frames they carried.
+
+- The key log is the `keylog` parameter of the call. When the call does not
+  give it, or gives NULL, it is the setting `pcapsql_keylog`; when that is
+  empty there is none. The parameter wins over the setting, and
+  `keylog := ''` reads without a key log whatever the setting is.
+- The setting is how a scan that cannot be given the parameter gets a key
+  log: a view over `read_http2(...)`, a prepared statement.
+- The file is opened through DuckDB's file system when the statement is
+  bound, like a capture. A file that cannot be opened or is not a key log
+  fails the statement; the message names the file and the line and repeats
+  no label, random or secret of it. A key log without entries is accepted
+  and decrypts nothing.
+- One key log serves every file of a call. A session it has no secrets of is
+  read as without a key log.
+- Only the four stream functions and `read_pcap` have the parameter.
+  `read_pcap` uses it when `protocol` is a stream table; for any other table
+  or view it accepts the parameter and ignores it (the file is not opened),
+  as every scan of a packet table ignores the setting. A `read_<table>`
+  function of a packet table refuses it: it has no such parameter.
+- The per-packet `tls` table is not affected: it is the handshake as it is on
+  the wire. The replacement scan reads `frames` and is not affected either.
+- What is tested end to end is TLS 1.3 with `TLS_AES_128_GCM_SHA256`
+  carrying HTTP/2. `pcapsql-core` also derives keys for the other TLS 1.3
+  suites and for TLS 1.2 (`CLIENT_RANDOM` lines), but no test decrypts such a
+  capture, and `is_decrypted` is set from the TLS 1.3 `Finished` message: do
+  not rely on TLS 1.2 decryption. Decrypted application data is parsed as
+  HTTP/2; HTTP/1.x inside TLS is not parsed.
+
+```sql
+SET pcapsql_keylog = '/home/me/keys.log';
+CREATE VIEW http2 AS SELECT * FROM read_http2('capture.pcapng');
+SELECT method, authority, path FROM http2 WHERE method IS NOT NULL;
+```
 
 ### Parameters
 
@@ -124,6 +216,7 @@ The stream tables of the pcapsql command-line tool (`tcp_connections`,
 | `protocol` | `VARCHAR` | `'frames'` | `read_pcap` | The table to read, in any case. An unknown name is an error |
 | `strict` | `BOOLEAN` | `false` | all | `true` makes a capture that ends inside a record an error. By default the complete packets are returned and a warning is logged |
 | `filename` | `BOOLEAN` | `false` | all | `true` adds a `filename VARCHAR` column after the table's columns, with the path of the file each row is from |
+| `keylog` | `VARCHAR` | `NULL` | `read_pcap`, `read_tcp_connections`, `read_tls_sessions`, `read_http_messages`, `read_http2` | The path of a TLS key log to decrypt with. NULL or not given: the setting `pcapsql_keylog`. Empty: none. See "TLS decryption" |
 
 ```sql
 SELECT count(*) FROM read_tcp('captures/*.pcap');
@@ -147,6 +240,7 @@ SELECT count(*) FROM read_frames('still-being-written.pcap', strict := true);
 |---|---|
 | `frames` | `frame_number UBIGINT`, `timestamp TIMESTAMP_NS`, `length UINTEGER`, `original_length UINTEGER`, `link_type USMALLINT`, `raw_data BLOB` |
 | every protocol table | `frame_number UBIGINT`, `timestamp TIMESTAMP_NS`, the protocol's fields, `encap_depth UTINYINT`, `tunnel_type VARCHAR`, `tunnel_id UBIGINT` |
+| every stream table | `frame_number UBIGINT`, `connection_id UBIGINT`, the table's columns, `encap_depth UTINYINT`, `tunnel_type VARCHAR`, `tunnel_id UBIGINT` |
 
 - `frame_number` starts at 1 in each file. With several files,
   `(filename, frame_number)` identifies a frame.
@@ -177,7 +271,7 @@ Type mapping:
   (`=`, `<`, `<=`, `>`, `>=`), and `AND`s of them, are applied by the scan
   before a packet is parsed. Two bounds on one column narrow what is read and
   are also still applied by DuckDB. Everything else is left to DuckDB. See
-  `pcapsql_filter_pushdown`.
+  `pcapsql_filter_pushdown`. A scan of a stream table takes no filter over.
 
 ## Listing table functions
 
@@ -190,7 +284,7 @@ One row per table the extension reads, sorted by name.
 | `name` | `VARCHAR` | The table's name: the `protocol` of `read_pcap` and the suffix of its `read_<table>` function |
 | `description` | `VARCHAR` | What the table holds |
 | `field_count` | `UINTEGER` | The number of columns |
-| `kind` | `VARCHAR` | `frames` for the table of packets, `protocol` for a protocol's table |
+| `kind` | `VARCHAR` | `frames` for the table of packets, `protocol` for a protocol's table, `stream` for a table built from TCP streams |
 
 ### `pcap_views()`
 
@@ -277,6 +371,7 @@ All are global.
 | `pcapsql_parallel_min_file_size` | `UBIGINT` | `4194304` | The size in bytes from which a capture is scanned in partitions |
 | `pcapsql_index_stride` | `UBIGINT` | `65536` | Frames between two places a capture can be split at. A capture of no more frames than this is not split |
 | `pcapsql_filter_pushdown` | `BOOLEAN` | `true` | Apply filters on `frame_number` and `timestamp` in the scan. `false` leaves every filter to DuckDB |
+| `pcapsql_keylog` | `VARCHAR` | empty | The path of the TLS key log a scan of a stream table decrypts with when its `keylog` parameter is not given. Empty: none. The file is opened when a scan is bound, not when the setting is set. NULL is refused |
 
 ```sql
 SET pcapsql_parallel_scan = false;
@@ -294,7 +389,7 @@ SELECT * FROM 'captures/*.pcapng.gz' WHERE length > 1400;
 ```
 
 A table, view or common table expression of that name takes precedence. Any
-other table, `strict` and `filename` need the function.
+other table, `strict`, `filename` and `keylog` need the function.
 
 ## DuckDB facilities the extension uses
 

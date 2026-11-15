@@ -43,8 +43,8 @@ fn pcap_protocols_lists_the_catalogue() -> Result<()> {
     );
 
     let names = column(&connection, "SELECT name FROM pcap_protocols()")?;
-    // `frames` and the 27 protocol tables of the shared catalogue.
-    assert_eq!(names.len(), 28);
+    // `frames`, the 27 protocol tables and the 4 stream tables of the shared catalogue.
+    assert_eq!(names.len(), 32);
     assert!(names.is_sorted(), "{names:?}");
     for expected in ["frames", "ethernet", "ipv4", "tcp", "dns", "tls"] {
         assert!(
@@ -52,9 +52,8 @@ fn pcap_protocols_lists_the_catalogue() -> Result<()> {
             "{expected} is missing"
         );
     }
-    // The catalogue's stream tables are not read by the extension yet.
     for stream in ["tcp_connections", "tls_sessions", "http_messages", "http2"] {
-        assert!(!names.iter().any(|name| name == stream), "{stream}");
+        assert!(names.iter().any(|name| name == stream), "{stream}");
     }
 
     assert_eq!(
@@ -73,14 +72,18 @@ fn pcap_protocols_lists_the_catalogue() -> Result<()> {
             &connection,
             "SELECT kind, count(*) FROM pcap_protocols() GROUP BY kind ORDER BY kind",
         )?,
-        [row(&["frames", "1"]), row(&["protocol", "27"])]
+        [
+            row(&["frames", "1"]),
+            row(&["protocol", "27"]),
+            row(&["stream", "4"])
+        ]
     );
     assert_eq!(
         value(
             &connection,
             "SELECT count(*) FROM pcap_protocols() WHERE field_count > 0 AND description <> ''",
         )?,
-        "28"
+        "32"
     );
     // Two scans in one query each have their own position.
     assert_eq!(
@@ -88,7 +91,7 @@ fn pcap_protocols_lists_the_catalogue() -> Result<()> {
             &connection,
             "SELECT count(*) FROM pcap_protocols() a JOIN pcap_protocols() b USING (name)",
         )?,
-        "28"
+        "32"
     );
     Ok(())
 }
@@ -154,12 +157,13 @@ fn pcap_schema_lists_the_columns_a_scan_returns() -> Result<()> {
     );
 
     // Every table `pcap_protocols()` lists has a schema of `field_count` columns, the first of
-    // them `frame_number`, exactly one a TIMESTAMP_NS named `timestamp`.
+    // them `frame_number`. A table of the frames has exactly one TIMESTAMP_NS, named
+    // `timestamp`; a stream table has no frame's time (`stream_tables.rs`).
     // (The argument must be a constant: a table function takes no lateral column.)
     let mut type_names = std::collections::BTreeSet::new();
     for protocol in rows(
         &connection,
-        "SELECT name, field_count FROM pcap_protocols()",
+        "SELECT name, field_count FROM pcap_protocols() WHERE kind <> 'stream'",
     )? {
         let (name, field_count) = (&protocol[0], &protocol[1]);
         assert_eq!(
@@ -200,10 +204,18 @@ fn pcap_schema_lists_the_columns_a_scan_returns() -> Result<()> {
         rows(&connection, "SELECT * FROM pcap_schema('ethernet')")?
     );
 
-    // An unknown table, a stream table and NULL are bind errors.
+    // A stream table has a schema like any other (`stream_tables.rs`).
+    assert_eq!(
+        value(
+            &connection,
+            "SELECT count(*) FROM pcap_schema('tcp_connections')"
+        )?,
+        "20"
+    );
+
+    // An unknown table and NULL are bind errors.
     for (argument, message) in [
         ("'nope'", "no protocol table 'nope'"),
-        ("'tcp_connections'", "no protocol table 'tcp_connections'"),
         ("NULL", "must not be NULL"),
     ] {
         let error = value(

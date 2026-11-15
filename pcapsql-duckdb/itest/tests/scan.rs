@@ -31,11 +31,12 @@ fn zstd(bytes: &[u8]) -> Vec<u8> {
     zstd::encode_all(bytes, 3).unwrap()
 }
 
-/// The tables the extension reads, by name.
+/// The tables of the frames the extension reads, by name: `frames` and the protocol tables.
+/// The stream tables have `stream_tables.rs`.
 fn tables(connection: &Connection) -> Vec<String> {
     column(
         connection,
-        "SELECT name FROM pcap_protocols() ORDER BY name",
+        "SELECT name FROM pcap_protocols() WHERE kind <> 'stream' ORDER BY name",
     )
     .unwrap()
 }
@@ -110,16 +111,6 @@ fn every_table_has_a_function_with_the_columns_of_pcap_schema() -> Result<()> {
                 .collect();
             assert_eq!(last, ["encap_depth", "tunnel_type", "tunnel_id"], "{table}");
         }
-    }
-
-    // The stream tables are in the catalogue but are not read yet: no function.
-    for stream in ["tcp_connections", "tls_sessions", "http_messages", "http2"] {
-        let error = rows(
-            &connection,
-            &format!("SELECT * FROM read_{stream}('{path}')"),
-        )
-        .expect_err(stream);
-        assert!(error.message.contains("does not exist"), "{error}");
     }
     Ok(())
 }
@@ -218,10 +209,6 @@ fn bad_arguments_are_bind_errors_that_say_what_is_wrong() -> Result<()> {
         (
             format!("read_pcap('{path}', protocol := 'nope')"),
             &["read_pcap", "no protocol table 'nope'", "pcap_protocols()"],
-        ),
-        (
-            format!("read_pcap('{path}', protocol := 'tcp_connections')"),
-            &["no protocol table 'tcp_connections'"],
         ),
         (
             format!("read_pcap('{path}', protocol := NULL)"),

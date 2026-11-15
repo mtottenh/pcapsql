@@ -6,8 +6,8 @@
 //! of either. The three are one table function, [`ListingFunction`], which differ in their
 //! columns and in the rows `bind` computes.
 //!
-//! The views are not rows of `pcap_protocols()`: that function lists the protocol tables, one
-//! per parser, and what it returned before there were views is what it returns now.
+//! `pcap_protocols()` lists the tables of the catalogue: `frames`, one table per parser, and
+//! the four stream tables, which its `kind` column tells apart. The views are not rows of it.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -280,21 +280,22 @@ mod tests {
     }
 
     #[test]
-    fn protocols_are_frames_and_the_protocol_tables_in_name_order() {
+    fn protocols_are_the_tables_of_the_catalogue_in_name_order() {
+        const STREAMS: [&str; 4] = ["tcp_connections", "tls_sessions", "http_messages", "http2"];
         let rows = protocol_rows();
         let names: Vec<&str> = rows.iter().map(|row| text(&row[0])).collect();
         assert!(names.is_sorted(), "{names:?}");
         assert_eq!(names.len(), scan_tables().count());
-        // The 27 parsers of core's default registry, and `frames`.
-        assert_eq!(names.len(), 28);
+        assert_eq!(names.len(), Catalog::builtin().tables().count());
+        // `frames`, the 27 parsers of core's default registry, and the stream tables.
+        assert_eq!(names.len(), 32);
         assert_eq!(
             names.len(),
-            pcapsql_core::default_registry().all_parsers().count() + 1
+            pcapsql_core::default_registry().all_parsers().count() + 1 + STREAMS.len()
         );
-        for stream in ["tcp_connections", "tls_sessions", "http_messages", "http2"] {
-            assert!(Catalog::builtin().table(stream).is_some(), "{stream}");
-            assert!(!names.contains(&stream), "{stream}");
-            assert!(scan_table(stream).is_none(), "{stream}");
+        for stream in STREAMS {
+            assert!(names.contains(&stream), "{stream}");
+            assert!(Relation::find(stream).unwrap().is_stream(), "{stream}");
         }
 
         for row in &rows {
@@ -314,10 +315,13 @@ mod tests {
             );
             let kind = if name == "frames" {
                 "frames"
+            } else if STREAMS.contains(&name) {
+                "stream"
             } else {
                 "protocol"
             };
             assert_eq!(text(&row[3]), kind, "{name}");
+            assert_eq!(Relation::find(name).unwrap().is_stream(), kind == "stream");
         }
     }
 
@@ -422,6 +426,6 @@ mod tests {
         for relation in relations() {
             assert!(names.insert(relation.name()), "{}", relation.name());
         }
-        assert_eq!(names.len(), 28 + 21);
+        assert_eq!(names.len(), 32 + 21);
     }
 }

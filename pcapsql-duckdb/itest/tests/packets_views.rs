@@ -888,10 +888,10 @@ fn the_views_are_listed_and_described() -> Result<()> {
             ["column_count", "UINTEGER"]
         ]
     );
-    // What `pcap_protocols()` lists is what it listed before there were views.
+    // `pcap_protocols()` lists the tables only: no view is a row of it.
     assert_eq!(
         value(&connection, "SELECT count(*) FROM pcap_protocols()")?,
-        "28"
+        "32"
     );
 
     // The documented example: addresses of the anchor's level, formatted by the scalars.

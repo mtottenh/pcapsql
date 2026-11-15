@@ -245,9 +245,11 @@ fn every_table_of_every_corpus_capture_is_the_same_in_partitions() -> Result<()>
     let connection = connect()?;
     let fixture = Fixture::new();
     connection.execute("CALL enable_logging(level = 'debug')", Parameters::None)?;
+    // The tables of the frames: a stream table is never read in partitions
+    // (`stream_tables.rs`).
     let tables = column(
         &connection,
-        "SELECT name FROM pcap_protocols() ORDER BY name",
+        "SELECT name FROM pcap_protocols() WHERE kind <> 'stream' ORDER BY name",
     )?;
     // The captures have a few dozen frames: a place to cut after every second one.
     const STRIDE: u64 = 2;

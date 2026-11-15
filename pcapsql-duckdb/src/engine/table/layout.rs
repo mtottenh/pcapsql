@@ -42,6 +42,13 @@ impl Layout {
             note: format!("1 ({why})"),
         }
     }
+
+    /// The whole capture as one partition, for a plan that cannot be scanned any other way
+    /// (`CompiledScan::requires_single_partition`): a stream table is what the TCP streams of
+    /// a capture hold once all of it was read, in order. No setting changes this.
+    pub(super) fn in_order() -> Self {
+        Self::sequential("a stream table is built from the whole capture, read in order")
+    }
 }
 
 impl PcapScan {

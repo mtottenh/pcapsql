@@ -6,6 +6,7 @@
 //! | `pcapsql_parallel_min_file_size` | `UBIGINT` | 4194304 | The size in bytes from which a capture is split. Below it the index pass costs more than it saves |
 //! | `pcapsql_index_stride` | `UBIGINT` | 65536 | Frames between two places a capture can be split at. A capture has at most one partition per stride |
 //! | `pcapsql_filter_pushdown` | `BOOLEAN` | `true` | Let a scan take over the filters on `frame_number` and `timestamp` it can apply exactly (`engine::pushdown`). `false` leaves every filter to DuckDB, which then applies it to the rows of a full scan |
+//! | `pcapsql_keylog` | `VARCHAR` | empty | The path of a TLS key log (NSS key log format, `SSLKEYLOGFILE`) that a scan of a stream table decrypts TLS with when its `keylog` parameter is not given. Empty: none. It is how a scan that cannot be given the parameter gets one: a view over `read_tls_sessions`, a prepared statement |
 //!
 //! They are ordinary DuckDB settings (`SET`, `RESET`, `current_setting`, global or per session).
 //! The two numbers are there for tests and for experiments: with a stride of a few frames and a
@@ -26,6 +27,7 @@ pub const PARALLEL_SCAN: &str = "pcapsql_parallel_scan";
 pub const PARALLEL_MIN_FILE_SIZE: &str = "pcapsql_parallel_min_file_size";
 pub const INDEX_STRIDE: &str = "pcapsql_index_stride";
 pub const FILTER_PUSHDOWN: &str = "pcapsql_filter_pushdown";
+pub const KEYLOG: &str = "pcapsql_keylog";
 
 /// DuckDB's own setting: the number of threads a query may run on.
 const THREADS: &str = "threads";
@@ -74,6 +76,16 @@ impl ScanSettings {
 pub fn filter_pushdown(context: &Context) -> Result<bool> {
     let (value, _scope) = context.config()?.get_value(FILTER_PUSHDOWN)?;
     Ok(value.get::<bool>()?.unwrap_or(true))
+}
+
+/// `pcapsql_keylog`, as it is for the statement `context` belongs to: the path of the key log
+/// for the scans that are not given one, empty for none.
+///
+/// It is read when a scan is bound. The file is opened then too, not when the setting is set,
+/// so a path that cannot be read fails the queries that would use it.
+pub fn keylog(context: &Context) -> Result<String> {
+    let (value, _scope) = context.config()?.get_value(KEYLOG)?;
+    Ok(value.get::<String>()?.unwrap_or_default())
 }
 
 /// A setting that takes any value of its type but NULL.
@@ -156,5 +168,17 @@ pub(super) fn register(extension: &Extension) -> Result<()> {
         .default_value(default.value(extension)?)
         .register(extension)?;
     }
-    Ok(())
+
+    CustomOptionBuilder::new(
+        KEYLOG,
+        "The TLS key log (SSLKEYLOGFILE) the stream tables are decrypted with when a scan is \
+         given none",
+        String::logical_type(extension)?,
+        NotNull {
+            name: KEYLOG,
+            min: None,
+        },
+    )
+    .default_value("".value(extension)?)
+    .register(extension)
 }

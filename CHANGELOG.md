@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **DuckDB extension: the stream tables, and TLS decryption with a key
+  log.** `read_tcp_connections(files)`, `read_tls_sessions(files)`,
+  `read_http_messages(files)` and `read_http2(files)`, and the same tables
+  through `read_pcap(files, protocol := ...)`: the tables the shared scan
+  layer builds from the reassembled TCP streams of a capture, with the
+  columns of the DataFusion engine's tables of those names (times as
+  `TIMESTAMP_NS`). `pcap_protocols()` lists them with `kind = 'stream'` (32
+  tables now), and `pcap_schema()` describes them. A capture is read in
+  order as one partition, whatever its size and `pcapsql_parallel_scan`;
+  several files are read by several threads, and each file is a scan of its
+  own, so `connection_id` starts at 1 in each (`filename := true` tells them
+  apart). No filter is taken over by the scan: DuckDB applies them all. The
+  rows come when a capture has been read to its end, so a `LIMIT` does not
+  shorten the read and an interrupted query stops only once the file being
+  read has been read (the C API offers a scan no way to ask). A TLS key log
+  (NSS key log format, `SSLKEYLOGFILE`) decrypts the sessions it has secrets
+  of: `keylog := 'path'` on the four functions and on `read_pcap`, or the new
+  setting `pcapsql_keylog` for a call that names none (a view, a prepared
+  statement); the parameter wins and `keylog := ''` means none. The file is
+  opened through DuckDB's file system when the statement is bound; one that
+  cannot be opened or is not a key log is an error that names the file and
+  the line and repeats no label, random or secret. `read_pcap` accepts and
+  ignores `keylog` for a packet table or a view. Decryption is tested with
+  TLS 1.3 (`TLS_AES_128_GCM_SHA256`) carrying HTTP/2; TLS 1.2 is not. A
+  DuckDB secret type was not possible: the C API v2 has none.
 - **`pcapsql-testgen`: a capture of HTTP/2 over TLS 1.3 with its key log.**
   `pcapsql_testgen::tls` describes one connection (a TLS 1.3 handshake up to
   both `Finished` messages, one request and its response, a close) and holds
@@ -18,7 +43,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   decryption derives and fails if the result is not the committed file
   (`PCAPSQL_FIXTURE_UPDATE=1` writes it again). It is the first capture in
   the repository that the key log path decrypts end to end; the tests of
-  core and of the DataFusion engine (`e2e_tls_http2.rs`) read it.
+  core, of the DataFusion engine (`e2e_tls_http2.rs`) and of the DuckDB
+  extension read it.
 - **DuckDB extension: a test that reads captures over HTTP.**
   `make remote_test_release` (`scripts/remote-test.sh`) serves captures from
   a local HTTP server with Range support (`scripts/range-http-server.py`) and

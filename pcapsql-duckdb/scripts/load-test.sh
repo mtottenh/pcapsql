@@ -26,6 +26,8 @@ echo "load-test: $extension"
 # Captures: small real ones the repository has as seeds of the reader fuzzer, and two made from
 # one of them here: a gzip-compressed copy, and a copy cut off inside a record.
 captures=$(cd "$here/../../fuzz/corpus/fuzz_pcap_reader" && pwd)
+# The generated capture of HTTP/2 over TLS 1.3 and its key log (pcapsql_testgen::tls).
+fixtures=$(cd "$here/../../pcapsql-testgen/fixtures" && pwd)
 scratch=$(mktemp -d)
 trap 'rm -rf "$scratch"' EXIT
 gzip -c "$captures/dns.cap" > "$scratch/dns.cap.gz"
@@ -69,9 +71,17 @@ SELECT count(*), count(DISTINCT transport), max(src_port) FROM read_pcap('$scrat
 SELECT parse_filename(filename), count(*), min(ttl) FROM read_tcp_packets(['$captures/http.pcap', '$captures/v6-http.cap'], filename := true) GROUP BY ALL ORDER BY ALL;
 SELECT count(*), min(frame_number), max(frame_number) FROM read_dns_packets('$captures/dns.cap') WHERE frame_number > 4 AND frame_number < 10;
 SELECT (SELECT count(*) FROM read_ndp_packets('$captures/v6.pcap')), (SELECT count(*) FROM read_icmpv6('$captures/v6.pcap') WHERE type BETWEEN 133 AND 137);
+SELECT name, field_count FROM pcap_protocols() WHERE kind = 'stream' ORDER BY name;
+SELECT frame_number, connection_id, client_ip, server_port, state, typeof(start_time) FROM read_tcp_connections('$captures/v6-http.cap', strict := true);
+SELECT parse_filename(filename), frame_number, method, status_code FROM read_http_messages(['$captures/http-chunked-gzip.pcap', '$captures/v6-http.cap'], filename := true) WHERE frame_number > 4;
+SELECT sni, is_decrypted, (SELECT count(*) FROM read_pcap('$fixtures/tls13_http2.pcap', protocol := 'http2')) FROM read_tls_sessions('$fixtures/tls13_http2.pcap');
+SELECT sni, is_decrypted FROM read_tls_sessions('$fixtures/tls13_http2.pcap', keylog := '$fixtures/tls13_http2.keys');
+SELECT h.frame_number, h.frame_type, h.method, h.status, c.server_port FROM read_http2('$fixtures/tls13_http2.pcap', keylog := '$fixtures/tls13_http2.keys') h JOIN read_tcp_connections('$fixtures/tls13_http2.pcap') c USING (connection_id) WHERE h.stream_id = 1 ORDER BY h.frame_number;
+SET pcapsql_keylog = '$fixtures/tls13_http2.keys';
+SELECT count(*), (SELECT is_decrypted FROM read_tls_sessions('$fixtures/tls13_http2.pcap', keylog := '')) FROM read_http2('$fixtures/tls13_http2.pcap');
 "
 expected="pcapsql,true,$extension_version
-28
+32
 frames,6,frames
 timestamp,TIMESTAMP_NS,false
 src_mac,BLOB,true
@@ -116,7 +126,21 @@ ttl,UTINYINT,true
 http.pcap,1,128
 v6-http.cap,10,64
 5,5,9
-20,20"
+20,20
+http2,34
+http_messages,17
+tcp_connections,20
+tls_sessions,12
+46,1,2001:6f8:102d:0:2d0:9ff:fee3:e8de,80,last_ack,TIMESTAMP_NS
+http-chunked-gzip.pcap,24,NULL,200
+v6-http.cap,49,GET,NULL
+v6-http.cap,51,NULL,200
+example.test,false,0
+example.test,true
+10,HEADERS,GET,NULL,443
+11,HEADERS,NULL,200,443
+12,DATA,NULL,NULL,443
+8,false"
 
 actual=$("$duckdb" -unsigned -csv -noheader -c "$sql")
 if [ "$actual" != "$expected" ]; then
