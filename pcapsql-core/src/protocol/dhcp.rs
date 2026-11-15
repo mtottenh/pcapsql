@@ -3,10 +3,13 @@
 //! Parses DHCP (Dynamic Host Configuration Protocol) messages used for
 //! network configuration. Matches on UDP ports 67/68 and the DHCP magic cookie.
 
+use std::fmt::Write as _;
+
 use super::{
     Cond, Dispatch, DispatchRule, FieldSink, FieldValue, HintKey, Hints, ParseContext, Parsed,
     Protocol,
 };
+use crate::format::{mac_text, MAC_TEXT_LEN};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// DHCP server port.
@@ -130,8 +133,8 @@ impl Protocol for DhcpProtocol {
 
         // Client hardware address (16 bytes, but only first hlen are valid)
         let chaddr_len = (hlen as usize).min(16);
-        let chaddr = format_mac(&data[28..28 + chaddr_len]);
-        fields.push(("chaddr", fields.str(&chaddr)));
+        let chaddr = hardware_address(&data[28..28 + chaddr_len], fields);
+        fields.push(("chaddr", chaddr));
 
         // Skip server host name (64 bytes) and boot file name (128 bytes)
         // These are at offsets 44 and 108 respectively
@@ -186,13 +189,22 @@ fn format_ip(bytes: &[u8]) -> String {
     }
 }
 
-/// Format a MAC address from bytes.
-fn format_mac(bytes: &[u8]) -> String {
-    bytes
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<Vec<_>>()
-        .join(":")
+/// A client hardware address as text, in the packet's arena: its bytes in
+/// hex, colon-separated. Six bytes are a MAC address; `hlen` allows any
+/// number up to sixteen.
+fn hardware_address<'a>(bytes: &[u8], fields: &FieldSink<'_, 'a>) -> FieldValue<'a> {
+    if let Ok(mac) = <&[u8; 6]>::try_from(bytes) {
+        return fields.str(mac_text(mac, &mut [0; MAC_TEXT_LEN]));
+    }
+    let mut text = fields.text_builder();
+    for (index, byte) in bytes.iter().enumerate() {
+        if index > 0 {
+            text.push_str(":");
+        }
+        // Writing to an arena string does not fail.
+        let _ = write!(text, "{byte:02x}");
+    }
+    text.finish()
 }
 
 /// Parse DHCP options and add relevant fields.

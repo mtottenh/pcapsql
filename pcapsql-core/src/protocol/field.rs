@@ -8,6 +8,8 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
+use crate::format::{mac_text, MAC_TEXT_LEN};
+
 /// Possible field value types (maps to Arrow types).
 ///
 /// The lifetime parameter `'data` is that of the packet and of the arena
@@ -90,10 +92,7 @@ impl<'data> FieldValue<'data> {
 
     /// Format a MAC address as a string.
     pub fn format_mac(mac: &[u8; 6]) -> String {
-        format!(
-            "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
-        )
+        mac_text(mac, &mut [0; MAC_TEXT_LEN]).to_owned()
     }
 
     /// Check if this is a null value.
@@ -198,7 +197,7 @@ impl<'data> std::fmt::Display for FieldValue<'data> {
             FieldValue::Str(s) => write!(f, "{s}"),
             FieldValue::Bytes(b) => write!(f, "[{} bytes]", b.len()),
             FieldValue::IpAddr(addr) => write!(f, "{addr}"),
-            FieldValue::MacAddr(mac) => write!(f, "{}", Self::format_mac(mac)),
+            FieldValue::MacAddr(mac) => f.write_str(mac_text(mac, &mut [0; MAC_TEXT_LEN])),
             FieldValue::List(items) => {
                 write!(f, "[")?;
                 for (i, item) in items.iter().enumerate() {
