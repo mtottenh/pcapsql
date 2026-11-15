@@ -499,8 +499,8 @@ struct PartitionOutput {
 }
 
 /// One partition of a pass: the scan layer's resumable scan of the
-/// partition's reader, with the batch set as its observer (delivery, fused
-/// joins, the stream subscriber).
+/// partition's reader, with the batch set as its observer (delivery, the
+/// stream subscriber).
 type Scan<R> = PartitionScan<R, NormalizedBatchSet>;
 
 /// Packets per chunk of a partition's push loop: how often progress is
@@ -543,7 +543,6 @@ fn flush_partial<R: PacketReader>(
             pending.push((output, batch));
         }
     }
-    scan.observer_mut().take_fused_pending(&mut pending)?;
     for (output, batch) in pending {
         deliver(scan, output, batch);
     }

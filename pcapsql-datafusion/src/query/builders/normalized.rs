@@ -2,16 +2,14 @@
 //! terms.
 //!
 //! Reading the capture, parsing each packet and deciding which rows it adds
-//! to `frames` and the protocol tables is the scan layer's
+//! to `frames`, the protocol tables and the fused joins is the scan layer's
 //! (`pcapsql_core::scan::PartitionScan`), which writes those rows into one
-//! [`ArrowSink`] per table. [`NormalizedBatchSet`] owns the rest:
+//! [`ArrowSink`] per table or join. [`NormalizedBatchSet`] owns the rest:
 //!
 //! - where a table's completed batch goes (accumulated for the cache, or
 //!   sent to the plan through a bounded exchange), with the backpressure
 //!   rules that keep one producer feeding several tables from deadlocking;
-//! - the fused joins, which the scan layer does not build yet: their rows
-//!   come from [`FusedBatchBuilder`]s fed once per frame;
-//! - the stream subscriber (TCP reassembly, TLS, HTTP), fed the same way.
+//! - the stream subscriber (TCP reassembly, TLS, HTTP), fed once per frame.
 //!
 //! It is the scan's [`FrameObserver`]: the scan shows it every frame once,
 //! and the push loop (`providers::shared`) reaches it between steps to
@@ -19,7 +17,6 @@
 
 use std::collections::HashMap;
 
-use super::fused::FusedBatchBuilder;
 use super::sink::ArrowSink;
 use crate::error::Error;
 use arrow::record_batch::RecordBatch;
@@ -54,42 +51,24 @@ impl BatchSink {
     }
 }
 
-/// The rows of a fused join, which are not routed by the scan layer yet:
-/// its builder, row cap and row count.
-struct FusedRows {
-    builder: FusedBatchBuilder,
-    fetch: Option<usize>,
-    rows_added: usize,
-}
-
-impl FusedRows {
-    fn capped(&self) -> bool {
-        self.fetch.is_some_and(|f| self.rows_added >= f)
-    }
-}
-
-/// Per-table delivery state within one parse pass.
+/// Per-table delivery state within one parse pass. A table's rows are in
+/// its [`ArrowSink`], and its row cap and count with the scan.
 struct TableSlot {
     name: String,
     sink: BatchSink,
     /// The streaming consumer dropped its receiver; nothing more is wanted.
     consumer_gone: bool,
-    /// `Some` for a fused join. A protocol table's rows are in its
-    /// [`ArrowSink`], and its row cap and count with the scan.
-    fused: Option<FusedRows>,
 }
 
 /// Delivers the batches of one partition of a parse pass, and builds what
-/// the scan layer does not: fused joins and stream tables. See the
-/// [module](self) documentation.
+/// the scan layer does not: the stream tables. See the [module](self)
+/// documentation.
 ///
 /// `slots[i]` is output `i` of the compiled plan ([`OutputId`]): the
 /// protocol tables, then the fused joins.
 pub struct NormalizedBatchSet {
     /// Every subscribed table, in the order of the compiled plan's outputs.
     slots: Vec<TableSlot>,
-    /// Indices of the slots that are fused joins (in name order).
-    fused: Vec<usize>,
     /// Streaming only: wakes the producer when a consumer takes a batch.
     pacer: Option<Arc<Pacer>>,
     /// Builds the stream tables of a pass that has any.
@@ -99,7 +78,7 @@ pub struct NormalizedBatchSet {
 impl NormalizedBatchSet {
     /// Delivery for exactly the subscribed tables (materialize mode:
     /// completed batches accumulate in memory), and the [`ArrowSink`]s the
-    /// scan writes the protocol tables' rows to: `sinks[i]` is output `i`.
+    /// scan writes the rows to: `sinks[i]` is output `i`.
     pub fn new(batch_size: usize, subscription: &CompiledSubscription) -> (Self, Vec<ArrowSink>) {
         Self::build(batch_size, subscription, |_| {
             BatchSink::Accumulate(Vec::new())
@@ -140,52 +119,28 @@ impl NormalizedBatchSet {
     ) -> (Self, Vec<ArrowSink>) {
         let mut slots = Vec::new();
         let mut sinks = Vec::new();
-        let mut fused = Vec::new();
-        // The protocol tables, then the fused joins. A protocol table's
-        // predicate and row cap are the scan's, from the compiled plan.
+        // The protocol tables, then the fused joins. Predicates and row
+        // caps are the scan's, from the compiled plan. A fused join's
+        // batches carry its spec's schema (the flattened column names);
+        // the cells are the plan's columns either way.
         for (output, plan) in subscription.outputs() {
-            let fused_rows = match &output.spec {
-                Some(spec) => {
-                    fused.push(slots.len());
-                    Some(FusedRows {
-                        builder: FusedBatchBuilder::new(Arc::clone(spec), batch_size),
-                        fetch: plan
-                            .fetch()
-                            .map(|rows| usize::try_from(rows).unwrap_or(usize::MAX)),
-                        rows_added: 0,
-                    })
-                }
-                None => {
-                    debug_assert_eq!(sinks.len(), slots.len(), "tables precede fused joins");
-                    sinks.push(ArrowSink::with_schema(
-                        Arc::clone(&output.schema),
-                        &plan.columns,
-                        batch_size,
-                    ));
-                    None
-                }
-            };
+            sinks.push(ArrowSink::with_schema(
+                Arc::clone(&output.schema),
+                &plan.columns,
+                batch_size,
+            ));
             slots.push(TableSlot {
                 name: output.name.clone(),
                 sink: sink_for(&output.name),
                 consumer_gone: false,
-                fused: fused_rows,
             });
         }
         let set = Self {
             slots,
-            fused,
             pacer: None,
             subscriber: None,
         };
         (set, sinks)
-    }
-
-    /// Nothing further the fused join at `index` produces can be observed:
-    /// it reached its row cap, or its consumer is gone.
-    fn fused_done(&self, index: usize) -> bool {
-        let slot = &self.slots[index];
-        slot.consumer_gone || slot.fused.as_ref().is_some_and(FusedRows::capped)
     }
 
     /// Streaming: the producer may proceed with a batch for `name` when that
@@ -215,8 +170,7 @@ impl NormalizedBatchSet {
     /// stalling the pass.
     ///
     /// Returns `true` when the table's consumer is gone: nothing more is
-    /// wanted for it (the caller closes a protocol table's output in the
-    /// scan).
+    /// wanted for it (the caller closes the output in the scan).
     pub fn deliver(&mut self, output: OutputId, batch: RecordBatch) -> bool {
         let index = usize::from(output.0);
         if let Some(pacer) = &self.pacer {
@@ -232,74 +186,14 @@ impl NormalizedBatchSet {
         slot.consumer_gone
     }
 
-    /// The frame's rows in every fused join, from its parsed layers.
-    fn feed_fused(
-        &mut self,
-        packet: &PacketRef<'_>,
-        parsed: &[(&'static str, ParseResult<'_>)],
-    ) -> Result<(), Error> {
-        for i in 0..self.fused.len() {
-            let index = self.fused[i];
-            if self.fused_done(index) {
-                continue;
-            }
-            let Some(rows) = &mut self.slots[index].fused else {
-                continue;
-            };
-            let added = rows.builder.add_packet(packet, parsed);
-            if added == 0 {
-                continue;
-            }
-            rows.rows_added += added;
-            // A full batch goes out; so does a partial one the moment the
-            // row cap is reached, since nothing will be added to it (a
-            // LIMIT on a live pipe would otherwise wait for input that is
-            // not wanted).
-            let batch = if rows.capped() {
-                rows.builder.finish()?
-            } else {
-                rows.builder.try_build()?
-            };
-            if let Some(batch) = batch {
-                self.deliver(OutputId(index as u16), batch);
-            }
-        }
-        Ok(())
-    }
-
-    /// The partially filled batch of every fused join that is not done,
-    /// appended to `pending` (a continuous engine's time-based flush),
-    /// leaving the builders empty.
-    pub fn take_fused_pending(
-        &mut self,
-        pending: &mut Vec<(OutputId, RecordBatch)>,
-    ) -> Result<(), Error> {
-        for i in 0..self.fused.len() {
-            let index = self.fused[i];
-            if self.fused_done(index) {
-                continue;
-            }
-            let Some(rows) = &mut self.slots[index].fused else {
-                continue;
-            };
-            if let Some(batch) = rows.builder.finish()? {
-                pending.push((OutputId(index as u16), batch));
-            }
-        }
-        Ok(())
-    }
-
-    /// Rows added to each table so far (pending and built): a protocol
-    /// table's from the scan's statistics, a fused join's from its builder.
+    /// Rows added to each table so far (pending and built), from the
+    /// scan's statistics.
     pub fn rows_built(&self, stats: &ScanStats) -> HashMap<String, usize> {
         self.slots
             .iter()
             .enumerate()
             .map(|(index, slot)| {
-                let rows = match &slot.fused {
-                    Some(rows) => rows.rows_added,
-                    None => usize::try_from(stats.rows[index]).unwrap_or(usize::MAX),
-                };
+                let rows = usize::try_from(stats.rows[index]).unwrap_or(usize::MAX);
                 (slot.name.clone(), rows)
             })
             .collect()
@@ -310,11 +204,10 @@ impl NormalizedBatchSet {
         self.subscriber.take()
     }
 
-    /// Finish the partition. Takes each table's final partial batch (a
-    /// protocol table's out of `sinks`, the ones [`new`](Self::new)
-    /// returned) and returns the accumulated batches per table (empty for
-    /// tables in streaming mode — those went to their exchanges, which are
-    /// closed here).
+    /// Finish the partition. Takes each table's final partial batch out of
+    /// `sinks` (the ones [`new`](Self::new) returned) and returns the
+    /// accumulated batches per table (empty for tables in streaming mode —
+    /// those went to their exchanges, which are closed here).
     pub fn finish(self, sinks: Vec<ArrowSink>) -> Result<HashMap<String, Vec<RecordBatch>>, Error> {
         let (batches, _) = self.finish_inner(sinks)?;
         Ok(batches)
@@ -345,11 +238,7 @@ impl NormalizedBatchSet {
         let mut out = HashMap::with_capacity(self.slots.len());
         let mut overflowed = HashMap::new();
         for (index, mut slot) in self.slots.into_iter().enumerate() {
-            let last = match &mut slot.fused {
-                Some(rows) => rows.builder.finish()?,
-                None => sinks[index].take_batch()?,
-            };
-            if let Some(batch) = last {
+            if let Some(batch) = sinks[index].take_batch()? {
                 slot.sink.emit(batch);
             }
             let batches = match slot.sink {
@@ -366,10 +255,8 @@ impl NormalizedBatchSet {
 }
 
 impl FrameObserver for NormalizedBatchSet {
-    /// Feed the stream subscriber and the fused joins. Called by the scan
-    /// once per frame, before the frame's rows are routed to the protocol
-    /// tables. A fused join's completed batch is delivered from here, which
-    /// may wait for its consumer.
+    /// Feed the stream subscriber. Called by the scan once per frame,
+    /// before the frame's rows are routed.
     #[inline]
     fn observe(
         &mut self,
@@ -379,19 +266,13 @@ impl FrameObserver for NormalizedBatchSet {
         if let Some(subscriber) = self.subscriber.as_mut() {
             subscriber.observe(packet, layers)?;
         }
-        if !self.fused.is_empty() {
-            self.feed_fused(packet, layers)?;
-        }
         Ok(())
     }
 
-    /// The scan may stop once the protocol tables are done unless a fused
-    /// join can still take rows or stream tables are being built (they are
-    /// complete only at end of capture). A pass that delivers no table at
-    /// all reads the whole capture.
+    /// The scan may stop once its outputs are done unless stream tables are
+    /// being built (they are complete only at end of capture). A pass that
+    /// delivers no table at all reads the whole capture.
     fn wants_frames(&self) -> bool {
-        self.subscriber.is_some()
-            || self.slots.is_empty()
-            || self.fused.iter().any(|&index| !self.fused_done(index))
+        self.subscriber.is_some() || self.slots.is_empty()
     }
 }
