@@ -5,8 +5,9 @@
 //! - Detect which columns represent network addresses based on type and name
 
 use std::fmt;
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::Ipv6Addr;
 
+use super::hex::HEX_DIGITS;
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// The kind of network address a column represents.
@@ -31,8 +32,58 @@ pub enum AddressKind {
 /// assert_eq!(format_ipv4(0x0A000001), "10.0.0.1");
 /// ```
 pub fn format_ipv4(value: u32) -> String {
-    let bytes = value.to_be_bytes();
-    Ipv4Addr::from(bytes).to_string()
+    ipv4_text(value, &mut [0; IPV4_TEXT_LEN]).to_owned()
+}
+
+/// The length of the longest dotted-decimal IPv4 address.
+pub(crate) const IPV4_TEXT_LEN: usize = 15;
+
+/// The length of a colon-separated MAC address.
+pub(crate) const MAC_TEXT_LEN: usize = 17;
+
+/// `value` in dotted-decimal notation, written to `buf`: what
+/// `Ipv4Addr`'s `Display` gives, without going through `fmt`.
+#[inline]
+pub(crate) fn ipv4_text(value: u32, buf: &mut [u8; IPV4_TEXT_LEN]) -> &str {
+    let mut len = 0;
+    for (i, octet) in value.to_be_bytes().into_iter().enumerate() {
+        if i > 0 {
+            buf[len] = b'.';
+            len += 1;
+        }
+        if octet >= 100 {
+            buf[len] = b'0' + octet / 100;
+            len += 1;
+        }
+        if octet >= 10 {
+            buf[len] = b'0' + octet / 10 % 10;
+            len += 1;
+        }
+        buf[len] = b'0' + octet % 10;
+        len += 1;
+    }
+    ascii(&buf[..len])
+}
+
+/// `bytes` as six colon-separated pairs of lowercase hex digits, written to
+/// `buf`. Every place that formats a MAC address goes through here.
+#[inline]
+pub(crate) fn mac_text<'b>(bytes: &[u8; 6], buf: &'b mut [u8; MAC_TEXT_LEN]) -> &'b str {
+    *buf = *b"00:00:00:00:00:00";
+    for (pair, &byte) in buf.chunks_mut(3).zip(bytes) {
+        pair[0] = HEX_DIGITS[usize::from(byte >> 4)];
+        pair[1] = HEX_DIGITS[usize::from(byte & 0x0f)];
+    }
+    ascii(buf)
+}
+
+/// Text made of ASCII digits and punctuation only, as a `&str`.
+#[inline]
+fn ascii(text: &[u8]) -> &str {
+    debug_assert!(text.is_ascii());
+    // The callers write nothing but ASCII, so the check cannot fail; it is
+    // what there is instead of `unsafe`.
+    std::str::from_utf8(text).unwrap_or_default()
 }
 
 /// Format 16 bytes as an IPv6 address string.
@@ -68,19 +119,14 @@ pub fn format_ipv6(bytes: &[u8]) -> Option<String> {
 /// assert_eq!(format_mac(&bytes), Some("aa:bb:cc:dd:ee:ff".to_string()));
 /// ```
 pub fn format_mac(bytes: &[u8]) -> Option<String> {
-    if bytes.len() != 6 {
-        return None;
-    }
-    Some(format!(
-        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5]
-    ))
+    let bytes: &[u8; 6] = bytes.try_into().ok()?;
+    Some(mac_text(bytes, &mut [0; MAC_TEXT_LEN]).to_owned())
 }
 
 /// Write a `u32` as a dotted-decimal IPv4 address: [`format_ipv4`] without
-/// the `String`.
+/// the `String`. The sink gets the address in one `write_str`.
 pub fn write_ipv4(value: u32, out: &mut impl fmt::Write) -> fmt::Result {
-    write!(out, "{}", Ipv4Addr::from(value))
+    out.write_str(ipv4_text(value, &mut [0; IPV4_TEXT_LEN]))
 }
 
 /// Write 16 bytes as an IPv6 address in RFC 5952 form: [`format_ipv6`]
@@ -90,13 +136,9 @@ pub fn write_ipv6(bytes: &[u8; 16], out: &mut impl fmt::Write) -> fmt::Result {
 }
 
 /// Write 6 bytes as a colon-separated lowercase MAC address: [`format_mac`]
-/// without the `String`.
+/// without the `String`. The sink gets the address in one `write_str`.
 pub fn write_mac(bytes: &[u8; 6], out: &mut impl fmt::Write) -> fmt::Result {
-    write!(
-        out,
-        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5]
-    )
+    out.write_str(mac_text(bytes, &mut [0; MAC_TEXT_LEN]))
 }
 
 /// Detect if a column represents a network address based on its type and name.
@@ -438,6 +480,131 @@ mod tests {
             let mut s = String::new();
             write_mac(&bytes, &mut s).unwrap();
             assert_eq!(Some(s), format_mac(&bytes));
+        }
+    }
+
+    // ========== the hand-written kernels against std's formatting ==========
+
+    /// A sink that records each `write_str` it gets.
+    #[derive(Default)]
+    struct Pieces(Vec<String>);
+
+    impl fmt::Write for Pieces {
+        fn write_str(&mut self, s: &str) -> fmt::Result {
+            self.0.push(s.to_owned());
+            Ok(())
+        }
+    }
+
+    /// What `write_ipv4` and `format_ipv4` did before they were written by
+    /// hand: std's `Display` of the address.
+    fn std_ipv4(value: u32) -> String {
+        std::net::Ipv4Addr::from(value).to_string()
+    }
+
+    /// What `write_mac`, `format_mac` and the row writer's string form did
+    /// before: `{:02x}` pairs joined by colons.
+    fn std_mac(b: &[u8; 6]) -> String {
+        format!(
+            "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            b[0], b[1], b[2], b[3], b[4], b[5]
+        )
+    }
+
+    fn check_ipv4(value: u32) {
+        let expected = std_ipv4(value);
+        let mut buf = [0xffu8; IPV4_TEXT_LEN];
+        assert_eq!(ipv4_text(value, &mut buf), expected, "{value:#010x}");
+    }
+
+    fn check_mac(bytes: [u8; 6]) {
+        let expected = std_mac(&bytes);
+        let mut buf = [0xffu8; MAC_TEXT_LEN];
+        assert_eq!(mac_text(&bytes, &mut buf), expected, "{bytes:02x?}");
+    }
+
+    /// Every value of every pair of adjacent octets (the pairs overlap, so
+    /// each octet is seen in each position with every neighbour), the other
+    /// two octets taking a short, a medium and a long value.
+    #[test]
+    fn ipv4_text_is_std_display_for_every_octet_pair() {
+        for shift in [0, 8, 16] {
+            for fill in [0u32, 0x0909_0909, 0x6363_6363, 0xffff_ffff] {
+                for pair in 0..=u32::from(u16::MAX) {
+                    let mask = 0xffffu32 << shift;
+                    check_ipv4((fill & !mask) | (pair << shift));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mac_text_is_the_02x_form_for_every_octet_pair() {
+        for position in 0..5 {
+            for fill in [0x00u8, 0x0a, 0xa0, 0xff] {
+                for pair in 0..=u16::MAX {
+                    let mut bytes = [fill; 6];
+                    bytes[position..position + 2].copy_from_slice(&pair.to_be_bytes());
+                    check_mac(bytes);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn public_forms_agree_with_std_and_write_once() {
+        let v4 = [
+            0u32,
+            1,
+            9,
+            10,
+            99,
+            100,
+            255,
+            0x0A00_0001,
+            0xC0A8_0101,
+            u32::MAX,
+        ];
+        for value in v4 {
+            let expected = std_ipv4(value);
+            assert_eq!(format_ipv4(value), expected);
+            let mut pieces = Pieces::default();
+            write_ipv4(value, &mut pieces).unwrap();
+            assert_eq!(pieces.0, [expected]);
+        }
+        for bytes in [[0u8; 6], [0xff; 6], [0x01, 0x23, 0x45, 0x67, 0x89, 0xab]] {
+            let expected = std_mac(&bytes);
+            assert_eq!(format_mac(&bytes), Some(expected.clone()));
+            let mut pieces = Pieces::default();
+            write_mac(&bytes, &mut pieces).unwrap();
+            assert_eq!(pieces.0, [expected]);
+        }
+    }
+
+    mod sampled {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(20_000))]
+
+            #[test]
+            fn ipv4_text_is_std_display(value in any::<u32>()) {
+                check_ipv4(value);
+                prop_assert_eq!(format_ipv4(value), std_ipv4(value));
+                let mut written = String::new();
+                write_ipv4(value, &mut written).unwrap();
+                prop_assert_eq!(written, std_ipv4(value));
+            }
+
+            #[test]
+            fn mac_text_is_the_02x_form(bytes in any::<[u8; 6]>()) {
+                check_mac(bytes);
+                prop_assert_eq!(format_mac(&bytes), Some(std_mac(&bytes)));
+                let mut written = String::new();
+                write_mac(&bytes, &mut written).unwrap();
+                prop_assert_eq!(written, std_mac(&bytes));
+            }
         }
     }
 }
