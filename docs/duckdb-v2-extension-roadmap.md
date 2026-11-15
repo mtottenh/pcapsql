@@ -373,11 +373,10 @@ Done:
 
 Remaining, in the order intended:
 
-1. Scan-layer polish in core and the DuckDB engine clean-up: `thiserror`
-   on the plan errors, the observer's own error type, the frame-predicate
-   algebra in core, table descriptions in the catalogue, `scan::testing`
-   behind a feature, a plan the driver cannot run refused, `engine/table.rs`
-   split, type tests by id.
+1. Done: the scan-layer polish in core and the DuckDB engine clean-up
+   (`thiserror` plan errors, the frame-predicate algebra in core, table
+   descriptions in the catalogue, `scan::testing` behind a feature,
+   `engine/table/` split).
 2. Done: the DataFusion scan path, in the table above.
 3. Typed columns in the Arrow sink (fixed-width columns as vectors with a
    lazily built validity bitmap).
@@ -387,15 +386,16 @@ Remaining, in the order intended:
    UDFs as wrappers, `COPY ... TO 'x.pcap'`.
 6. The S3 half of the P5 remote test, once the HTTP half has run.
 
-Open decisions for the maintainer:
+Decisions taken:
 
-- A constant-pattern match over a chunk with NULLs falls back to the
-  per-row loop; covering it needs a second kind of `unsafe` (slices over
-  all-valid words).
-- The CLI's entry points became public items of the `pcapsql-datafusion`
-  library (`cli::run_repl` and others) when `main.rs` was split.
+- A constant-pattern match over a chunk with NULLs is a SIMD compare over
+  the rows that are not NULL (done, in the table above).
+- The CLI's entry points stay public items of the `pcapsql-datafusion`
+  library (`cli::run_repl` and others).
 - A strict partitioned scan checks the capture's tail up front, so `strict`
-  with `LIMIT` differs between a split and an unsplit scan.
+  with `LIMIT` differs between a split and an unsplit scan. Kept, and
+  documented.
+- WebAssembly builds are deferred.
 
 Needs the repository's owner: a first run of the workflows on GitHub (none
 has run), and the submission of the community descriptor.
