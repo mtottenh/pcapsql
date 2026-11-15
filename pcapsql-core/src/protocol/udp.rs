@@ -1,12 +1,10 @@
 //! UDP protocol parser.
 
-use smallvec::SmallVec;
-
 use etherparse::UdpHeaderSlice;
 
 use super::{
-    Cond, Dispatch, DispatchRule, FieldSet, FieldValue, HintKey, Hints, ParseContext, ParseResult,
-    Protocol,
+    Cond, Dispatch, DispatchRule, FieldSet, FieldSink, FieldValue, HintKey, Hints, ParseContext,
+    Parsed, Protocol,
 };
 use crate::schema::{DataKind, FieldDescriptor};
 
@@ -45,11 +43,14 @@ impl Protocol for UdpProtocol {
         }
     }
 
-    fn parse<'a>(&self, data: &'a [u8], _context: &ParseContext) -> ParseResult<'a> {
+    fn parse_into<'a>(
+        &self,
+        data: &'a [u8],
+        _context: &ParseContext,
+        fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
         match UdpHeaderSlice::from_slice(data) {
             Ok(udp) => {
-                let mut fields = SmallVec::new();
-
                 fields.push(("src_port", FieldValue::UInt16(udp.source_port())));
                 fields.push(("dst_port", FieldValue::UInt16(udp.destination_port())));
                 fields.push(("length", FieldValue::UInt16(udp.length())));
@@ -61,9 +62,9 @@ impl Protocol for UdpProtocol {
                 child_hints.insert(HintKey::Transport, 17); // UDP
 
                 // UDP header is always 8 bytes
-                ParseResult::success(fields, &data[8..], child_hints)
+                Parsed::ok(&data[8..], child_hints)
             }
-            Err(e) => ParseResult::error(format!("UDP parse error: {e}"), data),
+            Err(e) => Parsed::error(fields.text_fmt(format_args!("UDP parse error: {e}")), data),
         }
     }
 
@@ -84,34 +85,22 @@ impl Protocol for UdpProtocol {
         &["ipv4", "ipv6"]
     }
 
-    // MIGRATION: until this parser writes to the sink itself.
     fn parse_projected_into<'a>(
-        &self,
-        data: &'a [u8],
-        context: &ParseContext,
-        projection: Option<&FieldSet>,
-        fields: &mut super::layers::FieldSink<'_, 'a>,
-    ) -> super::Parsed<'a> {
-        super::layers::adapt(self.parse_projected(data, context, projection), fields)
-    }
-
-    fn parse_projected<'a>(
         &self,
         data: &'a [u8],
         _context: &ParseContext,
         fields: Option<&FieldSet>,
-    ) -> ParseResult<'a> {
+        result_fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
         // If no projection, use full parse
         let fields = match fields {
-            None => return self.parse(data, _context),
-            Some(f) if f.is_empty() => return self.parse(data, _context),
+            None => return self.parse_into(data, _context, result_fields),
+            Some(f) if f.is_empty() => return self.parse_into(data, _context, result_fields),
             Some(f) => f,
         };
 
         match UdpHeaderSlice::from_slice(data) {
             Ok(udp) => {
-                let mut result_fields = SmallVec::new();
-
                 // Always extract ports for child hints
                 let src_port = udp.source_port();
                 let dst_port = udp.destination_port();
@@ -136,9 +125,12 @@ impl Protocol for UdpProtocol {
                 child_hints.insert(HintKey::Transport, 17); // UDP
 
                 // UDP header is always 8 bytes
-                ParseResult::success(result_fields, &data[8..], child_hints)
+                Parsed::ok(&data[8..], child_hints)
             }
-            Err(e) => ParseResult::error(format!("UDP parse error: {e}"), data),
+            Err(e) => Parsed::error(
+                result_fields.text_fmt(format_args!("UDP parse error: {e}")),
+                data,
+            ),
         }
     }
 
