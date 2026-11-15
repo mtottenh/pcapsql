@@ -45,8 +45,8 @@ make test_release       # test/sql against the artifact, in DuckDB's Python pack
 make load_test_release  # LOAD the artifact in the DuckDB command-line shell
 make check_reference_release  # the function reference lists what the artifact registers
 make itest              # in-process tests against libduckdb
-make check              # duckdb_neo containment; no std::fs in the extension; the DuckDB pins agree;
-                        # fmt and clippy for itest/
+make check              # duckdb_neo containment; no std::fs in the extension; unsafe code only in
+                        # its two audited places; the DuckDB pins agree; fmt and clippy for itest/
 make canary             # build against the newest duckdb-neo on crates.io (CANARY=main: duckdb-rs main)
 ```
 
@@ -534,7 +534,12 @@ nobody wrote are NULL. One vector of a chunk can be a constant the scan layer
 does not write: the `filename` column, which `finish` fills with the path of
 the one file the rows of the chunk are from. It is the one module with
 `unsafe` code, and its header states the invariants that make the pointer
-writes sound.
+writes sound. The crate has one other `unsafe` call, in `engine::scalar`:
+`values_without_nulls` borrows the values of a flat vector without NULLs as a
+slice, so that `ip_in_cidr` and `has_tcp_flag` with a literal pattern compile
+to a SIMD compare, and its comment says what `duckdb-neo` requires for that
+and how it is met. `make check_unsafe` fails if `unsafe` is allowed anywhere
+else.
 
 `DuckFile` reads 1 MiB at a time from a local file and 4 MiB from a remote
 one, never more than the file holds. `DuckFile::open` starts at the first

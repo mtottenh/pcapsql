@@ -16,6 +16,10 @@
 //! Inputs are read through `duckdb-neo`'s vector reader, which maps rows through the vector's
 //! selection, so flat, constant and dictionary inputs all work. NULL in gives NULL out, and so
 //! does a value the kernel rejects: no function raises an error for its input.
+//!
+//! One function here has an `unsafe` call, the second of the two places in the crate that do
+//! (`scripts/check-unsafe.sh`): [`values_without_nulls`] borrows the values of a flat vector
+//! without NULLs as a slice, and says why it may.
 
 use std::borrow::{Borrow, Cow};
 use std::marker::PhantomData;
@@ -484,6 +488,54 @@ where
     }
 }
 
+/// The values of a flat vector that has no NULL row, as a slice: row `r` is `values[r]`. `None`
+/// for a vector with a NULL row and for one that is not flat (its rows are behind the selection
+/// of a dictionary or constant vector), whose values the caller reads through the reader.
+///
+/// This is the one `unsafe` call of the crate outside `engine::writer`. Nothing is required of
+/// the caller: the function checks what the call needs.
+fn values_without_nulls<'vector, I>(reader: &VectorReader<'vector, I>) -> Option<&'vector [I]>
+where
+    I: PlainNative + NativeElement<Native<'vector> = I>,
+{
+    let rows = reader.len();
+    // Flat: the slots of the vector are its rows, in order, and there are `rows` of them.
+    if !matches!(reader.selection(), Selection::Identity) {
+        return None;
+    }
+    // No NULL: bit `r % 64` of word `r / 64` of the mask is set for every row `r`. The bits after
+    // the last row say nothing. A vector without a mask has no NULL.
+    if let Some(validity) = reader.validity() {
+        let (words, tail) = (rows / 64, rows % 64);
+        if validity.get(..words)?.iter().any(|word| *word != u64::MAX) {
+            return None;
+        }
+        if tail != 0 && !validity.get(words)? & ((1u64 << tail) - 1) != 0 {
+            return None;
+        }
+    }
+    // SAFETY: `VectorReader::as_slice` returns the vector's physical slots as `&[I::Native]`,
+    // for the lifetime of the borrow of the vector the reader holds, and requires one thing:
+    // that every slot it exposes, including that of a NULL row and one no row selects, is
+    // initialised as `I::Native`. DuckDB does not promise that for the slot of a NULL row (an
+    // operator need not write it, and the buffer is not zeroed), so:
+    //
+    // - the vector is flat (checked above), so the slots exposed are exactly rows `0..rows`:
+    //   there is no slot that a selection leaves out;
+    // - no row is NULL (checked above), and DuckDB reads the slot of a non-NULL row as a value
+    //   of the vector's type wherever it evaluates one, so every operator writes it: all of
+    //   `0..rows` are initialised;
+    // - the vector's logical type was checked to be the one stored as `I` when `duckdb-neo`
+    //   attached the type to it (`Vector::cast`), `I::Native` is `I` (the bound above), and
+    //   every bit pattern of a slot is a value of a `PlainNative` type.
+    //
+    // The reader borrows the vector, so nothing resizes or writes it while the slice lives.
+    #[allow(unsafe_code)]
+    let values = unsafe { reader.as_slice() }?;
+    // Flat storage has one slot per row.
+    (values.len() == rows).then_some(values)
+}
+
 /// The rows of a chunk a [`MatchPlain`] has room to answer at once: DuckDB's vector size
 /// (`STANDARD_VECTOR_SIZE`), which no chunk exceeds.
 const BLOCK: usize = 2048;
@@ -498,10 +550,12 @@ const BLOCK: usize = 2048;
 /// validity mask, which costs nothing for an input without NULLs. A NULL value is not tested:
 /// its answer is `false` until then.
 ///
-/// The loop reads the input through the vector reader, a row at a time: `duckdb-neo` has no
-/// safe view of a vector's values as a slice (`VectorReader::as_slice` is `unsafe`, because the
-/// slots of NULL rows need not be initialised), so the compiler does not turn it into a SIMD
-/// compare.
+/// The loop that computes the answers reads the values as a slice ([`values_without_nulls`]) and
+/// does nothing but test them, so the compiler turns it into a SIMD compare. `duckdb-neo` lends
+/// that slice only on the promise that every slot of the vector holds a value, which is not so
+/// for the slot of a NULL row: a chunk with a NULL value, and one whose values are behind a
+/// selection (a dictionary or constant vector), is read through the vector reader instead, a row
+/// at a time.
 struct MatchPlain<I, P, Parse, Test> {
     parse: Parse,
     test: Test,
@@ -525,7 +579,10 @@ where
 
 impl<I, P, Parse, Test> ScalarCallbacks for MatchPlain<I, P, Parse, Test>
 where
-    I: PlainNative + for<'a> ReadableNativeElement<Ref<'a> = &'a I> + 'static,
+    I: PlainNative
+        + for<'a> ReadableNativeElement<Ref<'a> = &'a I>
+        + for<'a> NativeElement<Native<'a> = I>
+        + 'static,
     P: 'static,
     Parse: Fn(&str) -> Option<P> + Send + Sync + 'static,
     Test: Fn(I, &P) -> bool + Send + Sync + 'static,
@@ -576,6 +633,13 @@ where
             }
             return Ok(());
         };
+        if let Some(values) = values_without_nulls(&values) {
+            // Nothing but the test, over two slices: a SIMD compare. No row is NULL.
+            for (answer, value) in answers.iter_mut().zip(values) {
+                *answer = (self.test)(*value, &pattern);
+            }
+            return writer.write_slice(0, answers);
+        }
         for (answer, value) in answers.iter_mut().zip(values.iter()) {
             *answer = value.is_some_and(|value| (self.test)(*value, &pattern));
         }

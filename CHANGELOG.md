@@ -528,6 +528,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of called through function pointers. Over 20M rows on one thread:
   `ip_in_cidr` filter 4.8 → 3.6 ns/row (native expression: 2.6),
   `has_tcp_flag` 7.0 → 5.8, `tcp_flags_str` 45 → 23.
+- **DuckDB extension: `ip_in_cidr` and `has_tcp_flag` with a literal pattern
+  are a SIMD compare** over a chunk without NULLs: 15 → 7 instructions per
+  row in the function; the whole filter query over 20M rows on one thread
+  3.5 → 3.1 ns/row and 5.1 → 4.6 (native expressions: 2.3 and 3.9). The
+  crate's second audited `unsafe` call; `make check_unsafe` pins the two.
 
 ### Fixed
 
