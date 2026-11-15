@@ -438,6 +438,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ecn::to_name` of `pcapsql_core::protocol` are gone: `dscp_name` and
   `ecn_name` hold those tables. The TLS parser no longer builds a `String`
   per item of its list columns, nor the QUIC parser one for the version.
+- **The stream tables are built by the shared scan layer.**
+  `tcp_connections`, `tls_sessions`, `http_messages` and `http2` are now
+  outputs of a `pcapsql_core::scan` plan like `frames`, the protocol tables
+  and the fused joins, written through `RowSink` by engine-neutral code
+  (`scan/stream.rs`), so that a frontend without DataFusion can produce
+  them. Their rows, columns, types and order are unchanged. An empty stream
+  table is now served as no record batch, where it was one batch of zero
+  rows.
+  - `pcapsql-core` (`scan`, unstable): `ScanPlan::compile` accepts
+    `streams`, and `CompiledScan::outputs()` is the tables, the fused
+    joins, then the stream tables. `PartitionScan::step` reassembles the TCP
+    streams while it reads the partition and, when the reader has no more
+    packets, writes the stream tables' rows to their sinks (`Step::Flush`
+    for each full sink, then `Step::End`); row caps and `close_output`
+    apply to them. `PartitionScan::with_keylog` gives it the keys to
+    decrypt TLS with. A scan can take any columns of a stream table, in any
+    order. Gone: `ScanPlan::compile_with_streams`,
+    `CompiledScan::stream_outputs`, `PlanError::StreamsNotBuilt`
+    (`StreamNotBuilt` is a stream table of a catalogue that stream analysis
+    does not build), and `FrameObserver` with `NoObserver`: `PartitionScan`
+    has one type parameter, `step` fails with `pcapsql_core::Error`, and
+    `finish` returns the statistics and the reader. `Router::all_done`
+    counts every output of the plan.
+  - `pcapsql-datafusion`: `query::stream_tables` (`StreamSubscriber` and
+    its four Arrow batch builders) is deleted. `query/providers/shared.rs`
+    is split into `subscription`, `pass`, `delivery`, `materialized`,
+    `streamed` and `stats`; the items keep their paths in
+    `query::providers`. The four pass functions take the subscription and a
+    `PassOptions` (batch size, partitions, progress, key log, flush
+    interval) in place of five loose parameters:
+    `run_shared_parse(source, registry, subscription, &options)`.
+    `NormalizedBatchSet` is `providers::BatchDelivery`
+    (`accumulating`, `streaming`, `deliver`, `finish`), no longer the scan's
+    observer and no longer re-exported from `query`. Within a pass a table
+    is its `scan::OutputId`: `StreamingHandle::tables` is a vector of
+    `StreamedTable { name, schema, receivers }` (it was two maps by name),
+    `PartitionStat::outputs` a vector of `OutputStat`, and the senders
+    given to a partition a vector. `SubscribedOutput::name` is an
+    `Arc<str>`, and `CompiledSubscription::stream_tables` an iterator of
+    names. Gone, for want of a user: `ParseSubscription::output_names` and
+    `stream_table_names`, `CompiledSubscription::output_names` and
+    `table_schema`.
 - **Performance: parsers write their fields in place.** A parser used to
   return a `ParseResult`: 1,000 bytes with a `SmallVec` of sixteen fields
   that the walk moved into a list of layers and the scan dropped field by

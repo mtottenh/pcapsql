@@ -361,6 +361,7 @@ Done:
 | Reader | No `BufReader` under the parser's own buffer |
 | Benchmarks | A thin-LTO bench profile, so they link on a small machine; the `with_payload` case runs again |
 | One set of name tables | The parsers' name columns read the tables of `pcapsql_core::format::names` and keep none of their own, so `icmp.type_name` is `icmp_type_name(type)`; a number without a name carries the number (`Unknown (n)`, `Type n`), which changes column values (CHANGELOG). A lookup returns a `Copy` `Name` and allocates nothing; `protocol/name_columns_tests.rs` checks every name column against its table over every number |
+| The DataFusion scan path (S4c) | The stream tables (`tcp_connections`, `tls_sessions`, `http_messages`, `http2`) are outputs of the shared scan layer: `PartitionScan` reassembles the TCP streams while it reads and writes the tables through `RowSink` when the capture ends (`scan/stream.rs`), decrypting TLS with the key log given to `PartitionScan::with_keylog`. DataFusion's Arrow builders (`stream_tables.rs`) and the scan's frame observer are gone; `providers/shared.rs` is six modules; a pass keeps its tables by `OutputId` and takes its parameters as a `PassOptions`. Rows unchanged: no snapshot changed. Instructions per packet through `PartitionScan` into a sink that stores nothing: `frames` 593 to 555, `udp` 2,529 to 2,415, `tcp` 4,036 to 3,922; one iteration of a scan benchmark within 0.3 percent in instructions, and the benchmark's wall-clock medians within its run-to-run spread (design, section 5.1.2) |
 
 Remaining, in the order intended:
 
@@ -369,9 +370,7 @@ Remaining, in the order intended:
    algebra in core, table descriptions in the catalogue, `scan::testing`
    behind a feature, a plan the driver cannot run refused, `engine/table.rs`
    split, type tests by id.
-2. The DataFusion scan path: stream tables on the shared layer (S4c) so
-   that the legacy builders in `stream_tables.rs` go, `providers/shared.rs`
-   split and keyed by output id.
+2. Done: the DataFusion scan path, in the table above.
 3. Typed columns in the Arrow sink (fixed-width columns as vectors with a
    lazily built validity bitmap).
 4. A benchmark run of the whole (P3 projection, P4 scaling, a view against

@@ -79,6 +79,41 @@ fn stream_tables_are_the_last_outputs() {
     );
 }
 
+/// A stream table of some other catalogue compiles only if stream analysis
+/// builds a table of that name, and only with columns that table has.
+#[test]
+fn a_stream_table_must_be_one_stream_analysis_builds() {
+    use crate::scan::{ColumnDef, TableDef};
+    let stream = |name, column| TableDef {
+        name,
+        description: "",
+        kind: TableKind::Stream,
+        columns: [ColumnDef::new(column, ColKind::U64, ColumnSource::Stream)].into(),
+    };
+    let other = Catalog::new(vec![
+        stream("dns_transactions", "frame_number"),
+        stream("tls_sessions", "connection_id"),
+        stream("tcp_connections", "round_trips"),
+    ]);
+    let plan = |table| ScanPlan {
+        streams: vec![TableScan::new(TableId(table), vec![ColId(0)])],
+        ..ScanPlan::default()
+    };
+    let registry = default_registry();
+    assert_eq!(
+        plan(0).compile(&other, &registry).unwrap_err(),
+        PlanError::StreamNotBuilt("dns_transactions")
+    );
+    assert!(plan(1).compile(&other, &registry).is_ok());
+    assert_eq!(
+        plan(2).compile(&other, &registry).unwrap_err(),
+        PlanError::UnknownColumn {
+            table: "tcp_connections",
+            column: ColId(0)
+        }
+    );
+}
+
 fn set(names: &[&str]) -> HashSet<String> {
     names.iter().map(|s| s.to_string()).collect()
 }
