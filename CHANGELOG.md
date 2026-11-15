@@ -524,6 +524,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   2.0, `has_tcp_flag` 8.1 → 0.7; `ip4_to_string`, `ip6_to_string` and
   `mac_to_string` write into the result without a `String` per row (11%, 24%
   and 33% faster). New `udf` benchmark.
+- **DuckDB extension: scalar kernels are inlined into their vector loops**
+  instead of called through function pointers. Over 20M rows on one thread:
+  `ip_in_cidr` filter 4.8 → 3.6 ns/row (native expression: 2.6),
+  `has_tcp_flag` 7.0 → 5.8, `tcp_flags_str` 45 → 23.
 
 ### Fixed
 
