@@ -496,6 +496,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   allocation per packet before, 0 after (`tests/parse_alloc.rs` counts);
   `frames` 51 → 31 ns and 972 → 430 instructions per packet, `udp` 5,750 →
   5,230 instructions per packet. Results are unchanged.
+- **Performance: IPv4 and MAC addresses are formatted without `fmt`.**
+  `format::write_ipv4`, `write_mac`, `format_ipv4`, `format_mac` and the text
+  a string column gets for an address write digits into a stack buffer and
+  hand the sink one `&str`; all MAC formatting of the scan path is one
+  function. Per call: `write_ipv4` 81 → 24 ns, `format_ipv4` 95 → 30 ns,
+  `write_mac` 95 → 11 ns, `format_mac` 128 → 27 ns. The text is byte for
+  byte what it was (lowercase hex, colons, no leading zeros in an octet),
+  checked against the standard library for every pair of adjacent octets.
+  IPv6 still goes through `std`.
 
 ### Fixed
 

@@ -29,7 +29,7 @@
 //! has an invalid-input case (`parse_*`), it returns `None` and the wrapper
 //! decides what that means in SQL (NULL in both engines today).
 
-mod address;
+pub(crate) mod address;
 pub mod cidr;
 pub mod flags;
 pub mod hex;

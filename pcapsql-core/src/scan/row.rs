@@ -16,6 +16,7 @@ use std::ops::ControlFlow;
 use super::catalog::{ColKind, ColumnSource};
 use super::plan::{OutCol, OutColumn};
 use super::sink::{Full, ListSink, RowSink};
+use crate::format::address::{ipv4_text, mac_text, IPV4_TEXT_LEN, MAC_TEXT_LEN};
 use crate::io::PacketRef;
 use crate::{FieldHint, FieldValue, ParseResult};
 
@@ -324,14 +325,11 @@ fn with_text(value: &FieldValue<'_>, store: impl FnOnce(&str)) -> bool {
     match value {
         FieldValue::Str(v) => store(v),
         FieldValue::OwnedString(v) => store(v.as_str()),
-        FieldValue::IpAddr(v) => with_display(v, store),
-        FieldValue::MacAddr(mac) => with_display(
-            format_args!(
-                "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
-            ),
-            store,
-        ),
+        FieldValue::IpAddr(IpAddr::V4(v4)) => {
+            store(ipv4_text(u32::from(*v4), &mut [0; IPV4_TEXT_LEN]));
+        }
+        FieldValue::IpAddr(v6 @ IpAddr::V6(_)) => with_display(v6, store),
+        FieldValue::MacAddr(mac) => store(mac_text(mac, &mut [0; MAC_TEXT_LEN])),
         FieldValue::UInt8(v) => with_display(v, store),
         FieldValue::UInt16(v) => with_display(v, store),
         FieldValue::UInt32(v) => with_display(v, store),
@@ -705,7 +703,11 @@ mod tests {
             v6(),
             V::IpAddr("ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff".parse().unwrap()),
             V::IpAddr(widest_v6.parse().unwrap()),
+            V::IpAddr("0.0.0.0".parse().unwrap()),
+            V::IpAddr("255.255.255.255".parse().unwrap()),
+            V::IpAddr("10.99.100.9".parse().unwrap()),
             MAC,
+            V::MacAddr([0xab, 0xcd, 0xef, 0x09, 0x90, 0xff]),
             V::UInt8(0),
             V::UInt16(u16::MAX),
             V::UInt32(u32::MAX),

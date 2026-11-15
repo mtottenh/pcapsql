@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+pub(crate) const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 
 /// Write bytes as lowercase hexadecimal, two digits per byte and no
 /// separator. Writes nothing for an empty slice.
