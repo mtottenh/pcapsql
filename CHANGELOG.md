@@ -539,6 +539,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rejects what it did. `pcap_unhex` in DuckDB: 61 → 26 ns/row over 20M
   16-digit strings on one thread (DuckDB's `unhex`: 36). `unhex` in
   DataFusion appends to a `BinaryBuilder` from one buffer.
+- **DuckDB extension: `ip4_to_string` and `mac_to_string` store the text
+  from a stack buffer** (`format::ipv4_text`, `mac_text`, now public)
+  without a `String` in between: 24 → 21 ns/row (DuckDB's integer to
+  `VARCHAR` cast: 19) and 32 → 26 over 20M rows on one thread, down from 69
+  before the kernels stopped using `fmt`. `ip6_to_string` is still `std`'s
+  formatting, at 82.
 
 ### Fixed
 

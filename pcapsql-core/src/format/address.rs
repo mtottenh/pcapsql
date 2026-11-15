@@ -36,15 +36,27 @@ pub fn format_ipv4(value: u32) -> String {
 }
 
 /// The length of the longest dotted-decimal IPv4 address.
-pub(crate) const IPV4_TEXT_LEN: usize = 15;
+pub const IPV4_TEXT_LEN: usize = 15;
 
 /// The length of a colon-separated MAC address.
-pub(crate) const MAC_TEXT_LEN: usize = 17;
+pub const MAC_TEXT_LEN: usize = 17;
 
 /// `value` in dotted-decimal notation, written to `buf`: what
 /// `Ipv4Addr`'s `Display` gives, without going through `fmt`.
+///
+/// For a caller that stores the text itself, such as a column of strings:
+/// the buffer is on its stack and nothing is copied on the way.
+///
+/// # Example
+///
+/// ```
+/// use pcapsql_core::format::{ipv4_text, IPV4_TEXT_LEN};
+///
+/// let mut buf = [0; IPV4_TEXT_LEN];
+/// assert_eq!(ipv4_text(0xC0A80101, &mut buf), "192.168.1.1");
+/// ```
 #[inline]
-pub(crate) fn ipv4_text(value: u32, buf: &mut [u8; IPV4_TEXT_LEN]) -> &str {
+pub fn ipv4_text(value: u32, buf: &mut [u8; IPV4_TEXT_LEN]) -> &str {
     let mut len = 0;
     for (i, octet) in value.to_be_bytes().into_iter().enumerate() {
         if i > 0 {
@@ -67,8 +79,17 @@ pub(crate) fn ipv4_text(value: u32, buf: &mut [u8; IPV4_TEXT_LEN]) -> &str {
 
 /// `bytes` as six colon-separated pairs of lowercase hex digits, written to
 /// `buf`. Every place that formats a MAC address goes through here.
+///
+/// # Example
+///
+/// ```
+/// use pcapsql_core::format::{mac_text, MAC_TEXT_LEN};
+///
+/// let mut buf = [0; MAC_TEXT_LEN];
+/// assert_eq!(mac_text(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff], &mut buf), "aa:bb:cc:dd:ee:ff");
+/// ```
 #[inline]
-pub(crate) fn mac_text<'b>(bytes: &[u8; 6], buf: &'b mut [u8; MAC_TEXT_LEN]) -> &'b str {
+pub fn mac_text<'b>(bytes: &[u8; 6], buf: &'b mut [u8; MAC_TEXT_LEN]) -> &'b str {
     *buf = *b"00:00:00:00:00:00";
     for (pair, &byte) in buf.chunks_mut(3).zip(bytes) {
         pair[0] = HEX_DIGITS[usize::from(byte >> 4)];

@@ -89,3 +89,11 @@ query I
 SELECT count(*) FROM range(256) t(i) WHERE ip4('10.0.0.' || i) BETWEEN ip4('10.0.0.16') AND ip4('10.0.0.31');
 ----
 16
+
+# The text is the four octets in decimal, for addresses of every length, with NULLs kept
+query III
+SELECT count(*), count(s), count(*) FILTER (s = concat_ws('.', x >> 24, (x >> 16) & 255, (x >> 8) & 255, x & 255))
+FROM (SELECT x, ip4_to_string(x) AS s
+      FROM (SELECT CASE WHEN i % 11 <> 0 THEN ((i * 2654435761) % 4294967296)::UINTEGER END AS x FROM range(20000) t(i)));
+----
+20000	18181	18181
