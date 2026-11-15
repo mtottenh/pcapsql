@@ -57,6 +57,9 @@ jobs:
       - name: LOAD in the DuckDB command-line shell
         run: make -C pcapsql-duckdb load_test_release
 
+      - name: The function reference lists everything the artifact registers
+        run: make -C pcapsql-duckdb check_reference_release
+
       - uses: actions/upload-artifact@v4
         with:
           name: pcapsql-duckdb-extension-linux_amd64
