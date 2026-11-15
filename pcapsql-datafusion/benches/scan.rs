@@ -10,6 +10,10 @@
 //! ```text
 //! cargo bench -p pcapsql-datafusion --bench scan
 //! ```
+//! Benchmarks build with thin LTO and 16 codegen units (`[profile.bench]` in
+//! the workspace `Cargo.toml`), not with the release profile's fat LTO, which
+//! needs more memory to link than a 15 GB machine has. Compare numbers taken
+//! with the same profile only.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
