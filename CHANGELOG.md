@@ -359,6 +359,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Performance: parsers write their fields in place.** A parser used to
+  return a `ParseResult`: 1,000 bytes with a `SmallVec` of sixteen fields
+  that the walk moved into a list of layers and the scan dropped field by
+  field, since a `FieldValue` could own a string, bytes or a `Vec`. TCP's
+  twenty-four fields spilled to the heap for every segment. Now every parser
+  writes through a `FieldSink` into storage the scan keeps for the whole
+  partition (`ParseBuf`: one vector of fields, one of layers, and a
+  `bumpalo` arena for the values a parser constructs), and `FieldValue` is
+  `Copy` and owns nothing, so forgetting a packet's fields runs no
+  destructor. Instructions per packet (callgrind, bench profile), before
+  and after: `parse_packet` with every protocol, `udp` 3,485 → 1,719, `tcp`
+  5,098 → 2,469, `dns` 9,163 → 5,551, `http` 8,624 → 5,422; a
+  `PartitionScan` into a sink that stores nothing, `udp` 3,930 → 2,529,
+  `tcp` 6,439 → 4,036, `dns` 10,643 → 7,135, `http` 11,436 → 7,959,
+  `frames` 619 → 593. Allocations per packet of such a scan: `tcp` 1 → 0,
+  `http` 1 → 0, `dns` 9 → 4, which is what `simple-dns` allocates for the
+  message (`tests/parse_alloc.rs` counts both). The scan benchmark (`cargo bench -p pcapsql-datafusion --bench scan`, thin LTO, three interleaved runs of each build on a shared machine, medians for 20,000 packets): the parse passes are 22 to 40 percent faster (`udp/mmap/1` 11.7 → 8.5 ms, `tcp_options/mmap/1` 20.4 → 12.3 ms, `vxlan/mmap/1` 26.6 → 20.1 ms) and the one-shot queries 29 to 39 percent (`count_udp` 8.7 → 5.3 ms), except `with_payload` (7.3 → 6.9 ms, inside the run-to-run spread).
+  Query results are unchanged: every packet of the fuzz corpus gives the
+  same layers and fields, in the same order, as before.
+  API changes in `pcapsql_core::protocol` (re-exported at the crate root):
+  - `Protocol::parse(&self, data, context, fields: &mut FieldSink<'_, 'a>)
+    -> Parsed<'a>` and `parse_projected(.., projection, fields)` replace the
+    methods that returned a `ParseResult`. `ParseResult` is gone; `Parsed`
+    has `remaining`, `child_hints` and `status` (`Status::Ok`,
+    `Partial(&str)`, `Error(&str)`), built with `Parsed::ok`, `partial` and
+    `error`.
+  - `FieldValue` is `Copy`: `OwnedString` and `OwnedBytes` are gone, `List`
+    holds a slice, and `to_owned` is gone. A constructed value is made with
+    `FieldSink::str`, `format`, `bytes`, `list`, `list_builder` or
+    `text_builder`.
+  - `parse_packet(registry, link_type, data, scope, &mut ParseBuf)` returns
+    a `PacketLayers`, read with `iter`, `get`, `last`, `find` and `names`,
+    each layer a `LayerRef` (`name`, `fields`, `get`, `get_hinted`,
+    `encap_depth`, `tunnel_type`, `tunnel_id`, `payload`, `error`).
+    `parse_packet_into`, `LayerBuf` and the `Layers` alias are gone.
+    `PacketLayers::parse_layer` runs one parser; `LayerRef::new` and
+    `PacketLayers::push_layer` build a layer by hand.
+  - In `scan`: `FrameObserver::observe` and `Router::route_frame` take
+    `&PacketLayers`; `write_layer_row` and `CompiledPredicate::keeps` take
+    a `LayerRef`.
+  - `OwnedFieldValue`, the value of a `ParsedMessage` field, is an enum of
+    its own in `pcapsql_core::stream` (it was `FieldValue<'static>`).
+- **Performance: the remaining address texts are written without `fmt`.**
+  An IPv6 address in a string column, `FieldValue::format_mac` (and the
+  `Display` of a MAC value), and the address texts of the `icmpv6` and
+  `dhcp` parsers go through `format::ipv6_text` and `format::mac_text`. The
+  texts are the same.
 - **`pcapsql-core` builds for Windows.** Its manifest listed most
   dependencies under `[target.'cfg(unix)'.dependencies]` by accident, and
   depended on the Unix-only `netlink-packet-route` without using it. Checked
@@ -518,8 +565,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `parse_packet` returned the layers in a new `Vec` with room for eight
   (7,808 bytes), also for a scan of `frames` alone, which parses nothing. A
   partition scan now keeps that storage from packet to packet
-  (`protocol::LayerBuf` with the new `parse_packet_into`; `parse_packet` is
-  unchanged for other callers) and asks for none when nothing is parsed.
+  (a buffer the scan owns; it became `protocol::ParseBuf`, see "parsers
+  write their fields in place" above) and asks for none when nothing is
+  parsed.
   Measured through `PartitionScan` into a sink that stores nothing: 1.00
   allocation per packet before, 0 after (`tests/parse_alloc.rs` counts);
   `frames` 51 → 31 ns and 972 → 430 instructions per packet, `udp` 5,750 →

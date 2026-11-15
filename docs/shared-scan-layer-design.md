@@ -100,8 +100,8 @@ DataFusion-specific**.
 | C1 reader over any `Read` | `GenericPcapReader<R: Read>` is public with `with_format` and `with_format_starting_at` (`io/pcap_stream.rs:263-306`, exported `io/mod.rs:39`). `StdinPacketSource::from_reader` already probes and reads any `Read + Send + 'static` sequentially (`io/stdin.rs:384`). Missing: a public `PacketReader` over `R` with the `end_frame` logic that is private to `FilePacketReader` (`io/source.rs:487-507`), a public probe (`probe_stream` is private), and exports for `synth_legacy_header`/`synth_pcapng_header` (`io/index.rs:655,671`, not in `io/mod.rs:33-36`) |
 | C2 stop without consuming | Half there: a callback error stops the loop and the delivered packet counts as consumed, documented and tested (`io/pcap_stream.rs:408-415, 723-760`). There is no way to stop *before* a packet |
 | C3 index without `Path` | Done: `build_boundary_index<R: Read>` (`io/index.rs:444`), `BoundaryIndex::to_bytes`/`from_bytes` (`io/index.rs:250, 289`), `matches_source` (`io/index.rs:167`) |
-| C4 slot-indexed field access | Not as described. Parsers push `(&'static str, FieldValue)` conditionally (`protocol/udp.rs:102-113`), so a field's position is not fixed by `schema_fields()`. What exists is `ParseResult::get_hinted` with a per-column `FieldHint` (`protocol/context.rs:206-224, 322-351`): one pointer compare when the field is where it was in the previous row |
-| C5 encapsulation depth | Done: `ParseResult.encap_depth`, `tunnel_type`, `tunnel_id` (`protocol/context.rs:247-254`) |
+| C4 slot-indexed field access | Not as described. Parsers push `(&'static str, FieldValue)` conditionally (`protocol/udp.rs:102-113`), so a field's position is not fixed by `schema_fields()`. What exists is `LayerRef::get_hinted` (`ParseResult::get_hinted` when this was written) with a per-column `FieldHint` (`protocol/context.rs:206-224, 322-351`): one pointer compare when the field is where it was in the previous row |
+| C5 encapsulation depth | Done: `ParseResult.encap_depth`, `tunnel_type`, `tunnel_id` (`protocol/context.rs:247-254`); since section 3.6.1 they are methods of `LayerRef` |
 
 ---
 
@@ -303,7 +303,7 @@ pub enum ColKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ColumnSource {
     FrameNumber, Timestamp, CapturedLen, OriginalLen, LinkType, RawData,  // PacketRef
-    EncapDepth, TunnelType, TunnelId,                                     // ParseResult context
+    EncapDepth, TunnelType, TunnelId,                                     // the layer's parse context
     Field(&'static str),                                                  // parser field, short name
 }
 
@@ -425,7 +425,7 @@ impl RowPredicate {
 }
 pub struct CompiledPredicate { /* flat terms: source, FieldHint, op, literal */ }
 impl CompiledPredicate {
-    pub fn keeps(&mut self, layer: &ParseResult<'_>) -> bool;   // hinted lookups
+    pub fn keeps(&mut self, layer: LayerRef<'_, '_>) -> bool;   // hinted lookups
 }
 
 /// Exact predicate on packet metadata, enforced before parsing.
@@ -542,15 +542,15 @@ value type (audit section 3: NULL `answer_ip6s`, VARCHAR IP addresses).
 | `I64` | `Int64`, `Int8`, `UInt8/16/32`; `UInt64` if it fits | NULL |
 | `F64` | `Float64`; any integer `as f64` | NULL |
 | `Bool` | `Bool` | NULL |
-| `Str` | `Str`, `OwnedString`; `IpAddr` and `MacAddr` formatted; numbers, floats and bools via `to_string` | NULL (`Bytes`, `List`) |
-| `Bin` | `Bytes`, `OwnedBytes` | NULL (including `MacAddr`) |
-| `Fixed(n)` | `MacAddr` (n = 6), `IpAddr::V6` (n = 16), `Bytes`/`OwnedBytes` of length n | NULL. **Change:** a wrong length is NULL; today the Arrow error is discarded (`let _ =`, `protocol.rs:256-264`) and the batch fails later |
+| `Str` | `Str`; `IpAddr` and `MacAddr` formatted; numbers, floats and bools via `to_string` | NULL (`Bytes`, `List`) |
+| `Bin` | `Bytes` | NULL (including `MacAddr`) |
+| `Fixed(n)` | `MacAddr` (n = 6), `IpAddr::V6` (n = 16), `Bytes` of length n | NULL. **Change:** a wrong length is NULL; today the Arrow error is discarded (`let _ =`, `protocol.rs:256-264`) and the batch fails later |
 | `TsMicros` | `Int64`; `UInt64` | NULL. **Change:** a `UInt64` above `i64::MAX` is NULL; today it wraps (`protocol.rs:278`) |
 | `ListU16` | list; items `UInt16`, `UInt8` | non-list or `Null` gives a NULL cell; other items are NULL items; an empty list stays empty (test at `protocol.rs:753-811`) |
 | `ListU32` | items `UInt32`, `UInt16`, `UInt8`, `IpAddr::V4` | same |
-| `ListStr` | items `Str`, `OwnedString`, anything `as_string()` accepts | same |
-| `ListBin` | items `Bytes`, `OwnedBytes` | same |
-| `ListFixed(n)` | items `Bytes`, `OwnedBytes`, `IpAddr::V6`, `MacAddr` of length n | same |
+| `ListStr` | items `Str`, anything `as_string()` accepts | same |
+| `ListBin` | items `Bytes` | same |
+| `ListFixed(n)` | items `Bytes`, `IpAddr::V6`, `MacAddr` of length n | same |
 | any | field absent, or `FieldValue::Null` | NULL |
 
 Pseudo-columns: `frame_number` u64, never NULL; `encap_depth` u8;
@@ -697,6 +697,72 @@ A stream table in pull mode is a blocking source: the first `exec` runs the
 pass to `Step::End` with no table outputs, `finish()` yields `StreamTables`,
 and later calls drain it with a row cursor (section 3.8).
 
+### 3.6.1 Field storage as built
+
+The scan above was first built on `parse_packet` as it was: every parser
+returned a `ParseResult` (1,000 bytes: a `SmallVec` of sixteen 48-byte
+fields, the remaining bytes, 152 bytes of hints, an error `String`, the
+tunnel context), the walk moved it into a `Vec` of layers, and the scan
+dropped that `Vec`'s contents after the packet's rows were written. A
+`FieldValue` could own its data (`OwnedString`, `OwnedBytes`, `List(Vec)`),
+so the drop was a loop over every field, TCP's twenty-four fields spilled
+the `SmallVec` to the heap for every segment, and a DNS name was copied
+into a `CompactString`. After the dispatch tables, that was what a parse
+cost: `memcpy` and drop glue were about half of a `udp` scan's instructions.
+
+Since then (`protocol/layers.rs`):
+
+- `FieldValue<'a>` is `Copy` and owns nothing: `Str(&'a str)`,
+  `Bytes(&'a [u8])` and `List(&'a [FieldValue<'a>])` are slices of the
+  packet, of an arena, or static. It is 24 bytes and a field entry 40.
+- A `ParseBuf`, one per partition scan, holds one vector for the fields of
+  every layer of the packet, one for the layers (each a range of the field
+  vector with its tunnel context, payload and error), and a `bumpalo`
+  arena. `ParseBuf::for_packet` resets the arena and lends the three out as
+  a `PacketLayers` whose lifetime is the packet's; taking the buffer by
+  `&mut` is what lets the borrow checker prove that no value of the last
+  packet is still alive. The vectors change element lifetime the way
+  `LayerBuf` did (collecting an emptied `vec::IntoIter` in place): there is
+  no `unsafe`.
+- A parser writes its fields through a `FieldSink` (`push`; `str`,
+  `format`, `bytes`, `list`, `ListBuilder` and `TextBuilder` for what it
+  constructs, all in the arena) and returns a
+  `Parsed { remaining, child_hints, status }`. `Status::Error` makes the
+  walk truncate the field vector back to where the layer began;
+  `Status::Partial` keeps the fields and stops the walk.
+- `parse_packet(registry, link_type, data, scope, &mut buf)` returns the
+  `PacketLayers`. `FrameObserver::observe`, `Router::route_frame` and the
+  fused joins take `&PacketLayers`; `write_layer_row` and
+  `CompiledPredicate::keeps` take a `LayerRef` (name, fields, `get`,
+  `get_hinted`, `encap_depth`, `tunnel_type`, `tunnel_id`, `payload`,
+  `error`). `LayerRef::new` and `PacketLayers::push_layer` build a layer by
+  hand, for tests.
+- Forgetting a packet is two length stores and a pointer reset.
+
+The stream layer keeps values past their packets, so a `ParsedMessage`
+holds `stream::OwnedFieldValue`, an enum of its own.
+
+Measured with `pcapsql-core/examples/parse_cost.rs`, per packet through
+`PartitionScan` into a sink that stores nothing (callgrind, bench
+profile), before and after:
+
+| Table (frame) | Instructions | Allocations |
+|---|---|---|
+| `frames` | 619 to 593 | 0 to 0 |
+| `udp` | 3,930 to 2,529 | 0 to 0 |
+| `tcp` (timestamp option) | 6,439 to 4,036 | 1 to 0 |
+| `dns` (one answer) | 10,643 to 7,135 | 9 to 4 |
+| `http` (a `GET`) | 11,436 to 7,959 | 1 to 0 |
+
+What `dns` still allocates is `simple-dns`'s own (its record vectors and
+the labels of each name); `tests/parse_alloc.rs` counts
+`simple_dns::Packet::parse` on the same message and holds the scan to
+exactly that, and holds `frames`, `udp`, `tcp` (SACK blocks and assembled
+option texts included) and `http` to nothing. The remaining cost of a
+`udp` scan is the walk itself (context and hints, about 950 instructions
+for three layers), the router and row writer (460) and the three parsers
+(450).
+
 ### 3.7 Where static dispatch matters, and how the generics stay contained
 
 | Frequency | Code | Dispatch |
@@ -739,7 +805,7 @@ pub struct StreamObserver { /* StreamManager, Vec<ParsedMessage>, wanted */ }
 impl StreamObserver {
     pub fn new(wanted: &[StreamTable], keylog: Option<Arc<KeyLog>>) -> Self;
     pub fn observe(&mut self, packet: &PacketRef<'_>,
-                   layers: &[(&'static str, ParseResult<'_>)]) -> Result<(), Error>;
+                   layers: &PacketLayers<'_, '_>) -> Result<(), Error>;
     pub fn finish(self) -> StreamTables;
 }
 pub struct StreamTables { /* connections, tls sessions, http messages, http2 messages, in table order */ }
@@ -764,7 +830,7 @@ pub(crate) struct FusedEval { member_rows: Vec<Vec<RowRef>>, tuples: Vec<RowRef>
 impl FusedEval {
     /// The frame's join tuples, `members` slots each. Non-generic.
     pub(crate) fn tuples(&mut self, plan: &FusedPlan,
-                         layers: &[(&'static str, ParseResult<'_>)]) -> &[RowRef];
+                         layers: &PacketLayers<'_, '_>) -> &[RowRef];
 }
 ```
 
