@@ -173,7 +173,10 @@ impl Router {
         packet: &PacketRef<'_>,
         layers: &[(&'static str, ParseResult<'_>)],
     ) -> Routed {
-        if self.pending.is_some_and(|frame| frame != packet.frame_number) {
+        if self
+            .pending
+            .is_some_and(|frame| frame != packet.frame_number)
+        {
             // The frame that was to be redelivered never came back.
             self.forget_frame();
         }
@@ -543,7 +546,12 @@ mod tests {
             &[("udp", &["frame_number", "src_port"], None)],
             Some(("src_port", CmpOp::GtEq, 21)),
         );
-        let expected = vec![udp_row(2, 21), udp_row(2, 22), udp_row(4, 40), udp_row(4, 41)];
+        let expected = vec![
+            udp_row(2, 21),
+            udp_row(2, 22),
+            udp_row(4, 40),
+            udp_row(4, 41),
+        ];
         for capacity in [None, Some(1), Some(2), Some(3)] {
             let (rows, _, router) = run(&plan, capacity, &frames());
             assert_eq!(rows[0], expected, "capacity {capacity:?}");
