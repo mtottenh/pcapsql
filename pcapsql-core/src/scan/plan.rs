@@ -200,9 +200,28 @@ pub struct OutputPlan {
     pub columns: Box<[OutColumn]>,
     predicate: Option<CompiledPredicate>,
     fetch: Option<u64>,
+    feed: Feed,
+}
+
+/// What an output's rows are made from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Feed {
+    /// One row per packet, from the packet record (`frames`).
+    Frames,
+    /// One row per parsed layer with this name (a protocol table).
+    Layer(&'static str),
+    /// The joined rows of a fused join.
+    Fused,
+    /// Stream analysis, at the end of the pass.
+    Stream,
 }
 
 impl OutputPlan {
+    /// What the output's rows are made from.
+    pub(crate) fn feed(&self) -> Feed {
+        self.feed
+    }
+
     /// The row predicate, if it can drop any row. It keeps per-row lookup
     /// state: clone it for each partition.
     pub fn predicate(&self) -> Option<&CompiledPredicate> {
@@ -350,6 +369,10 @@ impl ScanPlan {
                 columns,
                 predicate,
                 fetch: scan.fetch,
+                feed: match table.kind {
+                    TableKind::Frames => Feed::Frames,
+                    _ => Feed::Layer(table.name),
+                },
             });
         }
 
@@ -407,6 +430,7 @@ impl ScanPlan {
                 columns: resolved.into(),
                 predicate: None,
                 fetch: fused.fetch,
+                feed: Feed::Fused,
             });
         }
         if outputs.len() > usize::from(u16::MAX) {
@@ -431,6 +455,7 @@ impl ScanPlan {
                 columns: self.scan_columns(table, scan)?,
                 predicate: None,
                 fetch: scan.fetch,
+                feed: Feed::Stream,
             });
         }
 
