@@ -5,8 +5,8 @@ use smallvec::SmallVec;
 use etherparse::{TcpHeaderSlice, TcpOptionElement};
 
 use super::{
-    http, Cond, Dispatch, DispatchRule, FieldSet, FieldValue, HintKey, Hints, ParseContext,
-    ParseResult, PayloadMode, Protocol,
+    http, Cond, Dispatch, DispatchRule, FieldSet, FieldSink, FieldValue, HintKey, Hints,
+    ParseContext, Parsed, PayloadMode, Protocol,
 };
 use crate::schema::{DataKind, FieldDescriptor};
 
@@ -42,15 +42,18 @@ pub mod options {
 /// Uses zero-copy parsing via etherparse.
 #[derive(Debug, Clone, Default)]
 pub struct ParsedTcpOptions {
-    /// List of option names present (e.g., "MSS,WS,TS")
-    pub option_names: SmallVec<[&'static str; 4]>,
+    /// List of option names present (e.g., "MSS,WS,TS"). Twenty is the most a
+    /// header has room for (forty bytes of two-byte options), so the names
+    /// are never on the heap.
+    pub option_names: SmallVec<[&'static str; 20]>,
     /// Maximum Segment Size (option 2)
     pub mss: Option<u16>,
     /// Window Scale factor (option 3)
     pub window_scale: Option<u8>,
     /// SACK Permitted (option 4)
     pub sack_permitted: bool,
-    /// SACK block left edges (option 5) - parallel to sack_right_edges
+    /// SACK block left edges (option 5) - parallel to sack_right_edges. A
+    /// header has room for four blocks.
     pub sack_left_edges: SmallVec<[u32; 4]>,
     /// SACK block right edges (option 5) - parallel to sack_left_edges
     pub sack_right_edges: SmallVec<[u32; 4]>,
@@ -60,8 +63,30 @@ pub struct ParsedTcpOptions {
     pub ts_ecr: Option<u32>,
 }
 
+/// The `options` text: the names of the options present, comma-separated.
+/// A static string for the common combinations, assembled in the packet's
+/// arena for the others. `opts` has at least one name.
+fn options_text<'a>(opts: &ParsedTcpOptions, fields: &FieldSink<'_, 'a>) -> FieldValue<'a> {
+    if let Some(static_str) = get_options_static(opts) {
+        return FieldValue::Str(static_str); // Zero-copy static string
+    }
+    let mut text = fields.text_builder();
+    for (index, name) in opts.option_names.iter().enumerate() {
+        if index > 0 {
+            text.push_str(",");
+        }
+        text.push_str(name);
+    }
+    text.finish()
+}
+
+/// SACK block edges as a list value in the packet's arena.
+fn edges_list<'a>(edges: &[u32], fields: &FieldSink<'_, 'a>) -> FieldValue<'a> {
+    fields.list(edges.iter().map(|&edge| FieldValue::UInt32(edge)))
+}
+
 /// Get a static string for common TCP option combinations.
-/// Returns None for uncommon combinations, which fall back to dynamic allocation.
+/// Returns None for uncommon combinations, which are assembled in the arena.
 fn get_options_static(opts: &ParsedTcpOptions) -> Option<&'static str> {
     // Build bitmask: MSS=1, WS=2, SACK_PERM=4, SACK=8, TS=16
     let mut mask: u8 = 0;
@@ -197,11 +222,14 @@ impl Protocol for TcpProtocol {
         }
     }
 
-    fn parse<'a>(&self, data: &'a [u8], _context: &ParseContext) -> ParseResult<'a> {
+    fn parse_into<'a>(
+        &self,
+        data: &'a [u8],
+        _context: &ParseContext,
+        fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
         match TcpHeaderSlice::from_slice(data) {
             Ok(tcp) => {
-                let mut fields = SmallVec::new();
-
                 fields.push(("src_port", FieldValue::UInt16(tcp.source_port())));
                 fields.push(("dst_port", FieldValue::UInt16(tcp.destination_port())));
                 fields.push(("seq", FieldValue::UInt32(tcp.sequence_number())));
@@ -262,12 +290,7 @@ impl Protocol for TcpProtocol {
 
                     // Options list string - use static lookup for common combinations
                     if !opts.option_names.is_empty() {
-                        let options_str = if let Some(static_str) = get_options_static(&opts) {
-                            FieldValue::Str(static_str) // Zero-copy static string
-                        } else {
-                            FieldValue::OwnedString(opts.option_names.join(",").into())
-                        };
-                        fields.push(("options", options_str));
+                        fields.push(("options", options_text(&opts, fields)));
                     } else {
                         fields.push(("options", FieldValue::Null));
                     }
@@ -295,18 +318,10 @@ impl Protocol for TcpProtocol {
 
                     // SACK Blocks as parallel lists
                     if !opts.sack_left_edges.is_empty() {
-                        let left_edges: Vec<FieldValue> = opts
-                            .sack_left_edges
-                            .iter()
-                            .map(|&v| FieldValue::UInt32(v))
-                            .collect();
-                        let right_edges: Vec<FieldValue> = opts
-                            .sack_right_edges
-                            .iter()
-                            .map(|&v| FieldValue::UInt32(v))
-                            .collect();
-                        fields.push(("sack_left_edges", FieldValue::List(left_edges)));
-                        fields.push(("sack_right_edges", FieldValue::List(right_edges)));
+                        let left_edges = edges_list(&opts.sack_left_edges, fields);
+                        let right_edges = edges_list(&opts.sack_right_edges, fields);
+                        fields.push(("sack_left_edges", left_edges));
+                        fields.push(("sack_right_edges", right_edges));
                     } else {
                         fields.push(("sack_left_edges", FieldValue::Null));
                         fields.push(("sack_right_edges", FieldValue::Null));
@@ -338,9 +353,9 @@ impl Protocol for TcpProtocol {
                 let payload = &data[header_len..];
                 let child_hints = child_hints(tcp.source_port(), tcp.destination_port(), payload);
 
-                ParseResult::success(fields, payload, child_hints)
+                Parsed::ok(payload, child_hints)
             }
-            Err(e) => ParseResult::error(format!("TCP parse error: {e}"), data),
+            Err(e) => Parsed::error(fields.text_fmt(format_args!("TCP parse error: {e}")), data),
         }
     }
 
@@ -408,33 +423,22 @@ impl Protocol for TcpProtocol {
         &["ipv4", "ipv6"]
     }
 
-    // MIGRATION: until this parser writes to the sink itself.
     fn parse_projected_into<'a>(
-        &self,
-        data: &'a [u8],
-        context: &ParseContext,
-        projection: Option<&FieldSet>,
-        fields: &mut super::layers::FieldSink<'_, 'a>,
-    ) -> super::Parsed<'a> {
-        super::layers::adapt(self.parse_projected(data, context, projection), fields)
-    }
-
-    fn parse_projected<'a>(
         &self,
         data: &'a [u8],
         _context: &ParseContext,
         fields: Option<&FieldSet>,
-    ) -> ParseResult<'a> {
+        result_fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
         // If no projection, use full parse
         let fields = match fields {
-            None => return self.parse(data, _context),
-            Some(f) if f.is_empty() => return self.parse(data, _context),
+            None => return self.parse_into(data, _context, result_fields),
+            Some(f) if f.is_empty() => return self.parse_into(data, _context, result_fields),
             Some(f) => f,
         };
 
         match TcpHeaderSlice::from_slice(data) {
             Ok(tcp) => {
-                let mut result_fields = SmallVec::new();
                 let header_len = tcp.slice().len();
 
                 // Always extract ports for child hints (needed for protocol detection)
@@ -551,12 +555,7 @@ impl Protocol for TcpProtocol {
 
                         if fields.contains("options") {
                             if !opts.option_names.is_empty() {
-                                let options_str =
-                                    if let Some(static_str) = get_options_static(&opts) {
-                                        FieldValue::Str(static_str)
-                                    } else {
-                                        FieldValue::OwnedString(opts.option_names.join(",").into())
-                                    };
+                                let options_str = options_text(&opts, result_fields);
                                 result_fields.push(("options", options_str));
                             } else {
                                 result_fields.push(("options", FieldValue::Null));
@@ -588,22 +587,14 @@ impl Protocol for TcpProtocol {
                         if need_sack_edges {
                             if !opts.sack_left_edges.is_empty() {
                                 if fields.contains("sack_left_edges") {
-                                    let left_edges: Vec<FieldValue> = opts
-                                        .sack_left_edges
-                                        .iter()
-                                        .map(|&v| FieldValue::UInt32(v))
-                                        .collect();
-                                    result_fields
-                                        .push(("sack_left_edges", FieldValue::List(left_edges)));
+                                    let left_edges =
+                                        edges_list(&opts.sack_left_edges, result_fields);
+                                    result_fields.push(("sack_left_edges", left_edges));
                                 }
                                 if fields.contains("sack_right_edges") {
-                                    let right_edges: Vec<FieldValue> = opts
-                                        .sack_right_edges
-                                        .iter()
-                                        .map(|&v| FieldValue::UInt32(v))
-                                        .collect();
-                                    result_fields
-                                        .push(("sack_right_edges", FieldValue::List(right_edges)));
+                                    let right_edges =
+                                        edges_list(&opts.sack_right_edges, result_fields);
+                                    result_fields.push(("sack_right_edges", right_edges));
                                 }
                             } else {
                                 if fields.contains("sack_left_edges") {
@@ -661,9 +652,12 @@ impl Protocol for TcpProtocol {
                 let payload = &data[header_len..];
                 let child_hints = child_hints(src_port, dst_port, payload);
 
-                ParseResult::success(result_fields, payload, child_hints)
+                Parsed::ok(payload, child_hints)
             }
-            Err(e) => ParseResult::error(format!("TCP parse error: {e}"), data),
+            Err(e) => Parsed::error(
+                result_fields.text_fmt(format_args!("TCP parse error: {e}")),
+                data,
+            ),
         }
     }
 
@@ -1128,10 +1122,9 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.get("options_length"), Some(&FieldValue::UInt8(4)));
         assert_eq!(result.get("mss"), Some(&FieldValue::UInt16(1460)));
-        // Check options string contains MSS (may be static or owned)
+        // Check options string contains MSS (static, or in the arena)
         match result.get("options") {
             Some(FieldValue::Str(s)) => assert!(s.contains("MSS")),
-            Some(FieldValue::OwnedString(s)) => assert!(s.contains("MSS")),
             _ => panic!("Expected string for options"),
         }
     }
@@ -1278,10 +1271,9 @@ mod tests {
         assert_eq!(result.get("ts_val"), Some(&FieldValue::UInt32(1)));
         assert_eq!(result.get("ts_ecr"), Some(&FieldValue::UInt32(0)));
 
-        // Check options string contains all options (may be static or owned)
+        // Check options string contains all options (static, or in the arena)
         let opts_str = match result.get("options") {
             Some(FieldValue::Str(s)) => *s,
-            Some(FieldValue::OwnedString(s)) => s.as_str(),
             _ => panic!("Expected string for options"),
         };
         assert!(
