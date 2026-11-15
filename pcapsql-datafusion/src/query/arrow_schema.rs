@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+use pcapsql_core::scan::{ColKind, TableDef, TimestampUnit};
 use pcapsql_core::schema::{DataKind, FieldDescriptor};
 use pcapsql_core::Protocol;
 
@@ -35,6 +36,47 @@ pub fn to_arrow_type(kind: &DataKind) -> DataType {
             DataType::List(Arc::new(Field::new("item", inner_type, true)))
         }
     }
+}
+
+/// The Arrow type that stores a catalogue column kind.
+pub fn col_kind_to_arrow_type(kind: ColKind) -> DataType {
+    let list = |inner: DataType| DataType::List(Arc::new(Field::new("item", inner, true)));
+    match kind {
+        ColKind::Bool => DataType::Boolean,
+        ColKind::U8 => DataType::UInt8,
+        ColKind::U16 => DataType::UInt16,
+        ColKind::U32 => DataType::UInt32,
+        ColKind::U64 => DataType::UInt64,
+        ColKind::I8 => DataType::Int8,
+        ColKind::I64 => DataType::Int64,
+        ColKind::F64 => DataType::Float64,
+        ColKind::Str => DataType::Utf8,
+        ColKind::Bin => DataType::Binary,
+        ColKind::Fixed(n) => DataType::FixedSizeBinary(i32::from(n)),
+        ColKind::TsMicros => DataType::Timestamp(TimeUnit::Microsecond, None),
+        ColKind::TsNanos => DataType::Timestamp(TimeUnit::Nanosecond, None),
+        ColKind::ListU16 => list(DataType::UInt16),
+        ColKind::ListU32 => list(DataType::UInt32),
+        ColKind::ListStr => list(DataType::Utf8),
+        ColKind::ListFixed(n) => list(DataType::FixedSizeBinary(i32::from(n))),
+    }
+}
+
+/// The Arrow schema of a catalogue table as DataFusion exposes it: the
+/// table's default columns in catalogue order (opt-in columns such as the
+/// protocol tables' `timestamp` are left out), timestamps in microseconds.
+pub fn table_def_to_arrow_schema(table: &TableDef) -> Schema {
+    let fields: Vec<Field> = table
+        .default_columns()
+        .map(|(_, column)| {
+            Field::new(
+                column.name,
+                col_kind_to_arrow_type(column.kind_in(TimestampUnit::Micros)),
+                column.nullable,
+            )
+        })
+        .collect();
+    Schema::new(fields)
 }
 
 /// Convert a protocol's schema to Arrow Schema.

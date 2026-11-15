@@ -327,6 +327,37 @@ mod tests {
         );
     }
 
+    /// The catalogue in `pcapsql-core` describes exactly the tables defined
+    /// here: same tables in the same order, and for each the same Arrow
+    /// schema (column names, order, types, nullability, metadata).
+    #[test]
+    fn catalogue_schemas_equal_legacy_schemas() {
+        use crate::query::arrow_schema::table_def_to_arrow_schema;
+        use pcapsql_core::scan::Catalog;
+
+        let catalog = Catalog::builtin();
+        let names: Vec<_> = catalog.tables().map(|(_, t)| t.name).collect();
+        assert_eq!(names, all_table_names());
+        for (_, table) in catalog.tables() {
+            let legacy = get_table_schema(table.name).expect("legacy schema");
+            let derived = table_def_to_arrow_schema(table);
+            assert_eq!(derived, legacy, "{}", table.name);
+            assert_eq!(derived.to_string(), legacy.to_string(), "{}", table.name);
+            assert_eq!(
+                table.is_stream(),
+                is_stream_table(table.name),
+                "{}",
+                table.name
+            );
+        }
+        let streams: Vec<_> = catalog
+            .tables()
+            .filter(|(_, t)| t.is_stream())
+            .map(|(_, t)| t.name)
+            .collect();
+        assert_eq!(streams, STREAM_TABLES);
+    }
+
     #[test]
     fn test_strip_protocol_prefix() {
         assert_eq!(strip_protocol_prefix("dns.query_name"), "query_name");
