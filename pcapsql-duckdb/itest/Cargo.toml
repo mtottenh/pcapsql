@@ -17,4 +17,6 @@ pcapsql-duckdb = { path = "..", default-features = false, features = ["static"] 
 duckdb-neo = { version = "=0.20000.2", default-features = false, features = ["build-extension-static"] }
 
 [dev-dependencies]
+# The kernels, to compare what the SQL functions return with what the kernels return.
+pcapsql-core = { path = "../../pcapsql-core" }
 tempfile = "3"

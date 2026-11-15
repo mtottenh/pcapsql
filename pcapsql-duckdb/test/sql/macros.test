@@ -1,0 +1,79 @@
+# name: test/sql/macros.test
+# description: the format_* macros format address columns and lists of addresses
+# group: [pcapsql]
+
+require pcapsql
+
+query TT
+SELECT function_name, macro_definition FROM duckdb_functions()
+WHERE function_type = 'macro' AND function_name IN ('format_ip4', 'format_ip6', 'format_mac', 'format_ip4_list', 'format_ip6_list', 'format_mac_list')
+ORDER BY function_name;
+----
+format_ip4	ip4_to_string(ip)
+format_ip4_list	list_transform(ips, (lambda x: ip4_to_string(x)))
+format_ip6	ip6_to_string(ip)
+format_ip6_list	list_transform(ips, (lambda x: ip6_to_string(x)))
+format_mac	mac_to_string(mac)
+format_mac_list	list_transform(macs, (lambda x: mac_to_string(x)))
+
+query TTT
+SELECT format_ip4(3232235777), format_ip6(ip6('2001:0db8::0001')), format_mac(mac('AA-BB-CC-DD-EE-FF'));
+----
+192.168.1.1	2001:db8::1	aa:bb:cc:dd:ee:ff
+
+query TTT
+SELECT format_ip4(NULL), format_ip6(NULL), format_mac(NULL);
+----
+NULL	NULL	NULL
+
+query T
+SELECT format_ip4(x) FROM (VALUES (16909060::UINTEGER), (NULL), (256)) t(x);
+----
+1.2.3.4
+NULL
+0.0.1.0
+
+query T
+SELECT format_ip4_list([ip4('192.168.1.1'), NULL, ip4('10.0.0.1')]);
+----
+[192.168.1.1, NULL, 10.0.0.1]
+
+query T
+SELECT array_to_string(format_ip6_list([ip6('::1'), ip6('2001:db8::')]), ' ');
+----
+::1 2001:db8::
+
+query T
+SELECT array_to_string(format_mac_list([mac('aa:bb:cc:dd:ee:ff'), mac('00-00-00-00-00-01')]), ' ');
+----
+aa:bb:cc:dd:ee:ff 00:00:00:00:00:01
+
+query TTTT
+SELECT typeof(format_ip4_list([1::UINTEGER])), format_ip4_list([]::UINTEGER[]), format_ip6_list(NULL::BLOB[]), format_mac_list([NULL::BLOB]);
+----
+VARCHAR[]	[]	NULL	[NULL]
+
+# The aggregated addresses of each group
+query IT
+SELECT g, format_ip4_list(list(x ORDER BY x))
+FROM (SELECT i % 2 AS g, (167772160 + i)::UINTEGER AS x FROM range(4) t(i))
+GROUP BY g ORDER BY g;
+----
+0	[10.0.0.0, 10.0.0.2]
+1	[10.0.0.1, 10.0.0.3]
+
+# A macro takes what the function in its body takes
+statement error
+SELECT format_ip4('text');
+----
+Could not convert string 'text' to UINT32
+
+statement error
+SELECT format_ip4(x) FROM (SELECT 1::BIGINT AS x);
+----
+No function matches
+
+statement error
+SELECT format_mac_list([1, 2]);
+----
+No function matches

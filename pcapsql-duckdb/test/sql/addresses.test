@@ -1,0 +1,100 @@
+# name: test/sql/addresses.test
+# description: ip6(), mac() and their *_to_string() counterparts convert between address text and BLOBs
+# group: [pcapsql]
+
+require pcapsql
+
+query TTTT
+SELECT typeof(ip6('::1')), typeof(ip6_to_string(ip6('::1'))), typeof(mac('00:00:00:00:00:00')), typeof(mac_to_string(NULL));
+----
+BLOB	VARCHAR	BLOB	VARCHAR
+
+query TTI
+SELECT hex(ip6('2001:db8::1')), hex(ip6('::ffff:192.168.1.1')), octet_length(ip6('::'));
+----
+20010DB8000000000000000000000001	00000000000000000000FFFFC0A80101	16
+
+query TTT
+SELECT ip6_to_string(ip6('2001:0db8:0000:0000:0000:0000:0000:0001')), ip6_to_string(ip6('::')), ip6_to_string(ip6('FE80::ABCD'));
+----
+2001:db8::1	::	fe80::abcd
+
+# Colons, hyphens or no separator; any case
+query TTTT
+SELECT hex(mac('aa:bb:cc:dd:ee:ff')), hex(mac('AA-BB-CC-DD-EE-FF')), hex(mac('aabbccddeeff')), hex(mac(' a:b:c:d:e:f '));
+----
+AABBCCDDEEFF	AABBCCDDEEFF	AABBCCDDEEFF	0A0B0C0D0E0F
+
+query TT
+SELECT mac_to_string(from_hex('AABBCCDDEEFF')), mac_to_string(mac('0-1-2-3-4-5'));
+----
+aa:bb:cc:dd:ee:ff	00:01:02:03:04:05
+
+# Text that is not an address is NULL, not an error
+query TTTTTT
+SELECT ip6('192.168.1.1'), ip6('2001:db8::g'), ip6(''), mac('aa:bb:cc:dd:ee'), mac('gg:bb:cc:dd:ee:ff'), mac('aa:bb-cc:dd-ee:ff');
+----
+NULL	NULL	NULL	NULL	NULL	NULL
+
+# So is a BLOB of the wrong length
+query TTTT
+SELECT ip6_to_string('\x01\x02'::BLOB), ip6_to_string(mac('aa:bb:cc:dd:ee:ff')), mac_to_string(''::BLOB), mac_to_string(ip6('::1'));
+----
+NULL	NULL	NULL	NULL
+
+query TTTT
+SELECT ip6(NULL), ip6_to_string(NULL), mac(NULL), mac_to_string(NULL);
+----
+NULL	NULL	NULL	NULL
+
+# The arguments are VARCHAR and BLOB
+statement error
+SELECT ip6(1);
+----
+No function matches
+
+statement error
+SELECT mac_to_string(1);
+----
+No function matches
+
+# NULLs are kept row by row
+query T
+SELECT ip6_to_string(ip6(x)) FROM (VALUES ('::1'), (NULL), ('bogus'), ('fe80::1')) t(x);
+----
+::1
+NULL
+NULL
+fe80::1
+
+query T
+SELECT mac_to_string(mac(x)) FROM (VALUES ('00-11-22-33-44-55'), (NULL), ('bogus'), ('ffffffffffff')) t(x);
+----
+00:11:22:33:44:55
+NULL
+NULL
+ff:ff:ff:ff:ff:ff
+
+# Round trips over more rows than one vector holds, with a NULL every seventh row
+query IIII
+SELECT count(*), count(s), count(DISTINCT s), bool_and(ip6(s) = b)
+FROM (SELECT b, ip6_to_string(b) AS s
+      FROM (SELECT pcap_unhex(CASE WHEN i % 7 <> 0 THEN format('20010db8{:08x}{:016x}', i, i * 977) END) AS b FROM range(10000) t(i)));
+----
+10000	8571	8571	true
+
+query IIIII
+SELECT count(*), count(s), count(DISTINCT s), bool_and(mac(s) = b), bool_and(mac(replace(s, ':', '')) = b)
+FROM (SELECT b, mac_to_string(b) AS s
+      FROM (SELECT pcap_unhex(CASE WHEN i % 7 <> 0 THEN format('{:012x}', i * 1000003) END) AS b FROM range(10000) t(i)));
+----
+10000	8571	8571	true	true
+
+# A constant argument next to a column: the one-row side of a cross join arrives as a constant vector
+statement ok
+CREATE TABLE one AS SELECT ip6('2001:db8::1') AS a6, 'aa:bb:cc:dd:ee:ff' AS m;
+
+query ITTTT
+SELECT count(*), min(ip6_to_string(a6)), max(ip6_to_string(a6)), min(hex(mac(m))), max(hex(mac(m))) FROM one, range(3000);
+----
+3000	2001:db8::1	2001:db8::1	AABBCCDDEEFF	AABBCCDDEEFF

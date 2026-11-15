@@ -13,7 +13,13 @@
 //! SELECT * FROM pcap_protocols();          -- name, description, field_count
 //! SELECT ip4('192.168.1.1');               -- 3232235777
 //! SELECT ip4_to_string(3232235777);        -- 192.168.1.1
+//! SELECT ip_in_cidr(ip4('10.1.2.3'), '10.0.0.0/8'), tcp_flags_str(18), ip_proto_name(6);
+//! SELECT format_mac(mac('aabbccddeeff'));  -- aa:bb:cc:dd:ee:ff
 //! ```
+//!
+//! That is `pcap_protocols()`, the sixteen scalar functions and the six `format_*` macros; the
+//! README lists them. The scalar functions have no logic here: they are loops over the kernels
+//! of `pcapsql_core::format`.
 //!
 //! See `docs/duckdb-v2-extension-roadmap.md` for the plan this follows.
 
@@ -22,6 +28,5 @@
 #![deny(unsafe_code)]
 
 pub mod engine;
-pub mod kernels;
 
 pub use engine::register;
