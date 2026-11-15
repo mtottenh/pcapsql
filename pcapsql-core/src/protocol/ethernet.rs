@@ -188,6 +188,7 @@ impl Protocol for EthernetProtocol {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::test_utils::ParseLayer as _;
 
     #[test]
     fn test_parse_ethernet() {
@@ -201,7 +202,7 @@ mod tests {
 
         let parser = EthernetProtocol;
         let context = ParseContext::new(LINKTYPE_ETHERNET);
-        let result = parser.parse(&frame, &context);
+        let result = parser.parse_layer(&frame, &context);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -225,7 +226,7 @@ mod tests {
 
         let parser = EthernetProtocol;
         let context = ParseContext::new(LINKTYPE_ETHERNET);
-        let result = parser.parse(&frame, &context);
+        let result = parser.parse_layer(&frame, &context);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -249,7 +250,7 @@ mod tests {
 
         let parser = EthernetProtocol;
         let context = ParseContext::new(LINKTYPE_ETHERNET);
-        let result = parser.parse(&frame, &context);
+        let result = parser.parse_layer(&frame, &context);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -282,7 +283,7 @@ mod tests {
 
         let parser = EthernetProtocol;
         let context = ParseContext::new(LINKTYPE_ETHERNET);
-        let result = parser.parse(&short_frame, &context);
+        let result = parser.parse_layer(&short_frame, &context);
 
         assert!(!result.is_ok());
         assert!(result.error.is_some());
@@ -298,7 +299,7 @@ mod tests {
 
         let parser = EthernetProtocol;
         let context = ParseContext::new(LINKTYPE_ETHERNET);
-        let result = parser.parse(&frame, &context);
+        let result = parser.parse_layer(&frame, &context);
 
         assert!(result.is_ok());
 

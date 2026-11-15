@@ -118,12 +118,12 @@ pub enum ColumnSource {
     LinkType,
     /// [`PacketRef::data`](crate::io::PacketRef::data).
     RawData,
-    /// [`ParseResult::encap_depth`](crate::ParseResult::encap_depth).
+    /// [`LayerRef::encap_depth`](crate::LayerRef::encap_depth).
     EncapDepth,
-    /// [`ParseResult::tunnel_type`](crate::ParseResult::tunnel_type), as its
+    /// [`LayerRef::tunnel_type`](crate::LayerRef::tunnel_type), as its
     /// name; NULL outside a tunnel.
     TunnelType,
-    /// [`ParseResult::tunnel_id`](crate::ParseResult::tunnel_id).
+    /// [`LayerRef::tunnel_id`](crate::LayerRef::tunnel_id).
     TunnelId,
     /// A field the table's parser extracted, by its short name (the
     /// descriptor name without the `protocol.` prefix).

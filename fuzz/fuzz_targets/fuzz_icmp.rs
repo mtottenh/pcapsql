@@ -10,7 +10,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use pcapsql_core::{default_registry, parse_packet, ParseScope};
+use pcapsql_core::{default_registry, parse_packet, ParseBuf, ParseScope};
 
 // Include generated frame wrappers
 include!("../src/frames.rs");
@@ -21,6 +21,8 @@ fuzz_target!(|data: &[u8]| {
     }
 
     let registry = default_registry();
+
+    let mut buf = ParseBuf::new();
 
     // Test ICMPv4: frame with protocol=1
     {
@@ -35,7 +37,7 @@ fuzz_target!(|data: &[u8]| {
         frame_v4.extend_from_slice(data);
 
         // Parse - ICMP parser triggered by ip_protocol=1
-        let _ = parse_packet(&registry, 1, &frame_v4, &ParseScope::full());
+        let _ = parse_packet(&registry, 1, &frame_v4, &ParseScope::full(), &mut buf);
     }
 
     // Test ICMPv6: frame with next_header=58
@@ -51,6 +53,6 @@ fuzz_target!(|data: &[u8]| {
         frame_v6.extend_from_slice(data);
 
         // Parse - ICMPv6 parser triggered by next_header=58
-        let _ = parse_packet(&registry, 1, &frame_v6, &ParseScope::full());
+        let _ = parse_packet(&registry, 1, &frame_v6, &ParseScope::full(), &mut buf);
     }
 });

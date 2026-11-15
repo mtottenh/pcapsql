@@ -3157,6 +3157,7 @@ dependencies = [
 name = "pcapsql-core"
 version = "0.4.2"
 dependencies = [
+ "bumpalo",
  "bytes",
  "bzip2 0.4.4",
  "compact_str",

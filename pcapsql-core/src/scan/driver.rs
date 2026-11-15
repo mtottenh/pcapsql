@@ -73,8 +73,8 @@ use super::plan::{CompiledScan, OutputId};
 use super::route::{Routed, Router};
 use super::sink::RowSink;
 use crate::io::{PacketReader, PacketRef, Pause};
-use crate::protocol::{parse_packet_into, LayerBuf};
-use crate::{Error, ParseResult, ProtocolRegistry};
+use crate::protocol::{parse_packet, PacketLayers, ParseBuf};
+use crate::{Error, ProtocolRegistry};
 
 /// Why [`PartitionScan::step`] returned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -174,7 +174,7 @@ pub trait FrameObserver {
     fn observe(
         &mut self,
         packet: &PacketRef<'_>,
-        layers: &[(&'static str, ParseResult<'_>)],
+        layers: &PacketLayers<'_, '_>,
     ) -> Result<(), Self::Error>;
 
     /// Whether the observer still needs frames once every routed output is
@@ -196,7 +196,7 @@ impl FrameObserver for NoObserver {
     fn observe(
         &mut self,
         _packet: &PacketRef<'_>,
-        _layers: &[(&'static str, ParseResult<'_>)],
+        _layers: &PacketLayers<'_, '_>,
     ) -> Result<(), Error> {
         Ok(())
     }
@@ -224,7 +224,7 @@ pub struct PartitionScan<R: PacketReader, O: FrameObserver = NoObserver> {
     observer: O,
     /// Storage for the layers of the packet being routed, reused from one
     /// packet to the next.
-    layers: LayerBuf,
+    layers: ParseBuf,
     /// The number of the last frame the observer saw (frames are numbered
     /// from 1). A frame shown again has this number.
     observed_frame: u64,
@@ -262,7 +262,7 @@ impl<R: PacketReader, O: FrameObserver> PartitionScan<R, O> {
             registry,
             router,
             observer,
-            layers: LayerBuf::new(),
+            layers: ParseBuf::new(),
             observed_frame: 0,
             filtered,
             ended,
@@ -350,8 +350,7 @@ impl<R: PacketReader, O: FrameObserver> PartitionScan<R, O> {
                 }
             }
             // Per-packet link type is correct even for PCAPNG multi-interface.
-            let mut layers = layers.for_packet();
-            parse_packet_into(registry, packet.link_type, packet.data, scope, &mut layers);
+            let layers = parse_packet(registry, packet.link_type, packet.data, scope, layers);
             if packet.frame_number != *observed_frame {
                 // The first time this frame is shown.
                 *observed_frame = packet.frame_number;
@@ -634,7 +633,7 @@ mod tests {
         fn observe(
             &mut self,
             packet: &PacketRef<'_>,
-            _layers: &[(&'static str, ParseResult<'_>)],
+            _layers: &PacketLayers<'_, '_>,
         ) -> Result<(), Error> {
             self.frames.push(packet.frame_number);
             if self.fail_at == Some(packet.frame_number) {
@@ -829,7 +828,7 @@ mod tests {
             fn observe(
                 &mut self,
                 packet: &PacketRef<'_>,
-                _layers: &[(&'static str, ParseResult<'_>)],
+                _layers: &PacketLayers<'_, '_>,
             ) -> Result<(), Failure> {
                 if packet.frame_number == self.0 {
                     return Err(Failure::Observer(packet.frame_number));

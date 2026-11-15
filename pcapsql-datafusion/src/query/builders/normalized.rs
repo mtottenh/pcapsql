@@ -26,7 +26,7 @@ use crate::query::providers::{BatchSender, CompiledSubscription, OverflowStats, 
 use crate::query::stream_tables::StreamSubscriber;
 use pcapsql_core::io::PacketRef;
 use pcapsql_core::scan::{FrameObserver, OutputId, ScanStats};
-use pcapsql_core::ParseResult;
+use pcapsql_core::PacketLayers;
 
 /// Where a table's completed batches go.
 enum BatchSink {
@@ -263,7 +263,7 @@ impl FrameObserver for NormalizedBatchSet {
     fn observe(
         &mut self,
         packet: &PacketRef<'_>,
-        layers: &[(&'static str, ParseResult<'_>)],
+        layers: &PacketLayers<'_, '_>,
     ) -> Result<(), Error> {
         match self.subscriber.as_mut() {
             Some(subscriber) => subscriber.observe(packet, layers),

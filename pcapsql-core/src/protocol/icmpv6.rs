@@ -535,6 +535,7 @@ fn format_mac(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::test_utils::ParseLayer as _;
 
     fn create_context_icmpv6() -> ParseContext {
         let mut context = ParseContext::new(1);
@@ -580,7 +581,7 @@ mod tests {
             0x00, 0x02, // Sequence: 2
         ];
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("type"), Some(&FieldValue::UInt8(128)));
@@ -606,7 +607,7 @@ mod tests {
             0x00, 0x0a, // Sequence: 10
         ];
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("type"), Some(&FieldValue::UInt8(129)));
@@ -630,7 +631,7 @@ mod tests {
             0x00, 0x00, 0x00, 0x00, // Unused
         ];
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("type"), Some(&FieldValue::UInt8(1)));
@@ -653,7 +654,7 @@ mod tests {
             0x00, 0x00, 0x05, 0xdc, // MTU: 1500
         ];
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("type"), Some(&FieldValue::UInt8(2)));
@@ -676,7 +677,7 @@ mod tests {
             0x00, 0x00, 0x00, 0x00, // Unused
         ];
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("type"), Some(&FieldValue::UInt8(3)));
@@ -698,7 +699,7 @@ mod tests {
             0x00, 0x00, 0x00, 0x28, // Pointer: 40
         ];
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("type"), Some(&FieldValue::UInt8(4)));
@@ -717,7 +718,7 @@ mod tests {
 
         let data = [0x80, 0x00]; // Only 2 bytes
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(!result.is_ok());
         assert!(result.error.is_some());
@@ -755,7 +756,7 @@ mod tests {
             0x00, 0x11, 0x22, 0x33, 0x44, 0x55, // MAC
         ];
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("type"), Some(&FieldValue::UInt8(133)));
@@ -789,7 +790,7 @@ mod tests {
             0x00, 0x00, 0x00, 0x00, // Retrans Timer: 0
         ];
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("type"), Some(&FieldValue::UInt8(134)));
@@ -819,7 +820,7 @@ mod tests {
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         ];
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
         assert_eq!(
             result.get("ndp_managed_flag"),
             Some(&FieldValue::Bool(true))
@@ -832,7 +833,7 @@ mod tests {
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         ];
 
-        let result2 = parser.parse(&data2, &context);
+        let result2 = parser.parse_layer(&data2, &context);
         assert_eq!(
             result2.get("ndp_managed_flag"),
             Some(&FieldValue::Bool(false))
@@ -856,7 +857,7 @@ mod tests {
             0x00, 0x01,
         ];
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("type"), Some(&FieldValue::UInt8(135)));
@@ -882,7 +883,7 @@ mod tests {
             0x00, 0x01,
         ];
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("type"), Some(&FieldValue::UInt8(136)));
@@ -913,7 +914,7 @@ mod tests {
             0x00, 0x01,
         ];
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
         assert_eq!(
             result.get("ndp_router_flag"),
             Some(&FieldValue::Bool(false))
@@ -944,7 +945,7 @@ mod tests {
         // Destination Address (16 bytes)
         data.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("type"), Some(&FieldValue::UInt8(137)));
@@ -968,7 +969,7 @@ mod tests {
         // Source Link-Layer option
         data.extend_from_slice(&[0x01, 0x01, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         match result.get("ndp_source_mac") {
@@ -994,7 +995,7 @@ mod tests {
         // Target Link-Layer option
         data.extend_from_slice(&[0x02, 0x01, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         match result.get("ndp_target_mac") {
@@ -1031,7 +1032,7 @@ mod tests {
             0x00, 0x00,
         ]);
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -1061,7 +1062,7 @@ mod tests {
         // Multicast Address (all-nodes: ff02::1)
         data.extend_from_slice(&[0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("type"), Some(&FieldValue::UInt8(130)));
@@ -1090,7 +1091,7 @@ mod tests {
         // Multicast Address
         data.extend_from_slice(&[0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x12]);
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("type"), Some(&FieldValue::UInt8(131)));
@@ -1112,7 +1113,7 @@ mod tests {
         // Multicast Address
         data.extend_from_slice(&[0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x12]);
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("type"), Some(&FieldValue::UInt8(132)));
@@ -1135,7 +1136,7 @@ mod tests {
             0x00, 0x03, // Number of Group Records: 3
         ];
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("type"), Some(&FieldValue::UInt8(143)));
@@ -1158,7 +1159,7 @@ mod tests {
         let mut data = vec![0x82, 0x00, 0x00, 0x00, 0x00, 0x64, 0x00, 0x00];
         data.extend_from_slice(&[0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x16]);
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         match result.get("mld_multicast_address") {
@@ -1178,7 +1179,7 @@ mod tests {
         ];
         data.extend_from_slice(&[0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         assert_eq!(

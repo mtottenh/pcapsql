@@ -26,7 +26,7 @@ use pcapsql_core::stream::{
     cipher_suite_name, Connection, ConnectionState, Http2StreamParser, HttpStreamParser,
     ParsedMessage, StreamManager, TcpFlags, TlsStreamParser,
 };
-use pcapsql_core::{FieldValue, KeyLog, ParseResult};
+use pcapsql_core::{FieldValue, KeyLog, LayerRef, PacketLayers};
 
 use crate::error::{Error, QueryError};
 use crate::query::providers::TableData;
@@ -72,7 +72,7 @@ impl StreamSubscriber {
     pub fn observe(
         &mut self,
         packet: &PacketRef<'_>,
-        parsed: &[(&'static str, ParseResult<'_>)],
+        parsed: &PacketLayers<'_, '_>,
     ) -> Result<(), Error> {
         let Some(segment) = TcpSegment::from_layers(parsed) else {
             return Ok(());
@@ -243,11 +243,11 @@ struct TcpSegment<'a> {
 }
 
 impl<'a> TcpSegment<'a> {
-    fn from_layers(parsed: &[(&'static str, ParseResult<'a>)]) -> Option<Self> {
+    fn from_layers(parsed: &PacketLayers<'_, 'a>) -> Option<Self> {
         let mut ips: Option<(IpAddr, IpAddr)> = None;
         let mut segment = None;
-        for (name, result) in parsed {
-            match *name {
+        for result in parsed.iter() {
+            match result.name() {
                 "ipv4" | "ipv6" => {
                     if let (Some(FieldValue::IpAddr(s)), Some(FieldValue::IpAddr(d))) =
                         (result.get("src_ip"), result.get("dst_ip"))
@@ -283,7 +283,7 @@ impl<'a> TcpSegment<'a> {
                             rst: flag("flag_rst"),
                             ack: flag("flag_ack"),
                         },
-                        payload: result.remaining,
+                        payload: result.payload(),
                     });
                 }
                 _ => {}
@@ -293,14 +293,14 @@ impl<'a> TcpSegment<'a> {
     }
 }
 
-fn get_u16_field(result: &ParseResult<'_>, name: &str) -> Option<u16> {
+fn get_u16_field(result: LayerRef<'_, '_>, name: &str) -> Option<u16> {
     match result.get(name) {
         Some(FieldValue::UInt16(v)) => Some(*v),
         _ => None,
     }
 }
 
-fn get_u32_field(result: &ParseResult<'_>, name: &str) -> Option<u32> {
+fn get_u32_field(result: LayerRef<'_, '_>, name: &str) -> Option<u32> {
     match result.get(name) {
         Some(FieldValue::UInt32(v)) => Some(*v),
         _ => None,

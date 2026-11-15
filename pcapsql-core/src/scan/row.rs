@@ -18,7 +18,7 @@ use super::plan::{OutCol, OutColumn};
 use super::sink::{Full, ListSink, RowSink};
 use crate::format::address::{ipv4_text, mac_text, IPV4_TEXT_LEN, MAC_TEXT_LEN};
 use crate::io::PacketRef;
-use crate::{FieldHint, FieldValue, ParseResult};
+use crate::{FieldHint, FieldValue, LayerRef};
 
 /// Write `value` to column `col` of kind `kind`.
 ///
@@ -427,7 +427,7 @@ impl Cell {
         sink: &mut S,
         col: OutCol,
         packet: &PacketRef<'_>,
-        layer: &ParseResult<'_>,
+        layer: LayerRef<'_, '_>,
     ) {
         match self.source {
             Source::Field(name) => match layer.get_hinted(name, &mut self.hint) {
@@ -435,12 +435,12 @@ impl Cell {
                 None => sink.null(col),
             },
             Source::FrameNumber => sink.u64(col, packet.frame_number),
-            Source::EncapDepth => sink.u8(col, layer.encap_depth),
-            Source::TunnelType => match layer.tunnel_type.as_str() {
+            Source::EncapDepth => sink.u8(col, layer.encap_depth()),
+            Source::TunnelType => match layer.tunnel_type().as_str() {
                 Some(name) => sink.str(col, name),
                 None => sink.null(col),
             },
-            Source::TunnelId => match layer.tunnel_id {
+            Source::TunnelId => match layer.tunnel_id() {
                 Some(id) => sink.u64(col, id),
                 None => sink.null(col),
             },
@@ -484,7 +484,7 @@ impl Cell {
 ///
 /// A parser emits its fields in a fixed order, so a column's field is almost
 /// always where it was in the previous row; the resolver remembers that
-/// position per column ([`ParseResult::get_hinted`]). It therefore serves
+/// position per column ([`LayerRef::get_hinted`]). It therefore serves
 /// one stream of rows of one output: make one per output per partition.
 ///
 /// The packet-record and parse-context columns (`frame_number`, `timestamp`,
@@ -529,7 +529,7 @@ pub fn write_layer_row<S: RowSink>(
     sink: &mut S,
     resolver: &mut FieldResolver,
     packet: &PacketRef<'_>,
-    layer: &ParseResult<'_>,
+    layer: LayerRef<'_, '_>,
 ) -> ControlFlow<Full> {
     for (index, cell) in resolver.cells.iter_mut().enumerate() {
         let col = OutCol(index as u16);
@@ -539,12 +539,12 @@ pub fn write_layer_row<S: RowSink>(
                 None => sink.null(col),
             },
             Source::FrameNumber => sink.u64(col, packet.frame_number),
-            Source::EncapDepth => sink.u8(col, layer.encap_depth),
-            Source::TunnelType => match layer.tunnel_type.as_str() {
+            Source::EncapDepth => sink.u8(col, layer.encap_depth()),
+            Source::TunnelType => match layer.tunnel_type().as_str() {
                 Some(name) => sink.str(col, name),
                 None => sink.null(col),
             },
-            Source::TunnelId => match layer.tunnel_id {
+            Source::TunnelId => match layer.tunnel_id() {
                 Some(id) => sink.u64(col, id),
                 None => sink.null(col),
             },
@@ -884,16 +884,8 @@ mod tests {
         }
     }
 
-    fn layer<'a>(fields: &[(&'static str, FieldValue<'a>)]) -> ParseResult<'a> {
-        ParseResult {
-            fields: fields.iter().cloned().collect(),
-            remaining: &[],
-            child_hints: crate::protocol::Hints::new(),
-            error: None,
-            encap_depth: 0,
-            tunnel_type: TunnelType::None,
-            tunnel_id: None,
-        }
+    fn layer<'l, 'a>(fields: &'l [(&'static str, FieldValue<'a>)]) -> LayerRef<'l, 'a> {
+        LayerRef::new("udp", fields)
     }
 
     /// The columns of `table` (`columns` by name, or every default column)
@@ -984,17 +976,15 @@ mod tests {
             ("src_port", FieldValue::UInt16(50_000)),
             ("dst_port", FieldValue::UInt16(4789)),
         ]);
-        let mut inner = layer(&[
+        let inner = layer(&[
             // Another order, and one field more: the hints must follow.
             ("length", FieldValue::UInt16(20)),
             ("dst_port", FieldValue::UInt16(53)),
             ("src_port", FieldValue::UInt16(1234)),
-        ]);
-        inner.encap_depth = 1;
-        inner.tunnel_type = TunnelType::Vxlan;
-        inner.tunnel_id = Some(77);
+        ])
+        .in_tunnel(1, TunnelType::Vxlan, Some(77));
 
-        for l in [&outer, &inner, &outer] {
+        for l in [outer, inner, outer] {
             assert!(write_layer_row(&mut sink, &mut resolver, &PACKET, l).is_continue());
         }
         let outer_row = vec![
@@ -1036,7 +1026,7 @@ mod tests {
             let mut resolver = FieldResolver::new(&columns);
             let mut sink = RecordingSink::new(&columns, None);
             let l = layer(&[("src_port", FieldValue::UInt16(1))]);
-            let _ = write_layer_row(&mut sink, &mut resolver, &PACKET, &l);
+            let _ = write_layer_row(&mut sink, &mut resolver, &PACKET, l);
             assert_eq!(
                 sink.take_rows(),
                 vec![vec![C::Timestamp(expected), C::U16(1)]]
@@ -1076,7 +1066,7 @@ mod tests {
         assert!(resolver.is_empty());
         let mut sink = RecordingSink::new(&[], Some(2));
         assert!(write_frame_row(&mut sink, &mut resolver, &PACKET).is_continue());
-        assert!(write_layer_row(&mut sink, &mut resolver, &PACKET, &layer(&[])).is_break());
+        assert!(write_layer_row(&mut sink, &mut resolver, &PACKET, layer(&[])).is_break());
         assert_eq!(sink.take_rows(), vec![Vec::<C>::new(), vec![]]);
     }
 }

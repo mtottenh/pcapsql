@@ -276,6 +276,7 @@ impl Protocol for Ipv4Protocol {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::test_utils::ParseLayer as _;
     use std::net::IpAddr;
 
     #[test]
@@ -298,7 +299,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::EtherType, ethertype::IPV4 as u64);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("ttl"), Some(&FieldValue::UInt8(64)));
@@ -325,7 +326,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::EtherType, ethertype::IPV4 as u64);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("ttl"), Some(&FieldValue::UInt8(128)));
@@ -353,7 +354,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::EtherType, ethertype::IPV4 as u64);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("protocol"), Some(&FieldValue::UInt8(1)));
@@ -381,7 +382,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::EtherType, ethertype::IPV4 as u64);
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.remaining.len(), 8); // TCP header bytes
@@ -414,7 +415,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::EtherType, ethertype::IPV4 as u64);
 
-        let result = parser.parse(&short_header, &context);
+        let result = parser.parse_layer(&short_header, &context);
 
         assert!(!result.is_ok());
         assert!(result.error.is_some());
@@ -434,7 +435,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::EtherType, ethertype::IPV4 as u64);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -466,7 +467,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::EtherType, ethertype::IPV4 as u64);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("more_fragments"), Some(&FieldValue::Bool(true)));
@@ -489,7 +490,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::EtherType, ethertype::IPV4 as u64);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.hint(HintKey::IpProtocol), Some(6u64));

@@ -293,25 +293,17 @@ mod tests {
     /// false rows (the evaluation itself is tested in core).
     #[test]
     fn converted_predicate_evaluates_against_a_layer() {
-        use pcapsql_core::{FieldValue, ParseResult, TunnelType};
-        use smallvec::SmallVec;
+        use pcapsql_core::{FieldValue, LayerRef};
 
-        let mut fields = SmallVec::new();
-        fields.push(("src_port", FieldValue::UInt16(12345)));
-        fields.push(("dst_port", FieldValue::UInt16(80)));
-        let layer = ParseResult {
-            fields,
-            remaining: &[],
-            child_hints: pcapsql_core::protocol::Hints::new(),
-            error: None,
-            encap_depth: 0,
-            tunnel_type: TunnelType::None,
-            tunnel_id: None,
-        };
+        let fields = [
+            ("src_port", FieldValue::UInt16(12345)),
+            ("dst_port", FieldValue::UInt16(80)),
+        ];
+        let layer = LayerRef::new("tcp", &fields);
         let keeps = |exprs: &[Expr]| {
             row_predicate(exprs, tcp())
                 .and_then(|p| p.compile(tcp()))
-                .is_none_or(|mut p| p.keeps(&layer))
+                .is_none_or(|mut p| p.keeps(layer))
         };
         assert!(keeps(&[col("dst_port").eq(lit(80i32))]));
         assert!(!keeps(&[col("dst_port").eq(lit(443i32))]));

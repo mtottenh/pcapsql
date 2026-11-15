@@ -19,8 +19,8 @@ pub use crate::schema::{DataKind, FieldDescriptor, ProtocolSchema};
 
 // Protocol types
 pub use crate::protocol::{
-    default_registry, parse_packet, BuiltinProtocol, FieldValue, ParseContext, ParseResult,
-    ParseScope, PayloadMode, Protocol, ProtocolRegistry,
+    default_registry, parse_packet, BuiltinProtocol, FieldValue, LayerRef, PacketLayers, ParseBuf,
+    ParseContext, ParseResult, ParseScope, PayloadMode, Protocol, ProtocolRegistry,
 };
 
 // I/O types

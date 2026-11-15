@@ -793,6 +793,7 @@ impl BgpProtocol {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::test_utils::ParseLayer as _;
 
     /// Create a BGP message header.
     fn create_bgp_header(msg_type: u8, length: u16) -> Vec<u8> {
@@ -895,13 +896,13 @@ mod tests {
 
         // Valid marker
         let valid_msg = create_bgp_header(message_type::KEEPALIVE, 19);
-        let result = parser.parse(&valid_msg, &context);
+        let result = parser.parse_layer(&valid_msg, &context);
         assert!(result.is_ok());
 
         // Invalid marker
         let mut invalid_msg = create_bgp_header(message_type::KEEPALIVE, 19);
         invalid_msg[0] = 0xFE; // Corrupt marker
-        let result = parser.parse(&invalid_msg, &context);
+        let result = parser.parse_layer(&invalid_msg, &context);
         assert!(!result.is_ok());
         assert!(result.error.unwrap().contains("invalid marker"));
     }
@@ -934,7 +935,7 @@ mod tests {
                 msg.extend(vec![0u8; 10]);
             }
 
-            let result = parser.parse(&msg, &context);
+            let result = parser.parse_layer(&msg, &context);
             assert!(result.is_ok());
             assert_eq!(
                 result.get("message_type"),
@@ -955,7 +956,7 @@ mod tests {
         context.insert_hint(HintKey::DstPort, 179);
 
         let msg = create_bgp_open(4, 65001, 180, [192, 168, 1, 1]);
-        let result = parser.parse(&msg, &context);
+        let result = parser.parse_layer(&msg, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("version"), Some(&FieldValue::UInt8(4)));
@@ -975,7 +976,7 @@ mod tests {
         context.insert_hint(HintKey::DstPort, 179);
 
         let msg = create_bgp_header(message_type::KEEPALIVE, 19);
-        let result = parser.parse(&msg, &context);
+        let result = parser.parse_layer(&msg, &context);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -993,7 +994,7 @@ mod tests {
         context.insert_hint(HintKey::DstPort, 179);
 
         let msg = create_bgp_update(5, 10);
-        let result = parser.parse(&msg, &context);
+        let result = parser.parse_layer(&msg, &context);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -1018,7 +1019,7 @@ mod tests {
         msg.push(6); // Error code: Cease
         msg.push(4); // Error subcode: Administrative Reset
 
-        let result = parser.parse(&msg, &context);
+        let result = parser.parse_layer(&msg, &context);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -1043,7 +1044,7 @@ mod tests {
         msg.extend_from_slice(&19u16.to_be_bytes());
         msg.push(message_type::KEEPALIVE);
 
-        let result = parser.parse(&msg, &context);
+        let result = parser.parse_layer(&msg, &context);
         assert!(!result.is_ok());
         assert!(result.error.unwrap().contains("invalid marker"));
     }
@@ -1056,7 +1057,7 @@ mod tests {
         context.insert_hint(HintKey::DstPort, 179);
 
         let short_msg = [0xFF; 18]; // Only 18 bytes
-        let result = parser.parse(&short_msg, &context);
+        let result = parser.parse_layer(&short_msg, &context);
 
         assert!(!result.is_ok());
         assert!(result.error.is_some());
@@ -1092,7 +1093,7 @@ mod tests {
         let mut data = create_bgp_header(message_type::KEEPALIVE, 19);
         data.extend(create_bgp_header(message_type::KEEPALIVE, 19));
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.remaining.len(), 19); // Second message remains
@@ -1134,7 +1135,7 @@ mod tests {
         msg.push(cap_data.len() as u8); // Opt params length
         msg.extend_from_slice(&cap_data);
 
-        let result = parser.parse(&msg, &context);
+        let result = parser.parse_layer(&msg, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("my_as"), Some(&FieldValue::UInt16(AS_TRANS)));
@@ -1180,7 +1181,7 @@ mod tests {
         // Path attribute length (0 - no attributes)
         msg.extend_from_slice(&0u16.to_be_bytes());
 
-        let result = parser.parse(&msg, &context);
+        let result = parser.parse_layer(&msg, &context);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -1247,7 +1248,7 @@ mod tests {
         msg.extend_from_slice(&(path_attrs.len() as u16).to_be_bytes());
         msg.extend_from_slice(&path_attrs);
 
-        let result = parser.parse(&msg, &context);
+        let result = parser.parse_layer(&msg, &context);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -1311,7 +1312,7 @@ mod tests {
         msg.extend_from_slice(&path_attrs);
         msg.extend_from_slice(&nlri);
 
-        let result = parser.parse(&msg, &context);
+        let result = parser.parse_layer(&msg, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("nlri_count"), Some(&FieldValue::UInt16(1)));
@@ -1337,7 +1338,7 @@ mod tests {
         msg.push(0); // Reserved
         msg.push(1); // SAFI
 
-        let result = parser.parse(&msg, &context);
+        let result = parser.parse_layer(&msg, &context);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -1366,7 +1367,7 @@ mod tests {
         msg.push(0); // Reserved
         msg.push(2); // SAFI
 
-        let result = parser.parse(&msg, &context);
+        let result = parser.parse_layer(&msg, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("afi"), Some(&FieldValue::UInt16(2)));
@@ -1417,7 +1418,7 @@ mod tests {
         msg.extend_from_slice(&(path_attrs.len() as u16).to_be_bytes());
         msg.extend_from_slice(&path_attrs);
 
-        let result = parser.parse(&msg, &context);
+        let result = parser.parse_layer(&msg, &context);
 
         assert!(result.is_ok());
         // AS_SET counts as 1 for path length
@@ -1453,7 +1454,7 @@ mod tests {
             msg.push(err_code);
             msg.push(err_subcode);
 
-            let result = parser.parse(&msg, &context);
+            let result = parser.parse_layer(&msg, &context);
 
             assert!(result.is_ok());
             assert_eq!(result.get("error_code"), Some(&FieldValue::UInt8(err_code)));
@@ -1506,7 +1507,7 @@ mod tests {
         msg.extend_from_slice(&(path_attrs.len() as u16).to_be_bytes());
         msg.extend_from_slice(&path_attrs);
 
-        let result = parser.parse(&msg, &context);
+        let result = parser.parse_layer(&msg, &context);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -1560,7 +1561,7 @@ mod tests {
         msg.extend_from_slice(&(path_attrs.len() as u16).to_be_bytes());
         msg.extend_from_slice(&path_attrs);
 
-        let result = parser.parse(&msg, &context);
+        let result = parser.parse_layer(&msg, &context);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -1611,7 +1612,7 @@ mod tests {
         msg.extend_from_slice(&(path_attrs.len() as u16).to_be_bytes());
         msg.extend_from_slice(&path_attrs);
 
-        let result = parser.parse(&msg, &context);
+        let result = parser.parse_layer(&msg, &context);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -1665,7 +1666,7 @@ mod tests {
         msg.extend_from_slice(&path_attrs);
         msg.extend_from_slice(&nlri);
 
-        let result = parser.parse(&msg, &context);
+        let result = parser.parse_layer(&msg, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("nlri_count"), Some(&FieldValue::UInt16(3)));

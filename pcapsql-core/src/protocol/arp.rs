@@ -113,6 +113,7 @@ impl Protocol for ArpProtocol {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::test_utils::ParseLayer as _;
     use std::net::IpAddr;
 
     #[test]
@@ -134,7 +135,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::EtherType, ethertype::ARP as u64);
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("operation"), Some(&FieldValue::UInt16(1)));
@@ -168,7 +169,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::EtherType, ethertype::ARP as u64);
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -216,7 +217,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::EtherType, ethertype::ARP as u64);
 
-        let result = parser.parse(&short_packet, &context);
+        let result = parser.parse_layer(&short_packet, &context);
 
         assert!(!result.is_ok());
         assert!(result.error.is_some());
@@ -240,7 +241,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::EtherType, ethertype::ARP as u64);
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("hardware_type"), Some(&FieldValue::UInt16(1)));
@@ -270,7 +271,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::EtherType, ethertype::ARP as u64);
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         // ARP doesn't have child protocols

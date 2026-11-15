@@ -104,6 +104,7 @@ impl Protocol for VlanProtocol {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::test_utils::ParseLayer as _;
 
     /// Create a VLAN tag with the given parameters.
     fn create_vlan_tag(vlan_id: u16, priority: u8, dei: bool, inner_ethertype: u16) -> Vec<u8> {
@@ -128,7 +129,7 @@ mod tests {
         context.insert_hint(HintKey::EtherType, ethertype::VLAN as u64);
         context.parent_protocol = Some("ethernet");
 
-        let result = parser.parse(&tag, &context);
+        let result = parser.parse_layer(&tag, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("vlan_id"), Some(&FieldValue::UInt16(100)));
@@ -150,7 +151,7 @@ mod tests {
         context.insert_hint(HintKey::EtherType, ethertype::VLAN as u64);
         context.parent_protocol = Some("ethernet");
 
-        let result = parser.parse(&tag, &context);
+        let result = parser.parse_layer(&tag, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("vlan_id"), Some(&FieldValue::UInt16(200)));
@@ -171,7 +172,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::EtherType, ethertype::VLAN as u64);
 
-        let result = parser.parse(&tag, &context);
+        let result = parser.parse_layer(&tag, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("vlan_id"), Some(&FieldValue::UInt16(4095)));
@@ -210,7 +211,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::EtherType, ethertype::VLAN as u64);
 
-        let result = parser.parse(&short_tag, &context);
+        let result = parser.parse_layer(&short_tag, &context);
 
         assert!(!result.is_ok());
         assert!(result.error.is_some());
@@ -225,7 +226,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::EtherType, ethertype::VLAN as u64);
 
-        let result = parser.parse(&tag, &context);
+        let result = parser.parse_layer(&tag, &context);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -245,7 +246,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::EtherType, ethertype::VLAN as u64);
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.remaining.len(), 4); // IPv4 header bytes

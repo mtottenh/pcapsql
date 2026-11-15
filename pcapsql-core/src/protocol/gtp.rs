@@ -416,6 +416,7 @@ impl GtpProtocol {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::test_utils::ParseLayer as _;
 
     /// Create a minimal GTPv1 header.
     fn create_gtp_header(
@@ -508,7 +509,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::DstPort, 2152);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("version"), Some(&FieldValue::UInt8(1)));
@@ -528,7 +529,7 @@ mod tests {
 
         for teid in test_teids {
             let header = create_gtp_header(message_type::G_PDU, teid, 0, None);
-            let result = parser.parse(&header, &context);
+            let result = parser.parse_layer(&header, &context);
 
             assert!(result.is_ok());
             assert_eq!(result.get("teid"), Some(&FieldValue::UInt32(teid)));
@@ -551,7 +552,7 @@ mod tests {
 
         for msg_type in test_types {
             let header = create_gtp_header(msg_type, 0x1234, 0, None);
-            let result = parser.parse(&header, &context);
+            let result = parser.parse_layer(&header, &context);
 
             assert!(result.is_ok());
             assert_eq!(
@@ -570,7 +571,7 @@ mod tests {
 
         // With sequence number
         let header = create_gtp_header(message_type::G_PDU, 0x1234, 0, Some(0xABCD));
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("sequence"), Some(&FieldValue::UInt32(0xABCD)));
@@ -587,7 +588,7 @@ mod tests {
         let mut data_ipv4 = create_gtp_header(message_type::G_PDU, 0x1234, 20, None);
         data_ipv4.extend_from_slice(&[0x45, 0x00, 0x00, 0x14]); // IPv4 header start
 
-        let result_ipv4 = parser.parse(&data_ipv4, &context);
+        let result_ipv4 = parser.parse_layer(&data_ipv4, &context);
         assert!(result_ipv4.is_ok());
         assert_eq!(result_ipv4.hint(HintKey::EtherType), Some(0x0800u64));
         assert_eq!(result_ipv4.hint(HintKey::IpVersion), Some(4u64));
@@ -596,7 +597,7 @@ mod tests {
         let mut data_ipv6 = create_gtp_header(message_type::G_PDU, 0x1234, 40, None);
         data_ipv6.extend_from_slice(&[0x60, 0x00, 0x00, 0x00]); // IPv6 header start
 
-        let result_ipv6 = parser.parse(&data_ipv6, &context);
+        let result_ipv6 = parser.parse_layer(&data_ipv6, &context);
         assert!(result_ipv6.is_ok());
         assert_eq!(result_ipv6.hint(HintKey::EtherType), Some(0x86DDu64));
         assert_eq!(result_ipv6.hint(HintKey::IpVersion), Some(6u64));
@@ -610,7 +611,7 @@ mod tests {
         context.insert_hint(HintKey::DstPort, 2152);
 
         let short_header = [0x30, 0xFF, 0x00, 0x00]; // Only 4 bytes
-        let result = parser.parse(&short_header, &context);
+        let result = parser.parse_layer(&short_header, &context);
 
         assert!(!result.is_ok());
         assert!(result.error.is_some());
@@ -627,7 +628,7 @@ mod tests {
         // Add 100 bytes of payload
         header.extend(vec![0u8; 100]);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("length"), Some(&FieldValue::UInt16(100)));
@@ -665,7 +666,7 @@ mod tests {
             0x00, 0x00, 0x00, 0x01, // TEID
         ];
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("protocol_type"), Some(&FieldValue::UInt8(0)));
@@ -699,7 +700,7 @@ mod tests {
             extension_header_type::NO_MORE, // No more extensions
         ];
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -748,7 +749,7 @@ mod tests {
             extension_header_type::NO_MORE, // End of chain
         ];
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -799,7 +800,7 @@ mod tests {
             }
         }
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         // Should be capped at MAX_EXTENSION_HEADERS (16)
@@ -828,7 +829,7 @@ mod tests {
             0x00, // Spare
         ];
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("version"), Some(&FieldValue::UInt8(2)));
@@ -853,7 +854,7 @@ mod tests {
             0x00, // Spare
         ];
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("version"), Some(&FieldValue::UInt8(2)));
@@ -878,7 +879,7 @@ mod tests {
             0x00, // Spare
         ];
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("piggyback"), Some(&FieldValue::Bool(true)));
@@ -901,7 +902,7 @@ mod tests {
             0x00, // Spare
         ];
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         // Sequence is stored as UInt32 for GTPv2 (24-bit value)
@@ -931,7 +932,7 @@ mod tests {
             0x00, // Next extension header type
         ];
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("npdu"), Some(&FieldValue::UInt8(0x42)));
@@ -974,7 +975,7 @@ mod tests {
                 extension_header_type::NO_MORE, // End
             ];
 
-            let result = parser.parse(&header, &context);
+            let result = parser.parse_layer(&header, &context);
             assert!(result.is_ok());
 
             if let Some(FieldValue::OwnedString(ext)) = result.get("extension_headers") {
@@ -1016,7 +1017,7 @@ mod tests {
                 0x00, // Spare
             ];
 
-            let result = parser.parse(&header, &context);
+            let result = parser.parse_layer(&header, &context);
             assert!(result.is_ok());
             assert_eq!(
                 result.get("message_type"),
@@ -1052,7 +1053,7 @@ mod tests {
             extension_header_type::NO_MORE,
         ];
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("teid"), Some(&FieldValue::UInt32(0x12345678)));

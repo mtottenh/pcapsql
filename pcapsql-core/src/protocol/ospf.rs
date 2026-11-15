@@ -417,6 +417,7 @@ impl OspfProtocol {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::test_utils::ParseLayer as _;
 
     /// Create an OSPF v2 header.
     fn create_ospf_header(
@@ -520,7 +521,7 @@ mod tests {
 
         let pkt = create_ospf_header(2, packet_type::HELLO, 24, [192, 168, 1, 1], [0, 0, 0, 0]);
 
-        let result = parser.parse(&pkt, &context);
+        let result = parser.parse_layer(&pkt, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("version"), Some(&FieldValue::UInt8(2)));
@@ -540,13 +541,13 @@ mod tests {
 
         // OSPFv2
         let pkt_v2 = create_ospf_header(2, packet_type::HELLO, 24, [1, 1, 1, 1], [0, 0, 0, 0]);
-        let result_v2 = parser.parse(&pkt_v2, &context);
+        let result_v2 = parser.parse_layer(&pkt_v2, &context);
         assert!(result_v2.is_ok());
         assert_eq!(result_v2.get("version"), Some(&FieldValue::UInt8(2)));
 
         // OSPFv3
         let pkt_v3 = create_ospf_header(3, packet_type::HELLO, 24, [1, 1, 1, 1], [0, 0, 0, 0]);
-        let result_v3 = parser.parse(&pkt_v3, &context);
+        let result_v3 = parser.parse_layer(&pkt_v3, &context);
         assert!(result_v3.is_ok());
         assert_eq!(result_v3.get("version"), Some(&FieldValue::UInt8(3)));
     }
@@ -567,7 +568,7 @@ mod tests {
             [192, 168, 1, 2], // BDR
         );
 
-        let result = parser.parse(&pkt, &context);
+        let result = parser.parse_layer(&pkt, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("hello_interval"), Some(&FieldValue::UInt16(10)));
@@ -591,7 +592,7 @@ mod tests {
 
         let pkt = create_ospf_header(2, packet_type::HELLO, 24, [10, 0, 0, 1], [0, 0, 0, 0]);
 
-        let result = parser.parse(&pkt, &context);
+        let result = parser.parse_layer(&pkt, &context);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -609,7 +610,7 @@ mod tests {
 
         // Backbone area (0.0.0.0)
         let pkt1 = create_ospf_header(2, packet_type::HELLO, 24, [1, 1, 1, 1], [0, 0, 0, 0]);
-        let result1 = parser.parse(&pkt1, &context);
+        let result1 = parser.parse_layer(&pkt1, &context);
         assert!(result1.is_ok());
         assert_eq!(
             result1.get("area_id"),
@@ -618,7 +619,7 @@ mod tests {
 
         // Non-backbone area
         let pkt2 = create_ospf_header(2, packet_type::HELLO, 24, [1, 1, 1, 1], [0, 0, 0, 1]);
-        let result2 = parser.parse(&pkt2, &context);
+        let result2 = parser.parse_layer(&pkt2, &context);
         assert!(result2.is_ok());
         assert_eq!(
             result2.get("area_id"),
@@ -643,7 +644,7 @@ mod tests {
 
         for (pkt_type, name) in test_types {
             let pkt = create_ospf_header(2, pkt_type, 24, [1, 1, 1, 1], [0, 0, 0, 0]);
-            let result = parser.parse(&pkt, &context);
+            let result = parser.parse_layer(&pkt, &context);
 
             assert!(result.is_ok());
             assert_eq!(
@@ -665,7 +666,7 @@ mod tests {
         context.insert_hint(HintKey::IpProtocol, 89);
 
         let short_pkt = [2u8, 1, 0, 24]; // Only 4 bytes
-        let result = parser.parse(&short_pkt, &context);
+        let result = parser.parse_layer(&short_pkt, &context);
 
         assert!(!result.is_ok());
         assert!(result.error.is_some());
@@ -683,7 +684,7 @@ mod tests {
         pkt[14] = 0;
         pkt[15] = 2;
 
-        let result = parser.parse(&pkt, &context);
+        let result = parser.parse_layer(&pkt, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("auth_type"), Some(&FieldValue::UInt16(2)));
@@ -732,7 +733,7 @@ mod tests {
         pkt.push(0x07); // DD Flags (I/M/MS all set)
         pkt.extend_from_slice(&0x12345678u32.to_be_bytes()); // DD Sequence
 
-        let result = parser.parse(&pkt, &context);
+        let result = parser.parse_layer(&pkt, &context);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -779,7 +780,7 @@ mod tests {
         pkt.extend_from_slice(&[0x00, 0x00]); // LS Checksum
         pkt.extend_from_slice(&36u16.to_be_bytes()); // Length
 
-        let result = parser.parse(&pkt, &context);
+        let result = parser.parse_layer(&pkt, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("dd_lsa_count"), Some(&FieldValue::UInt16(1)));
@@ -823,7 +824,7 @@ mod tests {
         pkt.extend_from_slice(&[0x00, 0x00]); // LS Checksum
         pkt.extend_from_slice(&32u16.to_be_bytes()); // Length
 
-        let result = parser.parse(&pkt, &context);
+        let result = parser.parse_layer(&pkt, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("lsu_lsa_count"), Some(&FieldValue::UInt32(2)));
@@ -882,7 +883,7 @@ mod tests {
         pkt.extend_from_slice(&[0x00, 0x00]); // LS Checksum
         pkt.extend_from_slice(&28u16.to_be_bytes()); // Length
 
-        let result = parser.parse(&pkt, &context);
+        let result = parser.parse_layer(&pkt, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("lsa_ack_count"), Some(&FieldValue::UInt16(2)));
@@ -934,7 +935,7 @@ mod tests {
             pkt.extend_from_slice(&[0x00, 0x00]); // LS Checksum
             pkt.extend_from_slice(&20u16.to_be_bytes()); // Length
 
-            let result = parser.parse(&pkt, &context);
+            let result = parser.parse_layer(&pkt, &context);
             assert!(result.is_ok());
             assert_eq!(result.get("lsa_type"), Some(&FieldValue::UInt8(ls_type)));
             assert_eq!(
@@ -972,7 +973,7 @@ mod tests {
         pkt.extend_from_slice(&[0x00, 0x00]); // LS Checksum
         pkt.extend_from_slice(&20u16.to_be_bytes()); // Length
 
-        let result = parser.parse(&pkt, &context);
+        let result = parser.parse_layer(&pkt, &context);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -1018,7 +1019,7 @@ mod tests {
         pkt.extend_from_slice(&[192, 168, 1, 3]); // Neighbor 2
         pkt.extend_from_slice(&[192, 168, 1, 4]); // Neighbor 3
 
-        let result = parser.parse(&pkt, &context);
+        let result = parser.parse_layer(&pkt, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("neighbor_count"), Some(&FieldValue::UInt16(3)));
@@ -1040,7 +1041,7 @@ mod tests {
         ];
 
         // Should not panic, should parse header fields
-        let result = parser.parse(&crash_input, &context);
+        let result = parser.parse_layer(&crash_input, &context);
         assert!(result.is_ok());
         assert_eq!(result.get("version"), Some(&FieldValue::UInt8(2)));
         assert_eq!(result.get("message_type"), Some(&FieldValue::UInt8(2)));
@@ -1075,7 +1076,7 @@ mod tests {
         pkt.extend_from_slice(&[0x00, 0x00]); // LS Checksum
         pkt.extend_from_slice(&20u16.to_be_bytes()); // Length
 
-        let result = parser.parse(&pkt, &context);
+        let result = parser.parse_layer(&pkt, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("lsa_age"), Some(&FieldValue::UInt16(1800)));

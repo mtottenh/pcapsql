@@ -9,7 +9,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use pcapsql_core::{default_registry, parse_packet, ParseScope};
+use pcapsql_core::{default_registry, parse_packet, ParseBuf, ParseScope};
 
 // Include generated frame wrappers
 include!("../src/frames.rs");
@@ -20,6 +20,8 @@ fuzz_target!(|data: &[u8]| {
     }
 
     let registry = default_registry();
+
+    let mut buf = ParseBuf::new();
 
     // Clone DNS frame header and patch lengths
     let mut frame = DNS_FRAME.to_vec();
@@ -38,5 +40,5 @@ fuzz_target!(|data: &[u8]| {
     frame.extend_from_slice(data);
 
     // Parse through the full chain - DNS parser triggered by dst_port=53
-    let _ = parse_packet(&registry, 1, &frame, &ParseScope::full());
+    let _ = parse_packet(&registry, 1, &frame, &ParseScope::full(), &mut buf);
 });

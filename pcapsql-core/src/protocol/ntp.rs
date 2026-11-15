@@ -213,6 +213,7 @@ pub mod stratum {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::test_utils::ParseLayer as _;
 
     /// Signed fields and fixed-point conversions: poll/precision are signed
     /// log2 seconds, root delay is a signed 16.16 fixed-point second count,
@@ -226,7 +227,7 @@ mod tests {
         packet[3] = 0xEC; // precision = -20
         packet[4..8].copy_from_slice(&(-0x0000_8000i32).to_be_bytes()); // -0.5 s
         packet[8..12].copy_from_slice(&0x0001_4000u32.to_be_bytes()); // 1.25 s
-        let result = NtpProtocol.parse(&packet, &ParseContext::new(1));
+        let result = NtpProtocol.parse_layer(&packet, &ParseContext::new(1));
         assert!(result.is_ok());
         assert_eq!(result.get("poll"), Some(&FieldValue::Int8(-6)));
         assert_eq!(result.get("precision"), Some(&FieldValue::Int8(-20)));
@@ -370,7 +371,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::DstPort, 123);
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("version"), Some(&FieldValue::UInt8(4)));
@@ -386,7 +387,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::SrcPort, 123);
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("version"), Some(&FieldValue::UInt8(4)));
@@ -407,7 +408,7 @@ mod tests {
         let parser = NtpProtocol;
         let context = ParseContext::new(1);
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("version"), Some(&FieldValue::UInt8(3)));
@@ -435,7 +436,7 @@ mod tests {
         let parser = NtpProtocol;
         let context = ParseContext::new(1);
 
-        let result = parser.parse(&short_packet, &context);
+        let result = parser.parse_layer(&short_packet, &context);
 
         assert!(!result.is_ok());
         assert!(result.error.is_some());

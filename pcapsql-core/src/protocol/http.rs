@@ -347,7 +347,8 @@ impl Protocol for HttpProtocol {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{default_registry, parse_packet, ParseScope};
+    use crate::protocol::test_utils::{ParseLayer as _, ParsedLayer};
+    use crate::protocol::{default_registry, parse_packet, ParseBuf, ParseScope};
 
     fn ctx(src_port: u64, dst_port: u64, sniffed: bool) -> ParseContext {
         let mut ctx = ParseContext::new(1);
@@ -360,12 +361,12 @@ mod tests {
         ctx
     }
 
-    fn parse(data: &[u8]) -> ParseResult<'_> {
-        HttpProtocol.parse(data, &ctx(40000, 80, true))
+    fn parse(data: &[u8]) -> ParsedLayer<'_> {
+        HttpProtocol.parse_layer(data, &ctx(40000, 80, true))
     }
 
-    fn text<'a>(result: &'a ParseResult<'_>, name: &str) -> Option<&'a str> {
-        result.get(name).and_then(|v| v.as_str())
+    fn text<'a>(value: Option<&'a FieldValue<'_>>) -> Option<&'a str> {
+        value.and_then(|v| v.as_str())
     }
 
     #[test]
@@ -426,15 +427,15 @@ mod tests {
             result.get("headers_complete"),
             Some(&FieldValue::Bool(true))
         );
-        assert_eq!(text(&result, "method"), Some("GET"));
-        assert_eq!(text(&result, "uri"), Some("/index.html"));
-        assert_eq!(text(&result, "version"), Some("HTTP/1.1"));
-        assert_eq!(text(&result, "host"), Some("example.test"));
-        assert_eq!(text(&result, "user_agent"), Some("pcapsql/1.0"));
-        assert_eq!(text(&result, "accept"), Some("text/plain"));
-        assert_eq!(text(&result, "cookie"), Some("a=1"));
+        assert_eq!(text(result.get("method")), Some("GET"));
+        assert_eq!(text(result.get("uri")), Some("/index.html"));
+        assert_eq!(text(result.get("version")), Some("HTTP/1.1"));
+        assert_eq!(text(result.get("host")), Some("example.test"));
+        assert_eq!(text(result.get("user_agent")), Some("pcapsql/1.0"));
+        assert_eq!(text(result.get("accept")), Some("text/plain"));
+        assert_eq!(text(result.get("cookie")), Some("a=1"));
         // Credentials never reach the table.
-        assert_eq!(text(&result, "authorization"), Some("Bearer"));
+        assert_eq!(text(result.get("authorization")), Some("Bearer"));
         assert_eq!(result.get("body_length"), Some(&FieldValue::UInt64(0)));
         assert!(result.get("status_code").is_none());
         assert!(result.remaining.is_empty());
@@ -451,15 +452,15 @@ mod tests {
             result.get("headers_complete"),
             Some(&FieldValue::Bool(true))
         );
-        assert_eq!(text(&result, "version"), Some("HTTP/1.1"));
+        assert_eq!(text(result.get("version")), Some("HTTP/1.1"));
         assert_eq!(result.get("status_code"), Some(&FieldValue::UInt16(200)));
-        assert_eq!(text(&result, "status_text"), Some("OK"));
-        assert_eq!(text(&result, "server"), Some("corpus"));
-        assert_eq!(text(&result, "content_type"), Some("text/plain"));
+        assert_eq!(text(result.get("status_text")), Some("OK"));
+        assert_eq!(text(result.get("server")), Some("corpus"));
+        assert_eq!(text(result.get("content_type")), Some("text/plain"));
         assert_eq!(result.get("content_length"), Some(&FieldValue::UInt64(5)));
         assert_eq!(result.get("body_length"), Some(&FieldValue::UInt64(5)));
         // Repeated header: the first value wins, and there is one entry.
-        assert_eq!(text(&result, "set_cookie"), Some("a=1"));
+        assert_eq!(text(result.get("set_cookie")), Some("a=1"));
         assert_eq!(
             result
                 .fields
@@ -474,11 +475,11 @@ mod tests {
     #[test]
     fn http10_version() {
         let result = parse(b"GET / HTTP/1.0\r\n\r\n");
-        assert_eq!(text(&result, "version"), Some("HTTP/1.0"));
+        assert_eq!(text(result.get("version")), Some("HTTP/1.0"));
         let result = parse(b"HTTP/1.0 302 Found\r\nLocation: /x\r\n\r\n");
-        assert_eq!(text(&result, "version"), Some("HTTP/1.0"));
+        assert_eq!(text(result.get("version")), Some("HTTP/1.0"));
         assert_eq!(result.get("status_code"), Some(&FieldValue::UInt16(302)));
-        assert_eq!(text(&result, "location"), Some("/x"));
+        assert_eq!(text(result.get("location")), Some("/x"));
     }
 
     #[test]
@@ -491,10 +492,10 @@ mod tests {
             result.get("headers_complete"),
             Some(&FieldValue::Bool(false))
         );
-        assert_eq!(text(&result, "method"), Some("POST"));
-        assert_eq!(text(&result, "uri"), Some("/api"));
-        assert_eq!(text(&result, "version"), Some("HTTP/1.1"));
-        assert_eq!(text(&result, "host"), Some("api.test"));
+        assert_eq!(text(result.get("method")), Some("POST"));
+        assert_eq!(text(result.get("uri")), Some("/api"));
+        assert_eq!(text(result.get("version")), Some("HTTP/1.1"));
+        assert_eq!(text(result.get("host")), Some("api.test"));
         assert!(result.get("content_length").is_none());
         assert!(result.get("body_length").is_none());
 
@@ -505,7 +506,7 @@ mod tests {
             result.get("headers_complete"),
             Some(&FieldValue::Bool(false))
         );
-        assert_eq!(text(&result, "version"), Some("HTTP/1.1"));
+        assert_eq!(text(result.get("version")), Some("HTTP/1.1"));
         assert!(result.get("status_code").is_none());
     }
 
@@ -522,7 +523,7 @@ mod tests {
         let result = parse(b"GET \xff\xfe\x00");
         assert!(result.error.is_some());
         assert_eq!(result.get("is_request"), Some(&FieldValue::Bool(true)));
-        assert_eq!(text(&result, "method"), Some("GET"));
+        assert_eq!(text(result.get("method")), Some("GET"));
         assert!(result.get("uri").is_none());
         assert_eq!(
             result.get("headers_complete"),
@@ -538,10 +539,10 @@ mod tests {
         let result = parse(b"GET /path HTTP/1.1\r\nHost: h\r\nBad Header: x\r\n\r\n");
         assert!(result.error.is_some(), "expected a parse error");
         assert_eq!(result.get("is_request"), Some(&FieldValue::Bool(true)));
-        assert_eq!(text(&result, "method"), Some("GET"));
-        assert_eq!(text(&result, "uri"), Some("/path"));
-        assert_eq!(text(&result, "version"), Some("HTTP/1.1"));
-        assert_eq!(text(&result, "host"), Some("h"));
+        assert_eq!(text(result.get("method")), Some("GET"));
+        assert_eq!(text(result.get("uri")), Some("/path"));
+        assert_eq!(text(result.get("version")), Some("HTTP/1.1"));
+        assert_eq!(text(result.get("host")), Some("h"));
         assert_eq!(
             result.get("headers_complete"),
             Some(&FieldValue::Bool(false))
@@ -552,8 +553,8 @@ mod tests {
         // A leading-space header line.
         let result = parse(b"GET / HTTP/1.1\r\n Host: x\r\n\r\n");
         assert!(result.error.is_some());
-        assert_eq!(text(&result, "method"), Some("GET"));
-        assert_eq!(text(&result, "uri"), Some("/"));
+        assert_eq!(text(result.get("method")), Some("GET"));
+        assert_eq!(text(result.get("uri")), Some("/"));
         assert_eq!(
             result.get("headers_complete"),
             Some(&FieldValue::Bool(false))
@@ -567,8 +568,8 @@ mod tests {
         data.extend_from_slice(b"\r\n");
         let result = parse(&data);
         assert!(result.error.is_some());
-        assert_eq!(text(&result, "method"), Some("GET"));
-        assert_eq!(text(&result, "uri"), Some("/many"));
+        assert_eq!(text(result.get("method")), Some("GET"));
+        assert_eq!(text(result.get("uri")), Some("/many"));
         assert_eq!(
             result.get("headers_complete"),
             Some(&FieldValue::Bool(false))
@@ -578,7 +579,7 @@ mod tests {
         let result = parse(b"HTTP/1.1  200 OK\r\n\r\n");
         assert!(result.error.is_some());
         assert_eq!(result.get("is_request"), Some(&FieldValue::Bool(false)));
-        assert_eq!(text(&result, "version"), Some("HTTP/1.1"));
+        assert_eq!(text(result.get("version")), Some("HTTP/1.1"));
         assert!(result.get("status_code").is_none());
         assert_eq!(
             result.get("headers_complete"),
@@ -588,7 +589,7 @@ mod tests {
         // A bad status code after a good version.
         let result = parse(b"HTTP/1.1 ok\r\n\r\n");
         assert!(result.error.is_some());
-        assert_eq!(text(&result, "version"), Some("HTTP/1.1"));
+        assert_eq!(text(result.get("version")), Some("HTTP/1.1"));
         assert!(result.get("status_code").is_none());
     }
 
@@ -665,10 +666,9 @@ mod tests {
 
     fn layer_names(frame: &[u8]) -> Vec<&'static str> {
         let registry = default_registry();
-        parse_packet(&registry, 1, frame, &ParseScope::full())
-            .into_iter()
-            .map(|(name, _)| name)
-            .collect()
+        let mut buf = ParseBuf::new();
+        let layers = parse_packet(&registry, 1, frame, &ParseScope::full(), &mut buf);
+        layers.names().collect()
     }
 
     #[test]
@@ -677,12 +677,13 @@ mod tests {
 
         // A request on port 80.
         let frame = tcp_frame(40000, 80, b"GET / HTTP/1.1\r\nHost: h\r\n\r\n");
-        let parsed = parse_packet(&registry, 1, &frame, &ParseScope::full());
-        let names: Vec<_> = parsed.iter().map(|(n, _)| *n).collect();
+        let mut buf = ParseBuf::new();
+        let parsed = parse_packet(&registry, 1, &frame, &ParseScope::full(), &mut buf);
+        let names: Vec<_> = parsed.names().collect();
         assert_eq!(names, ["ethernet", "ipv4", "tcp", "http"]);
-        let http = &parsed.iter().find(|(n, _)| *n == "http").unwrap().1;
-        assert_eq!(text(http, "host"), Some("h"));
-        assert_eq!(http.encap_depth, 0);
+        let http = parsed.find("http").unwrap();
+        assert_eq!(text(http.get("host")), Some("h"));
+        assert_eq!(http.encap_depth(), 0);
 
         // A response from port 8080.
         assert_eq!(
@@ -765,12 +766,13 @@ mod tests {
     fn content_sniff_outranks_port_only_parsers() {
         let registry = default_registry();
         let http = |frame: &[u8]| {
-            let parsed = parse_packet(&registry, 1, frame, &ParseScope::full());
-            let names: Vec<_> = parsed.iter().map(|(n, _)| *n).collect();
+            let mut buf = ParseBuf::new();
+            let parsed = parse_packet(&registry, 1, frame, &ParseScope::full(), &mut buf);
+            let names: Vec<_> = parsed.names().collect();
             assert_eq!(names, ["ethernet", "ipv4", "tcp", "http"], "{names:?}");
-            let http = &parsed.iter().find(|(n, _)| *n == "http").unwrap().1;
-            assert!(http.is_ok(), "{:?}", http.error);
-            assert_eq!(text(http, "method"), Some("GET"));
+            let http = parsed.find("http").unwrap();
+            assert_eq!(http.error(), None);
+            assert_eq!(text(http.get("method")), Some("GET"));
         };
 
         // Plaintext HTTP to a TLS port: `http`, not a `tls` error row.
@@ -789,42 +791,46 @@ mod tests {
 
         // A real TLS ClientHello on 8443 is still TLS.
         let frame = tcp_frame(40000, 8443, &tls_client_hello());
-        let parsed = parse_packet(&registry, 1, &frame, &ParseScope::full());
-        let names: Vec<_> = parsed.iter().map(|(n, _)| *n).collect();
+        let mut buf = ParseBuf::new();
+        let parsed = parse_packet(&registry, 1, &frame, &ParseScope::full(), &mut buf);
+        let names: Vec<_> = parsed.names().collect();
         assert_eq!(names, ["ethernet", "ipv4", "tcp", "tls"]);
-        let tls = &parsed.iter().find(|(n, _)| *n == "tls").unwrap().1;
-        assert!(tls.is_ok(), "{:?}", tls.error);
+        let tls = parsed.find("tls").unwrap();
+        assert_eq!(tls.error(), None);
         assert_eq!(tls.get("handshake_type"), Some(&FieldValue::UInt8(1)));
 
         // A QUIC Initial on UDP 443 is QUIC: the TLS port match no longer
         // claims UDP, so it does not shadow the lower-priority QUIC match.
         let frame = udp_frame(40000, 443, &quic_initial());
-        let parsed = parse_packet(&registry, 1, &frame, &ParseScope::full());
-        let names: Vec<_> = parsed.iter().map(|(n, _)| *n).collect();
+        let mut buf = ParseBuf::new();
+        let parsed = parse_packet(&registry, 1, &frame, &ParseScope::full(), &mut buf);
+        let names: Vec<_> = parsed.names().collect();
         assert_eq!(names, ["ethernet", "ipv4", "udp", "quic"]);
-        let quic = &parsed.iter().find(|(n, _)| *n == "quic").unwrap().1;
-        assert!(quic.is_ok(), "{:?}", quic.error);
-        assert_eq!(text(quic, "long_packet_type"), Some("Initial"));
+        let quic = parsed.find("quic").unwrap();
+        assert_eq!(quic.error(), None);
+        assert_eq!(text(quic.get("long_packet_type")), Some("Initial"));
         assert_eq!(quic.get("version"), Some(&FieldValue::UInt32(1)));
 
         // DNS over UDP 53 and over TCP 53 (two-byte length prefix) are DNS.
         let frame = udp_frame(40000, 53, &dns_query());
-        let parsed = parse_packet(&registry, 1, &frame, &ParseScope::full());
-        let names: Vec<_> = parsed.iter().map(|(n, _)| *n).collect();
+        let mut buf = ParseBuf::new();
+        let parsed = parse_packet(&registry, 1, &frame, &ParseScope::full(), &mut buf);
+        let names: Vec<_> = parsed.names().collect();
         assert_eq!(names, ["ethernet", "ipv4", "udp", "dns"]);
-        let dns = &parsed.iter().find(|(n, _)| *n == "dns").unwrap().1;
+        let dns = parsed.find("dns").unwrap();
         assert_eq!(dns.get("transaction_id"), Some(&FieldValue::UInt16(0x1234)));
 
         let mut over_tcp = (dns_query().len() as u16).to_be_bytes().to_vec();
         over_tcp.extend_from_slice(&dns_query());
         let frame = tcp_frame(40000, 53, &over_tcp);
-        let parsed = parse_packet(&registry, 1, &frame, &ParseScope::full());
-        let names: Vec<_> = parsed.iter().map(|(n, _)| *n).collect();
+        let mut buf = ParseBuf::new();
+        let parsed = parse_packet(&registry, 1, &frame, &ParseScope::full(), &mut buf);
+        let names: Vec<_> = parsed.names().collect();
         assert_eq!(names, ["ethernet", "ipv4", "tcp", "dns"]);
-        let dns = &parsed.iter().find(|(n, _)| *n == "dns").unwrap().1;
-        assert!(dns.is_ok(), "{:?}", dns.error);
+        let dns = parsed.find("dns").unwrap();
+        assert_eq!(dns.error(), None);
         assert_eq!(dns.get("transaction_id"), Some(&FieldValue::UInt16(0x1234)));
-        assert_eq!(text(dns, "query_name"), Some("a"));
+        assert_eq!(text(dns.get("query_name")), Some("a"));
 
         // A UDP datagram to a TCP-only service port is not that service
         // (no error row claims it), and vice versa.
@@ -843,17 +849,17 @@ mod tests {
         let registry = default_registry();
         let frame = tcp_frame(40000, 80, b"GET / HTTP/1.1\r\n\r\n");
         let scope = ParseScope::for_tables(&["http"], &registry);
-        let names: Vec<_> = parse_packet(&registry, 1, &frame, &scope)
-            .into_iter()
-            .map(|(n, _)| n)
+        let mut buf = ParseBuf::new();
+        let names: Vec<_> = parse_packet(&registry, 1, &frame, &scope, &mut buf)
+            .names()
             .collect();
         assert_eq!(names, ["ethernet", "ipv4", "tcp", "http"]);
 
         // A query on tcp alone does not pay for HTTP parsing.
         let scope = ParseScope::for_tables(&["tcp"], &registry);
-        let names: Vec<_> = parse_packet(&registry, 1, &frame, &scope)
-            .into_iter()
-            .map(|(n, _)| n)
+        let mut buf = ParseBuf::new();
+        let names: Vec<_> = parse_packet(&registry, 1, &frame, &scope, &mut buf)
+            .names()
             .collect();
         assert_eq!(names, ["ethernet", "ipv4", "tcp"]);
     }
@@ -864,14 +870,15 @@ mod tests {
 
         // First segment: the request line and one header, cut mid-header.
         let first = tcp_frame(40000, 80, b"GET /split HTTP/1.1\r\nHost: h\r\nUser-Ag");
-        let parsed = parse_packet(&registry, 1, &first, &ParseScope::full());
-        let names: Vec<_> = parsed.iter().map(|(n, _)| *n).collect();
+        let mut buf = ParseBuf::new();
+        let parsed = parse_packet(&registry, 1, &first, &ParseScope::full(), &mut buf);
+        let names: Vec<_> = parsed.names().collect();
         assert_eq!(names, ["ethernet", "ipv4", "tcp", "http"]);
-        let http = &parsed.iter().find(|(n, _)| *n == "http").unwrap().1;
-        assert!(http.is_ok(), "{:?}", http.error);
-        assert_eq!(text(http, "method"), Some("GET"));
-        assert_eq!(text(http, "uri"), Some("/split"));
-        assert_eq!(text(http, "host"), Some("h"));
+        let http = parsed.find("http").unwrap();
+        assert_eq!(http.error(), None);
+        assert_eq!(text(http.get("method")), Some("GET"));
+        assert_eq!(text(http.get("uri")), Some("/split"));
+        assert_eq!(text(http.get("host")), Some("h"));
         assert!(http.get("user_agent").is_none());
         assert_eq!(http.get("headers_complete"), Some(&FieldValue::Bool(false)));
         assert!(http.get("body_length").is_none());

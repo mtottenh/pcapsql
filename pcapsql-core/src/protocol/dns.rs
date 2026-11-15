@@ -162,6 +162,17 @@ impl Protocol for DnsProtocol {
         &["udp", "tcp"] // DNS runs over UDP (primarily) and TCP
     }
 
+    // MIGRATION: until this parser writes to the sink itself.
+    fn parse_projected_into<'a>(
+        &self,
+        data: &'a [u8],
+        context: &ParseContext,
+        projection: Option<&FieldSet>,
+        fields: &mut super::layers::FieldSink<'_, 'a>,
+    ) -> super::Parsed<'a> {
+        super::layers::adapt(self.parse_projected(data, context, projection), fields)
+    }
+
     fn parse_projected<'a>(
         &self,
         data: &'a [u8],
@@ -675,6 +686,7 @@ pub mod rcode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::test_utils::ParseLayer as _;
     use std::net::Ipv4Addr;
 
     /// Encode a domain name in DNS format.
@@ -779,7 +791,7 @@ mod tests {
         context.insert_hint(HintKey::DstPort, 53);
         context.parent_protocol = Some("udp");
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -810,7 +822,7 @@ mod tests {
         context.insert_hint(HintKey::SrcPort, 53);
         context.parent_protocol = Some("udp");
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -890,7 +902,7 @@ mod tests {
         let mut tcp = ParseContext::new(1);
         tcp.insert_hint(HintKey::DstPort, 53);
         tcp.insert_hint(HintKey::Transport, 6);
-        let result = parser.parse(&segment, &tcp);
+        let result = parser.parse_layer(&segment, &tcp);
         assert!(result.is_ok(), "{:?}", result.error);
         assert_eq!(
             result.get("transaction_id"),
@@ -903,7 +915,7 @@ mod tests {
 
         // Projection goes through the same prefix handling.
         let fields: FieldSet = ["transaction_id"].iter().map(|s| s.to_string()).collect();
-        let projected = parser.parse_projected(&segment, &tcp, Some(&fields));
+        let projected = parser.parse_layer_projected(&segment, &tcp, Some(&fields));
         assert!(projected.is_ok(), "{:?}", projected.error);
         assert_eq!(
             projected.get("transaction_id"),
@@ -914,7 +926,7 @@ mod tests {
         let mut udp = ParseContext::new(1);
         udp.insert_hint(HintKey::DstPort, 53);
         udp.insert_hint(HintKey::Transport, 17);
-        let result = parser.parse(&query, &udp);
+        let result = parser.parse_layer(&query, &udp);
         assert!(result.is_ok(), "{:?}", result.error);
         assert_eq!(
             result.get("transaction_id"),
@@ -922,7 +934,7 @@ mod tests {
         );
 
         // A one-byte TCP segment is an error, not a panic.
-        assert!(parser.parse(&[0x00], &tcp).error.is_some());
+        assert!(parser.parse_layer(&[0x00], &tcp).error.is_some());
     }
 
     #[test]
@@ -933,7 +945,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::DstPort, 53);
 
-        let result = parser.parse(&short_packet, &context);
+        let result = parser.parse_layer(&short_packet, &context);
 
         assert!(!result.is_ok());
         assert!(result.error.is_some());
@@ -972,7 +984,7 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let result = parser.parse_projected(&packet, &context, Some(&fields));
+        let result = parser.parse_layer_projected(&packet, &context, Some(&fields));
 
         assert!(result.is_ok());
         // Requested fields are present
@@ -1018,7 +1030,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::DstPort, 53);
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(

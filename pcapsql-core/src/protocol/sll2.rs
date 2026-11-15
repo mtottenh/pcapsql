@@ -159,6 +159,7 @@ impl Protocol for Sll2Protocol {
 mod tests {
     use super::super::linux_sll::packet_type;
     use super::*;
+    use crate::protocol::test_utils::ParseLayer as _;
 
     /// Build an SLL2 header (big-endian) followed by `payload`.
     fn sll2_header(
@@ -207,7 +208,7 @@ mod tests {
             [0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0, 0],
             &[0xAA, 0xBB],
         );
-        let result = Sll2Protocol.parse(&data, &ParseContext::new(LINKTYPE_LINUX_SLL2));
+        let result = Sll2Protocol.parse_layer(&data, &ParseContext::new(LINKTYPE_LINUX_SLL2));
         assert!(result.is_ok());
         assert_eq!(result.get("protocol"), Some(&FieldValue::UInt16(0x0800)));
         assert_eq!(result.get("interface_index"), Some(&FieldValue::UInt32(7)));
@@ -241,7 +242,7 @@ mod tests {
             [0; 8],
             &[],
         );
-        let result = Sll2Protocol.parse(&data, &ParseContext::new(LINKTYPE_LINUX_SLL2));
+        let result = Sll2Protocol.parse_layer(&data, &ParseContext::new(LINKTYPE_LINUX_SLL2));
         assert!(result.is_ok());
         assert_eq!(result.get("arphrd_name"), Some(&FieldValue::Str("NETLINK")));
         assert!(result.get("addr").is_none());
@@ -261,7 +262,7 @@ mod tests {
             519,       /* RAWIP */
         ] {
             let data = sll2_header(0x0800, 5, arphrd_type, 0, 0, [0; 8], &[]);
-            let result = Sll2Protocol.parse(&data, &ParseContext::new(LINKTYPE_LINUX_SLL2));
+            let result = Sll2Protocol.parse_layer(&data, &ParseContext::new(LINKTYPE_LINUX_SLL2));
             assert!(result.is_ok());
             assert_eq!(
                 result.hint(HintKey::EtherType),
@@ -273,7 +274,7 @@ mod tests {
         // GRE / radiotap / frame relay: the field is not an ethertype.
         for arphrd_type in [arphrd::IPGRE, arphrd::IEEE80211_RADIOTAP, arphrd::FRAD] {
             let data = sll2_header(0x0800, 5, arphrd_type, 0, 0, [0; 8], &[]);
-            let result = Sll2Protocol.parse(&data, &ParseContext::new(LINKTYPE_LINUX_SLL2));
+            let result = Sll2Protocol.parse_layer(&data, &ParseContext::new(LINKTYPE_LINUX_SLL2));
             assert!(
                 result.hint(HintKey::EtherType).is_none(),
                 "arphrd {arphrd_type}"
@@ -286,25 +287,31 @@ mod tests {
     /// (ARPHRD_NONE) parses sll2 -> ipv4 -> udp.
     #[test]
     fn parse_packet_reaches_ip_through_sll2() {
-        use super::super::{default_registry, parse_packet, ParseScope};
+        use super::super::{default_registry, parse_packet, ParseBuf, ParseScope};
         let udp = [0x9C, 0x40, 0x00, 0x35, 0x00, 0x08, 0x00, 0x00]; // 40000 -> 53, len 8
         let mut ip = vec![0x45, 0x00, 0x00, 28, 0, 1, 0x40, 0, 64, 17, 0, 0];
         ip.extend_from_slice(&[10, 0, 0, 1, 8, 8, 8, 8]);
         ip.extend_from_slice(&udp);
         let frame = sll2_header(0x0800, 3, 0xFFFE, 4, 0, [0; 8], &ip);
         let registry = default_registry();
-        let layers: Vec<&str> =
-            parse_packet(&registry, LINKTYPE_LINUX_SLL2, &frame, &ParseScope::full())
-                .iter()
-                .map(|(n, _)| *n)
-                .collect();
+        let mut buf = ParseBuf::new();
+        let layers: Vec<&str> = parse_packet(
+            &registry,
+            LINKTYPE_LINUX_SLL2,
+            &frame,
+            &ParseScope::full(),
+            &mut buf,
+        )
+        .names()
+        .collect();
         assert_eq!(layers, ["sll2", "ipv4", "udp"]);
         // Scoped to udp only: pruning must still walk through the cooked header.
         let scoped = ParseScope::for_tables(&["udp"], &registry);
-        let layers: Vec<&str> = parse_packet(&registry, LINKTYPE_LINUX_SLL2, &frame, &scoped)
-            .iter()
-            .map(|(n, _)| *n)
-            .collect();
+        let mut buf = ParseBuf::new();
+        let layers: Vec<&str> =
+            parse_packet(&registry, LINKTYPE_LINUX_SLL2, &frame, &scoped, &mut buf)
+                .names()
+                .collect();
         assert_eq!(layers, ["sll2", "ipv4", "udp"]);
     }
 
@@ -320,7 +327,7 @@ mod tests {
 
     #[test]
     fn short_header_is_an_error() {
-        let result = Sll2Protocol.parse(&[0u8; 19], &ParseContext::new(LINKTYPE_LINUX_SLL2));
+        let result = Sll2Protocol.parse_layer(&[0u8; 19], &ParseContext::new(LINKTYPE_LINUX_SLL2));
         assert!(!result.is_ok());
         assert!(result.error.is_some());
     }
@@ -328,7 +335,7 @@ mod tests {
     #[test]
     fn addr_len_is_clamped_to_eight_bytes() {
         let data = sll2_header(0x86DD, 1, arphrd::ETHER, 0, 200, [1; 8], &[]);
-        let result = Sll2Protocol.parse(&data, &ParseContext::new(LINKTYPE_LINUX_SLL2));
+        let result = Sll2Protocol.parse_layer(&data, &ParseContext::new(LINKTYPE_LINUX_SLL2));
         assert!(result.is_ok());
         assert_eq!(result.get("addr"), Some(&FieldValue::Bytes(&[1; 8])));
     }
