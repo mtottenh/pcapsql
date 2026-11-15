@@ -10,7 +10,7 @@ use datafusion::common::Result as DFResult;
 use datafusion::logical_expr::{
     ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
 };
-use pcapsql_core::format::{has_tcp_flag, write_tcp_flags};
+use pcapsql_core::format::{has_tcp_flag, tcp_flag_mask, write_tcp_flags};
 
 /// Create the `tcp_flags_str()` UDF that converts TCP flags bitmap to human-readable string.
 ///
@@ -133,6 +133,26 @@ impl ScalarUDFImpl for HasTcpFlagUdf {
     }
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        // A constant flag name (a literal, the usual call) is resolved to
+        // its bit once and the column tested as a whole. A NULL name gives
+        // NULL for every row, as below.
+        if let Some((flags, name)) = super::column_and_constant(&args.args) {
+            let flags_values = flags
+                .as_any()
+                .downcast_ref::<UInt16Array>()
+                .expect("has_tcp_flag: expected uint16 array for flags");
+            let result = match name {
+                Some(name) => {
+                    // A name that is not a flag has no bit, so it is never
+                    // set: what `has_tcp_flag` answers.
+                    let mask = tcp_flag_mask(name).unwrap_or(0);
+                    BooleanArray::from_unary(flags_values, |flags| flags & mask != 0)
+                }
+                None => BooleanArray::new_null(flags_values.len()),
+            };
+            return Ok(ColumnarValue::Array(Arc::new(result)));
+        }
+
         let args = ColumnarValue::values_to_arrays(&args.args)?;
         let flags_values = args[0]
             .as_any()

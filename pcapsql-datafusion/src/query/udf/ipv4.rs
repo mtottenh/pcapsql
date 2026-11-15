@@ -4,15 +4,15 @@
 
 use std::sync::Arc;
 
-use arrow::array::{Array, BooleanArray, StringArray, UInt32Array};
+use arrow::array::{Array, BooleanArray, UInt32Array};
 use arrow::datatypes::DataType;
 use datafusion::common::Result as DFResult;
 use datafusion::logical_expr::{
     ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
 };
 use pcapsql_core::format::{
-    format_ipv4, ipv4_in_cidr, is_loopback_ipv4, is_multicast_ipv4, is_private_ipv4, parse_cidr_v4,
-    parse_ipv4,
+    ipv4_in_cidr, is_loopback_ipv4, is_multicast_ipv4, is_private_ipv4, parse_cidr_v4, parse_ipv4,
+    write_ipv4,
 };
 
 /// Create the `ip4()` UDF that converts an IPv4 string to UInt32.
@@ -166,7 +166,10 @@ impl ScalarUDFImpl for Ip4ToStringUdf {
             .downcast_ref::<UInt32Array>()
             .expect("ip4_to_string: expected uint32 array");
 
-        let result: StringArray = ip_values.iter().map(|opt| opt.map(format_ipv4)).collect();
+        // "255.255.255.255" is 15 bytes.
+        let result = super::text_column(ip_values, 15, |ip, text| {
+            write_ipv4(ip, text).expect("writing to a StringBuilder does not fail")
+        });
 
         Ok(ColumnarValue::Array(Arc::new(result)))
     }
@@ -210,6 +213,23 @@ impl ScalarUDFImpl for IpInCidrUdf {
     }
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        // A constant network (a literal, the usual call) is parsed once and
+        // the column tested as a whole. NULL or invalid notation gives NULL
+        // for every row, as below.
+        if let Some((ips, cidr)) = super::column_and_constant(&args.args) {
+            let ip_values = ips
+                .as_any()
+                .downcast_ref::<UInt32Array>()
+                .expect("ip_in_cidr: expected uint32 array for IP");
+            let result = match cidr.and_then(parse_cidr_v4) {
+                Some((network, mask)) => {
+                    BooleanArray::from_unary(ip_values, |ip| ipv4_in_cidr(ip, network, mask))
+                }
+                None => BooleanArray::new_null(ip_values.len()),
+            };
+            return Ok(ColumnarValue::Array(Arc::new(result)));
+        }
+
         let args = ColumnarValue::values_to_arrays(&args.args)?;
         let ip_values = args[0]
             .as_any()

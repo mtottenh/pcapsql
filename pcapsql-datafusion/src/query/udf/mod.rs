@@ -146,13 +146,15 @@ pub use histogram::{
 };
 
 use crate::error::Error;
-use arrow::array::{Array, StringArray};
+use arrow::array::{Array, ArrayAccessor, ArrayRef, StringArray, StringBuilder};
 use arrow::datatypes::DataType;
 use datafusion::common::types::{
     logical_string, logical_uint16, logical_uint32, logical_uint64, logical_uint8, NativeType,
 };
-use datafusion::common::{DataFusionError, Result as DFResult};
-use datafusion::logical_expr::{Coercion, Signature, TypeSignatureClass, Volatility};
+use datafusion::common::{DataFusionError, Result as DFResult, ScalarValue};
+use datafusion::logical_expr::{
+    Coercion, ColumnarValue, Signature, TypeSignatureClass, Volatility,
+};
 use datafusion::prelude::SessionContext;
 
 /// A signature whose unsigned-integer parameters accept any integer argument.
@@ -190,7 +192,7 @@ pub(crate) fn coercible_signature(params: &[DataType], volatility: Volatility) -
 /// A UDF's string argument as a `StringArray`, whatever string type the
 /// planner delivered (`Utf8`, `LargeUtf8`, `Utf8View`); anything else is a
 /// planning/execution error naming the UDF, never a panic.
-pub(crate) fn string_arg(array: &arrow::array::ArrayRef, udf: &str) -> DFResult<StringArray> {
+pub(crate) fn string_arg(array: &ArrayRef, udf: &str) -> DFResult<StringArray> {
     let utf8 = match array.data_type() {
         DataType::Utf8 => array.clone(),
         DataType::LargeUtf8 | DataType::Utf8View => arrow::compute::cast(array, &DataType::Utf8)?,
@@ -206,6 +208,49 @@ pub(crate) fn string_arg(array: &arrow::array::ArrayRef, udf: &str) -> DFResult<
         .ok_or_else(|| {
             DataFusionError::Internal(format!("{udf}: cast to Utf8 produced {}", utf8.data_type()))
         })
+}
+
+/// The arguments of a call `f(column, constant)`: the column, and the text
+/// of the constant, `None` for a NULL.
+///
+/// DataFusion passes a literal as a scalar. A body that expands it to an
+/// array ([`ColumnarValue::values_to_arrays`]) builds a string per row and
+/// parses it per row; with this, a body parses the constant once and maps
+/// the column, and keeps the expansion for every other shape of call.
+///
+/// `None` when the first argument is not an array (a call of constants
+/// only, whose result is one row), or the second is not a string scalar
+/// (an array, or a scalar of another type, which [`string_arg`] rejects).
+pub(crate) fn column_and_constant(args: &[ColumnarValue]) -> Option<(&ArrayRef, Option<&str>)> {
+    match args {
+        [ColumnarValue::Array(column), ColumnarValue::Scalar(
+            ScalarValue::Utf8(text) | ScalarValue::LargeUtf8(text) | ScalarValue::Utf8View(text),
+        )] => Some((column, text.as_deref())),
+        _ => None,
+    }
+}
+
+/// A text column of the values of `values`: `write` writes the text of a
+/// value into the builder (which is a `fmt::Write`), so no row has a
+/// `String` of its own. A NULL value gives NULL. `bytes_per_row` is the
+/// room made for the text of a row ahead of the first.
+pub(crate) fn text_column<A: ArrayAccessor>(
+    values: A,
+    bytes_per_row: usize,
+    mut write: impl FnMut(A::Item, &mut StringBuilder),
+) -> StringArray {
+    let rows = values.len();
+    let mut text = StringBuilder::with_capacity(rows, rows * bytes_per_row);
+    for row in 0..rows {
+        if values.is_null(row) {
+            text.append_null();
+        } else {
+            write(values.value(row), &mut text);
+            // What was written is the row's value; the empty append ends it.
+            text.append_value("");
+        }
+    }
+    text.finish()
 }
 
 fn integer_slot(
@@ -376,6 +421,9 @@ pub fn register_time_udfs(
     ctx.register_udf(create_relative_time_udf(range));
     Ok(())
 }
+
+#[cfg(test)]
+mod constant_args_tests;
 
 #[cfg(test)]
 mod tests {
