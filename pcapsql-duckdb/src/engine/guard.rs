@@ -1,9 +1,9 @@
 //! Panic containment for DuckDB callbacks.
 //!
 //! `duckdb-neo` catches a panic that unwinds out of a callback and reports it as an INTERNAL
-//! error. DuckDB treats INTERNAL as fatal: it invalidates the database, and every later query in
-//! the process fails. A bug in one packet parser must not cost the user their session, so every
-//! callback body runs under [`run`], which reports the panic as an ordinary query error.
+//! error. DuckDB treats INTERNAL as fatal: it invalidates the database, and every later query on
+//! it fails. A bug in one packet parser must not cost the user their session, so every callback
+//! body runs under [`run`], which reports the panic as an ordinary query error.
 //!
 //! Functions are registered through [`table_function`] and [`scalar_function`], which wrap the
 //! implementation in [`Guarded`] so that no callback can be left out.
@@ -59,12 +59,12 @@ fn panic_message(panic: &(dyn Any + Send)) -> &str {
 
 /// A builder for the table function `name` whose callbacks all run under [`run`].
 pub fn table_function<T: TableFunctionCallbacks>(
-    name: &'static str,
+    name: &str,
     signature: SignatureBuilder,
     implementation: T,
 ) -> TableFunctionBuilder<Guarded<T>> {
     let guarded = Guarded {
-        name,
+        name: name.to_owned(),
         inner: implementation,
     };
     TableFunctionBuilder::new(name, signature, guarded)
@@ -72,12 +72,12 @@ pub fn table_function<T: TableFunctionCallbacks>(
 
 /// A builder for the scalar function `name` whose callback runs under [`run`].
 pub fn scalar_function<T: ScalarCallbacks>(
-    name: &'static str,
+    name: &str,
     signature: SignatureBuilder,
     implementation: T,
 ) -> ScalarFunctionBuilder<Guarded<T>> {
     let guarded = Guarded {
-        name,
+        name: name.to_owned(),
         inner: implementation,
     };
     ScalarFunctionBuilder::new(name, signature, guarded)
@@ -86,7 +86,8 @@ pub fn scalar_function<T: ScalarCallbacks>(
 /// A function implementation whose callbacks each run under [`run`].
 #[derive(Debug)]
 pub struct Guarded<T> {
-    name: &'static str,
+    /// The SQL name of the function, for the error message.
+    name: String,
     inner: T,
 }
 
