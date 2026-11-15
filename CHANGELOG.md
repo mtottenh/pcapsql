@@ -9,6 +9,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **DuckDB extension: `COPY ... TO 'x.pcap' (FORMAT pcap)`.** The rows of a
+  query written as a classic pcap file, a packet per row:
+  `COPY (SELECT * FROM read_frames('in.pcapng') WHERE ... ORDER BY
+  frame_number) TO 'out.pcap' (FORMAT pcap)`. The columns of a packet are
+  found by name and are those of `frames`: `raw_data` (`BLOB`) and
+  `timestamp` (any `TIMESTAMP` type) are required, `original_length` and
+  `link_type` are used when the query has them, every other column is
+  ignored, and a query without the required ones is refused at bind with a
+  message that says what is needed. Options: `LINKTYPE` (a number or a name;
+  default the link type of the first row, or Ethernet), `SNAPLEN` (default
+  262144; a longer packet is cut and keeps its original length) and
+  `PRECISION` (`'ns'` or `'us'`; the default is the unit of the `timestamp`
+  column, so a copy of `read_frames`, which returns `TIMESTAMP_NS`, is a
+  nanosecond pcap file and no timestamp loses precision unasked). Read back
+  with `read_frames`, a copy has the timestamps, lengths, link type and
+  bytes of its rows, in their order; with `PRECISION 'us'` and the input's
+  snapshot length, the copy of a whole little-endian microsecond pcap file
+  is that file byte for byte (tested over every such capture of the fuzzing
+  corpus). A row whose
+  link type is not the file's, NULL in `raw_data` or `timestamp`, and a
+  timestamp outside 1970 to 2106 fail the statement with a message that
+  names the row; DuckDB then removes the file, and an existing file is left
+  as it was. An empty result is a capture without packets. The file is
+  written through DuckDB's file system, in buffers; the rows arrive in the
+  order of the query (DuckDB 2.0.0 runs a copy function of the C API on one
+  thread), so `ORDER BY` decides the order of the file on any number of
+  threads. DuckDB's `RETURN_STATS`, `PER_THREAD_OUTPUT` and `PARTITION_BY`
+  work (`PARTITION_BY (link_type)` with `WRITE_PARTITION_COLUMNS` writes a
+  file per link type). The callbacks run under the panic guard, and no
+  `unsafe` was added. Not there: pcapng output; compressed output (a file
+  name ending in `.gz`, `.zst` and the like is refused, since DuckDB selects
+  this format for `x.pcap.gz` by itself); `COPY ... FROM`, which the table
+  functions cover; and no remote path (`s3://`) has been written.
+- **`pcapsql_core::io::PcapWriter`.** A writer of classic pcap files to any
+  `std::io::Write`: little-endian, version 2.4, microsecond or nanosecond
+  timestamps (`TimestampPrecision`), one link type, packets cut at the
+  snapshot length. `link_type_from_name` gives the number of the common
+  `LINKTYPE_*` names. The DuckDB extension's copy format is built on it.
+  `pcapsql-testgen` keeps its own writer of test captures: it has no
+  dependencies by design, and writes malformed and big-endian files too.
 - **DuckDB extension: 24 more scalar functions, the names of protocol
   numbers and the classes of addresses.** The functions of the command-line
   tool of the same names, as loops over the same `pcapsql_core::format`

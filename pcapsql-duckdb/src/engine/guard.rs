@@ -5,8 +5,9 @@
 //! it fails. A bug in one packet parser must not cost the user their session, so every callback
 //! body runs under [`run`], which reports the panic as an ordinary query error.
 //!
-//! Functions are registered through [`table_function`] and [`scalar_function`], which wrap the
-//! implementation in [`Guarded`] so that no callback can be left out.
+//! Functions are registered through [`table_function`], [`scalar_function`] and
+//! [`copy_function`], which wrap the implementation in [`Guarded`] so that no callback can be
+//! left out.
 //!
 //! This relies on unwinding: the extension must not be built with `panic = "abort"`.
 
@@ -17,7 +18,12 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use duckdb_neo::{
     bind_arguments::BindArgument,
+    column_data_collection::ColumnDataCollection,
     connection::Context,
+    copy_function::{
+        CopyFunctionBuilder, CopyToBindInfo, CopyToFunctionCallbacks, CopyToStatistics,
+        CopyToStatisticsCallbacks,
+    },
     data_chunk::{DataChunkRef, VectorCollection},
     error::DuckDBError,
     scalar::{ScalarCallbacks, ScalarFunctionBuilder},
@@ -81,6 +87,18 @@ pub fn scalar_function<T: ScalarCallbacks>(
         inner: implementation,
     };
     ScalarFunctionBuilder::new(name, signature, guarded)
+}
+
+/// A builder for the `COPY ... TO` format `name` whose callbacks all run under [`run`].
+pub fn copy_function<T: CopyToFunctionCallbacks>(
+    name: &str,
+    implementation: T,
+) -> CopyFunctionBuilder<Guarded<T>> {
+    let guarded = Guarded {
+        name: format!("COPY TO (FORMAT {name})"),
+        inner: implementation,
+    };
+    CopyFunctionBuilder::new(name, guarded)
 }
 
 /// A function implementation whose callbacks each run under [`run`].
@@ -267,6 +285,82 @@ impl<T: ScalarCallbacks> ScalarCallbacks for Guarded<T> {
     ) -> Result<()> {
         self.run("exec", |inner| {
             inner.exec(context, bind_data, init_data, vectors, output)
+        })
+    }
+}
+
+impl<T: CopyToFunctionCallbacks> CopyToFunctionCallbacks for Guarded<T> {
+    type InitData = T::InitData;
+    type BindData = T::BindData;
+    type BatchData = T::BatchData;
+
+    fn bind(&self, context: &Context, bind_info: &CopyToBindInfo) -> Result<Self::BindData> {
+        self.run("bind", |inner| inner.bind(context, bind_info))
+    }
+
+    fn init(
+        &self,
+        context: &Context,
+        bind_data: &Self::BindData,
+        file_path: &str,
+    ) -> Result<Self::InitData> {
+        self.run("init", |inner| inner.init(context, bind_data, file_path))
+    }
+
+    fn batch(
+        &self,
+        context: &Context,
+        bind_data: &Self::BindData,
+        init_data: &Self::InitData,
+        input: &ColumnDataCollection<'_>,
+    ) -> Result<Self::BatchData> {
+        self.run("batch", |inner| {
+            inner.batch(context, bind_data, init_data, input)
+        })
+    }
+
+    fn batch_size(
+        &self,
+        context: &Context,
+        bind_data: &Self::BindData,
+    ) -> Result<Option<NonZeroUsize>> {
+        self.run("batch_size", |inner| inner.batch_size(context, bind_data))
+    }
+
+    fn flush(
+        &self,
+        context: &Context,
+        bind_data: &Self::BindData,
+        init_data: &Self::InitData,
+        input: &ColumnDataCollection<'_>,
+        batch_data: &mut Self::BatchData,
+    ) -> Result<()> {
+        self.run("flush", |inner| {
+            inner.flush(context, bind_data, init_data, input, batch_data)
+        })
+    }
+
+    fn finalize(
+        &self,
+        context: &Context,
+        bind_data: &Self::BindData,
+        init_data: &Self::InitData,
+    ) -> Result<()> {
+        self.run("finalize", |inner| {
+            inner.finalize(context, bind_data, init_data)
+        })
+    }
+}
+
+impl<T: CopyToStatisticsCallbacks> CopyToStatisticsCallbacks for Guarded<T> {
+    fn statistics(
+        &self,
+        context: &Context,
+        bind_data: &Self::BindData,
+        init_data: &Self::InitData,
+    ) -> Result<CopyToStatistics> {
+        self.run("statistics", |inner| {
+            inner.statistics(context, bind_data, init_data)
         })
     }
 }

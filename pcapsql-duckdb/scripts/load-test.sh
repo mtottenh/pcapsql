@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# LOAD the built extension in the stock DuckDB command-line shell, call each kind of function and
-# read captures.
+# LOAD the built extension in the stock DuckDB command-line shell, call each kind of function,
+# read captures and write one.
 #
 #   load-test.sh <path to pcapsql.duckdb_extension> <DuckDB version> <extension version>
 #
@@ -84,6 +84,9 @@ SELECT sni, is_decrypted FROM read_tls_sessions('$fixtures/tls13_http2.pcap', ke
 SELECT h.frame_number, h.frame_type, h.method, h.status, c.server_port FROM read_http2('$fixtures/tls13_http2.pcap', keylog := '$fixtures/tls13_http2.keys') h JOIN read_tcp_connections('$fixtures/tls13_http2.pcap') c USING (connection_id) WHERE h.stream_id = 1 ORDER BY h.frame_number;
 SET pcapsql_keylog = '$fixtures/tls13_http2.keys';
 SELECT count(*), (SELECT is_decrypted FROM read_tls_sessions('$fixtures/tls13_http2.pcap', keylog := '')) FROM read_http2('$fixtures/tls13_http2.pcap');
+COPY (SELECT * FROM read_frames('$captures/dns.cap') ORDER BY frame_number) TO '$scratch/copy.pcap' (FORMAT pcap, PRECISION 'us', SNAPLEN 65535);
+COPY (SELECT f.* FROM read_frames('$scratch/dns.cap.gz') f JOIN read_dns('$scratch/dns.cap.gz') d USING (frame_number) WHERE d.is_query ORDER BY frame_number) TO '$scratch/queries.pcap';
+SELECT count(*), count(*) FILTER (is_query), min(typeof(timestamp)) FROM read_dns('$scratch/queries.pcap');
 "
 expected="pcapsql,true,$extension_version
 32
@@ -145,7 +148,8 @@ example.test,true
 10,HEADERS,GET,NULL,443
 11,HEADERS,NULL,200,443
 12,DATA,NULL,NULL,443
-8,false"
+8,false
+19,19,TIMESTAMP_NS"
 
 actual=$("$duckdb" -unsigned -csv -noheader -c "$sql")
 if [ "$actual" != "$expected" ]; then
@@ -154,6 +158,14 @@ if [ "$actual" != "$expected" ]; then
     exit 1
 fi
 echo "$actual"
+
+# COPY ... TO (FORMAT pcap): with the unit and the snapshot length of its header, the copy of a
+# little-endian microsecond capture is that capture.
+if ! cmp -s "$scratch/copy.pcap" "$captures/dns.cap"; then
+    echo "load-test: FAILED: the copy of dns.cap is not dns.cap" >&2
+    exit 1
+fi
+echo "load-test: copy: byte-identical to dns.cap"
 
 # A capture that ends inside a record: the complete frames and a warning, which the shell shows
 # with the result; an error when strict. A scan never ends short in silence.

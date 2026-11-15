@@ -11,6 +11,7 @@ pub mod guard;
 pub mod types;
 pub mod writer;
 
+mod copy;
 mod listing;
 mod macros;
 mod pushdown;
@@ -32,5 +33,6 @@ pub fn register(extension: &Extension) -> Result<()> {
     replacement::register(extension)?;
     scalar::register(extension)?;
     // After the scalars: the macro bodies call them.
-    macros::register(extension)
+    macros::register(extension)?;
+    copy::register(extension)
 }

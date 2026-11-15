@@ -12,6 +12,7 @@ This crate provides the core parsing functionality for pcapsql, without any SQL 
 
 - **Protocol Parsing**: 26 built-in protocol parsers
 - **PCAP Reading**: PCAP and PCAPNG formats with gzip/zstd compression
+- **PCAP Writing**: `io::PcapWriter` writes a classic PCAP file (microsecond or nanosecond timestamps) to any `std::io::Write`
 - **Memory-Mapped I/O**: Efficient reading of large capture files
 - **Boundary Index**: Record-boundary checkpoints (persisted as a sidecar) so a capture can be read in parallel partitions, locally or over cloud byte ranges
 - **Scoped Parsing**: `ParseScope` prunes the protocol walk and projects fields to what a query needs
