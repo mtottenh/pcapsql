@@ -60,6 +60,13 @@ impl MmapPacketSource {
         let path = path.as_ref().to_path_buf();
         let file = File::open(&path).map_err(Error::Io)?;
         let mtime = file.metadata().ok().and_then(|m| m.modified().ok());
+        // SAFETY: `Mmap::map` is unsafe because the mapping aliases the file: if another
+        // process truncates or rewrites it while it is mapped, a read of the mapping faults
+        // (SIGBUS) or sees bytes change under a `&[u8]`. The mapping is read-only and nothing in
+        // this process writes to the file, so this relies on what every reader of a capture
+        // file relies on: that the capture is not modified while it is being queried. A file
+        // that only grows (a capture still being written) is fine, since the mapping covers
+        // the length at open.
         let mmap = unsafe { Mmap::map(&file).map_err(Error::Io)? };
 
         let compression = Compression::detect(&mmap);
