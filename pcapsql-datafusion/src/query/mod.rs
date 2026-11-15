@@ -37,7 +37,7 @@ pub mod windowing;
 
 pub use arrow_schema::{descriptors_to_arrow_schema, protocol_to_arrow_schema, to_arrow_field};
 pub use builders::NormalizedBatchSet;
-pub use filter::FilterEvaluator;
+pub use filter::{is_pushable, row_predicate};
 pub use providers::{
     auto_target_partitions, merge_ordered_partitions, ParseStats, ParseSubscription, ProgressFn,
     ProtocolScanExec, ProtocolTableProvider, ServedFrom, TableSubscription,
@@ -1836,7 +1836,9 @@ impl QueryEngine {
                     let predicate = if multi_scan || name == "frames" {
                         None
                     } else {
-                        FilterEvaluator::try_from_exprs(&table_needs.filters)
+                        pcapsql_core::scan::Catalog::builtin()
+                            .table(&name)
+                            .and_then(|(_, table)| row_predicate(&table_needs.filters, table))
                     };
                     subscription.tables.insert(
                         name,
