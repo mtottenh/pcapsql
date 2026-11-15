@@ -576,12 +576,21 @@ nobody wrote are NULL. One vector of a chunk can be a constant the scan layer
 does not write: the `filename` column, which `finish` fills with the path of
 the one file the rows of the chunk are from. It is the one module with
 `unsafe` code, and its header states the invariants that make the pointer
-writes sound. The crate has one other `unsafe` call, in `engine::scalar`:
-`values_without_nulls` borrows the values of a flat vector without NULLs as a
-slice, so that `ip_in_cidr` and `has_tcp_flag` with a literal pattern compile
-to a SIMD compare, and its comment says what `duckdb-neo` requires for that
-and how it is met. `make check_unsafe` fails if `unsafe` is allowed anywhere
-else.
+writes sound. The crate has one other place with `unsafe` code, the private
+module `valid` of `engine::scalar`: it borrows the values of rows of a flat
+vector as a slice when none of those rows is NULL, so that `ip_in_cidr` and
+`has_tcp_flag` with a literal pattern compile to a SIMD compare. The slice is
+the whole chunk when it has no validity mask, and otherwise the 64 rows of
+each word of the mask without a NULL; the slot of a NULL row, which DuckDB
+does not promise to initialise, is in no slice and is never read: the rows
+of a word that are all NULL are skipped, and the rows of a word with some
+NULLs (and every row of a chunk where most words are like that, or whose
+values are behind a selection) go through `duckdb-neo`'s reader. The module's
+comments say what the borrow requires and how it is met, and its tests, over
+buffers whose NULL slots are left uninitialised, run under Miri
+(`cargo +nightly miri test -p pcapsql-duckdb --lib valid`). `make
+check_unsafe` fails if `unsafe` is allowed anywhere else, or if that module
+has an `unsafe` other than its three.
 
 `DuckFile` reads 1 MiB at a time from a local file and 4 MiB from a remote
 one, never more than the file holds. `DuckFile::open` starts at the first

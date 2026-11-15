@@ -45,10 +45,11 @@
 
 // Unsafe code is confined to two audited places, each of which says why it is sound:
 // `engine::writer`, which stores values through the raw pointers of DuckDB's vectors, and one
-// function of `engine::scalar`, `values_without_nulls`, which borrows the values of a flat
-// vector without NULLs as a slice. `make check_unsafe` (scripts/check-unsafe.sh) fails for a
-// third. The entrypoint that `ext/` and `itest/` expand from `duckdb-neo`'s macro is outside
-// this crate.
+// private module of `engine::scalar`, `valid`, which borrows the values of rows of a flat
+// vector as a slice when none of those rows is NULL, and never reads the slot of a NULL row.
+// `make check_unsafe` (scripts/check-unsafe.sh) fails for a third, and for an `unsafe` in the
+// second that is not one of its three. The entrypoint that `ext/` and `itest/` expand from
+// `duckdb-neo`'s macro is outside this crate.
 #![deny(unsafe_code)]
 
 pub mod engine;

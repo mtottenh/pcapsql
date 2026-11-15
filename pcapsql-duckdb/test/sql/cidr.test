@@ -102,3 +102,19 @@ SELECT count(*) FILTER (ip_in_cidr(a4, '192.168.1.0/' || (i % 33))),
 FROM one, range(3000) t(i);
 ----
 2366	1920
+
+# A stored column with NULLs in runs of 150 rows and here and there, against a literal network:
+# the answers are those of the expression, and NULL exactly where the address is
+statement ok
+CREATE TABLE addresses AS SELECT i,
+    CASE WHEN (i // 150) % 3 = 0 OR i % 97 = 5 THEN NULL ELSE (i * 37 % 1024)::UINTEGER END AS a
+FROM range(10000) t(i);
+
+query IIIIII
+SELECT count(*), count(ip_in_cidr(a, '0.0.1.0/24')),
+       count(*) FILTER (ip_in_cidr(a, '0.0.1.0/24')), count(*) FILTER (NOT ip_in_cidr(a, '0.0.1.0/24')),
+       count(*) FILTER (ip_in_cidr(a, '0.0.1.0/24') IS DISTINCT FROM ((a & 4294967040) = 256)),
+       count(*) FILTER ((ip_in_cidr(a, '0.0.1.0/24') IS NULL) <> (a IS NULL))
+FROM addresses;
+----
+10000	6531	1633	4898	0	0

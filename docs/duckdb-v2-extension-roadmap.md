@@ -363,7 +363,7 @@ Done:
 | Parser dispatch | Typed hints and per-parent tables in place of string-keyed candidate scans: a `udp` scan went from 5,338 to 3,919 instructions per packet |
 | Arrow sink | Builders start each batch at the size of the last: no reallocation in steady state |
 | Text kernels | IPv4, IPv6 and MAC text without `fmt`; hex decoded into a buffer the caller keeps |
-| Scalars | DataFusion UDFs parse a constant argument once; DuckDB's scalar loops are generic over their kernel, and a constant-pattern match over a chunk without NULLs is a SIMD compare (the second of two audited `unsafe` places) |
+| Scalars | DataFusion UDFs parse a constant argument once; DuckDB's scalar loops are generic over their kernel, and a constant-pattern match is a SIMD compare over the rows of a chunk that are not NULL, a 64-row word of the validity mask at a time (the second of two audited `unsafe` places) |
 | Reader | No `BufReader` under the parser's own buffer |
 | Benchmarks | A thin-LTO bench profile, so they link on a small machine; the `with_payload` case runs again |
 
