@@ -185,7 +185,6 @@ fn read_ntp_timestamp(data: &[u8]) -> f64 {
 const NTP_UNIX_OFFSET: u32 = 2_208_988_800;
 
 /// NTP modes.
-#[allow(dead_code)]
 pub mod mode {
     pub const RESERVED: u8 = 0;
     pub const SYMMETRIC_ACTIVE: u8 = 1;
@@ -198,7 +197,6 @@ pub mod mode {
 }
 
 /// NTP stratum levels.
-#[allow(dead_code)]
 pub mod stratum {
     pub const UNSPECIFIED: u8 = 0;
     pub const PRIMARY: u8 = 1;

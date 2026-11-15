@@ -72,23 +72,6 @@ impl DecryptingTlsStreamParser {
         }
     }
 
-    /// Get or create TLS state for a connection.
-    #[allow(dead_code)]
-    fn get_or_create_state(&self, connection_id: u64) -> ConnectionTlsState {
-        let mut sessions = self.sessions.lock().unwrap();
-        sessions
-            .entry(connection_id)
-            .or_insert_with(|| ConnectionTlsState::new(Arc::clone(&self.keylog)))
-            .clone_state()
-    }
-
-    /// Update state after processing.
-    #[allow(dead_code)]
-    fn update_state(&self, connection_id: u64, state: ConnectionTlsState) {
-        let mut sessions = self.sessions.lock().unwrap();
-        sessions.insert(connection_id, state);
-    }
-
     /// Remove state for a closed connection.
     pub fn remove_connection(&self, connection_id: u64) {
         let mut sessions = self.sessions.lock().unwrap();
@@ -273,17 +256,6 @@ fn detect_tls13_from_extensions(ext_data: &[u8]) -> Option<TlsVersion> {
         }
     }
     None
-}
-
-impl ConnectionTlsState {
-    /// Clone state for processing (needed due to borrow checker)
-    #[allow(dead_code)]
-    fn clone_state(&self) -> Self {
-        // We can't truly clone TlsSession, so we create a lightweight view
-        // For now, we'll use a different approach - keep state in Arc<Mutex<>>
-        // and modify in place
-        panic!("clone_state should not be called - use Arc<Mutex<>> directly")
-    }
 }
 
 impl StreamParser for DecryptingTlsStreamParser {

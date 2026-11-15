@@ -35,8 +35,12 @@ pub mod path_attr_type {
     pub const LOCAL_PREF: u8 = 5;
     pub const ATOMIC_AGGREGATE: u8 = 6;
     pub const AGGREGATOR: u8 = 7;
+    // The parser does not decode the attributes below; they complete the table.
+    #[allow(dead_code)]
     pub const COMMUNITIES: u8 = 8;
+    #[allow(dead_code)]
     pub const MP_REACH_NLRI: u8 = 14;
+    #[allow(dead_code)]
     pub const MP_UNREACH_NLRI: u8 = 15;
 }
 
@@ -112,24 +116,6 @@ fn error_code_name(code: u8) -> &'static str {
         error_code::CEASE => "Cease",
         error_code::ROUTE_REFRESH_ERROR => "ROUTE-REFRESH Message Error",
         _ => "Unknown",
-    }
-}
-
-/// Get the name of a path attribute type.
-#[allow(dead_code)]
-fn path_attr_type_name(type_code: u8) -> &'static str {
-    match type_code {
-        path_attr_type::ORIGIN => "ORIGIN",
-        path_attr_type::AS_PATH => "AS_PATH",
-        path_attr_type::NEXT_HOP => "NEXT_HOP",
-        path_attr_type::MULTI_EXIT_DISC => "MULTI_EXIT_DISC",
-        path_attr_type::LOCAL_PREF => "LOCAL_PREF",
-        path_attr_type::ATOMIC_AGGREGATE => "ATOMIC_AGGREGATE",
-        path_attr_type::AGGREGATOR => "AGGREGATOR",
-        path_attr_type::COMMUNITIES => "COMMUNITIES",
-        path_attr_type::MP_REACH_NLRI => "MP_REACH_NLRI",
-        path_attr_type::MP_UNREACH_NLRI => "MP_UNREACH_NLRI",
-        _ => "UNKNOWN",
     }
 }
 
