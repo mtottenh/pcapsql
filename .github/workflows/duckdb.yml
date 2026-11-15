@@ -108,3 +108,7 @@ jobs:
       # What `make check_containment` runs; called directly so that the job needs no submodule.
       - name: Check that duckdb_neo is only used in src/engine, ext and itest
         run: pcapsql-duckdb/scripts/check-neo-containment.sh
+
+      # What `make check_no_std_fs` runs.
+      - name: Check that the extension opens files only through DuckDB
+        run: pcapsql-duckdb/scripts/check-no-std-fs.sh
