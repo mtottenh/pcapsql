@@ -564,6 +564,10 @@ impl PacketReader for StdinPacketReader {
         }
     }
 
+    fn truncated(&self) -> bool {
+        self.inner.truncated()
+    }
+
     fn link_type(&self) -> u32 {
         self.link_type
     }

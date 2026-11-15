@@ -151,6 +151,10 @@ impl<R: Read + Send> PacketReader for ReadPacketReader<R> {
         }
     }
 
+    fn truncated(&self) -> bool {
+        self.inner.truncated()
+    }
+
     fn link_type(&self) -> u32 {
         self.link_type
     }
@@ -224,5 +228,211 @@ impl<R: Read> Read for HeadFill<R> {
             }
         }
         Ok(filled)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::io::index::build_boundary_index;
+    use pcapsql_testgen::{
+        legacy_pcap, pcapng, GenPacket, LegacyVariant, PcapngInterface, PcapngPacket, PcapngSection,
+    };
+
+    const FRAMES: u32 = 95;
+    /// Frames between two checkpoints of the test index.
+    const STRIDE: u64 = 10;
+
+    fn legacy() -> Vec<u8> {
+        let packets: Vec<GenPacket> = (0..FRAMES)
+            .map(|i| GenPacket {
+                ts_sec: 1_700_000_000 + i,
+                ts_frac: i,
+                data: vec![i as u8; 40 + (i % 7) as usize],
+                origlen: 60,
+            })
+            .collect();
+        legacy_pcap(LegacyVariant::LeMicro, 1, 65535, &packets).bytes
+    }
+
+    fn ng() -> Vec<u8> {
+        let section = PcapngSection {
+            interfaces: vec![PcapngInterface {
+                link_type: 1,
+                tsresol: 6,
+                snaplen: 65535,
+                if_tsoffset: 0,
+            }],
+            packets: (0..FRAMES)
+                .map(|i| PcapngPacket {
+                    interface_id: 0,
+                    ts_sec: 1_700_000_000 + u64::from(i),
+                    ts_frac_units: u64::from(i),
+                    data: vec![i as u8; 40 + (i % 7) as usize],
+                    origlen: 60,
+                })
+                .collect(),
+        };
+        pcapng(&[section]).bytes
+    }
+
+    /// Read `reader` to its end; the frame numbers it delivered.
+    fn drain<R: PacketReader>(reader: &mut R) -> Vec<u64> {
+        let mut frames = Vec::new();
+        loop {
+            let read = reader
+                .process_packets(7, |packet| {
+                    frames.push(packet.frame_number);
+                    Ok(())
+                })
+                .unwrap();
+            if read == 0 {
+                return frames;
+            }
+        }
+    }
+
+    fn sequential(bytes: &[u8]) -> ReadPacketReader<Cursor<&[u8]>> {
+        let mut read = Cursor::new(bytes);
+        let (header, head) = StreamHeader::probe(&mut read).unwrap();
+        ReadPacketReader::sequential(read, &header, head).unwrap()
+    }
+
+    fn index(bytes: &[u8]) -> BoundaryIndex {
+        let format = PcapFormat::detect(bytes).unwrap();
+        let len = bytes.len() as u64;
+        build_boundary_index(Cursor::new(bytes), format, STRIDE, len, None, 0).unwrap()
+    }
+
+    /// One reader per range of an index over `bytes` with a checkpoint every
+    /// [`STRIDE`] frames, `partitions` ranges asked for.
+    fn ranged(
+        bytes: &[u8],
+        partitions: usize,
+    ) -> Vec<(PacketRange, ReadPacketReader<Cursor<&[u8]>>)> {
+        let index = index(bytes);
+        let ranges = index.partition_ranges(partitions);
+        assert!(ranges.len() > 1, "{ranges:?}");
+        ranges
+            .into_iter()
+            .map(|range| {
+                let read = Cursor::new(&bytes[range.start.byte_offset as usize..]);
+                let reader = ReadPacketReader::at(read, index.format, &index, &range).unwrap();
+                (range, reader)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_complete_capture_is_not_truncated() {
+        let all: Vec<u64> = (1..=u64::from(FRAMES)).collect();
+        for bytes in [legacy(), ng()] {
+            let mut reader = sequential(&bytes);
+            assert!(!reader.truncated());
+            assert_eq!(drain(&mut reader), all);
+            assert!(!reader.truncated());
+            // Asked again at the end, the answer is the same.
+            assert!(drain(&mut reader).is_empty());
+            assert!(!reader.truncated());
+
+            let mut frames = Vec::new();
+            for (range, mut reader) in ranged(&bytes, 4) {
+                frames.extend(drain(&mut reader));
+                assert!(!reader.truncated(), "{range:?}");
+            }
+            assert_eq!(frames, all);
+        }
+    }
+
+    /// A capture cut inside its last record: in the packet data, in the
+    /// record header, and one byte into the record.
+    #[test]
+    fn a_sequential_reader_reports_a_record_cut_short() {
+        for bytes in [legacy(), ng()] {
+            // The last record: 16 (legacy) or 32 (pcapng) bytes of framing
+            // around 43 bytes of data (padded to 44 in pcapng).
+            let record = if bytes[0] == 0x0a { 32 + 44 } else { 16 + 43 };
+            for cut in [5, record - 7, record - 1] {
+                let bytes = &bytes[..bytes.len() - cut];
+                let mut reader = sequential(bytes);
+                // Not before the reader has got to the end.
+                let read = reader.process_packets(50, |_| Ok(())).unwrap();
+                assert_eq!(read, 50);
+                assert!(!reader.truncated(), "cut {cut}");
+                let complete = u64::from(FRAMES) - 1;
+                assert_eq!(drain(&mut reader), (51..=complete).collect::<Vec<_>>());
+                assert!(reader.truncated(), "cut {cut}");
+                assert_eq!(reader.position().frame_number, complete);
+                // It stays so however often the end is asked for.
+                assert!(drain(&mut reader).is_empty());
+                assert!(reader.truncated(), "cut {cut}");
+                // A call that reads nothing does not change the answer.
+                assert_eq!(reader.process_packets(0, |_| Ok(())).unwrap(), 0);
+                assert!(reader.truncated(), "cut {cut}");
+            }
+        }
+    }
+
+    /// Of the readers of a partitioned capture only the one that reads to
+    /// the end of the input sees the truncation.
+    #[test]
+    fn only_the_last_range_reader_reports_a_record_cut_short() {
+        for bytes in [legacy(), ng()] {
+            let bytes = &bytes[..bytes.len() - 5];
+            let complete = u64::from(FRAMES) - 1;
+            let readers = ranged(bytes, 4);
+            let last = readers.len() - 1;
+            let mut frames = Vec::new();
+            for (ordinal, (range, mut reader)) in readers.into_iter().enumerate() {
+                assert_eq!(range.end.is_none(), ordinal == last);
+                frames.extend(drain(&mut reader));
+                assert_eq!(reader.truncated(), ordinal == last, "{range:?}");
+            }
+            assert_eq!(frames, (1..=complete).collect::<Vec<_>>());
+        }
+    }
+
+    /// A capture cut inside a range that is not the last of the index it is
+    /// read with (the index is older than the cut): the reader of that range
+    /// runs into the end of the input and says so.
+    #[test]
+    fn a_range_reader_that_runs_into_the_end_of_the_input_reports_it() {
+        for whole in [legacy(), ng()] {
+            let index = index(&whole);
+            let ranges = index.partition_ranges(4);
+            let range = &ranges[1];
+            let end = range.end.as_ref().unwrap();
+            let cut = &whole[..end.byte_offset as usize - 30];
+            let read = Cursor::new(&cut[range.start.byte_offset as usize..]);
+            let mut reader = ReadPacketReader::at(read, index.format, &index, range).unwrap();
+            let frames = drain(&mut reader);
+            assert_eq!(frames.first(), Some(&range.start.frame_number));
+            assert_eq!(frames.last(), Some(&(end.frame_number - 2)));
+            assert!(reader.truncated());
+        }
+    }
+
+    /// The default of the trait: a reader that cannot tell says no.
+    #[test]
+    fn a_reader_without_the_signal_is_never_truncated() {
+        struct Nothing;
+        impl PacketReader for Nothing {
+            fn process_packets_flow<F>(&mut self, _max: usize, _f: F) -> Result<Delivered, Error>
+            where
+                F: FnMut(PacketRef<'_>) -> ControlFlow<Pause>,
+            {
+                Ok(Delivered {
+                    consumed: 0,
+                    paused: None,
+                })
+            }
+            fn position(&self) -> PacketPosition {
+                PacketPosition::START
+            }
+            fn link_type(&self) -> u32 {
+                1
+            }
+        }
+        assert!(!Nothing.truncated());
     }
 }
