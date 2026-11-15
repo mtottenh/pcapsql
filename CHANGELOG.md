@@ -387,7 +387,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `error`.
   - `FieldValue` is `Copy`: `OwnedString` and `OwnedBytes` are gone, `List`
     holds a slice, and `to_owned` is gone. A constructed value is made with
-    `FieldSink::str`, `format`, `bytes`, `list`, `list_builder` or
+    `FieldSink::str`, `format`, `list`, `list_builder` or
     `text_builder`.
   - `parse_packet(registry, link_type, data, scope, &mut ParseBuf)` returns
     a `PacketLayers`, read with `iter`, `get`, `last`, `find` and `names`,
