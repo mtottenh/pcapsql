@@ -620,7 +620,6 @@ fn extract_edns_fields_projected(
 }
 
 /// DNS record types.
-#[allow(dead_code)]
 pub mod record_type {
     pub const A: u16 = 1;
     pub const NS: u16 = 2;
@@ -636,7 +635,6 @@ pub mod record_type {
 }
 
 /// DNS response codes (RFC 1035, RFC 2136, RFC 2845, RFC 6895).
-#[allow(dead_code)]
 pub mod rcode {
     // Standard RCODEs (RFC 1035)
     pub const NOERROR: u8 = 0;
