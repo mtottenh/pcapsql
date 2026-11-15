@@ -320,6 +320,7 @@ pub struct ColumnDef {
 pub enum TableKind { Frames, Protocol, Stream }  // a stream table is told from the others by its name
 pub struct TableDef {
     pub name: &'static str,
+    pub description: &'static str,  // the line a frontend lists the table with (`pcap_protocols()`)
     pub kind: TableKind,
     pub columns: Box<[ColumnDef]>,
     /// Columns the rows are ordered by (ProtocolScanExec::PROTOCOL_ORDERING today).

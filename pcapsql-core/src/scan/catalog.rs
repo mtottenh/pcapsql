@@ -210,6 +210,9 @@ pub struct TableDef {
     /// Table name. For a [`TableKind::Protocol`] table this is the parser's
     /// name.
     pub name: &'static str,
+    /// What the table holds, in a few words: the line a frontend lists the
+    /// table with.
+    pub description: &'static str,
     /// How the rows are produced.
     pub kind: TableKind,
     /// Every column, in table order; [`ColId`] indexes this slice.
@@ -536,6 +539,21 @@ mod tests {
         assert!(!Catalog::builtin().table("http").unwrap().1.is_stream());
     }
 
+    /// A frontend lists the tables with their descriptions.
+    #[test]
+    fn every_table_has_a_description() {
+        for (_, table) in Catalog::builtin().tables() {
+            assert!(!table.description.is_empty(), "{}", table.name);
+            assert_eq!(table.description.trim(), table.description);
+        }
+        let description = |name: &str| Catalog::builtin().table(name).unwrap().1.description;
+        assert_eq!(description("tcp"), "Transmission Control Protocol");
+        assert_eq!(
+            description("frames"),
+            "Raw frame metadata (timestamp, length, etc.)"
+        );
+    }
+
     /// Ids are positions: lookups by name and by id agree, both for tables
     /// and for columns (non-default columns included).
     #[test]
@@ -729,6 +747,7 @@ mod tests {
     fn duplicate_column_names_are_rejected() {
         Catalog::new(vec![TableDef {
             name: "t",
+            description: "",
             kind: TableKind::Protocol,
             columns: Box::new([
                 ColumnDef::field("a", ColKind::U8),
@@ -742,6 +761,7 @@ mod tests {
     fn duplicate_table_names_are_rejected() {
         let table = || TableDef {
             name: "t",
+            description: "",
             kind: TableKind::Protocol,
             columns: Box::new([ColumnDef::field("a", ColKind::U8)]),
         };
