@@ -168,10 +168,13 @@ impl DecryptingTlsStreamParser {
                 fields.insert("handshake_type", OwnedFieldValue::Str("ServerHello"));
                 fields.insert("cipher_suite", OwnedFieldValue::UInt16(cipher_suite));
                 fields.insert("server_version", OwnedFieldValue::UInt16(sh.version.0));
-                fields.insert(
-                    "selected_version",
-                    OwnedFieldValue::UInt16(version.to_wire()),
-                );
+                // The negotiated version, which for TLS 1.3 is not the one
+                // on the wire: `to_wire()` is the record layer's, 1.2.
+                let selected = match version {
+                    TlsVersion::Tls13 => 0x0304,
+                    earlier => earlier.to_wire(),
+                };
+                fields.insert("selected_version", OwnedFieldValue::UInt16(selected));
 
                 if let Some(name) = state.session.cipher_suite_name() {
                     fields.insert(

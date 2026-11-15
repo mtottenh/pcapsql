@@ -6,12 +6,10 @@
 //! - TLS 1.2 and TLS 1.3 captures with matching SSLKEYLOGFILE
 //! - HTTP/2 capture (requires stream decryption pipeline)
 //!
-//! ## Current Status
-//!
-//! - **TLS Table**: ✅ Fully functional - parses handshake metadata, JA3 fingerprints
-//! - **HTTP/2 Table**: ⚠️ Schema exists but stream parsing not wired to DataFusion
-//!   - `Http2StreamParser` works (unit tested)
-//!   - Need to wire `StreamManager` → DataFusion table population
+//! Those captures are not in the repository, so the tests that read them skip.
+//! The tests of the last section do not: they read the generated capture of
+//! HTTP/2 over TLS 1.3 in `pcapsql-testgen/fixtures/` with its key log
+//! (`pcapsql_testgen::tls`), which is decrypted end to end.
 
 use std::path::Path;
 
@@ -530,4 +528,88 @@ async fn test_limit_pushdown() {
 
     let total_rows: usize = results.iter().map(|b| b.num_rows()).sum();
     assert!(total_rows <= 2, "LIMIT should restrict results");
+}
+
+// ============================================================================
+// Decrypted HTTP/2 (the generated fixture of `pcapsql_testgen::tls`)
+// ============================================================================
+
+/// An engine over the TLS 1.3 + HTTP/2 fixture, with or without its key log.
+async fn fixture_engine(keylog: bool) -> QueryEngine {
+    let capture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../pcapsql-testgen/fixtures/tls13_http2.pcap"
+    );
+    let keylog = keylog.then(|| {
+        std::sync::Arc::new(KeyLog::parse(pcapsql_testgen::tls::TLS13_HTTP2_KEYLOG).unwrap())
+    });
+    QueryEngine::open(
+        SourceSpec::Path(capture.into()),
+        EngineOptions {
+            keylog,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("the fixture opens")
+}
+
+/// With the key log the session is decrypted and `http2` has the frames of
+/// the exchange; without it `http2` is empty.
+#[tokio::test]
+async fn test_keylog_gives_http2_rows() {
+    let engine = fixture_engine(true).await;
+    let results = query(
+        &engine,
+        "SELECT count(*) FROM tls_sessions WHERE is_decrypted AND version = 'TLS 1.3'",
+    )
+    .await;
+    assert_eq!(get_i64(&results, 0), 1);
+    let results = query(
+        &engine,
+        "SELECT method, path, authority FROM http2 WHERE method IS NOT NULL",
+    )
+    .await;
+    assert_eq!(get_string(&results, 0, 0).as_deref(), Some("GET"));
+    assert_eq!(get_string(&results, 0, 1).as_deref(), Some("/"));
+    assert_eq!(get_string(&results, 0, 2).as_deref(), Some("example.test"));
+
+    let engine = fixture_engine(false).await;
+    let results = query(&engine, "SELECT count(*) FROM http2").await;
+    assert_eq!(get_i64(&results, 0), 0);
+    let results = query(
+        &engine,
+        "SELECT count(*) FROM tls_sessions WHERE NOT is_decrypted",
+    )
+    .await;
+    assert_eq!(get_i64(&results, 0), 1);
+}
+
+/// `http2.connection_id` is `tcp_connections.connection_id`: the join
+/// matches every HTTP/2 frame, and the connection is the TLS session's.
+#[tokio::test]
+async fn test_http2_joins_tcp_connections_on_connection_id() {
+    let engine = fixture_engine(true).await;
+    let results = query(&engine, "SELECT count(*) FROM http2").await;
+    let frames = get_i64(&results, 0);
+    assert_eq!(frames, 8);
+    let results = query(
+        &engine,
+        "SELECT count(*) FROM http2 WHERE connection_id IS NULL",
+    )
+    .await;
+    assert_eq!(get_i64(&results, 0), 0);
+    let results = query(
+        &engine,
+        "SELECT count(*) FROM http2 JOIN tcp_connections USING (connection_id)
+         WHERE server_port = 443",
+    )
+    .await;
+    assert_eq!(get_i64(&results, 0), frames);
+    let results = query(
+        &engine,
+        "SELECT count(*) FROM http2 JOIN tls_sessions USING (connection_id)",
+    )
+    .await;
+    assert_eq!(get_i64(&results, 0), frames);
 }

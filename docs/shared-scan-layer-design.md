@@ -1146,10 +1146,12 @@ deleted, not shrunk. Where this departs from the sketch in 3.8:
   like the cells of every other table. The values are those the Arrow
   builders wrote (they read each message field with a getter of the
   column's exact type; the stream parsers' field types are the columns'
-  kinds, so coercion changes nothing). Two things kept on purpose:
-  `http2.connection_id` is the parser's field of that name, which the
-  HTTP/2 parser does not set, so the column is NULL as it always was; and
-  the encapsulation columns are depth 0 and no tunnel.
+  kinds, so coercion changes nothing). One thing kept on purpose: the
+  encapsulation columns are depth 0 and no tunnel. One thing fixed since:
+  `http2.connection_id` was the parser's field of that name, which the
+  HTTP/2 parser does not set, so the column was always NULL; it is now the
+  id of the TCP connection that carried the frame, as in the other three
+  tables (P8 of the DuckDB roadmap).
 - **Timestamps.** The stream manager keeps microseconds. A `TsNanos` plan
   (DuckDB) gets `tcp_connections.start_time` and `end_time` as those
   microseconds times 1,000.
