@@ -56,12 +56,12 @@ load_test_release:
 ITEST_CARGO = lib=$$(DUCKDB_VERSION=$(TARGET_DUCKDB_VERSION) scripts/fetch-duckdb.sh lib) && \
 	DUCKDB_LIB_DIR="$$lib" DUCKDB_DOWNLOAD_LIB=0 cargo
 itest:
-	$(ITEST_CARGO) test --manifest-path itest/Cargo.toml --locked $(ITEST_ARGS)
+	$(ITEST_CARGO) test --manifest-path itest/Cargo.toml $(ITEST_ARGS)
 
 # The workspace-wide `cargo fmt` and `cargo clippy` runs do not reach itest/.
 lint_itest:
 	cargo fmt --manifest-path itest/Cargo.toml -- --check
-	$(ITEST_CARGO) clippy --manifest-path itest/Cargo.toml --locked --all-targets -- -D warnings
+	$(ITEST_CARGO) clippy --manifest-path itest/Cargo.toml --all-targets -- -D warnings
 
 check_containment:
 	scripts/check-neo-containment.sh

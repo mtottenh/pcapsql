@@ -12,9 +12,11 @@ publish = false
 # extension-ci-tools looks for lib<extension name>.so in the target directory.
 name = "pcapsql"
 crate-type = ["cdylib"]
-# Only the entrypoint lives here; it is tested by loading the built artifact.
+# Only the entrypoint lives here; it is tested by loading the built artifact. Its rustdoc would
+# also land in the directory of the CLI's `pcapsql` binary.
 test = false
 doctest = false
+doc = false
 
 [dependencies]
 pcapsql-duckdb = { path = "..", features = ["loadable"] }
