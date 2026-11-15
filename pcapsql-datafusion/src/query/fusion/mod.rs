@@ -110,25 +110,11 @@ pub struct FrameJoinSpec {
 }
 
 impl FrameJoinSpec {
-    /// Protocol tables the parse must produce for this spec, with the
-    /// columns each needs (`frame_number` and the encapsulation
-    /// pseudo-columns included; the subscription's scope drops them, as for
-    /// a plain table).
-    pub fn member_fields(&self) -> HashMap<String, std::collections::HashSet<String>> {
-        let mut out: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
-        for (i, member) in self.members.iter().enumerate() {
-            let entry = out.entry(member.table.clone()).or_default();
-            for col in self.columns.iter().filter(|c| c.member == i) {
-                entry.insert(col.column.clone());
-            }
-        }
-        out
-    }
-
     /// The join as the scan layer describes it: the members' tables and the
     /// output columns resolved against the table catalogue, with `fetch` as
-    /// the per-partition row cap. The Arrow `schema` and the aliases stay
-    /// here.
+    /// the per-partition row cap. The plan compiled from it says which
+    /// protocols and fields the parse must produce for the join. The Arrow
+    /// `schema` and the aliases stay here.
     pub fn to_fused_scan(&self, fetch: Option<usize>) -> Result<FusedScan, Error> {
         let catalog = Catalog::builtin();
         let mut tables = Vec::with_capacity(self.members.len());
