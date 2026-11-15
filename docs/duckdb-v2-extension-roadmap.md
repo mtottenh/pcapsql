@@ -330,7 +330,7 @@ of P1. P3 to P6 are independent of each other after P2 and can be reordered.
 | Phase | State |
 |---|---|
 | P0 Spike and scaffolding | done. The CI workflow is written and has not yet run on GitHub |
-| P1 Core seams and shared scan layer | done: S0 to S5, S6 and S7. Scan benchmark, pre-S1 code against S5, three interleaved runs each on an idle machine (thin LTO on both sides): one-shot queries equal or up to 10 percent faster; parse passes within the run-to-run spread, with the plain UDP pass 4 to 7 percent slower at the median and one VXLAN case 10 percent slower against a baseline that itself varied by 19 percent. No change was made in response; restoring per-batch pre-allocation in `ArrowSink` is the first thing to try if this matters |
+| P1 Core seams and shared scan layer | done: S0 to S5, S6 and S7. Scan benchmark, pre-S1 code against S5, three interleaved runs each on an idle machine (thin LTO on both sides): one-shot queries equal or up to 10 percent faster; parse passes within the run-to-run spread, with the plain UDP pass 4 to 7 percent slower at the median and one VXLAN case 10 percent slower against a baseline that itself varied by 19 percent. The pre-allocation was restored later (section 8.1), with the other fixes of the performance review |
 | P2 Sequential reader | done: `read_<table>` and `read_pcap`, scalars, macros, `pcap_schema`, `pcap_protocols`. 45 golden-corpus queries match the DataFusion snapshots; every table matches the core driver cell by cell |
 | P3 Projection, cardinality, progress | done except the benchmark exit check. The cardinality is an estimate from the file size |
 | P4 Parallel scans | done for local uncompressed captures; the index is rebuilt per scan (no cache: the file API exposes no modification time to validate one) |
@@ -339,6 +339,69 @@ of P1. P3 to P6 are independent of each other after P2 and can be reordered.
 | P7 Distribution and documentation | done as far as it can be without running on GitHub or submitting anything. Workflows for `linux_amd64`, `linux_arm64`, `osx_arm64` and `windows_amd64` (build through `extension-ci-tools`, then a load test of each artifact), release assets on a tag, the community descriptor, the function reference with a check against the artifact, the upgrade runbook with its dry run, and a canary. None of the new workflows has run on GitHub, and the descriptor has not been submitted, so the exit check is open. `windows_amd64` was added after P7, once `pcapsql-core` compiled for Windows (U13); it has not been built on a runner either, and no job loads its artifact. WebAssembly is not built (U10) |
 | P8 Backlog | first item done: `read_<proto>_packets(files)` for the 21 `*_packets` views that are a join within one encapsulation level, as fused scans of the shared layer (S4b), with `pcap_views()`. Each equals the DataFusion SQL view of its name (DataFusion test over 23 captures) and the DuckDB join of the `read_<table>` functions (itest over 24 captures, 1 and 4 threads, split and not, pushdown on and off); the 14 golden-corpus queries over these views now match the DataFusion snapshots too (59 compared in all). `packets`, `tunneled_packets`, `ip4_in_ip6` and `ip6_in_ip6` are not fusable shapes and are not offered. Not benchmarked. The other items are not started |
 | P9 Follow V2 to stability | not started |
+
+### 8.1 Review follow-ups and what remains
+
+After P7 the code had two reviews, one of architecture and one of
+performance. Their work is tracked here because it cuts across the phases.
+
+Done:
+
+| Item | Result |
+|---|---|
+| Core hygiene | The manifest's accidental Unix-only dependencies (which is what kept Windows from compiling), seven unused dependencies, declared minimum Rust versions, four needless `unsafe impl Send`, the reader loop's parameter lists, `io/index`, `io/cloud` and `io/stdin` split, dead parser code |
+| DataFusion structure | `query/mod.rs`, `query/streaming/mod.rs` and `main.rs` split; the test corpus in `pcapsql-testgen`; a `--filter` splice that was wrong or panicked on non-ASCII text |
+| A race in the streaming exchange | A queued batch could be returned ahead of one in the channel, so an un-`ORDER`ed streaming query could come out of capture order. Found by a test that failed once in thirty runs |
+| Per-packet allocation | The list of a packet's layers is kept by the partition scan: 1 allocation of 7.8 kB per packet became 0 for `frames` and `udp` |
+| Parser dispatch | Typed hints and per-parent tables in place of string-keyed candidate scans: a `udp` scan went from 5,338 to 3,919 instructions per packet |
+| Arrow sink | Builders start each batch at the size of the last: no reallocation in steady state |
+| Text kernels | IPv4, IPv6 and MAC text without `fmt`; hex decoded into a buffer the caller keeps |
+| Scalars | DataFusion UDFs parse a constant argument once; DuckDB's scalar loops are generic over their kernel, and a constant-pattern match over a chunk without NULLs is a SIMD compare (the second of two audited `unsafe` places) |
+| Reader | No `BufReader` under the parser's own buffer |
+| Benchmarks | A thin-LTO bench profile, so they link on a small machine; the `with_payload` case runs again |
+
+Remaining, in the order intended:
+
+1. Scan-layer polish in core and the DuckDB engine clean-up: `thiserror`
+   on the plan errors, the observer's own error type, the frame-predicate
+   algebra in core, table descriptions in the catalogue, `scan::testing`
+   behind a feature, a plan the driver cannot run refused, `engine/table.rs`
+   split, type tests by id.
+2. In-place field storage for the parsers (the second half of the parser
+   work): fields written into a per-partition buffer and an arena, a `Copy`
+   field value, no move of a layer's result and no drop of its fields. It
+   touches every parser. Expected, not measured: a `udp` scan near 2,400
+   instructions per packet and no allocation for TCP. The standard
+   `Allocator` trait (stable in Rust 1.100) is not used: the minimum Rust
+   version is 1.88 and the extension's CI toolchain is older than 1.100.
+3. The DataFusion scan path after that: stream tables on the shared layer
+   (S4c) so that the legacy builders in `stream_tables.rs` go,
+   `providers/shared.rs` split and keyed by output id.
+4. Typed columns in the Arrow sink (fixed-width columns as vectors with a
+   lazily built validity bitmap).
+5. Small items: IPv6 text in the row writer and the three MAC formatters
+   left in the parsers through the shared kernels; a benchmark run of the
+   whole (P3 projection, P4 scaling, a view against its join), recorded
+   here.
+6. P8: stream tables and TLS decryption in the extension, the remaining
+   UDFs as wrappers, `COPY ... TO 'x.pcap'`.
+7. The S3 half of the P5 remote test, once the HTTP half has run.
+
+Open decisions for the maintainer:
+
+- The parsers' own name tables and `pcapsql_core::format::names` disagree
+  for unknown codes (`UNKNOWN` against `Unknown (n)`); making the parsers
+  use the shared tables changes existing column values.
+- A constant-pattern match over a chunk with NULLs falls back to the
+  per-row loop; covering it needs a second kind of `unsafe` (slices over
+  all-valid words).
+- The CLI's entry points became public items of the `pcapsql-datafusion`
+  library (`cli::run_repl` and others) when `main.rs` was split.
+- A strict partitioned scan checks the capture's tail up front, so `strict`
+  with `LIMIT` differs between a split and an unsplit scan.
+
+Needs the repository's owner: a first run of the workflows on GitHub (none
+has run), and the submission of the community descriptor.
 
 ### P0: Spike and scaffolding
 
