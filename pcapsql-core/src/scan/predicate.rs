@@ -325,6 +325,39 @@ impl FramePredicate {
         )
     }
 
+    /// True when no packet at all can match: a range is inverted or holds
+    /// no integer (`> 3 AND < 4`), or the frame range ends before frame 1.
+    /// A scan with such a predicate reads nothing.
+    pub fn is_empty(&self) -> bool {
+        fn empty<T: Copy + Ord>(
+            (lower, upper): &(Bound<T>, Bound<T>),
+            up: impl Fn(T) -> Option<T>,
+            down: impl Fn(T) -> Option<T>,
+        ) -> bool {
+            // The smallest and the largest value inside the bounds.
+            let lowest = match *lower {
+                Bound::Unbounded => None,
+                Bound::Included(b) => Some(b),
+                Bound::Excluded(b) => match up(b) {
+                    Some(next) => Some(next),
+                    None => return true,
+                },
+            };
+            let highest = match *upper {
+                Bound::Unbounded => None,
+                Bound::Included(b) => Some(b),
+                Bound::Excluded(b) => match down(b) {
+                    Some(previous) => Some(previous),
+                    None => return true,
+                },
+            };
+            matches!((lowest, highest), (Some(lowest), Some(highest)) if lowest > highest)
+        }
+        self.past_end(1)
+            || empty(&self.frames, |b| b.checked_add(1), |b| b.checked_sub(1))
+            || empty(&self.time_ns, |b| b.checked_add(1), |b| b.checked_sub(1))
+    }
+
     /// Whether `packet` matches.
     #[inline]
     pub fn accepts(&self, packet: &PacketRef<'_>) -> bool {
@@ -783,6 +816,70 @@ mod tests {
     }
 
     /// `past_end(n)` implies that no frame from `n` on is accepted.
+    #[test]
+    fn is_empty_means_no_packet_matches() {
+        use Bound::*;
+        let frames = |lower, upper| FramePredicate {
+            frames: (lower, upper),
+            ..FramePredicate::all()
+        };
+        let time = |lower, upper| FramePredicate {
+            time_ns: (lower, upper),
+            ..FramePredicate::all()
+        };
+        assert!(!FramePredicate::all().is_empty());
+        for empty in [
+            frames(Included(5), Included(4)),
+            frames(Included(5), Excluded(5)),
+            frames(Excluded(5), Included(5)),
+            frames(Excluded(5), Excluded(6)),
+            frames(Excluded(u64::MAX), Unbounded),
+            frames(Unbounded, Excluded(1)),
+            frames(Unbounded, Included(0)),
+            frames(Unbounded, Excluded(0)),
+            time(Included(5), Included(4)),
+            time(Excluded(-1), Excluded(0)),
+            time(Unbounded, Excluded(i64::MIN)),
+            time(Excluded(i64::MAX), Unbounded),
+        ] {
+            assert!(empty.is_empty(), "{empty:?}");
+        }
+        for some in [
+            frames(Included(5), Included(5)),
+            frames(Excluded(5), Excluded(7)),
+            frames(Unbounded, Included(1)),
+            frames(Unbounded, Excluded(2)),
+            frames(Included(u64::MAX), Unbounded),
+            time(Included(-3), Included(-3)),
+            time(Excluded(-2), Excluded(0)),
+            time(Unbounded, Included(i64::MIN)),
+        ] {
+            assert!(!some.is_empty(), "{some:?}");
+        }
+        // Exhaustively over a small domain: empty exactly when nothing is
+        // accepted.
+        let bounds = |v: i64| [Unbounded, Included(v), Excluded(v)];
+        for low in 0..6i64 {
+            for high in 0..6i64 {
+                for lower in bounds(low) {
+                    for upper in bounds(high) {
+                        let p = time(lower, upper);
+                        let any = (-2..9).any(|ts| p.accepts(&packet(1, ts)));
+                        assert_eq!(p.is_empty(), !any, "{p:?}");
+                        let as_u64 = |b: Bound<i64>| match b {
+                            Unbounded => Unbounded,
+                            Included(v) => Included(v as u64),
+                            Excluded(v) => Excluded(v as u64),
+                        };
+                        let p = frames(as_u64(lower), as_u64(upper));
+                        let any = (1..9).any(|frame| p.accepts(&packet(frame, 0)));
+                        assert_eq!(p.is_empty(), !any, "{p:?}");
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn past_end_agrees_with_accepts() {
         let bounds = |v: u64| [Bound::Unbounded, Bound::Included(v), Bound::Excluded(v)];

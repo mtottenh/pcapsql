@@ -40,6 +40,31 @@
 //! - **Side effects happen once per frame.** The [`FrameObserver`] sees a
 //!   frame once, however often it is shown; [`ScanStats::packets`] counts
 //!   the packets the reader consumed.
+//!
+//! # The frame predicate
+//!
+//! The plan's [`FramePredicate`](super::FramePredicate)
+//! ([`CompiledScan::frames`]) is enforced here, exactly: a packet gives rows
+//! if and only if the predicate accepts it. A packet it rejects is consumed
+//! from the reader and nothing else: it is not parsed, not routed, not shown
+//! to the [`FrameObserver`] and not counted against a row cap. (An observer
+//! therefore sees the accepted frames only. That is what a fused join built
+//! in an observer needs. Stream reassembly needs every packet, and
+//! [`ScanPlan::compile`](super::ScanPlan::compile) refuses a plan that has
+//! both stream tables and a frame predicate.)
+//!
+//! Frame numbers ascend within a partition, so the scan ends
+//! ([`Step::End`]) as soon as no later frame can match: after consuming the
+//! last frame the upper frame bound admits, without reading the one behind
+//! it (on a live capture that packet may never come). Timestamps need not
+//! ascend, so a time bound never ends a scan: it is checked packet by
+//! packet to the end of the partition. A predicate nothing can satisfy
+//! ([`FramePredicate::is_empty`](super::FramePredicate::is_empty)) ends the
+//! scan before the first read.
+//!
+//! When the predicate is [all](super::FramePredicate::all) the packet loop
+//! tests one flag per packet and is otherwise what it was without a
+//! predicate.
 
 use std::ops::ControlFlow;
 use std::sync::Arc;
@@ -66,21 +91,32 @@ pub enum Step {
     /// wants no further frame: nothing the scan could still produce would be
     /// seen. The rest of the partition was not read.
     Done,
-    /// The end of the partition. The sinks may hold rows that never filled
-    /// them.
+    /// The end of the partition, or of the frames the plan's
+    /// [frame predicate](CompiledScan::frames) can accept in it (the rest of
+    /// the partition was not read). The sinks may hold rows that never
+    /// filled them.
     End,
 }
 
 /// What a partition scan has read and written so far.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScanStats {
-    /// Packets consumed from the reader.
+    /// Packets consumed from the reader: those the scan produced rows
+    /// from and those the frame predicate rejected
+    /// ([`skipped`](Self::skipped)). It is how far the reader has got, which
+    /// is what progress reporting wants, and what the scan cost in I/O. With
+    /// an inclusive upper frame bound `n`, on a partition starting at frame
+    /// `s`, it never exceeds `n - s + 1`.
     pub packets: u64,
-    /// The earliest packet timestamp seen, in nanoseconds; `i64::MAX` before
-    /// the first packet.
+    /// Of [`packets`](Self::packets), those the plan's frame predicate
+    /// rejected: read, but not parsed. `packets - skipped` frames were
+    /// accepted. Always 0 without a frame predicate.
+    pub skipped: u64,
+    /// The earliest timestamp of an accepted packet, in nanoseconds;
+    /// `i64::MAX` before the first one.
     pub min_ts_ns: i64,
-    /// The latest packet timestamp seen, in nanoseconds; `i64::MIN` before
-    /// the first packet.
+    /// The latest timestamp of an accepted packet, in nanoseconds;
+    /// `i64::MIN` before the first one.
     pub max_ts_ns: i64,
     /// Rows written per output, indexed by [`OutputId`]. Outputs the scan
     /// does not route (fused joins, for now) stay at 0.
@@ -91,14 +127,15 @@ impl ScanStats {
     fn new(outputs: usize) -> Self {
         Self {
             packets: 0,
+            skipped: 0,
             min_ts_ns: i64::MAX,
             max_ts_ns: i64::MIN,
             rows: vec![0; outputs].into(),
         }
     }
 
-    /// The `[earliest, latest]` packet timestamp in nanoseconds, once a
-    /// packet was seen.
+    /// The `[earliest, latest]` timestamp of the accepted packets in
+    /// nanoseconds, once there is one.
     pub fn time_range_ns(&self) -> Option<(i64, i64)> {
         (self.min_ts_ns <= self.max_ts_ns).then_some((self.min_ts_ns, self.max_ts_ns))
     }
@@ -110,8 +147,9 @@ impl Default for ScanStats {
     }
 }
 
-/// Sees every frame of a partition scan once, parsed, before its rows are
-/// routed: the hook for what a frontend derives from frames besides the
+/// Sees every frame of a partition scan that the plan's frame predicate
+/// accepts (every frame, when there is none) once, parsed, before its rows
+/// are routed: the hook for what a frontend derives from frames besides the
 /// routed rows (stream reassembly, outputs it builds itself).
 ///
 /// It is a type parameter of [`PartitionScan`], so the call is static and a
@@ -175,6 +213,10 @@ pub struct PartitionScan<R: PacketReader, O: FrameObserver = NoObserver> {
     /// The number of the last frame the observer saw (frames are numbered
     /// from 1). A frame shown again has this number.
     observed_frame: u64,
+    /// The plan has a frame predicate other than `all`.
+    filtered: bool,
+    /// The frame predicate accepts no further frame of the partition.
+    ended: bool,
     stats: ScanStats,
 }
 
@@ -197,6 +239,8 @@ impl<R: PacketReader, O: FrameObserver> PartitionScan<R, O> {
     ) -> Self {
         let router = Router::new(&plan);
         let stats = ScanStats::new(plan.outputs().len());
+        let filtered = !plan.frames().is_all();
+        let ended = plan.frames().is_empty();
         Self {
             reader,
             plan,
@@ -204,6 +248,8 @@ impl<R: PacketReader, O: FrameObserver> PartitionScan<R, O> {
             router,
             observer,
             observed_frame: 0,
+            filtered,
+            ended,
             stats,
         }
     }
@@ -211,7 +257,9 @@ impl<R: PacketReader, O: FrameObserver> PartitionScan<R, O> {
     /// Read and route packets until an output must be taken
     /// ([`Step::Flush`]), `max_packets` were consumed ([`Step::More`]),
     /// nothing more is wanted ([`Step::Done`]) or the partition ends
-    /// ([`Step::End`]).
+    /// ([`Step::End`]). Packets the plan's frame predicate rejects are
+    /// consumed (they count towards `max_packets`) and give no rows; the
+    /// partition also ends where the predicate accepts no later frame.
     ///
     /// `sinks[i]` is the sink of output `i` of the plan
     /// ([`CompiledScan::outputs`]); a slice that stops before the fused
@@ -231,6 +279,9 @@ impl<R: PacketReader, O: FrameObserver> PartitionScan<R, O> {
         if let Some(output) = self.router.take_flush() {
             return Ok(Step::Flush(output));
         }
+        if self.ended {
+            return Ok(Step::End);
+        }
         if self.router.all_done() && !self.observer.wants_frames() {
             return Ok(Step::Done);
         }
@@ -245,11 +296,39 @@ impl<R: PacketReader, O: FrameObserver> PartitionScan<R, O> {
             router,
             observer,
             observed_frame,
+            filtered,
+            ended,
             stats,
         } = self;
         let scope = plan.scope();
+        let frames = plan.frames();
+        let filtered = *filtered;
         let mut failed = None;
         let delivered = reader.process_packets_flow(max_packets, |packet| {
+            // True when the frame after this one cannot match either: the
+            // scan ends once this one is consumed.
+            let mut last = false;
+            if filtered {
+                if frames.past_end(packet.frame_number) {
+                    // Frame numbers ascend: nothing from here on matches.
+                    // (Only the first packet of a partition gets here; later
+                    // ones are stopped by `last` below.)
+                    *ended = true;
+                    return ControlFlow::Break(Pause::Before);
+                }
+                last = packet
+                    .frame_number
+                    .checked_add(1)
+                    .is_none_or(|next| frames.past_end(next));
+                if !frames.accepts(&packet) {
+                    stats.skipped += 1;
+                    if last {
+                        *ended = true;
+                        return ControlFlow::Break(Pause::After);
+                    }
+                    return ControlFlow::Continue(());
+                }
+            }
             // Per-packet link type is correct even for PCAPNG multi-interface.
             let layers = parse_packet(registry, packet.link_type, packet.data, scope);
             if packet.frame_number != *observed_frame {
@@ -266,6 +345,10 @@ impl<R: PacketReader, O: FrameObserver> PartitionScan<R, O> {
                 // Rows of the frame are waiting for a full sink: the reader
                 // keeps the packet and shows it again.
                 Routed::Redeliver => ControlFlow::Break(Pause::Before),
+                Routed::Consumed if last => {
+                    *ended = true;
+                    ControlFlow::Break(Pause::After)
+                }
                 Routed::Consumed if router.has_flush() => ControlFlow::Break(Pause::After),
                 Routed::Consumed => ControlFlow::Continue(()),
             }
@@ -280,7 +363,7 @@ impl<R: PacketReader, O: FrameObserver> PartitionScan<R, O> {
         if let Some(output) = router.take_flush() {
             return Ok(Step::Flush(output));
         }
-        if delivered.consumed == 0 && delivered.paused.is_none() {
+        if *ended || (delivered.consumed == 0 && delivered.paused.is_none()) {
             return Ok(Step::End);
         }
         Ok(Step::More)
@@ -340,7 +423,8 @@ mod tests {
     use super::*;
     use crate::io::{Delivered, PacketPosition};
     use crate::scan::testing::{Cell, RecordingSink};
-    use crate::scan::{Catalog, ScanPlan, TableScan};
+    use crate::scan::{Catalog, FramePredicate, ScanPlan, TableScan};
+    use std::ops::Bound;
 
     /// A reader over frames held in memory.
     struct Frames {
@@ -348,6 +432,8 @@ mod tests {
         next: usize,
         /// Fail the read before this frame index, once.
         fail_before: Option<usize>,
+        /// The highest frame number shown to a callback.
+        shown: u64,
     }
 
     /// Ethernet/IPv4/UDP to `port` around `payload`.
@@ -383,6 +469,7 @@ mod tests {
                 frames: (0..count).map(frame).collect(),
                 next: 0,
                 fail_before: None,
+                shown: 0,
             }
         }
     }
@@ -410,6 +497,7 @@ mod tests {
                     link_type: 1,
                     data,
                 };
+                self.shown = self.shown.max(packet.frame_number);
                 match f(packet) {
                     ControlFlow::Continue(()) => {
                         self.next += 1;
@@ -449,6 +537,10 @@ mod tests {
     }
 
     fn plan(tables: &[(&str, Option<u64>)]) -> Arc<CompiledScan> {
+        plan_of(tables, FramePredicate::all())
+    }
+
+    fn plan_of(tables: &[(&str, Option<u64>)], frames: FramePredicate) -> Arc<CompiledScan> {
         let catalog = Catalog::builtin();
         let tables = tables
             .iter()
@@ -464,9 +556,31 @@ mod tests {
             .collect();
         let plan = ScanPlan {
             tables,
+            frames,
             ..Default::default()
         };
         Arc::new(plan.compile(catalog, &crate::default_registry()).unwrap())
+    }
+
+    fn frame_range(lower: Bound<u64>, upper: Bound<u64>) -> FramePredicate {
+        FramePredicate {
+            frames: (lower, upper),
+            ..FramePredicate::all()
+        }
+    }
+
+    /// A scan of `count` frames with a frame predicate and an observer.
+    fn filtered(
+        count: u8,
+        tables: &[(&str, Option<u64>)],
+        frames: FramePredicate,
+    ) -> PartitionScan<Frames, Seen> {
+        PartitionScan::with_observer(
+            Frames::new(count),
+            plan_of(tables, frames),
+            Arc::new(crate::default_registry()),
+            Seen::default(),
+        )
     }
 
     fn sinks(plan: &CompiledScan, capacity: Option<usize>) -> Vec<RecordingSink> {
@@ -685,5 +799,200 @@ mod tests {
         assert_eq!(scan.step(&mut sinks, 100).unwrap(), Step::End);
         assert_eq!(numbers(sinks[0].take_rows()), [1, 2, 3, 4]);
         assert_eq!(scan.reader().position().frame_number, 4);
+    }
+
+    /// A frame range gives the rows of exactly its frames, to every output
+    /// and to the observer; the frames before it are read and not parsed,
+    /// and nothing behind its last frame is read at all.
+    #[test]
+    fn a_frame_range_selects_frames_and_ends_the_scan() {
+        let mut scan = filtered(
+            9,
+            &[("frames", None), ("udp", None)],
+            frame_range(Bound::Excluded(2), Bound::Included(5)),
+        );
+        let mut sinks = sinks(scan.plan(), None);
+        assert_eq!(scan.step(&mut sinks, 100).unwrap(), Step::End);
+        assert_eq!(scan.step(&mut sinks, 100).unwrap(), Step::End);
+        assert_eq!(numbers(sinks[0].take_rows()), [3, 4, 5]);
+        assert_eq!(numbers(sinks[1].take_rows()), [3, 4, 5]);
+        // Frame 6 was never asked of the reader.
+        assert_eq!(scan.reader().shown, 5);
+        assert_eq!(scan.reader().position().frame_number, 5);
+        let (stats, seen) = scan.finish();
+        assert_eq!(seen.frames, [3, 4, 5]);
+        assert_eq!((stats.packets, stats.skipped), (5, 2));
+        assert_eq!(stats.time_range_ns(), Some((3_000, 5_000)));
+        assert_eq!(*stats.rows, [3, 3]);
+    }
+
+    /// The upper frame bound ends the scan in whichever step reaches it,
+    /// and an exclusive bound one frame earlier.
+    #[test]
+    fn the_upper_frame_bound_ends_the_scan_in_any_step() {
+        for (upper, last) in [(Bound::Included(4), 4), (Bound::Excluded(4), 3)] {
+            let mut scan = filtered(9, &[("frames", None)], frame_range(Bound::Unbounded, upper));
+            let mut sinks = sinks(scan.plan(), None);
+            let mut steps = 0;
+            while scan.step(&mut sinks, 1).unwrap() == Step::More {
+                steps += 1;
+            }
+            // The step that consumes the last frame reports the end.
+            assert_eq!(steps, last - 1);
+            assert_eq!(scan.reader().shown, last);
+            assert_eq!(scan.stats().packets, last);
+            assert_eq!(scan.stats().skipped, 0);
+            assert_eq!(
+                numbers(sinks[0].take_rows()),
+                (1..=last).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// The last frame of the range can also be one the time bounds reject:
+    /// the scan still ends there.
+    #[test]
+    fn the_scan_ends_on_a_rejected_last_frame() {
+        let frames = FramePredicate {
+            frames: (Bound::Unbounded, Bound::Included(4)),
+            time_ns: (Bound::Unbounded, Bound::Excluded(3_000)),
+        };
+        let mut scan = filtered(9, &[("frames", None)], frames);
+        let mut sinks = sinks(scan.plan(), None);
+        assert_eq!(scan.step(&mut sinks, 100).unwrap(), Step::End);
+        assert_eq!(numbers(sinks[0].take_rows()), [1, 2]);
+        assert_eq!(scan.reader().shown, 4);
+        let (stats, seen) = scan.finish();
+        assert_eq!(seen.frames, [1, 2]);
+        assert_eq!((stats.packets, stats.skipped), (4, 2));
+        assert_eq!(stats.time_range_ns(), Some((1_000, 2_000)));
+    }
+
+    /// Time bounds select packets and never end a scan: timestamps need not
+    /// ascend, so every packet of the partition is looked at.
+    #[test]
+    fn a_time_range_selects_packets_to_the_end_of_the_partition() {
+        let frames = FramePredicate {
+            time_ns: (Bound::Included(2_000), Bound::Excluded(4_000)),
+            ..FramePredicate::all()
+        };
+        let mut scan = filtered(6, &[("frames", None), ("ipv4", None)], frames);
+        let mut sinks = sinks(scan.plan(), None);
+        assert_eq!(scan.step(&mut sinks, 100).unwrap(), Step::More);
+        assert_eq!(scan.step(&mut sinks, 100).unwrap(), Step::End);
+        assert_eq!(numbers(sinks[0].take_rows()), [2, 3]);
+        assert_eq!(numbers(sinks[1].take_rows()), [2, 3]);
+        let (stats, seen) = scan.finish();
+        assert_eq!(seen.frames, [2, 3]);
+        assert_eq!((stats.packets, stats.skipped), (6, 4));
+    }
+
+    /// Rejected packets count towards `max_packets` (a step stays bounded)
+    /// and not towards a row cap.
+    #[test]
+    fn rejected_packets_count_as_packets_not_as_rows() {
+        let mut scan = filtered(
+            9,
+            &[("frames", Some(2))],
+            frame_range(Bound::Included(4), Bound::Unbounded),
+        );
+        let mut sinks = sinks(scan.plan(), None);
+        assert_eq!(scan.step(&mut sinks, 3).unwrap(), Step::More);
+        assert_eq!((scan.stats().packets, scan.stats().skipped), (3, 3));
+        assert_eq!(sinks[0].rows(), 0);
+        assert_eq!(scan.step(&mut sinks, 3).unwrap(), Step::Flush(OutputId(0)));
+        assert_eq!(numbers(sinks[0].take_rows()), [4, 5]);
+        assert_eq!((scan.stats().packets, scan.stats().skipped), (5, 3));
+    }
+
+    /// A partition that starts behind the upper bound ends at its first
+    /// packet, which stays with the reader.
+    #[test]
+    fn a_partition_behind_the_range_ends_at_once() {
+        let mut scan = filtered(
+            9,
+            &[("frames", None)],
+            frame_range(Bound::Unbounded, Bound::Included(2)),
+        );
+        // As if the partition started at frame 4.
+        scan.reader_mut().next = 3;
+        let mut sinks = sinks(scan.plan(), None);
+        assert_eq!(scan.step(&mut sinks, 100).unwrap(), Step::End);
+        assert_eq!(scan.step(&mut sinks, 100).unwrap(), Step::End);
+        assert_eq!(sinks[0].rows(), 0);
+        assert_eq!(scan.reader().position().frame_number, 3);
+        let (stats, seen) = scan.finish();
+        assert!(seen.frames.is_empty());
+        assert_eq!((stats.packets, stats.skipped), (0, 0));
+    }
+
+    /// A predicate nothing satisfies never touches the reader.
+    #[test]
+    fn an_empty_predicate_reads_nothing() {
+        let inverted = frame_range(Bound::Included(5), Bound::Included(3));
+        let no_time = FramePredicate {
+            time_ns: (Bound::Excluded(7), Bound::Excluded(8)),
+            ..FramePredicate::all()
+        };
+        for frames in [inverted, no_time] {
+            let mut scan = filtered(9, &[("frames", None)], frames);
+            // A read would fail.
+            scan.reader_mut().fail_before = Some(0);
+            let mut sinks = sinks(scan.plan(), None);
+            assert_eq!(scan.step(&mut sinks, 100).unwrap(), Step::End);
+            assert_eq!(sinks[0].rows(), 0);
+            assert_eq!(scan.reader().shown, 0);
+            assert_eq!(scan.stats().packets, 0);
+        }
+    }
+
+    /// The last frame of the range filling a sink: the rows are handed out
+    /// first, the end is reported by the next step, and nothing more is
+    /// read. With a tunnelled last frame whose rows do not fit, the frame
+    /// is shown again until they are all written.
+    #[test]
+    fn the_end_of_the_range_waits_for_full_sinks() {
+        let mut scan = filtered(
+            9,
+            &[("frames", None)],
+            frame_range(Bound::Unbounded, Bound::Included(4)),
+        );
+        let mut sinks = sinks(scan.plan(), Some(2));
+        let mut rows = Vec::new();
+        for _ in 0..2 {
+            assert_eq!(
+                scan.step(&mut sinks, 100).unwrap(),
+                Step::Flush(OutputId(0))
+            );
+            rows.extend(numbers(sinks[0].take_rows()));
+        }
+        assert_eq!(scan.step(&mut sinks, 100).unwrap(), Step::End);
+        assert_eq!(rows, [1, 2, 3, 4]);
+        assert_eq!(scan.reader().shown, 4);
+    }
+
+    #[test]
+    fn the_end_of_the_range_waits_for_a_frame_shown_again() {
+        let mut scan = filtered(
+            0,
+            &[("ethernet", None)],
+            frame_range(Bound::Included(2), Bound::Included(3)),
+        );
+        scan.reader_mut().frames = (0..6).map(tunnelled).collect();
+        let mut sinks = sinks(scan.plan(), Some(1));
+        let mut rows = Vec::new();
+        loop {
+            match scan.step(&mut sinks, 100).unwrap() {
+                Step::Flush(OutputId(0)) => rows.extend(numbers(sinks[0].take_rows())),
+                Step::End => break,
+                other => panic!("{other:?}"),
+            }
+        }
+        rows.extend(numbers(sinks[0].take_rows()));
+        assert_eq!(rows, [2, 2, 3, 3]);
+        assert_eq!(scan.reader().shown, 3);
+        let (stats, seen) = scan.finish();
+        assert_eq!(seen.frames, [2, 3]);
+        assert_eq!((stats.packets, stats.skipped), (3, 1));
     }
 }
