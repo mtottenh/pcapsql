@@ -50,7 +50,7 @@ use super::predicate::CompiledPredicate;
 use super::row::{write_frame_row, write_layer_row, FieldResolver};
 use super::sink::RowSink;
 use crate::io::PacketRef;
-use crate::ParseResult;
+use crate::PacketLayers;
 
 /// What became of a frame given to [`Router::route_frame`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,7 +185,7 @@ impl Router {
         &mut self,
         sinks: &mut [S],
         packet: &PacketRef<'_>,
-        layers: &[(&'static str, ParseResult<'_>)],
+        layers: &PacketLayers<'_, '_>,
     ) -> Routed {
         if self
             .pending
@@ -228,8 +228,8 @@ impl Router {
             }
         }
 
-        for (position, (name, layer)) in layers.iter().enumerate() {
-            let Some(index) = output_for_layer(layer_outputs, outputs, name) else {
+        for (position, layer) in layers.iter().enumerate() {
+            let Some(index) = output_for_layer(layer_outputs, outputs, layer.name()) else {
                 continue;
             };
             let out = &mut outputs[index];
@@ -348,7 +348,7 @@ fn route_fused<S: RowSink>(
     flush: &mut Vec<u16>,
     sinks: &mut [S],
     packet: &PacketRef<'_>,
-    layers: &[(&'static str, ParseResult<'_>)],
+    layers: &PacketLayers<'_, '_>,
 ) -> bool {
     let mut redeliver = false;
     for (index, state) in fused {
@@ -405,8 +405,7 @@ mod tests {
     use super::*;
     use crate::scan::testing::{Cell, RecordingSink};
     use crate::scan::{Catalog, CmpOp, RowPredicate, ScanPlan, TableScan};
-    use crate::{FieldValue, TunnelType};
-    use smallvec::SmallVec;
+    use crate::{FieldValue, LayerRef, ParseBuf, TunnelType};
 
     fn packet(frame_number: u64) -> PacketRef<'static> {
         PacketRef {
@@ -419,18 +418,11 @@ mod tests {
         }
     }
 
-    fn udp(src_port: u16, depth: u8) -> ParseResult<'static> {
-        let mut fields = SmallVec::new();
-        fields.push(("src_port", FieldValue::UInt16(src_port)));
-        ParseResult {
-            fields,
-            remaining: &[],
-            child_hints: crate::protocol::Hints::new(),
-            error: None,
-            encap_depth: depth,
-            tunnel_type: TunnelType::None,
-            tunnel_id: None,
-        }
+    /// A layer of a test frame: its `src_port` and its encapsulation depth.
+    type TestLayer = (u16, u8);
+
+    fn udp(src_port: u16, depth: u8) -> TestLayer {
+        (src_port, depth)
     }
 
     /// A scan of `tables`: each a name, its columns, and a row cap.
@@ -473,13 +465,30 @@ mod tests {
             .collect()
     }
 
+    /// Route frame `frame_number` with these layers.
+    fn route(
+        router: &mut Router,
+        sinks: &mut [RecordingSink],
+        frame_number: u64,
+        frame_layers: &[(&'static str, TestLayer)],
+    ) -> Routed {
+        let mut buf = ParseBuf::new();
+        let mut layers = buf.for_packet();
+        for (name, (src_port, depth)) in frame_layers {
+            let fields = [("src_port", FieldValue::UInt16(*src_port))];
+            let layer = LayerRef::new(name, &fields);
+            layers.push_layer(layer.in_tunnel(*depth, TunnelType::None, None));
+        }
+        router.route_frame(sinks, &packet(frame_number), &layers)
+    }
+
     /// Route `frames` (each a frame number and its layers), taking rows out
     /// of the sinks whenever the router asks. Returns the rows per output
     /// and the number of redeliveries.
     fn run(
         plan: &CompiledScan,
         capacity: Option<usize>,
-        frames: &[(u64, Vec<(&'static str, ParseResult<'static>)>)],
+        frames: &[(u64, Vec<(&'static str, TestLayer)>)],
     ) -> (Vec<Vec<Vec<Cell>>>, usize, Router) {
         let mut router = Router::new(plan);
         let mut sinks = sinks(plan, capacity);
@@ -487,7 +496,7 @@ mod tests {
         let mut redeliveries = 0;
         for (frame_number, layers) in frames {
             loop {
-                let routed = router.route_frame(&mut sinks, &packet(*frame_number), layers);
+                let routed = route(&mut router, &mut sinks, *frame_number, layers);
                 // Every full sink is queued.
                 assert!(router.has_flush() || !sinks.iter().any(RecordingSink::is_full));
                 while let Some(output) = router.take_flush() {
@@ -511,7 +520,7 @@ mod tests {
     const ETHERNET: &str = "ethernet";
 
     /// Frames with 1, 3, 0 and 2 `udp` layers.
-    fn frames() -> Vec<(u64, Vec<(&'static str, ParseResult<'static>)>)> {
+    fn frames() -> Vec<(u64, Vec<(&'static str, TestLayer)>)> {
         vec![
             (1, vec![(ETHERNET, udp(0, 0)), (UDP, udp(10, 0))]),
             (
@@ -649,12 +658,12 @@ mod tests {
         let mut sinks = sinks(&plan, None);
         let frames = frames();
         assert_eq!(
-            router.route_frame(&mut sinks, &packet(1), &frames[0].1),
+            route(&mut router, &mut sinks, 1, &frames[0].1),
             Routed::Consumed
         );
         assert_eq!(router.take_flush(), None);
         assert_eq!(
-            router.route_frame(&mut sinks, &packet(2), &frames[1].1),
+            route(&mut router, &mut sinks, 2, &frames[1].1),
             Routed::Consumed
         );
         assert_eq!(router.take_flush(), Some(OutputId(1)));
@@ -685,7 +694,7 @@ mod tests {
         let frames = frames();
         // Frame 2 has three udp rows: the sink is full after the first.
         assert_eq!(
-            router.route_frame(&mut sinks, &packet(2), &frames[1].1),
+            route(&mut router, &mut sinks, 2, &frames[1].1),
             Routed::Redeliver
         );
         let mut taken = Vec::new();
@@ -697,7 +706,7 @@ mod tests {
         assert_eq!(taken, [OutputId(0), OutputId(1)]);
         router.close_output(OutputId(1));
         assert_eq!(
-            router.route_frame(&mut sinks, &packet(2), &frames[1].1),
+            route(&mut router, &mut sinks, 2, &frames[1].1),
             Routed::Consumed
         );
         // Nothing was added: frames had its row, udp is closed.
@@ -718,14 +727,14 @@ mod tests {
         let mut sinks = sinks(&plan, Some(1));
         let frames = frames();
         assert_eq!(
-            router.route_frame(&mut sinks, &packet(1), &frames[0].1),
+            route(&mut router, &mut sinks, 1, &frames[0].1),
             Routed::Consumed
         );
         assert!(router.has_flush());
         // Not taken. The next frame cannot be written.
         for _ in 0..3 {
             assert_eq!(
-                router.route_frame(&mut sinks, &packet(4), &frames[3].1),
+                route(&mut router, &mut sinks, 4, &frames[3].1),
                 Routed::Redeliver
             );
             assert_eq!(sinks[0].rows(), 1);
@@ -733,13 +742,13 @@ mod tests {
         assert_eq!(router.take_flush(), Some(OutputId(0)));
         assert_eq!(sinks[0].take_rows(), vec![udp_row(1, 10)]);
         assert_eq!(
-            router.route_frame(&mut sinks, &packet(4), &frames[3].1),
+            route(&mut router, &mut sinks, 4, &frames[3].1),
             Routed::Redeliver
         );
         assert_eq!(router.take_flush(), Some(OutputId(0)));
         assert_eq!(sinks[0].take_rows(), vec![udp_row(4, 40)]);
         assert_eq!(
-            router.route_frame(&mut sinks, &packet(4), &frames[3].1),
+            route(&mut router, &mut sinks, 4, &frames[3].1),
             Routed::Consumed
         );
         assert_eq!(sinks[0].take_rows(), vec![udp_row(4, 41)]);
@@ -754,14 +763,14 @@ mod tests {
         let mut sinks = sinks(&plan, Some(2));
         let frames = frames();
         assert_eq!(
-            router.route_frame(&mut sinks, &packet(2), &frames[1].1),
+            route(&mut router, &mut sinks, 2, &frames[1].1),
             Routed::Redeliver
         );
         assert_eq!(router.take_flush(), Some(OutputId(0)));
         sinks[0].take_rows();
         // Frame 4 instead of frame 2 again: both of its rows are written.
         assert_eq!(
-            router.route_frame(&mut sinks, &packet(4), &frames[3].1),
+            route(&mut router, &mut sinks, 4, &frames[3].1),
             Routed::Consumed
         );
         assert_eq!(sinks[0].take_rows(), vec![udp_row(4, 40), udp_row(4, 41)]);

@@ -4,11 +4,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::schema::FieldDescriptor;
 
+use super::layers::FieldSink;
 use super::{
     ArpProtocol, BgpProtocol, DhcpProtocol, DnsProtocol, EthernetProtocol, FieldSet, GreProtocol,
     GtpProtocol, HintKey, Hints, HttpProtocol, IcmpProtocol, Icmpv6Protocol, IpsecProtocol,
     Ipv4Protocol, Ipv6Protocol, LinuxSllProtocol, MplsProtocol, NetlinkProtocol, NtpProtocol,
-    OspfProtocol, ParseContext, ParseResult, QuicProtocol, RtnetlinkProtocol, Sll2Protocol,
+    OspfProtocol, ParseContext, ParseResult, Parsed, QuicProtocol, RtnetlinkProtocol, Sll2Protocol,
     SshProtocol, TcpProtocol, TlsProtocol, UdpProtocol, VlanProtocol, VxlanProtocol,
 };
 
@@ -202,7 +203,7 @@ pub trait Protocol: Send + Sync {
         Dispatch::Probe
     }
 
-    /// Every hint key this parser may put in `ParseResult::child_hints`.
+    /// Every hint key this parser may put in [`Parsed::child_hints`].
     /// `None` (the default) means unknown: every rule is kept for the layer
     /// after this one. A key missing from the list hides the parsers whose
     /// rules need it, so the list must be complete (debug builds check each
@@ -211,8 +212,22 @@ pub trait Protocol: Send + Sync {
         None
     }
 
-    /// Parse bytes into structured fields.
-    fn parse<'a>(&self, data: &'a [u8], context: &ParseContext) -> ParseResult<'a>;
+    /// MIGRATION: the parse of a parser that returns its fields. A ported
+    /// parser implements [`parse_into`](Self::parse_into) and not this.
+    fn parse<'a>(&self, _data: &'a [u8], _context: &ParseContext) -> ParseResult<'a> {
+        unreachable!("{} is ported: it implements parse_into", self.name())
+    }
+
+    /// Parse bytes into structured fields: write the layer's fields to
+    /// `fields` and return what is left.
+    fn parse_into<'a>(
+        &self,
+        data: &'a [u8],
+        context: &ParseContext,
+        fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
+        super::layers::adapt(self.parse(data, context), fields)
+    }
 
     /// Return the schema fields this protocol produces.
     fn schema_fields(&self) -> Vec<FieldDescriptor>;
@@ -243,24 +258,36 @@ pub trait Protocol: Send + Sync {
         &[] // Default: no dependencies (link layer protocols)
     }
 
-    /// Parse with field projection - only extract requested fields.
-    ///
-    /// If `fields` is None, extract all fields (default behavior).
-    /// If `fields` is Some, only extract fields in the set.
-    ///
-    /// Note: `frame_number` and `timestamp` are always available from
-    /// the packet metadata, not from parsing.
-    ///
-    /// The default implementation ignores projection and calls `parse()`.
-    /// Protocols can override this to skip expensive field extraction.
+    /// MIGRATION: the projected parse of a parser that returns its fields.
     fn parse_projected<'a>(
         &self,
         data: &'a [u8],
         context: &ParseContext,
         _fields: Option<&FieldSet>,
     ) -> ParseResult<'a> {
-        // Default: ignore projection, parse everything
         self.parse(data, context)
+    }
+
+    /// Parse with field projection - only extract requested fields.
+    ///
+    /// If `projection` is None, extract all fields (default behavior).
+    /// If `projection` is Some, only extract fields in the set.
+    ///
+    /// Note: `frame_number` and `timestamp` are always available from
+    /// the packet metadata, not from parsing.
+    ///
+    /// The default implementation ignores projection and calls
+    /// [`parse_into`](Self::parse_into). Protocols can override this to skip
+    /// expensive field extraction.
+    fn parse_projected_into<'a>(
+        &self,
+        data: &'a [u8],
+        context: &ParseContext,
+        _projection: Option<&FieldSet>,
+        fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
+        // Default: ignore projection, parse everything
+        self.parse_into(data, context, fields)
     }
 
     /// Returns fields that are "cheap" to extract (header fields parsed anyway).
@@ -377,8 +404,13 @@ impl Protocol for BuiltinProtocol {
     }
 
     #[inline]
-    fn parse<'a>(&self, data: &'a [u8], context: &ParseContext) -> ParseResult<'a> {
-        delegate_protocol!(self, parse, data, context)
+    fn parse_into<'a>(
+        &self,
+        data: &'a [u8],
+        context: &ParseContext,
+        fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
+        delegate_protocol!(self, parse_into, data, context, fields)
     }
 
     #[inline]
@@ -402,13 +434,21 @@ impl Protocol for BuiltinProtocol {
     }
 
     #[inline]
-    fn parse_projected<'a>(
+    fn parse_projected_into<'a>(
         &self,
         data: &'a [u8],
         context: &ParseContext,
-        fields: Option<&FieldSet>,
-    ) -> ParseResult<'a> {
-        delegate_protocol!(self, parse_projected, data, context, fields)
+        projection: Option<&FieldSet>,
+        fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
+        delegate_protocol!(
+            self,
+            parse_projected_into,
+            data,
+            context,
+            projection,
+            fields
+        )
     }
 
     #[inline]

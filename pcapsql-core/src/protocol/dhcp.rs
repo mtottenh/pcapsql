@@ -314,6 +314,7 @@ pub mod message_type {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::test_utils::ParseLayer as _;
 
     /// Create a minimal DHCP Discover packet.
     fn create_dhcp_discover() -> Vec<u8> {
@@ -479,7 +480,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::DstPort, 67);
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("op"), Some(&FieldValue::UInt8(1)));
@@ -504,7 +505,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::SrcPort, 67);
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("op"), Some(&FieldValue::UInt8(2)));
@@ -534,7 +535,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::SrcPort, 67);
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("message_type"), Some(&FieldValue::UInt8(5)));
@@ -548,7 +549,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::SrcPort, 67);
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("lease_time"), Some(&FieldValue::UInt32(86400)));
@@ -592,7 +593,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::DstPort, 67);
 
-        let result = parser.parse(&short_packet, &context);
+        let result = parser.parse_layer(&short_packet, &context);
 
         assert!(!result.is_ok());
         assert!(result.error.is_some());

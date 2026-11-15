@@ -408,6 +408,17 @@ impl Protocol for TcpProtocol {
         &["ipv4", "ipv6"]
     }
 
+    // MIGRATION: until this parser writes to the sink itself.
+    fn parse_projected_into<'a>(
+        &self,
+        data: &'a [u8],
+        context: &ParseContext,
+        projection: Option<&FieldSet>,
+        fields: &mut super::layers::FieldSink<'_, 'a>,
+    ) -> super::Parsed<'a> {
+        super::layers::adapt(self.parse_projected(data, context, projection), fields)
+    }
+
     fn parse_projected<'a>(
         &self,
         data: &'a [u8],
@@ -696,6 +707,7 @@ impl Protocol for TcpProtocol {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::test_utils::ParseLayer as _;
 
     #[test]
     fn test_options_static_lookup() {
@@ -739,7 +751,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 6);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("src_port"), Some(&FieldValue::UInt16(80)));
@@ -767,7 +779,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 6);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("flag_syn"), Some(&FieldValue::Bool(true)));
@@ -798,7 +810,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 6);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("flag_fin"), Some(&FieldValue::Bool(true)));
@@ -824,7 +836,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 6);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("flag_rst"), Some(&FieldValue::Bool(true)));
@@ -851,7 +863,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 6);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("src_port"), Some(&FieldValue::UInt16(443)));
@@ -888,7 +900,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 6);
 
-        let result = parser.parse(&short_header, &context);
+        let result = parser.parse_layer(&short_header, &context);
 
         assert!(!result.is_ok());
         assert!(result.error.is_some());
@@ -912,7 +924,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 6);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.hint(HintKey::SrcPort), Some(443u64));
@@ -943,7 +955,7 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let result = parser.parse_projected(&header, &context, Some(&fields));
+        let result = parser.parse_layer_projected(&header, &context, Some(&fields));
 
         assert!(result.is_ok());
         // Requested fields are present
@@ -982,7 +994,7 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let result = parser.parse_projected(&header, &context, Some(&fields));
+        let result = parser.parse_layer_projected(&header, &context, Some(&fields));
 
         assert!(result.is_ok());
         assert_eq!(result.get("src_port"), Some(&FieldValue::UInt16(80)));
@@ -1014,7 +1026,7 @@ mod tests {
         context.insert_hint(HintKey::IpProtocol, 6);
 
         // No projection - should return all fields
-        let result = parser.parse_projected(&header, &context, None);
+        let result = parser.parse_layer_projected(&header, &context, None);
 
         assert!(result.is_ok());
         // All fields present
@@ -1054,7 +1066,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 6);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("options_length"), Some(&FieldValue::UInt8(12)));
@@ -1081,7 +1093,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 6);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("options_length"), Some(&FieldValue::UInt8(0)));
@@ -1111,7 +1123,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 6);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("options_length"), Some(&FieldValue::UInt8(4)));
@@ -1147,7 +1159,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 6);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("window_scale"), Some(&FieldValue::UInt8(7)));
@@ -1176,7 +1188,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 6);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("sack_permitted"), Some(&FieldValue::Bool(true)));
@@ -1209,7 +1221,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 6);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
 
@@ -1257,7 +1269,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 6);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("mss"), Some(&FieldValue::UInt16(1460)));
@@ -1322,7 +1334,7 @@ mod tests {
 
         // Project to only timestamp fields
         let fields: FieldSet = ["ts_val", "ts_ecr"].iter().map(|s| s.to_string()).collect();
-        let result = parser.parse_projected(&header, &context, Some(&fields));
+        let result = parser.parse_layer_projected(&header, &context, Some(&fields));
 
         assert!(result.is_ok());
         assert_eq!(result.get("ts_val"), Some(&FieldValue::UInt32(0xaabbccdd)));

@@ -10,7 +10,7 @@
 //! run completes in minutes while still dominating constant overheads.
 
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion, Throughput};
-use pcapsql_core::{default_registry, parse_packet, ParseScope};
+use pcapsql_core::{default_registry, parse_packet, ParseBuf, ParseScope};
 use pcapsql_datafusion::query::{EngineOptions, QueryEngine, SourceSpec};
 use pcapsql_testgen::{legacy_pcap, GenPacket, LegacyVariant};
 use tempfile::TempDir;
@@ -100,8 +100,9 @@ fn bench_parse_throughput(c: &mut Criterion) {
     g.bench_function("full_parse_udp", |b| {
         b.iter(|| {
             let mut fields = 0usize;
+            let mut buf = ParseBuf::new();
             for f in &frames {
-                let parsed = parse_packet(&registry, 1, f, &scope);
+                let parsed = parse_packet(&registry, 1, f, &scope, &mut buf);
                 fields += parsed.len();
             }
             fields

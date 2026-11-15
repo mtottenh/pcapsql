@@ -290,6 +290,7 @@ impl IpsecProtocol {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::test_utils::ParseLayer as _;
 
     /// Create an ESP header.
     fn create_esp_header(spi: u32, sequence: u32) -> Vec<u8> {
@@ -370,7 +371,7 @@ mod tests {
         context.insert_hint(HintKey::IpProtocol, 50); // ESP
 
         let header = create_esp_header(0x12345678, 0xABCDEF01);
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("protocol"), Some(&FieldValue::Str("ESP")));
@@ -390,7 +391,7 @@ mod tests {
 
         // AH with 12-byte ICV (HMAC-SHA-256-128)
         let header = create_ah_header(6, 0x87654321, 0x00000001, 12);
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("protocol"), Some(&FieldValue::Str("AH")));
@@ -415,7 +416,7 @@ mod tests {
 
         for (next_header, _name) in test_cases {
             let header = create_ah_header(next_header, 0x1234, 0x5678, 12);
-            let result = parser.parse(&header, &context);
+            let result = parser.parse_layer(&header, &context);
 
             assert!(result.is_ok());
             assert_eq!(
@@ -435,7 +436,7 @@ mod tests {
         let mut ctx_esp = ParseContext::new(1);
         ctx_esp.insert_hint(HintKey::IpProtocol, 50);
         let esp_header = create_esp_header(0x1234, 0x5678);
-        let result_esp = parser.parse(&esp_header, &ctx_esp);
+        let result_esp = parser.parse_layer(&esp_header, &ctx_esp);
         assert!(result_esp.is_ok());
         assert_eq!(result_esp.get("protocol"), Some(&FieldValue::Str("ESP")));
 
@@ -443,7 +444,7 @@ mod tests {
         let mut ctx_ah = ParseContext::new(1);
         ctx_ah.insert_hint(HintKey::IpProtocol, 51);
         let ah_header = create_ah_header(6, 0x1234, 0x5678, 12);
-        let result_ah = parser.parse(&ah_header, &ctx_ah);
+        let result_ah = parser.parse_layer(&ah_header, &ctx_ah);
         assert!(result_ah.is_ok());
         assert_eq!(result_ah.get("protocol"), Some(&FieldValue::Str("AH")));
     }
@@ -456,7 +457,7 @@ mod tests {
         context.insert_hint(HintKey::IpProtocol, 50);
 
         let short_header = [0x00, 0x00, 0x00, 0x01]; // Only 4 bytes
-        let result = parser.parse(&short_header, &context);
+        let result = parser.parse_layer(&short_header, &context);
 
         assert!(!result.is_ok());
         assert!(result.error.is_some());
@@ -470,7 +471,7 @@ mod tests {
         context.insert_hint(HintKey::IpProtocol, 51);
 
         let short_header = [0x06, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01]; // Only 8 bytes
-        let result = parser.parse(&short_header, &context);
+        let result = parser.parse_layer(&short_header, &context);
 
         assert!(!result.is_ok());
         assert!(result.error.is_some());
@@ -488,7 +489,7 @@ mod tests {
 
         for icv_len in test_icv_lengths {
             let header = create_ah_header(6, 0x1234, 0x5678, icv_len);
-            let result = parser.parse(&header, &context);
+            let result = parser.parse_layer(&header, &context);
 
             assert!(result.is_ok());
             assert_eq!(
@@ -524,7 +525,7 @@ mod tests {
         // Add encrypted payload
         data.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.remaining.len(), 4); // Encrypted payload
@@ -541,7 +542,7 @@ mod tests {
         // Add payload (e.g., TCP header start)
         data.extend_from_slice(&[0x00, 0x50, 0x01, 0xBB, 0x00, 0x00, 0x00, 0x00]);
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.remaining.len(), 8); // TCP header

@@ -19,7 +19,7 @@ use std::ops::Bound;
 
 use super::catalog::{ColId, ColumnSource, TableDef};
 use crate::io::{PacketRange, PacketRef};
-use crate::{FieldHint, FieldValue, ParseResult};
+use crate::{FieldHint, FieldValue, LayerRef};
 
 /// A comparison operator.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -204,22 +204,22 @@ impl CompiledPredicate {
     /// Whether the row of `layer` is kept: `false` only when a comparison is
     /// positively false.
     #[inline]
-    pub fn keeps(&mut self, layer: &ParseResult<'_>) -> bool {
+    pub fn keeps(&mut self, layer: LayerRef<'_, '_>) -> bool {
         self.terms.iter_mut().all(|term| term.keeps(layer))
     }
 }
 
 impl Term {
     #[inline]
-    fn keeps(&mut self, layer: &ParseResult<'_>) -> bool {
+    fn keeps(&mut self, layer: LayerRef<'_, '_>) -> bool {
         match &self.value {
             Literal::Int(literal) => {
                 let value = match &mut self.operand {
                     Operand::Field(name, hint) => {
                         layer.get_hinted(name, hint).and_then(field_as_i64)
                     }
-                    Operand::EncapDepth => Some(i64::from(layer.encap_depth)),
-                    Operand::TunnelId => layer.tunnel_id.and_then(|id| i64::try_from(id).ok()),
+                    Operand::EncapDepth => Some(i64::from(layer.encap_depth())),
+                    Operand::TunnelId => layer.tunnel_id().and_then(|id| i64::try_from(id).ok()),
                     Operand::TunnelType => None,
                 };
                 value.is_none_or(|v| self.op.holds(&v, literal))
@@ -229,7 +229,7 @@ impl Term {
                     Operand::Field(name, hint) => {
                         layer.get_hinted(name, hint).and_then(field_as_str)
                     }
-                    Operand::TunnelType => layer.tunnel_type.as_str(),
+                    Operand::TunnelType => layer.tunnel_type().as_str(),
                     Operand::EncapDepth | Operand::TunnelId => None,
                 };
                 value.is_none_or(|v| self.op.holds(v, literal.as_ref()))

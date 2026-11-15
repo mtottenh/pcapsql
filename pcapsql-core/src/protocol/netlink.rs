@@ -232,6 +232,7 @@ impl Protocol for NetlinkProtocol {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::test_utils::ParseLayer as _;
 
     /// Helper to create a netlink header (little-endian).
     fn create_netlink_header(
@@ -294,7 +295,7 @@ mod tests {
         let parser = NetlinkProtocol;
         let ctx = ParseContext::new(LINKTYPE_NETLINK);
 
-        let result = parser.parse(&header, &ctx);
+        let result = parser.parse_layer(&header, &ctx);
 
         assert!(result.is_ok());
         assert_eq!(result.get("msg_len"), Some(&FieldValue::UInt32(32)));
@@ -316,7 +317,7 @@ mod tests {
         let parser = NetlinkProtocol;
         let ctx = ParseContext::new(LINKTYPE_NETLINK);
 
-        let result = parser.parse(&short_data, &ctx);
+        let result = parser.parse_layer(&short_data, &ctx);
 
         assert!(!result.is_ok());
         assert!(result.error.is_some());
@@ -331,7 +332,7 @@ mod tests {
         let parser = NetlinkProtocol;
         let ctx = ParseContext::new(LINKTYPE_NETLINK);
 
-        let result = parser.parse(&header, &ctx);
+        let result = parser.parse_layer(&header, &ctx);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -349,7 +350,7 @@ mod tests {
         let parser = NetlinkProtocol;
         let ctx = ParseContext::new(LINKTYPE_NETLINK);
 
-        let result = parser.parse(&header, &ctx);
+        let result = parser.parse_layer(&header, &ctx);
 
         assert!(result.is_ok());
         assert_eq!(result.get("is_request"), Some(&FieldValue::Bool(true)));
@@ -365,7 +366,7 @@ mod tests {
         let parser = NetlinkProtocol;
         let ctx = ParseContext::new(LINKTYPE_NETLINK);
 
-        let result = parser.parse(&header, &ctx);
+        let result = parser.parse_layer(&header, &ctx);
 
         assert!(result.is_ok());
         assert_eq!(result.get("is_multipart"), Some(&FieldValue::Bool(true)));
@@ -382,7 +383,7 @@ mod tests {
         let parser = NetlinkProtocol;
         let ctx = ParseContext::new(LINKTYPE_NETLINK);
 
-        let result = parser.parse(&header, &ctx);
+        let result = parser.parse_layer(&header, &ctx);
 
         assert!(result.is_ok());
         assert_eq!(result.get("is_request"), Some(&FieldValue::Bool(true)));
@@ -401,7 +402,7 @@ mod tests {
         let mut ctx = ParseContext::new(LINKTYPE_NETLINK);
         ctx.insert_hint(HintKey::NetlinkFamily, family::ROUTE as u64);
 
-        let result = parser.parse(&header, &ctx);
+        let result = parser.parse_layer(&header, &ctx);
 
         assert!(result.is_ok());
         // Check child hints are set
@@ -425,7 +426,7 @@ mod tests {
         let mut ctx = ParseContext::new(LINKTYPE_NETLINK);
         ctx.insert_hint(HintKey::NetlinkFamily, family::ROUTE as u64);
 
-        let result = parser.parse(&header, &ctx);
+        let result = parser.parse_layer(&header, &ctx);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -484,13 +485,20 @@ mod tests {
     // ==========================================================================
     #[test]
     fn test_parse_packet_selects_netlink() {
-        use crate::protocol::{default_registry, parse_packet, ParseScope};
+        use crate::protocol::{default_registry, parse_packet, ParseBuf, ParseScope};
 
         let registry = default_registry();
         let header = create_netlink_header(32, 16, NLM_F_REQUEST, 1, 1234);
 
         // Parse with link_type 253 (LINKTYPE_NETLINK)
-        let results = parse_packet(&registry, LINKTYPE_NETLINK, &header, &ParseScope::full());
+        let mut buf = ParseBuf::new();
+        let results = parse_packet(
+            &registry,
+            LINKTYPE_NETLINK,
+            &header,
+            &ParseScope::full(),
+            &mut buf,
+        );
 
         // Should find netlink protocol
         assert!(
@@ -498,7 +506,7 @@ mod tests {
             "parse_packet should return at least one protocol"
         );
 
-        let protocol_names: Vec<&str> = results.iter().map(|(name, _)| *name).collect();
+        let protocol_names: Vec<&str> = results.names().collect();
         assert!(
             protocol_names.contains(&"netlink"),
             "parse_packet should select 'netlink' for LINKTYPE_NETLINK, got: {:?}",
@@ -506,7 +514,7 @@ mod tests {
         );
 
         // Verify netlink result has expected fields
-        let (_, netlink_result) = results.iter().find(|(name, _)| *name == "netlink").unwrap();
+        let netlink_result = results.find("netlink").unwrap();
         assert_eq!(
             netlink_result.get("msg_type"),
             Some(&FieldValue::UInt16(16))

@@ -194,6 +194,7 @@ impl Protocol for IcmpProtocol {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::test_utils::ParseLayer as _;
 
     #[test]
     fn test_parse_icmp_echo_request() {
@@ -210,7 +211,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 1);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("type"), Some(&FieldValue::UInt8(8)));
@@ -236,7 +237,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 1);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -264,7 +265,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 1);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -291,7 +292,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 1);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -331,7 +332,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 1);
 
-        let result = parser.parse(&short_header, &context);
+        let result = parser.parse_layer(&short_header, &context);
 
         assert!(!result.is_ok());
         assert!(result.error.is_some());
@@ -353,7 +354,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 1);
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.remaining.len(), 4); // Payload bytes

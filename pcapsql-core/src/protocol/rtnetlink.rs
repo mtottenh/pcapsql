@@ -462,6 +462,7 @@ fn parse_route_attributes(
 mod tests {
     use super::*;
     use crate::protocol::netlink::LINKTYPE_NETLINK;
+    use crate::protocol::test_utils::ParseLayer as _;
 
     /// Helper to create rtnetlink context.
     fn make_rtnetlink_context(msg_type: u16) -> ParseContext {
@@ -517,7 +518,7 @@ mod tests {
         let ctx = make_rtnetlink_context(msg_type::RTM_NEWLINK);
 
         // Empty data - just tests message type extraction from hints
-        let result = parser.parse(&[], &ctx);
+        let result = parser.parse_layer(&[], &ctx);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -538,7 +539,7 @@ mod tests {
         let parser = RtnetlinkProtocol;
         let ctx = make_rtnetlink_context(msg_type::RTM_NEWADDR);
 
-        let result = parser.parse(&[], &ctx);
+        let result = parser.parse_layer(&[], &ctx);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -555,7 +556,7 @@ mod tests {
         let parser = RtnetlinkProtocol;
         let ctx = make_rtnetlink_context(msg_type::RTM_NEWROUTE);
 
-        let result = parser.parse(&[], &ctx);
+        let result = parser.parse_layer(&[], &ctx);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -618,7 +619,7 @@ mod tests {
         let parser = RtnetlinkProtocol;
         let ctx = make_rtnetlink_context(999);
 
-        let result = parser.parse(&[], &ctx);
+        let result = parser.parse_layer(&[], &ctx);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -635,7 +636,7 @@ mod tests {
         let parser = RtnetlinkProtocol;
         let ctx = make_rtnetlink_context(msg_type::RTM_NEWLINK);
 
-        let result = parser.parse(&[0u8; 32], &ctx);
+        let result = parser.parse_layer(&[0u8; 32], &ctx);
 
         assert!(result.is_ok());
         assert!(result.remaining.is_empty());

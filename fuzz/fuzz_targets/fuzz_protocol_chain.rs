@@ -10,22 +10,23 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use pcapsql_core::{default_registry, parse_packet, ParseScope};
+use pcapsql_core::{default_registry, parse_packet, ParseBuf, ParseScope};
 
 fuzz_target!(|data: &[u8]| {
     let registry = default_registry();
+    let mut buf = ParseBuf::new();
 
     let scope = ParseScope::full();
 
     // Test with Ethernet link type (most common, linktype 1)
-    let _ = parse_packet(&registry, 1, data, &scope);
+    let _ = parse_packet(&registry, 1, data, &scope, &mut buf);
 
     // Test with Linux SLL link type (linktype 113)
-    let _ = parse_packet(&registry, 113, data, &scope);
+    let _ = parse_packet(&registry, 113, data, &scope, &mut buf);
 
     // Test with Linux SLL2 link type (linktype 276)
-    let _ = parse_packet(&registry, 276, data, &scope);
+    let _ = parse_packet(&registry, 276, data, &scope, &mut buf);
 
     // Test with raw IP (linktype 101)
-    let _ = parse_packet(&registry, 101, data, &scope);
+    let _ = parse_packet(&registry, 101, data, &scope, &mut buf);
 });

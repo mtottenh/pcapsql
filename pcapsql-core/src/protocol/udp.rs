@@ -84,6 +84,17 @@ impl Protocol for UdpProtocol {
         &["ipv4", "ipv6"]
     }
 
+    // MIGRATION: until this parser writes to the sink itself.
+    fn parse_projected_into<'a>(
+        &self,
+        data: &'a [u8],
+        context: &ParseContext,
+        projection: Option<&FieldSet>,
+        fields: &mut super::layers::FieldSink<'_, 'a>,
+    ) -> super::Parsed<'a> {
+        super::layers::adapt(self.parse_projected(data, context, projection), fields)
+    }
+
     fn parse_projected<'a>(
         &self,
         data: &'a [u8],
@@ -145,6 +156,7 @@ impl Protocol for UdpProtocol {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::test_utils::ParseLayer as _;
 
     #[test]
     fn test_parse_udp() {
@@ -162,7 +174,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 17);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("src_port"), Some(&FieldValue::UInt16(53)));
@@ -186,7 +198,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 17);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("src_port"), Some(&FieldValue::UInt16(50000)));
@@ -207,7 +219,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 17);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("src_port"), Some(&FieldValue::UInt16(68)));
@@ -241,7 +253,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 17);
 
-        let result = parser.parse(&short_header, &context);
+        let result = parser.parse_layer(&short_header, &context);
 
         assert!(!result.is_ok());
         assert!(result.error.is_some());
@@ -260,7 +272,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 17);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.hint(HintKey::SrcPort), Some(4660u64));
@@ -282,7 +294,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 17);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("length"), Some(&FieldValue::UInt16(8)));
@@ -307,7 +319,7 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let result = parser.parse_projected(&header, &context, Some(&fields));
+        let result = parser.parse_layer_projected(&header, &context, Some(&fields));
 
         assert!(result.is_ok());
         // Requested fields are present

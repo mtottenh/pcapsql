@@ -23,7 +23,7 @@ use super::plan::{JoinKind, MemberJoin, OutCol, OutColumn};
 use super::row::Cell;
 use super::sink::{Full, ListSink, RowSink};
 use crate::io::PacketRef;
-use crate::ParseResult;
+use crate::PacketLayers;
 
 /// A member's row in a joined row: an index into the frame's parsed layers,
 /// or one of two markers.
@@ -136,13 +136,13 @@ impl FusedState {
     /// Evaluate the join over one frame's `layers`. Returns the number of
     /// joined rows, before the filter; they are numbered from 0 in output
     /// order, and the same frame always gives the same rows.
-    pub(crate) fn join(&mut self, layers: &[(&'static str, ParseResult<'_>)]) -> usize {
+    pub(crate) fn join(&mut self, layers: &PacketLayers<'_, '_>) -> usize {
         let members = &self.plan.members;
         let depth = |row: RowRef| -> Option<u8> {
             if row == FRAME {
                 None
             } else {
-                Some(layers[row].1.encap_depth)
+                layers.get(row).map(|layer| layer.encap_depth())
             }
         };
         // Each member's rows for this frame.
@@ -152,9 +152,9 @@ impl FusedState {
                 None => rows.push(FRAME),
                 Some(table) => rows.extend(
                     layers
-                        .iter()
+                        .names()
                         .enumerate()
-                        .filter(|(_, (name, _))| *name == table)
+                        .filter(|(_, name)| *name == table)
                         .map(|(index, _)| index),
                 ),
             }
@@ -203,7 +203,7 @@ impl FusedState {
         &mut self,
         row: usize,
         packet: &PacketRef<'_>,
-        layers: &[(&'static str, ParseResult<'_>)],
+        layers: &PacketLayers<'_, '_>,
     ) -> bool {
         let Some(filter) = &mut self.filter else {
             return true;
@@ -233,7 +233,7 @@ impl FusedState {
         sink: &mut S,
         row: usize,
         packet: &PacketRef<'_>,
-        layers: &[(&'static str, ParseResult<'_>)],
+        layers: &PacketLayers<'_, '_>,
     ) -> ControlFlow<Full> {
         let width = self.plan.members.len();
         let tuple = &self.tuples[row * width..(row + 1) * width];
@@ -283,12 +283,15 @@ fn write_slot<S: RowSink>(
     col: OutCol,
     slot: RowRef,
     packet: &PacketRef<'_>,
-    layers: &[(&'static str, ParseResult<'_>)],
+    layers: &PacketLayers<'_, '_>,
 ) {
     match slot {
         NULL => sink.null(col),
         FRAME => cell.write_frame(sink, col, packet),
-        row => cell.write_layer(sink, col, packet, &layers[row].1),
+        row => match layers.get(row) {
+            Some(layer) => cell.write_layer(sink, col, packet, layer),
+            None => sink.null(col),
+        },
     }
 }
 

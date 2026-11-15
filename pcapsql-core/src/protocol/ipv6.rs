@@ -382,6 +382,7 @@ fn parse_ah_header(data: &[u8]) -> Option<(u8, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::test_utils::ParseLayer as _;
 
     fn create_ipv6_context() -> ParseContext {
         let mut context = ParseContext::new(1);
@@ -407,7 +408,7 @@ mod tests {
         let parser = Ipv6Protocol;
         let context = create_ipv6_context();
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("version"), Some(&FieldValue::UInt8(6)));
@@ -454,7 +455,7 @@ mod tests {
         let parser = Ipv6Protocol;
         let context = create_ipv6_context();
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("next_header"), Some(&FieldValue::UInt8(17)));
@@ -469,7 +470,7 @@ mod tests {
         let parser = Ipv6Protocol;
         let context = create_ipv6_context();
 
-        let result = parser.parse(&short_data, &context);
+        let result = parser.parse_layer(&short_data, &context);
 
         assert!(!result.is_ok());
         assert!(result.error.is_some());
@@ -500,7 +501,7 @@ mod tests {
         let parser = Ipv6Protocol;
         let context = create_ipv6_context();
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("ext_hop_by_hop"), Some(&FieldValue::Bool(true)));
@@ -533,7 +534,7 @@ mod tests {
         let parser = Ipv6Protocol;
         let context = create_ipv6_context();
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("ext_routing"), Some(&FieldValue::Bool(true)));
@@ -566,7 +567,7 @@ mod tests {
         let parser = Ipv6Protocol;
         let context = create_ipv6_context();
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("ext_fragment"), Some(&FieldValue::Bool(true)));
@@ -591,7 +592,7 @@ mod tests {
         let parser = Ipv6Protocol;
         let context = create_ipv6_context();
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("ext_destination"), Some(&FieldValue::Bool(true)));
@@ -619,7 +620,7 @@ mod tests {
         let parser = Ipv6Protocol;
         let context = create_ipv6_context();
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("ext_hop_by_hop"), Some(&FieldValue::Bool(true)));
@@ -640,7 +641,7 @@ mod tests {
         let parser = Ipv6Protocol;
         let context = create_ipv6_context();
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("frag_offset"), Some(&FieldValue::UInt16(185)));
@@ -658,7 +659,7 @@ mod tests {
         let parser = Ipv6Protocol;
         let context = create_ipv6_context();
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("segments_left"), Some(&FieldValue::UInt8(5)));
@@ -676,7 +677,7 @@ mod tests {
         let parser = Ipv6Protocol;
         let context = create_ipv6_context();
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("ext_hop_by_hop"), Some(&FieldValue::Bool(true)));
@@ -709,7 +710,7 @@ mod tests {
         let parser = Ipv6Protocol;
         let context = create_ipv6_context();
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("next_header"), Some(&FieldValue::UInt8(4)));
@@ -752,7 +753,7 @@ mod tests {
         let parser = Ipv6Protocol;
         let context = create_ipv6_context();
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("next_header"), Some(&FieldValue::UInt8(41)));

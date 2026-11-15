@@ -269,6 +269,7 @@ impl Protocol for GreProtocol {
 mod tests {
     use super::*;
     use crate::protocol::ethernet::ethertype;
+    use crate::protocol::test_utils::ParseLayer as _;
 
     /// Create a minimal GRE header with just flags and protocol type.
     fn create_gre_header(checksum: bool, key: bool, sequence: bool, protocol: u16) -> Vec<u8> {
@@ -325,7 +326,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 47);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -365,7 +366,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 47);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -389,7 +390,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 47);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("key_present"), Some(&FieldValue::Bool(true)));
@@ -411,7 +412,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 47);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -442,7 +443,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 47);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -473,7 +474,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 47);
 
-        let result = parser.parse(&header_ipv4, &context);
+        let result = parser.parse_layer(&header_ipv4, &context);
         assert!(result.is_ok());
         assert_eq!(
             result.hint(HintKey::EtherType),
@@ -482,7 +483,7 @@ mod tests {
 
         // Test IPv6 ethertype
         let header_ipv6 = create_gre_header(false, false, false, ethertype::IPV6);
-        let result = parser.parse(&header_ipv6, &context);
+        let result = parser.parse_layer(&header_ipv6, &context);
         assert!(result.is_ok());
         assert_eq!(
             result.hint(HintKey::EtherType),
@@ -491,7 +492,7 @@ mod tests {
 
         // Test Transparent Ethernet Bridging
         let header_teb = create_gre_header(false, false, false, 0x6558);
-        let result = parser.parse(&header_teb, &context);
+        let result = parser.parse_layer(&header_teb, &context);
         assert!(result.is_ok());
         assert_eq!(result.hint(HintKey::EtherType), Some(0x6558u64));
     }
@@ -502,7 +503,7 @@ mod tests {
     /// inner ethernet / ipv4 / udp layers must be reached (NVGRE).
     #[test]
     fn test_teb_reaches_inner_ethernet() {
-        use super::super::{default_registry, parse_packet, ParseScope};
+        use super::super::{default_registry, parse_packet, ParseBuf, ParseScope};
         // Outer Ethernet + IPv4 (proto 47) + GRE (TEB) + inner Ethernet +
         // IPv4 + UDP.
         let udp = [0x9C, 0x40, 0x00, 0x35, 0x00, 0x08, 0x00, 0x00];
@@ -523,9 +524,9 @@ mod tests {
         frame.extend_from_slice(&outer_ip);
 
         let registry = default_registry();
-        let layers: Vec<&str> = parse_packet(&registry, 1, &frame, &ParseScope::full())
-            .iter()
-            .map(|(n, _)| *n)
+        let mut buf = ParseBuf::new();
+        let layers: Vec<&str> = parse_packet(&registry, 1, &frame, &ParseScope::full(), &mut buf)
+            .names()
             .collect();
         assert_eq!(
             layers,
@@ -533,9 +534,9 @@ mod tests {
         );
         // Scoped to udp: pruning keeps the tunnel path.
         let scoped = ParseScope::for_tables(&["udp"], &registry);
-        let layers: Vec<&str> = parse_packet(&registry, 1, &frame, &scoped)
-            .iter()
-            .map(|(n, _)| *n)
+        let mut buf = ParseBuf::new();
+        let layers: Vec<&str> = parse_packet(&registry, 1, &frame, &scoped, &mut buf)
+            .names()
             .collect();
         assert_eq!(
             layers,
@@ -550,7 +551,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 47);
 
-        let result = parser.parse(&short_header, &context);
+        let result = parser.parse_layer(&short_header, &context);
         assert!(!result.is_ok());
         assert!(result.error.is_some());
     }
@@ -564,7 +565,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 47);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
         assert!(!result.is_ok());
         assert!(result.error.unwrap().contains("missing key field"));
     }
@@ -596,7 +597,7 @@ mod tests {
 
         // Standard GRE with version 0
         let header = create_gre_header(false, false, false, ethertype::IPV4);
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -623,7 +624,7 @@ mod tests {
         header.extend_from_slice(&flags.to_be_bytes());
         header.extend_from_slice(&0x880Bu16.to_be_bytes()); // PPP protocol
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -651,7 +652,7 @@ mod tests {
             header.extend_from_slice(&flags.to_be_bytes());
             header.extend_from_slice(&ethertype::IPV4.to_be_bytes());
 
-            let result = parser.parse(&header, &context);
+            let result = parser.parse_layer(&header, &context);
 
             assert!(result.is_ok()); // Still parses (lenient)
             assert_eq!(
@@ -692,7 +693,7 @@ mod tests {
         packet[4] = (checksum >> 8) as u8;
         packet[5] = (checksum & 0xFF) as u8;
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -721,7 +722,7 @@ mod tests {
         // Add payload
         packet.extend_from_slice(&[0x45, 0x00, 0x00, 0x28]);
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok()); // Still parses (lenient)
         assert_eq!(
@@ -740,28 +741,28 @@ mod tests {
 
         // Minimal header (4 bytes)
         let header_min = create_gre_header(false, false, false, ethertype::IPV4);
-        let result = parser.parse(&header_min, &context);
+        let result = parser.parse_layer(&header_min, &context);
         assert!(result.is_ok());
         assert_eq!(result.get("header_length"), Some(&FieldValue::UInt8(4)));
 
         // With checksum (4 + 4 = 8 bytes)
         let mut header_chk = create_gre_header(true, false, false, ethertype::IPV4);
         header_chk.extend_from_slice(&[0x00; 4]); // checksum + reserved
-        let result = parser.parse(&header_chk, &context);
+        let result = parser.parse_layer(&header_chk, &context);
         assert!(result.is_ok());
         assert_eq!(result.get("header_length"), Some(&FieldValue::UInt8(8)));
 
         // With key (4 + 4 = 8 bytes)
         let mut header_key = create_gre_header(false, true, false, ethertype::IPV4);
         header_key.extend_from_slice(&[0x00; 4]); // key
-        let result = parser.parse(&header_key, &context);
+        let result = parser.parse_layer(&header_key, &context);
         assert!(result.is_ok());
         assert_eq!(result.get("header_length"), Some(&FieldValue::UInt8(8)));
 
         // With sequence (4 + 4 = 8 bytes)
         let mut header_seq = create_gre_header(false, false, true, ethertype::IPV4);
         header_seq.extend_from_slice(&[0x00; 4]); // sequence
-        let result = parser.parse(&header_seq, &context);
+        let result = parser.parse_layer(&header_seq, &context);
         assert!(result.is_ok());
         assert_eq!(result.get("header_length"), Some(&FieldValue::UInt8(8)));
 
@@ -770,7 +771,7 @@ mod tests {
         header_all.extend_from_slice(&[0x00; 4]); // checksum + reserved
         header_all.extend_from_slice(&[0x00; 4]); // key
         header_all.extend_from_slice(&[0x00; 4]); // sequence
-        let result = parser.parse(&header_all, &context);
+        let result = parser.parse_layer(&header_all, &context);
         assert!(result.is_ok());
         assert_eq!(result.get("header_length"), Some(&FieldValue::UInt8(16)));
     }
@@ -833,7 +834,7 @@ mod tests {
         // Checksum flag set but no checksum data
         let header = create_gre_header(true, false, false, ethertype::IPV4);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
         assert!(!result.is_ok());
         assert!(result.error.unwrap().contains("missing checksum field"));
     }
@@ -848,7 +849,7 @@ mod tests {
         // Sequence flag set but no sequence data
         let header = create_gre_header(false, false, true, ethertype::IPV4);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
         assert!(!result.is_ok());
         assert!(result.error.unwrap().contains("missing sequence field"));
     }

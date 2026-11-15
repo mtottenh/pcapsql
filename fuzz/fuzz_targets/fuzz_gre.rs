@@ -9,7 +9,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use pcapsql_core::{default_registry, parse_packet, ParseScope};
+use pcapsql_core::{default_registry, parse_packet, ParseBuf, ParseScope};
 
 fuzz_target!(|data: &[u8]| {
     if data.is_empty() {
@@ -17,6 +17,8 @@ fuzz_target!(|data: &[u8]| {
     }
 
     let registry = default_registry();
+
+    let mut buf = ParseBuf::new();
 
     // Build frame: Ethernet (14) + IPv4 (20) + GRE payload
     // GRE runs directly over IP (protocol 47), no TCP/UDP
@@ -43,5 +45,5 @@ fuzz_target!(|data: &[u8]| {
     frame.extend_from_slice(data);
 
     // Parse - GRE parser triggered by ip_protocol=47
-    let _ = parse_packet(&registry, 1, &frame, &ParseScope::full());
+    let _ = parse_packet(&registry, 1, &frame, &ParseScope::full(), &mut buf);
 });

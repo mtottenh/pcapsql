@@ -21,7 +21,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use pcapsql_core::protocol::{HintKey, HttpProtocol, ParseContext, Protocol};
+use pcapsql_core::protocol::{HintKey, HttpProtocol, ParseBuf, ParseContext};
 use pcapsql_core::stream::{
     Direction, Http2StreamParser, HttpStreamParser, StreamContext, StreamParser,
 };
@@ -104,7 +104,10 @@ fuzz_target!(|data: &[u8]| {
             ctx.insert_hint(HintKey::SrcPort, 12345);
             ctx.insert_hint(HintKey::DstPort, 80);
             ctx.insert_hint(HintKey::Transport, 6);
-            let _ = HttpProtocol.parse(payload, &ctx);
+            let mut buf = ParseBuf::new();
+            let _ = buf
+                .for_packet()
+                .parse_layer(&HttpProtocol, payload, &ctx, None);
         }
     }
 });

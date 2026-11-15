@@ -873,6 +873,7 @@ fn format_alert_description(code: u8) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::test_utils::ParseLayer as _;
 
     /// Create a minimal TLS Client Hello with SNI.
     fn create_tls_client_hello() -> Vec<u8> {
@@ -1061,7 +1062,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::DstPort, 443);
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("record_type"), Some(&FieldValue::UInt8(22)));
@@ -1088,7 +1089,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::SrcPort, 443);
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("handshake_type"), Some(&FieldValue::UInt8(2)));
@@ -1120,7 +1121,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::DstPort, 443);
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -1138,7 +1139,7 @@ mod tests {
         let parser = TlsProtocol;
         let context = ParseContext::new(1);
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("record_type"), Some(&FieldValue::UInt8(21)));
@@ -1197,7 +1198,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::DstPort, 443);
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         // Verify JA3 fields are present
@@ -1243,7 +1244,7 @@ mod tests {
         let parser = TlsProtocol;
         let context = ParseContext::new(1);
 
-        let result = parser.parse(&short_packet, &context);
+        let result = parser.parse_layer(&short_packet, &context);
 
         assert!(!result.is_ok());
     }

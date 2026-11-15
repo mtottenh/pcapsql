@@ -193,6 +193,7 @@ impl Protocol for LinuxSllProtocol {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::test_utils::ParseLayer as _;
 
     /// Helper to create a Linux SLL header (big-endian).
     fn create_sll_header(
@@ -261,7 +262,7 @@ mod tests {
         let parser = LinuxSllProtocol;
         let ctx = ParseContext::new(LINKTYPE_LINUX_SLL);
 
-        let result = parser.parse(&header, &ctx);
+        let result = parser.parse_layer(&header, &ctx);
 
         assert!(result.is_ok());
         assert_eq!(result.get("packet_type"), Some(&FieldValue::UInt16(0)));
@@ -292,7 +293,7 @@ mod tests {
         let parser = LinuxSllProtocol;
         let ctx = ParseContext::new(LINKTYPE_LINUX_SLL);
 
-        let result = parser.parse(&header, &ctx);
+        let result = parser.parse_layer(&header, &ctx);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -321,7 +322,7 @@ mod tests {
         let parser = LinuxSllProtocol;
         let ctx = ParseContext::new(LINKTYPE_LINUX_SLL);
 
-        let result = parser.parse(&short_data, &ctx);
+        let result = parser.parse_layer(&short_data, &ctx);
 
         assert!(!result.is_ok());
         assert!(result.error.is_some());
@@ -389,11 +390,11 @@ mod tests {
     #[test]
     fn test_unknown_arphrd_routes_by_ethertype() {
         let header = create_sll_header(packet_type::OUTGOING, 0xFFFE, 0, [0; 8], 0x86DD);
-        let result = LinuxSllProtocol.parse(&header, &ParseContext::new(LINKTYPE_LINUX_SLL));
+        let result = LinuxSllProtocol.parse_layer(&header, &ParseContext::new(LINKTYPE_LINUX_SLL));
         assert!(result.is_ok());
         assert_eq!(result.hint(HintKey::EtherType), Some(0x86DD));
         let header = create_sll_header(packet_type::OUTGOING, arphrd::IPGRE, 0, [0; 8], 0x0800);
-        let result = LinuxSllProtocol.parse(&header, &ParseContext::new(LINKTYPE_LINUX_SLL));
+        let result = LinuxSllProtocol.parse_layer(&header, &ParseContext::new(LINKTYPE_LINUX_SLL));
         assert!(result.hint(HintKey::EtherType).is_none());
     }
 
@@ -420,7 +421,7 @@ mod tests {
         let parser = LinuxSllProtocol;
         let ctx = ParseContext::new(LINKTYPE_LINUX_SLL);
 
-        let result = parser.parse(&data, &ctx);
+        let result = parser.parse_layer(&data, &ctx);
 
         assert!(result.is_ok());
         assert_eq!(result.remaining.len(), 4);

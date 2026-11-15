@@ -461,6 +461,7 @@ fn hex_encode(data: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::test_utils::ParseLayer as _;
 
     /// Create a QUIC Initial packet (long header).
     fn create_quic_initial(dcid: &[u8], scid: &[u8], version: u32) -> Vec<u8> {
@@ -576,7 +577,7 @@ mod tests {
         context.parent_protocol = Some("udp");
         context.insert_hint(HintKey::DstPort, 443);
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("header_form"), Some(&FieldValue::Str("long")));
@@ -592,7 +593,7 @@ mod tests {
         context.parent_protocol = Some("udp");
         context.insert_hint(HintKey::DstPort, 443);
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("header_form"), Some(&FieldValue::Str("short")));
@@ -607,7 +608,7 @@ mod tests {
         let parser = QuicProtocol;
         let context = ParseContext::new(1);
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -629,7 +630,7 @@ mod tests {
         let parser = QuicProtocol;
         let context = ParseContext::new(1);
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -647,7 +648,7 @@ mod tests {
         let parser = QuicProtocol;
         let context = ParseContext::new(1);
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -665,7 +666,7 @@ mod tests {
         let parser = QuicProtocol;
         let context = ParseContext::new(1);
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("dcid_length"), Some(&FieldValue::UInt8(4)));
@@ -684,7 +685,7 @@ mod tests {
         let parser = QuicProtocol;
         let context = ParseContext::new(1);
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("scid_length"), Some(&FieldValue::UInt8(4)));
@@ -703,7 +704,7 @@ mod tests {
         let parser = QuicProtocol;
         let context = ParseContext::new(1);
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -728,7 +729,7 @@ mod tests {
         let parser = QuicProtocol;
         let context = ParseContext::new(1);
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -749,7 +750,7 @@ mod tests {
         let parser = QuicProtocol;
         let context = ParseContext::new(1);
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("spin_bit"), Some(&FieldValue::Bool(true)));
@@ -764,7 +765,7 @@ mod tests {
         let parser = QuicProtocol;
         let context = ParseContext::new(1);
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("spin_bit"), Some(&FieldValue::Bool(false)));

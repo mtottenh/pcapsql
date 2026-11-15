@@ -614,8 +614,7 @@ mod tests {
         write_frame_row, write_layer_row, write_value, Catalog, ColumnSource, FieldResolver,
         ScanPlan, TableScan,
     };
-    use pcapsql_core::{FieldValue, ParseResult, TunnelType};
-    use smallvec::SmallVec;
+    use pcapsql_core::{FieldValue, LayerRef};
 
     const COL: OutCol = OutCol(0);
 
@@ -1229,22 +1228,16 @@ mod tests {
         );
     }
 
-    fn tcp_layer<'a>() -> ParseResult<'a> {
-        let mut fields = SmallVec::new();
-        fields.push(("src_port", FieldValue::UInt16(12345)));
-        fields.push(("dst_port", FieldValue::UInt16(80)));
-        fields.push(("seq", FieldValue::UInt32(100)));
-        fields.push(("ack", FieldValue::UInt32(0)));
-        fields.push(("flags", FieldValue::UInt16(0x02)));
-        ParseResult {
-            fields,
-            remaining: &[],
-            child_hints: pcapsql_core::protocol::Hints::new(),
-            error: None,
-            encap_depth: 0,
-            tunnel_type: TunnelType::None,
-            tunnel_id: None,
-        }
+    const TCP_FIELDS: [(&str, FieldValue<'static>); 5] = [
+        ("src_port", FieldValue::UInt16(12345)),
+        ("dst_port", FieldValue::UInt16(80)),
+        ("seq", FieldValue::UInt32(100)),
+        ("ack", FieldValue::UInt32(0)),
+        ("flags", FieldValue::UInt16(0x02)),
+    ];
+
+    fn tcp_layer() -> LayerRef<'static, 'static> {
+        LayerRef::new("tcp", &TCP_FIELDS)
     }
 
     fn packet(frame_number: u64) -> PacketRef<'static> {
@@ -1287,7 +1280,7 @@ mod tests {
         let columns = table_columns("tcp", None);
         let mut resolver = FieldResolver::new(&columns);
         let mut sink = ArrowSink::new(&columns, 10);
-        let _ = write_layer_row(&mut sink, &mut resolver, &packet(1), &tcp_layer());
+        let _ = write_layer_row(&mut sink, &mut resolver, &packet(1), tcp_layer());
         assert_eq!(sink.rows(), 1);
 
         let batch = sink.take_batch().unwrap().unwrap();
@@ -1313,7 +1306,7 @@ mod tests {
         assert!(sink.take_batch().unwrap().is_none());
         for round in 0..2 {
             for i in 1..=5 {
-                let flow = write_layer_row(&mut sink, &mut resolver, &packet(i), &tcp_layer());
+                let flow = write_layer_row(&mut sink, &mut resolver, &packet(i), tcp_layer());
                 assert_eq!(flow.is_break(), i == 5, "round {round} row {i}");
                 assert_eq!(sink.is_full(), i == 5);
             }

@@ -1,7 +1,7 @@
 //! What parsing costs per packet, for a profiler and an allocation count.
 //!
 //! ```text
-//! parse_cost parse <kind> <packets>          # parse_packet, full scope
+//! parse_cost parse <kind> <packets>          # parse_packet, full scope, one ParseBuf
 //! parse_cost scan <table> <kind> <packets>   # PartitionScan into a sink that stores nothing
 //! ```
 //!
@@ -33,7 +33,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use pcapsql_core::io::{ReadPacketReader, StreamHeader};
-use pcapsql_core::protocol::{parse_packet, ParseScope};
+use pcapsql_core::protocol::{parse_packet, ParseBuf, ParseScope};
 use pcapsql_core::scan::{
     Catalog, Full, ListSink, OutCol, PartitionScan, RowSink, ScanPlan, Step, TableScan,
     TimestampUnit,
@@ -227,16 +227,18 @@ impl ListSink for NullList {
     fn finish(self) {}
 }
 
-/// `parse_packet` over every frame; the number of fields it extracted.
+/// `parse_packet` over every frame, into one buffer; the number of fields it
+/// extracted.
 #[inline(never)]
 fn measured_parse(registry: &ProtocolRegistry, frames: &[Vec<u8>]) -> u64 {
     let scope = ParseScope::full();
+    let mut buf = ParseBuf::new();
     let mut fields = 0u64;
     for frame in frames {
-        let layers = parse_packet(registry, 1, black_box(frame), &scope);
+        let layers = parse_packet(registry, 1, black_box(frame), &scope, &mut buf);
         fields += layers
             .iter()
-            .map(|(_, layer)| layer.fields.len() as u64)
+            .map(|layer| layer.fields().len() as u64)
             .sum::<u64>();
         black_box(&layers);
     }

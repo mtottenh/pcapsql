@@ -251,6 +251,7 @@ impl Protocol for MplsProtocol {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::test_utils::ParseLayer as _;
 
     /// Create an MPLS label stack entry.
     fn create_mpls_label(label: u32, tc: u8, bottom: bool, ttl: u8) -> [u8; 4] {
@@ -299,7 +300,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::EtherType, 0x8847);
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("label"), Some(&FieldValue::UInt32(1000)));
@@ -331,7 +332,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::EtherType, 0x8847);
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         // Top label should be 100
@@ -362,7 +363,7 @@ mod tests {
             let mut context = ParseContext::new(1);
             context.insert_hint(HintKey::EtherType, 0x8847);
 
-            let result = parser.parse(&data, &context);
+            let result = parser.parse_layer(&data, &context);
 
             assert!(result.is_ok());
             assert_eq!(result.get("tc"), Some(&FieldValue::UInt8(tc)));
@@ -378,7 +379,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::EtherType, 0x8847);
 
-        let result1 = parser.parse(&data1, &context);
+        let result1 = parser.parse_layer(&data1, &context);
         assert!(result1.is_ok());
         assert_eq!(result1.get("bottom"), Some(&FieldValue::Bool(true)));
         assert_eq!(result1.get("stack_depth"), Some(&FieldValue::UInt8(1)));
@@ -388,7 +389,7 @@ mod tests {
         data2.extend_from_slice(&create_mpls_label(100, 0, false, 64));
         data2.extend_from_slice(&create_mpls_label(200, 0, true, 63));
 
-        let result2 = parser.parse(&data2, &context);
+        let result2 = parser.parse_layer(&data2, &context);
         assert!(result2.is_ok());
         assert_eq!(result2.get("stack_depth"), Some(&FieldValue::UInt8(2)));
     }
@@ -404,7 +405,7 @@ mod tests {
             let mut context = ParseContext::new(1);
             context.insert_hint(HintKey::EtherType, 0x8847);
 
-            let result = parser.parse(&data, &context);
+            let result = parser.parse_layer(&data, &context);
 
             assert!(result.is_ok());
             assert_eq!(result.get("ttl"), Some(&FieldValue::UInt8(ttl)));
@@ -423,7 +424,7 @@ mod tests {
         data_ipv4.extend_from_slice(&create_mpls_label(100, 0, true, 64));
         data_ipv4.extend_from_slice(&[0x45, 0x00, 0x00, 0x28]); // IPv4 header start
 
-        let result_ipv4 = parser.parse(&data_ipv4, &context);
+        let result_ipv4 = parser.parse_layer(&data_ipv4, &context);
         assert!(result_ipv4.is_ok());
         assert_eq!(
             result_ipv4.hint(HintKey::EtherType),
@@ -436,7 +437,7 @@ mod tests {
         data_ipv6.extend_from_slice(&create_mpls_label(100, 0, true, 64));
         data_ipv6.extend_from_slice(&[0x60, 0x00, 0x00, 0x00]); // IPv6 header start
 
-        let result_ipv6 = parser.parse(&data_ipv6, &context);
+        let result_ipv6 = parser.parse_layer(&data_ipv6, &context);
         assert!(result_ipv6.is_ok());
         assert_eq!(
             result_ipv6.hint(HintKey::EtherType),
@@ -450,7 +451,7 @@ mod tests {
     /// reported as an `mpls` layer.
     #[test]
     fn mpls_does_not_count_as_encapsulation() {
-        use crate::protocol::{default_registry, parse_packet, ParseScope, TunnelType};
+        use crate::protocol::{default_registry, parse_packet, ParseBuf, ParseScope, TunnelType};
         let mut frame = vec![0x02, 0, 0, 0, 0, 2, 0x02, 0, 0, 0, 0, 1, 0x88, 0x47];
         frame.extend_from_slice(&create_mpls_label(100, 0, false, 64));
         frame.extend_from_slice(&create_mpls_label(200, 0, true, 64));
@@ -459,14 +460,15 @@ mod tests {
         frame.extend_from_slice(&[10, 0, 0, 1, 10, 0, 0, 2]);
 
         let registry = default_registry();
-        let results = parse_packet(&registry, 1, &frame, &ParseScope::full());
-        let layers: Vec<&str> = results.iter().map(|(n, _)| *n).collect();
+        let mut buf = ParseBuf::new();
+        let results = parse_packet(&registry, 1, &frame, &ParseScope::full(), &mut buf);
+        let layers: Vec<&str> = results.names().collect();
         assert_eq!(&layers[..3], ["ethernet", "mpls", "ipv4"]);
-        let (_, ipv4) = &results[2];
-        assert_eq!(ipv4.encap_depth, 0);
-        assert_eq!(ipv4.tunnel_type, TunnelType::None);
-        assert_eq!(ipv4.tunnel_id, None);
-        let (_, mpls) = &results[1];
+        let ipv4 = results.get(2).unwrap();
+        assert_eq!(ipv4.encap_depth(), 0);
+        assert_eq!(ipv4.tunnel_type(), TunnelType::None);
+        assert_eq!(ipv4.tunnel_id(), None);
+        let mpls = results.get(1).unwrap();
         assert_eq!(mpls.get("stack_depth"), Some(&FieldValue::UInt8(2)));
     }
 
@@ -479,7 +481,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::EtherType, 0x8847);
 
-        let result = parser.parse(&short_data, &context);
+        let result = parser.parse_layer(&short_data, &context);
         assert!(!result.is_ok());
         assert!(result.error.is_some());
     }
@@ -493,7 +495,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::EtherType, 0x8847);
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("label"), Some(&FieldValue::UInt32(0xFFFFF)));
@@ -534,7 +536,7 @@ mod tests {
         ));
         data.extend_from_slice(&[0x45, 0x00]); // IPv4 payload
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("label"), Some(&FieldValue::UInt32(0)));
@@ -558,7 +560,7 @@ mod tests {
         // Label 1 = Router Alert
         let data = create_mpls_label(special_label::ROUTER_ALERT, 0, true, 64);
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("label"), Some(&FieldValue::UInt32(1)));
@@ -589,7 +591,7 @@ mod tests {
         ));
         data.extend_from_slice(&[0x60, 0x00]); // IPv6 payload
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("label"), Some(&FieldValue::UInt32(2)));
@@ -623,7 +625,7 @@ mod tests {
 
         for (label, expected_name) in test_cases {
             let data = create_mpls_label(label, 0, true, 64);
-            let result = parser.parse(&data, &context);
+            let result = parser.parse_layer(&data, &context);
 
             assert!(result.is_ok());
             assert_eq!(
@@ -647,7 +649,7 @@ mod tests {
         // Labels 4-6 and 8-12 are reserved
         for label in [4u32, 5, 6, 8, 9, 10, 11, 12] {
             let data = create_mpls_label(label, 0, true, 64);
-            let result = parser.parse(&data, &context);
+            let result = parser.parse_layer(&data, &context);
 
             assert!(result.is_ok());
             assert_eq!(
@@ -670,7 +672,7 @@ mod tests {
 
         // Labels >= 16 are normal labels
         let data = create_mpls_label(16, 0, true, 64);
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -681,7 +683,7 @@ mod tests {
 
         // Test a more typical label value
         let data2 = create_mpls_label(1000, 0, true, 64);
-        let result2 = parser.parse(&data2, &context);
+        let result2 = parser.parse_layer(&data2, &context);
 
         assert!(result2.is_ok());
         assert_eq!(
@@ -705,7 +707,7 @@ mod tests {
         }
         data_16.extend_from_slice(&create_mpls_label(115, 0, true, 64)); // Bottom
 
-        let result_16 = parser.parse(&data_16, &context);
+        let result_16 = parser.parse_layer(&data_16, &context);
         assert!(result_16.is_ok());
         assert_eq!(result_16.get("stack_depth"), Some(&FieldValue::UInt8(16)));
 
@@ -716,7 +718,7 @@ mod tests {
         }
         data_17.extend_from_slice(&create_mpls_label(116, 0, true, 64)); // Would be 17th
 
-        let result_17 = parser.parse(&data_17, &context);
+        let result_17 = parser.parse_layer(&data_17, &context);
         assert!(!result_17.is_ok());
         assert!(result_17.error.as_ref().unwrap().contains("too deep"));
     }
@@ -739,7 +741,7 @@ mod tests {
         ));
         data.extend_from_slice(&create_mpls_label(2000, 0, true, 62));
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         // Top label is not special
