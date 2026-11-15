@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **DuckDB extension: a test that reads captures over HTTP.**
+  `make remote_test_release` (`scripts/remote-test.sh`) serves captures from
+  a local HTTP server with Range support (`scripts/range-http-server.py`) and
+  reads them in the DuckDB shell through `httpfs`: every kind of table equals
+  the file's, row for row, for legacy, pcapng, gzip, zstd and a generated
+  28 MB capture; `filename`, lists of URLs, one partition per URL, a
+  pushed-down `frame_number` filter, `LIMIT`, a 404 and
+  `enable_external_access = false` are checked, and the server's log shows
+  what was fetched. `duckdb.yml` and the `verify` job of `duckdb-dist.yml`
+  run it and fail if `httpfs` cannot be installed; elsewhere the target
+  reports a skip. Not yet run: `httpfs` could not be installed where it was
+  written, so only the server and the skip path were exercised. The README
+  has a section on remote files.
 - **`--format raw`.** Prints only the values: no header, no quoting or
   escaping, columns separated by tabs, one row per line. A multi-line text
   value such as `hdr_ascii(...)` output prints as rendered, and a row that

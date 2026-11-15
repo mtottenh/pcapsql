@@ -18,7 +18,7 @@ env:
 
 jobs:
   extension:
-    name: Build, SQL tests and LOAD in the DuckDB shell
+    name: Build, SQL tests, LOAD in the DuckDB shell, captures over HTTP
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -62,6 +62,11 @@ jobs:
 
       - name: The function reference lists everything the artifact registers
         run: make -C pcapsql-duckdb check_reference_release
+
+      # The shell installs `httpfs` from extensions.duckdb.org. Where it cannot, the script skips
+      # the test; here that is a failure, or the test would be one that never runs.
+      - name: Captures over HTTP, through DuckDB's httpfs extension
+        run: make -C pcapsql-duckdb remote_test_release REMOTE_TEST_ARGS=--require-httpfs
 
       - uses: actions/upload-artifact@v4
         with:

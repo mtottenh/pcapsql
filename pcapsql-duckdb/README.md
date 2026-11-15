@@ -44,14 +44,15 @@ make release            # build/release/pcapsql.duckdb_extension
 make test_release       # test/sql against the artifact, in DuckDB's Python package
 make load_test_release  # LOAD the artifact in the DuckDB command-line shell
 make check_reference_release  # the function reference lists what the artifact registers
+make remote_test_release  # read captures over HTTP, through DuckDB's httpfs (skipped without it)
 make itest              # in-process tests against libduckdb
 make check              # duckdb_neo containment; no std::fs in the extension; unsafe code only in
                         # its two audited places; the DuckDB pins agree; fmt and clippy for itest/
 make canary             # build against the newest duckdb-neo on crates.io (CANARY=main: duckdb-rs main)
 ```
 
-`make debug`, `make test_debug` and `make load_test_debug` do the same for an
-unoptimised build. `make itest ITEST_ARGS="--test guard"` passes arguments to
+`make debug`, `make test_debug`, `make load_test_debug` and
+`make remote_test_debug` do the same for an unoptimised build. `make itest ITEST_ARGS="--test guard"` passes arguments to
 `cargo test`.
 
 The DuckDB shell and library used by `load_test_*` and `itest` are downloaded
@@ -181,6 +182,34 @@ DuckDB's access rules apply (`enable_external_access`,
 `allowed_directories`). Legacy pcap and pcapng are read, plain or compressed
 with gzip or zstd; the format and the compression are recognised from the
 first bytes of the file, not from its name.
+
+**Remote files.** The extension has no network code: a capture at a URL is
+opened through the same file-system API, by whichever DuckDB extension serves
+that kind of URL, so `read_pcap('https://example.org/a.pcap.gz')` and
+`read_pcap('s3://bucket/a.pcap')` work once `httpfs` is loaded (`INSTALL
+httpfs; LOAD httpfs;`, or DuckDB's autoloading), with the credentials of
+DuckDB's secrets. Without it the open fails with DuckDB's error, which says
+that `httpfs` is needed. A remote capture is read on one thread, front to
+back, 4 MiB at a time; it is not indexed, because that would be a read of
+the whole file before the first row. `enable_external_access = false`
+refuses a URL as it refuses a path.
+
+How this is tested: `make remote_test_release` (`scripts/remote-test.sh`)
+serves legacy, pcapng, gzip and zstd captures and a generated one of 28 MB
+from a local HTTP server that answers Range requests
+(`scripts/range-http-server.py`), and in the DuckDB shell compares every kind
+of table read from the URL with the same file read from disk, row for row;
+it also checks `filename`, lists of URLs, that the scan of a URL is one
+partition, a pushed-down `frame_number` filter, `LIMIT`, the error for a
+URL that does not exist, and `enable_external_access`, and reads back from
+the server's log what was requested. It needs `httpfs` from
+extensions.duckdb.org; where that cannot be installed the target says so and
+does nothing (`REMOTE_TEST_ARGS=--require-httpfs` makes that a failure, as
+the workflows do). **It has not run yet**: the machine it was written on
+cannot install `httpfs`, so only the server (`make remote_test_server`,
+with curl) and the script's logic over local paths were exercised; its first
+real run is the next run of `.github/workflows/duckdb.yml`. Nothing has read
+`s3://`, and no secret has been tried (roadmap U7).
 
 **Several files.** The one positional argument is a path, a glob pattern
 (`*`, `?`, `[...]`, and `**` for any depth of directories, as DuckDB's file

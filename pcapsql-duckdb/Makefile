@@ -5,16 +5,19 @@
 #   make test_release       run test/sql against it (DuckDB's Python package)
 #   make load_test_release  LOAD it in the stock DuckDB command-line shell
 #   make check_reference_release  docs/duckdb-extension-reference.md lists what it registers
+#   make remote_test_release  read captures over HTTP, through DuckDB's httpfs extension
 #   make itest              in-process tests (itest/) against a linked libduckdb
 #   make check              duckdb_neo containment, no std::fs in the extension, `unsafe` only in
 #                           its two audited places, the pins of the DuckDB release agree, and fmt
 #                           and clippy for itest/
 #   make canary             build against the newest duckdb-neo (scripts/canary.sh)
 #
-# `debug`, `test_debug` and `load_test_debug` do the same for an unoptimised build.
+# `debug`, `test_debug`, `load_test_debug` and `remote_test_debug` do the same for an unoptimised
+# build.
 
 .PHONY: all configure debug release test test_debug test_release load_test load_test_debug load_test_release
 .PHONY: check_reference check_reference_debug check_reference_release
+.PHONY: remote_test remote_test_debug remote_test_release remote_test_server
 .PHONY: itest lint_itest check_containment check_no_std_fs check_unsafe check_pins check canary clean clean_all
 
 PROJ_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
@@ -64,6 +67,20 @@ check_reference_debug:
 	scripts/check-reference.sh build/debug/$(EXTENSION_FILENAME) $(TARGET_DUCKDB_VERSION)
 check_reference_release:
 	scripts/check-reference.sh build/release/$(EXTENSION_FILENAME) $(TARGET_DUCKDB_VERSION)
+
+# Captures read from a local HTTP server through DuckDB's `httpfs` extension, which the shell
+# installs from extensions.duckdb.org. Where that cannot be reached the script says that it
+# skipped the test and exits with 77, which is not a failure here;
+# `make remote_test_release REMOTE_TEST_ARGS=--require-httpfs` makes it one, as CI does. The
+# server itself is tested first, with curl, and that needs no DuckDB.
+REMOTE_TEST_ARGS ?=
+remote_test: remote_test_debug
+remote_test_server:
+	scripts/range-http-server-test.sh
+remote_test_debug: remote_test_server
+	scripts/remote-test.sh $(REMOTE_TEST_ARGS) build/debug/$(EXTENSION_FILENAME) $(TARGET_DUCKDB_VERSION) || [ $$? -eq 77 ]
+remote_test_release: remote_test_server
+	scripts/remote-test.sh $(REMOTE_TEST_ARGS) build/release/$(EXTENSION_FILENAME) $(TARGET_DUCKDB_VERSION) || [ $$? -eq 77 ]
 
 # itest/ is its own cargo workspace (see its Cargo.toml) and links the libduckdb of the release.
 ITEST_CARGO = lib=$$(DUCKDB_VERSION=$(TARGET_DUCKDB_VERSION) scripts/fetch-duckdb.sh lib) && \
