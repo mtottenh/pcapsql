@@ -52,13 +52,15 @@
 //! calls behind the read timeout.
 
 use std::io::{self, Cursor, Read};
+use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::error::{Error, PcapError};
 use crate::io::decompress::{decompress_header, Compression, DecompressReader};
-use crate::io::pcap_stream::{GenericPcapReader, PcapFormat, BUFFER_SIZE};
+use crate::io::pcap_stream::{Delivered, GenericPcapReader, Pause, PcapFormat, BUFFER_SIZE};
+use crate::io::read_source::HeadFill;
 use crate::io::source::{
     PacketPosition, PacketReader, PacketRef, PacketSource, PacketSourceMetadata,
 };
@@ -99,6 +101,18 @@ pub struct StreamHeader {
     /// legacy global header, or the pcapng SHB. The reader must see at least
     /// this much in its first read.
     pub header_len: usize,
+}
+
+impl StreamHeader {
+    /// Read just enough of the head of `read` to learn the capture's
+    /// compression, format, link type and snapshot length.
+    ///
+    /// Returns the header and the bytes taken from `read`, which
+    /// [`ReadPacketReader::sequential`](crate::io::ReadPacketReader::sequential)
+    /// puts back in front of the stream.
+    pub fn probe<R: Read>(read: &mut R) -> Result<(StreamHeader, Vec<u8>), Error> {
+        probe_stream(read, "the capture")
+    }
 }
 
 /// Packet source over standard input or any other `Read + Send` stream.
@@ -361,7 +375,7 @@ impl StdinPacketSource {
         mut reader: R,
     ) -> Result<Self, Error> {
         let fd = reader.as_raw_fd();
-        let (header, prefix) = probe_stream(&mut reader)?;
+        let (header, prefix) = probe_stream(&mut reader, "stdin")?;
         let control = Arc::new(ReadTimeout::new());
         let timed = TimedRead {
             inner: reader,
@@ -382,7 +396,7 @@ impl StdinPacketSource {
     /// a continuous engine over it flushes held packets only when the next
     /// packet arrives.
     pub fn from_reader<R: Read + Send + 'static>(mut reader: R) -> Result<Self, Error> {
-        let (header, prefix) = probe_stream(&mut reader)?;
+        let (header, prefix) = probe_stream(&mut reader, "stdin")?;
         Ok(Self::assemble(header, prefix, Box::new(reader), None))
     }
 
@@ -530,15 +544,16 @@ impl StdinPacketReader {
 }
 
 impl PacketReader for StdinPacketReader {
-    fn process_packets<F>(&mut self, max: usize, f: F) -> Result<usize, Error>
+    #[inline]
+    fn process_packets_flow<F>(&mut self, max: usize, f: F) -> Result<Delivered, Error>
     where
-        F: FnMut(PacketRef<'_>) -> Result<(), Error>,
+        F: FnMut(PacketRef<'_>) -> ControlFlow<Pause>,
     {
-        let count = self.inner.process_packets(max, f)?;
-        if count > 0 || self.inner.frame_count() > 0 {
+        let delivered = self.inner.process_packets_flow(max, f)?;
+        if delivered.consumed > 0 || self.inner.frame_count() > 0 {
             self.link_type = self.inner.link_type();
         }
-        Ok(count)
+        Ok(delivered)
     }
 
     #[inline]
@@ -573,48 +588,6 @@ impl PacketReader for StdinPacketReader {
         self.timeout
             .as_ref()
             .is_some_and(|control| control.is_cancelled())
-    }
-}
-
-/// A reader whose *first* `read` returns at least `min` bytes (or everything
-/// up to end of input), by looping over the inner reader. Later reads pass
-/// through.
-///
-/// `pcap_parser` parses the capture header from the bytes of its first read
-/// alone; a decompressor (or a pipe) is free to return fewer.
-struct HeadFill<R> {
-    inner: R,
-    min: usize,
-    first: bool,
-}
-
-impl<R: Read> HeadFill<R> {
-    fn new(inner: R, min: usize) -> Self {
-        Self {
-            inner,
-            min,
-            first: true,
-        }
-    }
-}
-
-impl<R: Read> Read for HeadFill<R> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if !self.first {
-            return self.inner.read(buf);
-        }
-        self.first = false;
-        let want = self.min.min(buf.len());
-        let mut filled = 0;
-        while filled < want {
-            match self.inner.read(&mut buf[filled..]) {
-                Ok(0) => break,
-                Ok(n) => filled += n,
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                Err(e) => return Err(e),
-            }
-        }
-        Ok(filled)
     }
 }
 
@@ -738,13 +711,13 @@ fn analyze_header(bytes: &[u8]) -> Result<Probe, Error> {
 /// Read the head of the stream: compression, format, link type. Returns the
 /// header and the raw bytes consumed from the stream, which the caller
 /// chains back in front of it.
-fn probe_stream<R: Read>(reader: &mut R) -> Result<(StreamHeader, Vec<u8>), Error> {
+fn probe_stream<R: Read>(reader: &mut R, origin: &str) -> Result<(StreamHeader, Vec<u8>), Error> {
     let mut raw = Vec::with_capacity(64);
     // The compression magics need 6 bytes; every capture header is longer.
     read_up_to(reader, &mut raw, 6)?;
     if raw.is_empty() {
         return Err(Error::Pcap(PcapError::InvalidFormat {
-            reason: "stdin is empty: no capture header was read".into(),
+            reason: format!("{origin} is empty: no capture header was read"),
         }));
     }
     let compression = Compression::detect(&raw);
@@ -818,7 +791,7 @@ fn probe_stream<R: Read>(reader: &mut R) -> Result<(StreamHeader, Vec<u8>), Erro
             Err(e) if eof => {
                 return Err(Error::Pcap(PcapError::InvalidFormat {
                     reason: format!(
-                        "failed to decompress the capture header from stdin ({compression}): {e}"
+                        "failed to decompress the capture header from {origin} ({compression}): {e}"
                     ),
                 }));
             }

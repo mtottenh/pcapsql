@@ -13,6 +13,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   escaping, columns separated by tabs, one row per line. A multi-line text
   value such as `hdr_ascii(...)` output prints as rendered, and a row that
   already ends in a newline gets no second one.
+- **`pcapsql-core`: a packet reader over any `Read`.** `ReadPacketReader`
+  reads a capture from bytes the caller opened itself, from the first frame
+  (`sequential`, compressed or not, after `StreamHeader::probe`) or over one
+  partition of an uncompressed capture (`at`, with a `BoundaryIndex`). It is
+  the reader behind `FilePacketSource`, and what a host with its own file
+  system (the DuckDB extension) uses instead of a `PacketSource`.
+- **`pcapsql-core`: a consumer can stop a reader without an error.**
+  `PacketReader::process_packets_flow` takes a callback returning
+  `ControlFlow<Pause>`: `Pause::After` stops after the packet,
+  `Pause::Before` leaves it to be delivered again by the next call, with the
+  same frame number. A consumer with a bounded output (a fixed-size chunk)
+  can therefore stop exactly where it ran out of room.
+
+### Changed
+
+- **`pcapsql-core`: `PacketReader` implementations provide
+  `process_packets_flow`.** `process_packets` is now a provided method on top
+  of it, with its behaviour unchanged. `FilePacketReader` is an alias of
+  `ReadPacketReader<File>`.
 
 ## [0.4.1] - 2026-10-24
 

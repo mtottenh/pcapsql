@@ -16,6 +16,9 @@
 //! - [`MmapPacketSource`] - Memory-mapped I/O (`SeekCost::Free`; requires `mmap`)
 //! - [`CloudPacketSource`] - Object-store I/O (`SeekCost::RangeRequest`; requires `cloud`)
 //! - [`StdinPacketSource`] - Standard input or any other `Read` stream (sequential only)
+//!
+//! A host that opens the bytes itself (another engine's file system, a
+//! buffer) skips the source traits and builds a [`ReadPacketReader`] directly.
 
 #[cfg(feature = "cloud")]
 mod cloud;
@@ -24,6 +27,7 @@ mod index;
 #[cfg(feature = "mmap")]
 mod mmap;
 mod pcap_stream;
+mod read_source;
 mod source;
 mod stdin;
 
@@ -36,7 +40,10 @@ pub use index::{
 };
 #[cfg(feature = "mmap")]
 pub use mmap::{MmapPacketReader, MmapPacketSource};
-pub use pcap_stream::{GenericPcapReader, InterfaceInfo, InterfaceState, PcapFormat};
+pub use pcap_stream::{
+    Delivered, GenericPcapReader, InterfaceInfo, InterfaceState, Pause, PcapFormat,
+};
+pub use read_source::ReadPacketReader;
 pub use source::{
     FilePacketReader, FilePacketSource, PacketPosition, PacketRange, PacketReader, PacketRef,
     PacketSource, PacketSourceMetadata, SeekCost, SeekablePacketSource,

@@ -6,10 +6,14 @@
 //! rows in the same order as parsing C at 1 partition — and both equal the
 //! generator's ground truth (which validates timestamp/`if_tsresol` decoding too).
 
+use std::io::{Cursor, Read};
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
 use pcapsql_core::io::{
-    FilePacketSource, MmapPacketSource, PacketReader, PacketSource, SeekablePacketSource,
+    build_boundary_index, header_hash, FilePacketSource, MmapPacketSource, PacketRange,
+    PacketReader, PacketRef, PacketSource, Pause, ReadPacketReader, SeekablePacketSource,
+    StreamHeader,
 };
 use pcapsql_testgen::{
     generate, jumbo_straddle_capture, legacy_pcap, oversized_frame_capture, pcapng,
@@ -44,20 +48,26 @@ fn expected_frames(gc: &GeneratedCapture) -> Vec<Frame> {
         .collect()
 }
 
+impl Frame {
+    fn of(p: &PacketRef<'_>) -> Self {
+        Frame {
+            frame_number: p.frame_number,
+            timestamp_ns: p.timestamp_ns,
+            caplen: p.captured_len,
+            origlen: p.original_len,
+            link_type: p.link_type as u32,
+            data: p.data.to_vec(),
+        }
+    }
+}
+
 fn drain<R: PacketReader>(reader: &mut R) -> Vec<Frame> {
     let mut out = Vec::new();
     loop {
         let mut batch = Vec::new();
         let n = reader
             .process_packets(64, |p| {
-                batch.push(Frame {
-                    frame_number: p.frame_number,
-                    timestamp_ns: p.timestamp_ns,
-                    caplen: p.captured_len,
-                    origlen: p.original_len,
-                    link_type: p.link_type as u32,
-                    data: p.data.to_vec(),
-                });
+                batch.push(Frame::of(&p));
                 Ok(())
             })
             .expect("process_packets");
@@ -67,6 +77,153 @@ fn drain<R: PacketReader>(reader: &mut R) -> Vec<Frame> {
         }
     }
     out
+}
+
+/// Drain a reader whose consumer keeps stopping it: the verdict on each
+/// packet shown for the first time is the next byte of `schedule` (cycled)
+/// modulo 4, where 2 pauses after the packet and 3 pauses before it. A packet
+/// paused before is accepted when it comes back. Returns the frames the
+/// consumer accepted, checking on the way that a paused-before packet is
+/// shown again unchanged and that the reader's count of consumed packets and
+/// its position agree with what the consumer accepted.
+fn drain_with_pauses<R: PacketReader>(reader: &mut R, schedule: &[u8], max: usize) -> Vec<Frame> {
+    let mut out = Vec::new();
+    let mut turn = 0usize;
+    let mut refused: Option<Frame> = None;
+    loop {
+        let before = reader.position().frame_number;
+        let mut accepted = Vec::new();
+        let delivered = reader
+            .process_packets_flow(max, |p| {
+                let frame = Frame::of(&p);
+                if let Some(held) = refused.take() {
+                    assert_eq!(held, frame, "a packet paused before must be shown again");
+                    accepted.push(frame);
+                    return ControlFlow::Continue(());
+                }
+                let verdict = schedule[turn % schedule.len()] % 4;
+                turn += 1;
+                match verdict {
+                    3 => {
+                        refused = Some(frame);
+                        ControlFlow::Break(Pause::Before)
+                    }
+                    2 => {
+                        accepted.push(frame);
+                        ControlFlow::Break(Pause::After)
+                    }
+                    _ => {
+                        accepted.push(frame);
+                        ControlFlow::Continue(())
+                    }
+                }
+            })
+            .expect("process_packets_flow");
+        assert_eq!(delivered.consumed, accepted.len());
+        assert!(delivered.consumed <= max);
+        assert_eq!(
+            reader.position().frame_number,
+            before + delivered.consumed as u64,
+            "position counts consumed packets only"
+        );
+        assert_eq!(
+            delivered.paused == Some(Pause::Before),
+            refused.is_some(),
+            "a pause before is reported, and only then"
+        );
+        out.extend(accepted);
+        if delivered.consumed == 0 && delivered.paused.is_none() {
+            break;
+        }
+    }
+    out
+}
+
+/// A `Read` that returns a few bytes per call, as a pipe or a network file
+/// system may, however much the caller asks for.
+struct ShortReads<R> {
+    inner: R,
+    turn: usize,
+}
+
+impl<R> ShortReads<R> {
+    const SIZES: [usize; 5] = [1, 7, 4096, 3, 70_000];
+
+    fn new(inner: R) -> Self {
+        Self { inner, turn: 0 }
+    }
+}
+
+impl<R: Read> Read for ShortReads<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = Self::SIZES[self.turn % Self::SIZES.len()].min(buf.len());
+        self.turn += 1;
+        self.inner.read(&mut buf[..n])
+    }
+}
+
+/// The capture read from its first frame by a [`ReadPacketReader`] over
+/// short reads: probe the head, then hand the probed bytes back.
+fn read_sequential_read(bytes: &[u8]) -> Vec<Frame> {
+    let mut read = ShortReads::new(Cursor::new(bytes.to_vec()));
+    let (header, head) = StreamHeader::probe(&mut read).expect("probe");
+    let mut r = ReadPacketReader::sequential(read, &header, head).expect("sequential");
+    drain(&mut r)
+}
+
+/// The same, for a stream that was rewound after the probe: the reader gets
+/// no head back and its very first read is a single byte.
+fn read_sequential_rewound(bytes: &[u8]) -> Vec<Frame> {
+    let (header, _) = StreamHeader::probe(&mut Cursor::new(bytes)).expect("probe");
+    let read = ShortReads::new(Cursor::new(bytes.to_vec()));
+    let mut r = ReadPacketReader::sequential(read, &header, Vec::new()).expect("sequential");
+    drain(&mut r)
+}
+
+/// Index and partition ranges of an in-memory capture, with no file involved.
+fn index_ranges(
+    bytes: &[u8],
+    stride: u64,
+    n: usize,
+) -> (
+    StreamHeader,
+    pcapsql_core::io::BoundaryIndex,
+    Vec<PacketRange>,
+) {
+    let (header, _) = StreamHeader::probe(&mut Cursor::new(bytes)).expect("probe");
+    let index = build_boundary_index(
+        Cursor::new(bytes),
+        header.format,
+        stride,
+        bytes.len() as u64,
+        None,
+        header_hash(&bytes[..bytes.len().min(4096)]),
+    )
+    .expect("index");
+    let ranges = index.partition_ranges(n);
+    (header, index, ranges)
+}
+
+/// A [`ReadPacketReader`] over `range`, reading short reads from a cursor
+/// positioned at the range's start.
+fn reader_at(
+    bytes: &[u8],
+    header: &StreamHeader,
+    index: &pcapsql_core::io::BoundaryIndex,
+    range: &PacketRange,
+) -> ReadPacketReader<ShortReads<Cursor<Vec<u8>>>> {
+    let mut cursor = Cursor::new(bytes.to_vec());
+    cursor.set_position(range.start.byte_offset);
+    ReadPacketReader::at(ShortReads::new(cursor), header.format, index, range).expect("at")
+}
+
+fn read_partitioned_read(bytes: &[u8], stride: u64, n: usize) -> Vec<Frame> {
+    let (header, index, ranges) = index_ranges(bytes, stride, n);
+    let mut frames = Vec::new();
+    for range in &ranges {
+        frames.extend(drain(&mut reader_at(bytes, &header, &index, range)));
+    }
+    frames
 }
 
 fn write_capture(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
@@ -133,7 +290,32 @@ fn assert_equivalent(gc: &GeneratedCapture, stride: u64) {
             fi, expected,
             "file partitioned (n={n}) must equal ground truth"
         );
+        let rd = read_partitioned_read(&gc.bytes, stride, n);
+        assert_eq!(
+            rd, expected,
+            "Read-backed partitioned (n={n}) must equal ground truth"
+        );
     }
+
+    // The same capture with no file at all: a reader over a `Read` that
+    // returns short reads, from the first frame and over the whole range.
+    assert_eq!(
+        read_sequential_read(&gc.bytes),
+        expected,
+        "Read-backed sequential read must equal ground truth"
+    );
+    assert_eq!(
+        read_sequential_rewound(&gc.bytes),
+        expected,
+        "Read-backed sequential read of a rewound stream must equal ground truth"
+    );
+    let (header, index, _) = index_ranges(&gc.bytes, stride, 1);
+    let mut whole = reader_at(&gc.bytes, &header, &index, &PacketRange::whole());
+    assert_eq!(
+        drain(&mut whole),
+        expected,
+        "Read-backed whole range must equal ground truth"
+    );
 }
 
 // ----------------------------------------------------------------------------
@@ -446,6 +628,37 @@ fn truncated_capture_reads_complete_prefix() {
     let expected = expected_frames(&gc);
     let seq = read_sequential_mmap(&path, 4);
     assert_eq!(seq, expected, "truncated capture: complete prefix only");
+    assert_eq!(
+        read_sequential_read(&gc.bytes),
+        expected,
+        "truncated capture through a Read: complete prefix only"
+    );
+}
+
+/// A compressed capture is read through a [`ReadPacketReader`] from the
+/// compressed bytes alone: the probe detects the framing and the reader
+/// decompresses as it goes.
+#[test]
+fn compressed_capture_through_a_read() {
+    use std::io::Write;
+    let gc = generate(&CaptureSpec {
+        packet_count: 300,
+        ..CaptureSpec::default()
+    });
+    let expected = expected_frames(&gc);
+
+    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    enc.write_all(&gc.bytes).unwrap();
+    let gz = enc.finish().unwrap();
+    assert_eq!(read_sequential_read(&gz), expected, "gzip");
+    assert_eq!(read_sequential_rewound(&gz), expected, "gzip, rewound");
+
+    #[cfg(feature = "compress-zstd")]
+    {
+        let zst = zstd::stream::encode_all(Cursor::new(&gc.bytes), 3).unwrap();
+        assert_eq!(read_sequential_read(&zst), expected, "zstd");
+        assert_eq!(read_sequential_rewound(&zst), expected, "zstd, rewound");
+    }
 }
 
 /// `reader_at(&PacketRange::whole())` on an uncompressed seekable source reads
@@ -612,6 +825,51 @@ proptest! {
         let gc = generate(&spec);
         // Fine stride so even small captures split into several partitions.
         assert_equivalent(&gc, 2);
+    }
+
+    /// A consumer that stops the reader at arbitrary packets, before or
+    /// after them, and with any batch size, still sees every frame exactly
+    /// once and in order: from the first frame, and partition by partition,
+    /// for the Read-backed, file and mmap readers.
+    #[test]
+    fn prop_pauses_lose_and_repeat_nothing(
+        spec in capture_spec_strategy(),
+        schedule in proptest::collection::vec(any::<u8>(), 1..24),
+        max in 1usize..9,
+    ) {
+        let gc = generate(&spec);
+        let expected = expected_frames(&gc);
+
+        let mut read = Cursor::new(gc.bytes.clone());
+        let (header, head) = StreamHeader::probe(&mut read).unwrap();
+        let mut r = ReadPacketReader::sequential(read, &header, head).unwrap();
+        prop_assert_eq!(&drain_with_pauses(&mut r, &schedule, max), &expected);
+
+        let (header, index, ranges) = index_ranges(&gc.bytes, 2, 3);
+        let mut frames = Vec::new();
+        for range in &ranges {
+            let mut r = reader_at(&gc.bytes, &header, &index, range);
+            frames.extend(drain_with_pauses(&mut r, &schedule, max));
+        }
+        prop_assert_eq!(&frames, &expected);
+
+        let dir = TempDir::new().unwrap();
+        let path = write_capture(dir.path(), "cap", &gc.bytes);
+        let file = FilePacketSource::open(&path).unwrap().with_index_stride(2);
+        let mut frames = Vec::new();
+        for range in &file.partitions(3).unwrap() {
+            let mut r = file.reader_at(range).unwrap();
+            frames.extend(drain_with_pauses(&mut r, &schedule, max));
+        }
+        prop_assert_eq!(&frames, &expected);
+
+        let mmap = MmapPacketSource::open(&path).unwrap().with_index_stride(2);
+        let mut frames = Vec::new();
+        for range in &mmap.partitions(3).unwrap() {
+            let mut r = mmap.reader_at(range).unwrap();
+            frames.extend(drain_with_pauses(&mut r, &schedule, max));
+        }
+        prop_assert_eq!(&frames, &expected);
     }
 
     /// No frame dropped or duplicated across a seam: the multiset and the
