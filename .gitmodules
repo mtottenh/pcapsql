@@ -1,0 +1,3 @@
+[submodule "pcapsql-duckdb/extension-ci-tools"]
+	path = pcapsql-duckdb/extension-ci-tools
+	url = https://github.com/duckdb/extension-ci-tools
