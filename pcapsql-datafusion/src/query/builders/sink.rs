@@ -9,9 +9,9 @@ use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use arrow::array::{
-    ArrayRef, BinaryBuilder, BooleanBuilder, FixedSizeBinaryBuilder, Float64Builder, Int64Builder,
-    Int8Builder, ListBuilder, StringBuilder, UInt16Builder, UInt32Builder, UInt64Builder,
-    UInt8Builder,
+    Array, ArrayRef, AsArray, BinaryBuilder, BooleanBuilder, FixedSizeBinaryBuilder,
+    Float64Builder, Int64Builder, Int8Builder, ListBuilder, StringBuilder, UInt16Builder,
+    UInt32Builder, UInt64Builder, UInt8Builder,
 };
 use arrow::datatypes::{SchemaRef, TimestampMicrosecondType, TimestampNanosecondType};
 use arrow::record_batch::{RecordBatch, RecordBatchOptions};
@@ -61,8 +61,16 @@ enum ListColumn {
 ///
 /// The builders are kept in one vector per Arrow type, with a map from the
 /// output column to its place there, so that storing a value is an indexed
-/// append with no dispatch on the column's type. They are reused from one
-/// batch to the next.
+/// append with no dispatch on the column's type.
+///
+/// A builder gives its buffers away with its batch (Arrow's `finish` leaves
+/// it empty, without capacity). After a full batch each builder is therefore
+/// replaced by one with room for the next: `capacity` rows, and for the
+/// bytes of text and binary values and the items of lists what the batch
+/// just taken held plus an eighth (see [`next_capacity`]), so that a batch
+/// like the last one is built without growing a buffer. After a batch that
+/// is not full (the last of a scan, a row cap, a timed flush) nothing is
+/// allocated ahead.
 ///
 /// `end_row` reports [`Full`] when the sink holds `capacity` rows;
 /// [`take_batch`](Self::take_batch) empties it.
@@ -86,6 +94,14 @@ pub struct ArrowSink {
     /// Timestamps of either unit, as their integer.
     timestamps: Vec<Int64Builder>,
     lists: Vec<ListColumn>,
+}
+
+/// The capacity, in value bytes or list items, of the builder that follows
+/// one whose batch held `used`: an eighth more, so that the usual variation
+/// between batches does not double the buffer, and little enough that a
+/// batch kept in memory is not much larger than its values.
+fn next_capacity(used: usize) -> usize {
+    used + used / 8
 }
 
 fn push<B>(builders: &mut Vec<B>, builder: B) -> u16 {
@@ -195,31 +211,37 @@ impl ArrowSink {
                         Store::List,
                         push(
                             &mut sink.lists,
-                            ListColumn::U16(ListBuilder::new(UInt16Builder::with_capacity(n))),
+                            ListColumn::U16(ListBuilder::with_capacity(
+                                UInt16Builder::with_capacity(n),
+                                n,
+                            )),
                         ),
                     ),
                     ColKind::ListU32 => (
                         Store::List,
                         push(
                             &mut sink.lists,
-                            ListColumn::U32(ListBuilder::new(UInt32Builder::with_capacity(n))),
+                            ListColumn::U32(ListBuilder::with_capacity(
+                                UInt32Builder::with_capacity(n),
+                                n,
+                            )),
                         ),
                     ),
                     ColKind::ListStr => (
                         Store::List,
                         push(
                             &mut sink.lists,
-                            ListColumn::Str(ListBuilder::new(StringBuilder::with_capacity(
+                            ListColumn::Str(ListBuilder::with_capacity(
+                                StringBuilder::with_capacity(n, n * 32),
                                 n,
-                                n * 32,
-                            ))),
+                            )),
                         ),
                     ),
                     ColKind::ListFixed(width) => (
                         Store::List,
                         push(
                             &mut sink.lists,
-                            ListColumn::Fixed(ListBuilder::new(fixed(width))),
+                            ListColumn::Fixed(ListBuilder::with_capacity(fixed(width), n)),
                         ),
                     ),
                 };
@@ -247,52 +269,124 @@ impl ArrowSink {
     /// Take the rows held as a batch, leaving the sink empty; `None` when it
     /// holds none. A sink without columns (`SELECT count(*)`) gives a batch
     /// that carries only its row count.
+    ///
+    /// After a full batch the builders have room for the next; after any
+    /// other they hold no memory.
     pub fn take_batch(&mut self) -> Result<Option<RecordBatch>, Error> {
         if self.rows == 0 {
             return Ok(None);
         }
         let options = RecordBatchOptions::new().with_row_count(Some(self.rows));
+        // A batch that is not full is the last of its scan, or one of a feed
+        // slow enough to be flushed by time: no next batch to prepare for.
+        let refill = self.rows >= self.capacity;
         self.rows = 0;
-        let arrays = self.finish_arrays();
+        let arrays = self.finish_arrays(refill);
         RecordBatch::try_new_with_options(Arc::clone(&self.schema), arrays, &options)
             .map(Some)
             .map_err(|e| Error::Query(QueryError::Arrow(e.to_string())))
     }
 
     /// The columns' values so far as arrays, in column order, leaving every
-    /// builder empty.
-    pub(crate) fn finish_arrays(&mut self) -> Vec<ArrayRef> {
+    /// builder empty: with room for a batch like this one with `refill`,
+    /// without capacity otherwise.
+    pub(crate) fn finish_arrays(&mut self, refill: bool) -> Vec<ArrayRef> {
+        let n = self.capacity;
         let mut arrays = Vec::with_capacity(self.slots.len());
+        // Finish a builder whose only capacity is its rows.
+        macro_rules! finish {
+            ($builders:expr, $i:expr, $new:expr) => {{
+                let array = $builders[$i].finish();
+                if refill {
+                    $builders[$i] = $new;
+                }
+                array
+            }};
+        }
         for slot in self.slots.iter() {
             let i = usize::from(slot.index);
             let array: ArrayRef = match slot.store {
-                Store::Bool => Arc::new(self.bools[i].finish()),
-                Store::U8 => Arc::new(self.u8s[i].finish()),
-                Store::U16 => Arc::new(self.u16s[i].finish()),
-                Store::U32 => Arc::new(self.u32s[i].finish()),
-                Store::U64 => Arc::new(self.u64s[i].finish()),
-                Store::I8 => Arc::new(self.i8s[i].finish()),
-                Store::I64 => Arc::new(self.i64s[i].finish()),
-                Store::F64 => Arc::new(self.f64s[i].finish()),
-                Store::Str => Arc::new(self.strs[i].finish()),
-                Store::Bin => Arc::new(self.bins[i].finish()),
-                Store::Fixed => Arc::new(self.fixed[i].finish()),
+                Store::Bool => Arc::new(finish!(self.bools, i, BooleanBuilder::with_capacity(n))),
+                Store::U8 => Arc::new(finish!(self.u8s, i, UInt8Builder::with_capacity(n))),
+                Store::U16 => Arc::new(finish!(self.u16s, i, UInt16Builder::with_capacity(n))),
+                Store::U32 => Arc::new(finish!(self.u32s, i, UInt32Builder::with_capacity(n))),
+                Store::U64 => Arc::new(finish!(self.u64s, i, UInt64Builder::with_capacity(n))),
+                Store::I8 => Arc::new(finish!(self.i8s, i, Int8Builder::with_capacity(n))),
+                Store::I64 => Arc::new(finish!(self.i64s, i, Int64Builder::with_capacity(n))),
+                Store::F64 => Arc::new(finish!(self.f64s, i, Float64Builder::with_capacity(n))),
+                Store::Str => {
+                    let array = self.strs[i].finish();
+                    if refill {
+                        let bytes = next_capacity(array.value_data().len());
+                        self.strs[i] = StringBuilder::with_capacity(n, bytes);
+                    }
+                    Arc::new(array)
+                }
+                Store::Bin => {
+                    let array = self.bins[i].finish();
+                    if refill {
+                        let bytes = next_capacity(array.value_data().len());
+                        self.bins[i] = BinaryBuilder::with_capacity(n, bytes);
+                    }
+                    Arc::new(array)
+                }
+                Store::Fixed => {
+                    let array = self.fixed[i].finish();
+                    if refill {
+                        self.fixed[i] =
+                            FixedSizeBinaryBuilder::with_capacity(n, array.value_length());
+                    }
+                    Arc::new(array)
+                }
                 Store::TsMicros => Arc::new(
-                    self.timestamps[i]
-                        .finish()
+                    finish!(self.timestamps, i, Int64Builder::with_capacity(n))
                         .reinterpret_cast::<TimestampMicrosecondType>(),
                 ),
                 Store::TsNanos => Arc::new(
-                    self.timestamps[i]
-                        .finish()
+                    finish!(self.timestamps, i, Int64Builder::with_capacity(n))
                         .reinterpret_cast::<TimestampNanosecondType>(),
                 ),
-                Store::List => match &mut self.lists[i] {
-                    ListColumn::U16(b) => Arc::new(b.finish()),
-                    ListColumn::U32(b) => Arc::new(b.finish()),
-                    ListColumn::Str(b) => Arc::new(b.finish()),
-                    ListColumn::Fixed(b) => Arc::new(b.finish()),
-                },
+                Store::List => {
+                    let column = &mut self.lists[i];
+                    let array = match column {
+                        ListColumn::U16(b) => b.finish(),
+                        ListColumn::U32(b) => b.finish(),
+                        ListColumn::Str(b) => b.finish(),
+                        ListColumn::Fixed(b) => b.finish(),
+                    };
+                    if refill {
+                        // The items of the batch's lists, and so of the
+                        // next one's.
+                        let items = next_capacity(array.values().len());
+                        *column = match column {
+                            ListColumn::U16(_) => ListColumn::U16(ListBuilder::with_capacity(
+                                UInt16Builder::with_capacity(items),
+                                n,
+                            )),
+                            ListColumn::U32(_) => ListColumn::U32(ListBuilder::with_capacity(
+                                UInt32Builder::with_capacity(items),
+                                n,
+                            )),
+                            ListColumn::Str(_) => {
+                                let bytes = next_capacity(
+                                    array.values().as_string::<i32>().value_data().len(),
+                                );
+                                ListColumn::Str(ListBuilder::with_capacity(
+                                    StringBuilder::with_capacity(items, bytes),
+                                    n,
+                                ))
+                            }
+                            ListColumn::Fixed(_) => {
+                                let width = array.values().as_fixed_size_binary().value_length();
+                                ListColumn::Fixed(ListBuilder::with_capacity(
+                                    FixedSizeBinaryBuilder::with_capacity(items, width),
+                                    n,
+                                ))
+                            }
+                        };
+                    }
+                    Arc::new(array)
+                }
             };
             arrays.push(array);
         }
@@ -671,17 +765,146 @@ mod tests {
                 .collect();
             let mut sink = ArrowSink::new(&columns, 1);
             assert_eq!(sink.schema().as_ref(), &schema, "{name}");
-            let arrays = sink.finish_arrays();
-            assert_eq!(arrays.len(), schema.fields().len(), "{name}");
-            for (array, field) in arrays.iter().zip(schema.fields()) {
-                assert_eq!(
-                    array.data_type(),
-                    field.data_type(),
-                    "{name}.{}",
-                    field.name()
-                );
+            // The builders the sink starts with, and the ones that replace
+            // them after a full batch.
+            for refill in [true, false] {
+                let arrays = sink.finish_arrays(refill);
+                assert_eq!(arrays.len(), schema.fields().len(), "{name}");
+                for (array, field) in arrays.iter().zip(schema.fields()) {
+                    assert_eq!(
+                        array.data_type(),
+                        field.data_type(),
+                        "{name}.{}",
+                        field.name()
+                    );
+                }
             }
         }
+    }
+
+    /// The builders that replace the ones a full batch took hold the same
+    /// cells: rows written through a sink of two rows a batch are the rows
+    /// of a sink that holds them all, for every kind of column.
+    #[test]
+    fn batches_after_the_first_hold_the_same_cells() {
+        let kinds = [
+            ColKind::Bool,
+            ColKind::U8,
+            ColKind::U16,
+            ColKind::U32,
+            ColKind::U64,
+            ColKind::I8,
+            ColKind::I64,
+            ColKind::F64,
+            ColKind::Str,
+            ColKind::Bin,
+            ColKind::Fixed(6),
+            ColKind::TsMicros,
+            ColKind::TsNanos,
+            ColKind::ListU16,
+            ColKind::ListU32,
+            ColKind::ListStr,
+            ColKind::ListFixed(4),
+        ];
+        let columns: Vec<OutColumn> = kinds.iter().map(|kind| column(*kind)).collect();
+        // Row `row` of every column; every third row of a column is NULL,
+        // and text, bytes and lists grow with the row.
+        fn write_row(sink: &mut ArrowSink, kinds: &[ColKind], row: usize) -> ControlFlow<Full> {
+            for (index, kind) in kinds.iter().enumerate() {
+                let col = OutCol(index as u16);
+                if (row + index).is_multiple_of(3) {
+                    sink.null(col);
+                    continue;
+                }
+                let text = "x".repeat(row * 7);
+                let bytes = vec![row as u8; row * 5];
+                match *kind {
+                    ColKind::Bool => sink.bool(col, row.is_multiple_of(2)),
+                    ColKind::U8 => sink.u8(col, row as u8),
+                    ColKind::U16 => sink.u16(col, row as u16),
+                    ColKind::U32 => sink.u32(col, row as u32),
+                    ColKind::U64 => sink.u64(col, row as u64),
+                    ColKind::I8 => sink.i8(col, -(row as i8)),
+                    ColKind::I64 => sink.i64(col, -(row as i64)),
+                    ColKind::F64 => sink.f64(col, row as f64 / 2.0),
+                    ColKind::Str => sink.str(col, &text),
+                    ColKind::Bin => sink.bytes(col, &bytes),
+                    ColKind::Fixed(width) => sink.fixed(col, &vec![row as u8; usize::from(width)]),
+                    ColKind::TsMicros | ColKind::TsNanos => sink.timestamp(col, row as i64),
+                    ColKind::ListU16
+                    | ColKind::ListU32
+                    | ColKind::ListStr
+                    | ColKind::ListFixed(_) => {
+                        let mut list = sink.list(col);
+                        for item in 0..row {
+                            match *kind {
+                                ColKind::ListU16 => list.u16(item as u16),
+                                ColKind::ListU32 => list.u32(item as u32),
+                                ColKind::ListStr => list.str(&text[..item]),
+                                _ => list.bytes(&[item as u8; 4]),
+                            }
+                        }
+                        list.finish();
+                    }
+                }
+            }
+            sink.end_row()
+        }
+
+        const ROWS: usize = 9;
+        let mut whole = ArrowSink::new(&columns, ROWS + 1);
+        let mut paged = ArrowSink::new(&columns, 2);
+        let mut batches = Vec::new();
+        for row in 0..ROWS {
+            assert!(write_row(&mut whole, &kinds, row).is_continue());
+            if write_row(&mut paged, &kinds, row).is_break() {
+                batches.push(paged.take_batch().unwrap().unwrap());
+            }
+        }
+        batches.extend(paged.take_batch().unwrap());
+        assert_eq!(
+            batches.iter().map(|b| b.num_rows()).collect::<Vec<_>>(),
+            [2, 2, 2, 2, 1]
+        );
+        let whole = whole.take_batch().unwrap().unwrap();
+        let paged = arrow::compute::concat_batches(paged.schema(), &batches).unwrap();
+        assert_eq!(paged, whole);
+        assert_eq!(batch_cells(&paged, &columns), batch_cells(&whole, &columns));
+    }
+
+    /// After a full batch the builders have room for a batch like it, so
+    /// the next one's buffers are the ones allocated then; after a batch
+    /// that is not full nothing is held.
+    #[test]
+    fn builders_are_sized_from_the_batch_taken() {
+        let mut sink = one_column(ColKind::Bin, 4);
+        let value = [0xABu8; 1000];
+        for _ in 0..4 {
+            let _ = {
+                sink.bytes(COL, &value);
+                sink.end_row()
+            };
+        }
+        sink.take_batch().unwrap().unwrap();
+        // 4000 bytes held, so room for 4500: more than the 4 * 64 a new
+        // sink guesses.
+        for _ in 0..4 {
+            sink.bytes(COL, &value);
+            let _ = sink.end_row();
+        }
+        let batch = sink.take_batch().unwrap().unwrap();
+        let held = batch.column(0).as_binary::<i32>().values().capacity();
+        assert!((4500..5000).contains(&held), "{held}");
+
+        // A batch that is not full: no room is kept for another.
+        sink.bytes(COL, &value);
+        let _ = sink.end_row();
+        sink.take_batch().unwrap().unwrap();
+        sink.bytes(COL, &[1]);
+        let _ = sink.end_row();
+        let batch = sink.take_batch().unwrap().unwrap();
+        let held = batch.column(0).as_binary::<i32>().values().capacity();
+        assert!(held <= 1024, "{held}");
     }
 
     /// What each column type stores for each kind of `FieldValue`, one line

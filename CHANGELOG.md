@@ -514,6 +514,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same packets. Reading `frames` from memory: 430 → 364 instructions per
   74-byte packet, and 202 → 102 ns (3,926 → 2,473 instructions) per
   1,442-byte packet.
+- **`pcapsql-datafusion`: batch builders start at the size of the batch
+  before.** Arrow builders give their buffers away with each batch, so every
+  batch after the first regrew from empty: 0.257 reallocations per packet at
+  1,024 rows a batch (`frames`+`ipv4`+`udp`), now 0. The `scan` benchmark's
+  parse pass is 0 to 8% faster.
 
 ### Fixed
 
