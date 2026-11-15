@@ -258,7 +258,6 @@ fn field_as_i64(value: &FieldValue<'_>) -> Option<i64> {
 fn field_as_str<'v>(value: &'v FieldValue<'_>) -> Option<&'v str> {
     match value {
         FieldValue::Str(s) => Some(s),
-        FieldValue::OwnedString(s) => Some(s.as_str()),
         _ => None,
     }
 }

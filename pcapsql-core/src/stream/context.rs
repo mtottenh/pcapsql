@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 
-use crate::protocol::OwnedFieldValue;
+use super::OwnedFieldValue;
 
 /// Direction of data flow in a TCP connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

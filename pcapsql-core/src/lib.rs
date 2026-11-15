@@ -109,7 +109,6 @@ pub use io::{
 };
 #[cfg(feature = "mmap")]
 pub use io::{MmapPacketReader, MmapPacketSource};
-pub use protocol::OwnedFieldValue;
 pub use protocol::{
     chain_fields_for_protocol, compute_required_protocols, default_registry,
     merge_with_chain_fields, parse_packet, should_run_parser, BuiltinProtocol, FieldHint, FieldSet,
@@ -118,8 +117,9 @@ pub use protocol::{
 };
 pub use schema::{DataKind, FieldDescriptor, ProtocolSchema};
 pub use stream::{
-    Connection, ConnectionState, ConnectionTracker, Direction, ParsedMessage, StreamConfig,
-    StreamContext, StreamManager, StreamParseResult, StreamParser, StreamRegistry, TcpFlags,
+    Connection, ConnectionState, ConnectionTracker, Direction, OwnedFieldValue, ParsedMessage,
+    StreamConfig, StreamContext, StreamManager, StreamParseResult, StreamParser, StreamRegistry,
+    TcpFlags,
 };
 pub use tls::{
     derive_tls12_keys, derive_tls13_keys, extract_tls13_inner_content_type, hash_for_cipher_suite,
