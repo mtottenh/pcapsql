@@ -14,6 +14,12 @@
 //! predicate and row cap, and the Arrow schemas are derived from those
 //! columns.
 //!
+//! Every partition of a pass is the scan layer's resumable
+//! [`PartitionScan`], which reads, parses and routes rows into one
+//! [`ArrowSink`] per table. This module runs the push loop around it
+//! (`push_partition`): it steps the scan and hands a table's batch to its
+//! consumer whenever the scan asks for it to be taken.
+//!
 //! Partitions are range-partitioned by frame number and reassembled in frame
 //! order, so the result is identical to a single-partition parse — the
 //! property the partition-equivalence tests assert.
@@ -28,48 +34,43 @@ use arrow::record_batch::RecordBatch;
 use tokio::task::JoinHandle;
 
 use pcapsql_core::io::PacketRange;
-use pcapsql_core::{
-    parse_packet, PacketReader, PacketSource, ProtocolRegistry, SeekablePacketSource,
-};
+use pcapsql_core::{PacketReader, PacketSource, ProtocolRegistry, SeekCost, SeekablePacketSource};
 
 use super::exchange::{
     self, BatchReceiver, BatchSender, OverflowStats, Pacer, STREAM_CHANNEL_CAPACITY,
 };
 use crate::error::{Error, QueryError};
 use crate::query::arrow_schema::out_columns_to_arrow_schema;
-use crate::query::builders::NormalizedBatchSet;
+use crate::query::builders::{ArrowSink, NormalizedBatchSet};
 use crate::query::fusion::FrameJoinSpec;
 use crate::query::stream_tables::StreamSubscriber;
 use pcapsql_core::scan::{
-    Catalog, CompiledScan, OutputPlan, PlanError, RowPredicate, ScanPlan, TableScan,
+    partition_target, Catalog, CompiledScan, OutputId, OutputPlan, PartitionPolicy, PartitionScan,
+    PlanError, RowPredicate, ScanPlan, ScanStats, Step, TableScan,
 };
 use pcapsql_core::KeyLog;
 
-/// Minimum object size before a `Cheap`-seek source is partitioned.
-const CHEAP_MIN_BYTES: u64 = 4 * 1024 * 1024;
-/// Minimum file size before a `Free`-seek (mmap) source is partitioned when
-/// the caller did not ask for a specific partition count.
-///
-/// Partitioning costs a header-only index scan plus a sidecar write and one
-/// thread per partition; below this size a single sequential parse is faster.
-/// An explicit partition count (tests, benchmarks) is always honoured.
-const FREE_MIN_BYTES: u64 = 1024 * 1024;
-
 /// The partition count to use when the caller leaves it to the engine: the
 /// available parallelism, except that small `Free`-seek (mmap) files are not
-/// worth an index build, a sidecar and a thread per partition.
+/// worth an index build, a sidecar and a thread per partition (under
+/// [`PartitionPolicy::free_min_bytes`], 1 MiB).
+///
+/// This is the engine's parallelism, which DataFusion also plans with. For
+/// a source that is not `Free` to seek it stays `default`: whether a pass
+/// over such a source is partitioned at all is decided per pass, from its
+/// size ([`partition_target`]).
 pub fn auto_target_partitions<S: SeekablePacketSource>(source: &S, default: usize) -> usize {
-    use pcapsql_core::SeekCost;
-    let size = source.metadata().size_bytes.unwrap_or(0);
-    if source.seek_cost() == SeekCost::Free && size < FREE_MIN_BYTES {
-        1
-    } else {
-        default.max(1)
+    match source.seek_cost() {
+        SeekCost::Free => partition_target(
+            SeekCost::Free,
+            source.metadata().size_bytes.unwrap_or(0),
+            None,
+            default,
+            &PartitionPolicy::default(),
+        ),
+        SeekCost::Cheap | SeekCost::RangeRequest => default.max(1),
     }
 }
-/// Minimum object size before a `RangeRequest`-seek source is partitioned
-/// (network round trips must be amortized).
-const RANGE_MIN_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Progress callback: invoked with the cumulative packet count during parse.
 pub type ProgressFn = Arc<dyn Fn(u64) + Send + Sync>;
@@ -263,7 +264,7 @@ impl ParseSubscription {
     /// Arrow schema, predicate and row cap.
     pub fn compile(&self, registry: &ProtocolRegistry) -> Result<CompiledSubscription, Error> {
         let catalog = Catalog::builtin();
-        let scan = self.plan.compile(catalog, registry).map_err(plan_error)?;
+        let scan = Arc::new(self.plan.compile(catalog, registry).map_err(plan_error)?);
         // `scan.outputs()` is the plan's tables, then its fused joins.
         let tables = self
             .plan
@@ -313,7 +314,8 @@ pub struct SubscribedOutput {
 /// [`ParseSubscription::compile`]).
 #[derive(Clone, Debug)]
 pub struct CompiledSubscription {
-    scan: CompiledScan,
+    /// Shared with the scan of every partition of the pass.
+    scan: Arc<CompiledScan>,
     /// One per output of `scan.outputs()`, in the same order.
     outputs: Vec<SubscribedOutput>,
     stream_tables: HashSet<String>,
@@ -324,6 +326,11 @@ impl CompiledSubscription {
     /// columns, predicate and row cap.
     pub fn scan(&self) -> &CompiledScan {
         &self.scan
+    }
+
+    /// [`Self::scan`], shared: what a partition's `PartitionScan` holds.
+    pub fn shared_scan(&self) -> Arc<CompiledScan> {
+        Arc::clone(&self.scan)
     }
 
     /// The tables the pass delivers per packet (protocol tables, then fused
@@ -449,31 +456,21 @@ impl SharedParseState {
     }
 }
 
-/// Decide the partition ranges for a source, gating on seek cost and size.
+/// Decide the partition ranges for a source, gating on seek cost and size
+/// ([`partition_target`]): a `Cheap`-seek source is partitioned from 4 MiB
+/// on, a `RangeRequest`-seek one from 16 MiB on (network round trips must be
+/// amortized), a `Free`-seek one always.
 fn decide_ranges<S: SeekablePacketSource>(
     source: &S,
     target_partitions: usize,
 ) -> Result<Vec<PacketRange>, Error> {
-    use pcapsql_core::SeekCost;
-    let size = source.metadata().size_bytes.unwrap_or(0);
-    let target = target_partitions.max(1);
-    let want = match source.seek_cost() {
-        SeekCost::Free => target,
-        SeekCost::Cheap => {
-            if size >= CHEAP_MIN_BYTES {
-                target
-            } else {
-                1
-            }
-        }
-        SeekCost::RangeRequest => {
-            if size >= RANGE_MIN_BYTES {
-                target
-            } else {
-                1
-            }
-        }
-    };
+    let want = partition_target(
+        source.seek_cost(),
+        source.metadata().size_bytes.unwrap_or(0),
+        Some(target_partitions),
+        target_partitions,
+        &PartitionPolicy::default(),
+    );
     if want <= 1 {
         return Ok(vec![PacketRange::whole()]);
     }
@@ -501,68 +498,204 @@ struct PartitionOutput {
     capped: bool,
 }
 
+/// One partition of a pass: the scan layer's resumable scan of the
+/// partition's reader, with the batch set as its observer (delivery, fused
+/// joins, the stream subscriber).
+type Scan<R> = PartitionScan<R, NormalizedBatchSet>;
+
+/// Packets per chunk of a partition's push loop: how often progress is
+/// reported, and how often the loop looks whether anything it could still
+/// produce is wanted.
+const CHUNK: usize = 1024;
+
+/// The scan's packet-timestamp range in microseconds, as the pass
+/// statistics want it: `(i64::MAX, i64::MIN)` when it saw no packet.
+fn time_range_us(stats: &ScanStats) -> (i64, i64) {
+    match stats.time_range_ns() {
+        Some((min, max)) => (min / 1_000, max / 1_000),
+        None => (i64::MAX, i64::MIN),
+    }
+}
+
+/// Hand a completed batch of `output` to its consumer (which may wait for
+/// the consumer, see [`NormalizedBatchSet::deliver`]). A consumer that is
+/// gone closes the output: the scan writes nothing more to it.
+fn deliver<R: PacketReader>(scan: &mut Scan<R>, output: OutputId, batch: RecordBatch) {
+    if scan.observer_mut().deliver(output, batch) {
+        scan.close_output(output);
+    }
+}
+
+/// Deliver every table's partially filled batch now (a continuous engine's
+/// time-based flush), leaving the builders empty. Tables that are done
+/// (capped, or without a consumer) are skipped.
+fn flush_partial<R: PacketReader>(
+    scan: &mut Scan<R>,
+    sinks: &mut [ArrowSink],
+) -> Result<(), Error> {
+    let mut pending = Vec::new();
+    for (index, sink) in sinks.iter_mut().enumerate() {
+        let output = OutputId(index as u16);
+        if scan.output_done(output) {
+            continue;
+        }
+        if let Some(batch) = sink.take_batch()? {
+            pending.push((output, batch));
+        }
+    }
+    scan.observer_mut().take_fused_pending(&mut pending)?;
+    for (output, batch) in pending {
+        deliver(scan, output, batch);
+    }
+    Ok(())
+}
+
+/// How a partition's push loop treats its reader.
+#[derive(Clone, Copy)]
+enum Feed {
+    /// A pass that materializes its tables: read to the end; any read error
+    /// fails the pass.
+    Materialize,
+    /// A streaming producer: a cancelled reader ends the partition as if
+    /// every table were capped. With a `flush_interval` (a continuous
+    /// engine over a live feed) partially filled batches are delivered on
+    /// that cadence, also when no packet arrives.
+    Stream { flush_interval: Option<Duration> },
+}
+
+/// The push loop of one partition: step the scan until the partition ends
+/// or nothing it could still produce is wanted, delivering each table's
+/// batch when the scan asks for it to be taken (its sink is full, or the
+/// table reached its row cap).
+///
+/// Progress is reported per chunk of [`CHUNK`] packets consumed (per packet
+/// with a flush interval), with the pass's running total.
+///
+/// Returns whether the partition stopped before the end of its input.
+fn push_partition<R: PacketReader>(
+    scan: &mut Scan<R>,
+    sinks: &mut [ArrowSink],
+    progress: Option<(&AtomicU64, &ProgressFn)>,
+    feed: Feed,
+) -> Result<bool, Error> {
+    let (streaming, flush_interval) = match feed {
+        Feed::Materialize => (false, None),
+        Feed::Stream { flush_interval } => (true, flush_interval),
+    };
+    // With a flush interval packets are taken one at a time, so that the
+    // interval is checked after each.
+    let chunk = if flush_interval.is_some() { 1 } else { CHUNK };
+    if let Some(interval) = flush_interval {
+        // Best effort: a reader without timeouts keeps blocking in `read()`.
+        scan.reader_mut().set_read_timeout(Some(interval));
+    }
+    let mut last_flush = Instant::now();
+    // Packets of the current chunk still to consume, and the packets
+    // already reported to the progress callback.
+    let mut left = chunk;
+    let mut reported: u64 = 0;
+    // Report the packets consumed since the last report; `always` also
+    // when there are none.
+    let mut report = |scan: &Scan<R>, always: bool| {
+        let consumed = scan.stats().packets - reported;
+        if let Some((counter, cb)) = progress {
+            if always || consumed > 0 {
+                cb(counter.fetch_add(consumed, Ordering::Relaxed) + consumed);
+            }
+        }
+        reported += consumed;
+    };
+
+    loop {
+        let before = scan.stats().packets;
+        let step = match scan.step(sinks, left) {
+            Ok(step) => step,
+            Err(_) if streaming && scan.reader().cancelled() => {
+                // The consumer is done and released the reader: stop with
+                // what was parsed, as if every table had reached its cap.
+                report(scan, false);
+                return Ok(true);
+            }
+            Err(_) if streaming && scan.reader_mut().take_read_timeout() => {
+                // Nothing arrived within the interval: hand on what is held
+                // and keep waiting (the next step ends the partition if
+                // that left no table with a consumer).
+                report(scan, false);
+                flush_partial(scan, sinks)?;
+                last_flush = Instant::now();
+                continue;
+            }
+            Err(e) => return Err(e.into()),
+        };
+        left = left.saturating_sub((scan.stats().packets - before) as usize);
+        match step {
+            Step::Flush(output) => {
+                if let Some(batch) = sinks[usize::from(output.0)].take_batch()? {
+                    deliver(scan, output, batch);
+                }
+                if left > 0 {
+                    continue;
+                }
+            }
+            // The chunk is complete, or the reader had no more at hand.
+            Step::More => {}
+            Step::Done => {
+                report(scan, false);
+                return Ok(true);
+            }
+            Step::End => {
+                report(scan, false);
+                report(scan, true);
+                return Ok(false);
+            }
+        }
+        report(scan, true);
+        left = chunk;
+        if let Some(interval) = flush_interval {
+            if last_flush.elapsed() >= interval {
+                flush_partial(scan, sinks)?;
+                last_flush = Instant::now();
+            }
+        }
+    }
+}
+
 /// Parse one partition through `reader` into per-table batches restricted to
 /// the subscription. The reader is already positioned: a sequential reader
 /// (the whole source) or a seekable source's reader at a range start.
+///
+/// With a `subscriber` the partition is read to its end whatever the row
+/// caps: stream tables are complete only at end of capture.
 fn parse_partition<R: PacketReader>(
-    mut reader: R,
-    registry: &ProtocolRegistry,
+    reader: R,
+    registry: &Arc<ProtocolRegistry>,
     subscription: &CompiledSubscription,
     batch_size: usize,
     progress: Option<(&AtomicU64, &ProgressFn)>,
-    mut subscriber: Option<StreamSubscriber>,
+    subscriber: Option<StreamSubscriber>,
 ) -> Result<PartitionOutput, Error> {
-    let scope = subscription.scan().scope();
-    let mut batch_set = NormalizedBatchSet::new(batch_size, subscription);
-    let mut min_us = i64::MAX;
-    let mut max_us = i64::MIN;
-    let mut packets: u64 = 0;
-    let mut capped = false;
+    let (batch_set, mut sinks) = NormalizedBatchSet::new(batch_size, subscription);
+    let mut scan = PartitionScan::with_observer(
+        reader,
+        subscription.shared_scan(),
+        Arc::clone(registry),
+        batch_set.with_stream_subscriber(subscriber),
+    );
+    let capped = push_partition(&mut scan, &mut sinks, progress, Feed::Materialize)?;
+    let (stats, mut batch_set) = scan.finish();
 
-    loop {
-        let processed = reader.process_packets(1024, |packet| {
-            let us = packet.timestamp_ns / 1_000;
-            if us < min_us {
-                min_us = us;
-            }
-            if us > max_us {
-                max_us = us;
-            }
-            // Per-packet link type is correct even for PCAPNG multi-interface.
-            let parsed = parse_packet(registry, packet.link_type, packet.data, scope);
-            if let Some(sub) = subscriber.as_mut() {
-                sub.observe(&packet, &parsed)?;
-            }
-            batch_set.add_packet_from_ref(packet, &parsed)?;
-            Ok(())
-        })?;
-        packets += processed as u64;
-        if let Some((counter, cb)) = progress {
-            let total = counter.fetch_add(processed as u64, Ordering::Relaxed) + processed as u64;
-            cb(total);
-        }
-        if processed == 0 {
-            break;
-        }
-        // Stream tables are complete only at end of capture: never stop early
-        // while a subscriber is attached.
-        if subscriber.is_none() && batch_set.all_capped() {
-            capped = true;
-            break;
-        }
-    }
-
-    let stream_tables = match subscriber {
+    let stream_tables = match batch_set.take_stream_subscriber() {
         Some(sub) => sub.finish(batch_size)?,
         None => HashMap::new(),
     };
+    let (min_us, max_us) = time_range_us(&stats);
 
     Ok(PartitionOutput {
-        batches: batch_set.finish()?,
+        batches: batch_set.finish(sinks)?,
         stream_tables,
         min_us,
         max_us,
-        packets,
+        packets: stats.packets,
         capped,
     })
 }
@@ -829,8 +962,8 @@ impl<S: SeekablePacketSource> OpenReader for RangeOpener<S> {
 /// so held packets wait for it.
 #[allow(clippy::too_many_arguments)]
 fn stream_partition<R: PacketReader>(
-    mut reader: R,
-    registry: &ProtocolRegistry,
+    reader: R,
+    registry: &Arc<ProtocolRegistry>,
     subscription: &CompiledSubscription,
     batch_size: usize,
     senders: HashMap<String, BatchSender>,
@@ -838,81 +971,32 @@ fn stream_partition<R: PacketReader>(
     progress: Option<(&AtomicU64, &ProgressFn)>,
     flush_interval: Option<Duration>,
 ) -> Result<PartitionStat, Error> {
-    let scope = subscription.scan().scope();
-    let mut batch_set = NormalizedBatchSet::new_streaming(batch_size, subscription, senders, pacer);
-    let mut min_us = i64::MAX;
-    let mut max_us = i64::MIN;
-    let mut packets: u64 = 0;
-    let mut capped = false;
-    let chunk = if flush_interval.is_some() { 1 } else { 1024 };
-    let mut last_flush = Instant::now();
-    if let Some(interval) = flush_interval {
-        // Best effort: a reader without timeouts keeps blocking in `read()`.
-        reader.set_read_timeout(Some(interval));
-    }
+    let (batch_set, mut sinks) =
+        NormalizedBatchSet::new_streaming(batch_size, subscription, senders, pacer);
+    let mut scan = PartitionScan::with_observer(
+        reader,
+        subscription.shared_scan(),
+        Arc::clone(registry),
+        batch_set,
+    );
+    let capped = push_partition(
+        &mut scan,
+        &mut sinks,
+        progress,
+        Feed::Stream { flush_interval },
+    )?;
+    let (stats, batch_set) = scan.finish();
 
-    loop {
-        let result = reader.process_packets(chunk, |packet| {
-            let us = packet.timestamp_ns / 1_000;
-            min_us = min_us.min(us);
-            max_us = max_us.max(us);
-            let parsed = parse_packet(registry, packet.link_type, packet.data, scope);
-            batch_set.add_packet_from_ref(packet, &parsed)?;
-            Ok(())
-        });
-        let processed = match result {
-            Ok(n) => n,
-            Err(_) if reader.cancelled() => {
-                // The consumer is done and released the reader: stop with
-                // what was parsed, as if every table had reached its cap.
-                capped = true;
-                break;
-            }
-            Err(_) if reader.take_read_timeout() => {
-                // Nothing arrived within the interval: hand on what is held
-                // and keep waiting.
-                batch_set.flush_partial()?;
-                last_flush = Instant::now();
-                if batch_set.all_capped() {
-                    capped = true;
-                    break;
-                }
-                continue;
-            }
-            Err(e) => return Err(e.into()),
-        };
-        packets += processed as u64;
-        if let Some((counter, cb)) = progress {
-            let total = counter.fetch_add(processed as u64, Ordering::Relaxed) + processed as u64;
-            cb(total);
-        }
-        if processed == 0 {
-            break;
-        }
-        if batch_set.all_capped() {
-            capped = true;
-            break;
-        }
-        if let Some(interval) = flush_interval {
-            if last_flush.elapsed() >= interval {
-                batch_set.flush_partial()?;
-                last_flush = Instant::now();
-            }
-        }
-    }
-
-    let rows_built: HashMap<String, usize> = subscription
-        .output_names()
-        .map(|t| (t.to_string(), batch_set.row_count(t)))
-        .collect();
+    let rows_built = batch_set.rows_built(&stats);
     // Flushes final batches and closes every exchange (buffered batches
     // become the receivers' tails).
-    let overflow = batch_set.finish_streaming()?;
+    let overflow = batch_set.finish_streaming(sinks)?;
+    let (min_us, max_us) = time_range_us(&stats);
 
     Ok(PartitionStat {
         min_us,
         max_us,
-        packets,
+        packets: stats.packets,
         capped,
         rows_built,
         overflow,
@@ -1293,5 +1377,323 @@ mod tests {
         assert!(sub.subscribe_fused(fused("fused_a")).is_err());
         assert!(ParseSubscription::tables_full(["udp", "udp"]).is_err());
         assert_eq!(sub.output_names(), ["tcp", "fused_a"]);
+    }
+
+    // ------------------------------------------------------------------
+    // The push loop over one partition.
+    // ------------------------------------------------------------------
+
+    use arrow::array::{Array, UInt16Array, UInt64Array};
+    use pcapsql_core::io::{ReadPacketReader, StreamHeader};
+    use pcapsql_testgen::{legacy_pcap, GenPacket, LegacyVariant};
+    use std::io::Cursor;
+    use std::sync::Mutex;
+
+    fn eth(payload: &[u8]) -> Vec<u8> {
+        let mut p = vec![2, 0, 0, 0, 0, 2, 2, 0, 0, 0, 0, 1, 0x08, 0x00];
+        p.extend_from_slice(payload);
+        p
+    }
+
+    fn ipv4(proto: u8, payload: &[u8]) -> Vec<u8> {
+        let mut p = vec![0x45, 0x00];
+        p.extend_from_slice(&((20 + payload.len()) as u16).to_be_bytes());
+        p.extend_from_slice(&[0, 1, 0x40, 0x00, 64, proto, 0, 0]);
+        p.extend_from_slice(&[192, 168, 0, 1, 192, 168, 0, 2]);
+        p.extend_from_slice(payload);
+        p
+    }
+
+    fn udp_frame(src_port: u16, dst_port: u16, payload: &[u8]) -> Vec<u8> {
+        let mut udp = Vec::new();
+        udp.extend_from_slice(&src_port.to_be_bytes());
+        udp.extend_from_slice(&dst_port.to_be_bytes());
+        udp.extend_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+        udp.extend_from_slice(&[0, 0]);
+        udp.extend_from_slice(payload);
+        eth(&ipv4(17, &udp))
+    }
+
+    fn tcp_frame(dst_port: u16) -> Vec<u8> {
+        let mut tcp = Vec::new();
+        tcp.extend_from_slice(&40_000u16.to_be_bytes());
+        tcp.extend_from_slice(&dst_port.to_be_bytes());
+        tcp.extend_from_slice(&[0, 0, 0, 100, 0, 0, 0, 1, 0x50, 0x18, 0xff, 0xff, 0, 0, 0, 0]);
+        eth(&ipv4(6, &tcp))
+    }
+
+    /// `inner` inside VXLAN: a second row in `ethernet`, `ipv4` and `udp`.
+    fn vxlan(src_port: u16, inner: &[u8]) -> Vec<u8> {
+        let mut payload = vec![0x08, 0, 0, 0, 0, 0, 7, 0];
+        payload.extend_from_slice(inner);
+        udp_frame(src_port, 4789, &payload)
+    }
+
+    /// Parse `frames` as one partition, the way a materializing pass does.
+    fn parse(
+        sub: &ParseSubscription,
+        batch_size: usize,
+        frames: &[Vec<u8>],
+        progress: Option<(&AtomicU64, &ProgressFn)>,
+    ) -> PartitionOutput {
+        let packets: Vec<GenPacket> = frames
+            .iter()
+            .enumerate()
+            .map(|(i, data)| GenPacket {
+                ts_sec: 1_700_000_000 + i as u32,
+                ts_frac: 5,
+                data: data.clone(),
+                origlen: data.len() as u32,
+            })
+            .collect();
+        let capture = legacy_pcap(LegacyVariant::LeMicro, 1, 65535, &packets).bytes;
+        let mut read = Cursor::new(capture);
+        let (header, head) = StreamHeader::probe(&mut read).unwrap();
+        let reader = ReadPacketReader::sequential(read, &header, head).unwrap();
+        let registry = Arc::new(pcapsql_core::default_registry());
+        let compiled = sub.compile(&registry).unwrap();
+        parse_partition(reader, &registry, &compiled, batch_size, progress, None).unwrap()
+    }
+
+    fn rows(batches: &[RecordBatch]) -> usize {
+        batches.iter().map(RecordBatch::num_rows).sum()
+    }
+
+    fn u64s(batches: &[RecordBatch], column: &str) -> Vec<u64> {
+        batches
+            .iter()
+            .flat_map(|batch| {
+                let array = batch.column_by_name(column).unwrap();
+                let array = array.as_any().downcast_ref::<UInt64Array>().unwrap();
+                array.values().to_vec()
+            })
+            .collect()
+    }
+
+    fn u16s(batches: &[RecordBatch], column: &str) -> Vec<u16> {
+        batches
+            .iter()
+            .flat_map(|batch| {
+                let array = batch.column_by_name(column).unwrap();
+                let array = array.as_any().downcast_ref::<UInt16Array>().unwrap();
+                array.values().to_vec()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn partition_builds_only_subscribed_tables() {
+        let sub = ParseSubscription::tables_full(["frames", "tcp"]).unwrap();
+        let frames = [tcp_frame(80), udp_frame(1, 2, &[]), tcp_frame(443)];
+        let out = parse(&sub, 1000, &frames, None);
+        // Unsubscribed layers (ethernet, ipv4, udp) are not built.
+        let mut tables: Vec<&str> = out.batches.keys().map(String::as_str).collect();
+        tables.sort_unstable();
+        assert_eq!(tables, ["frames", "tcp"]);
+        assert_eq!(u64s(&out.batches["frames"], "frame_number"), [1, 2, 3]);
+        assert_eq!(u64s(&out.batches["tcp"], "frame_number"), [1, 3]);
+        assert_eq!(out.packets, 3);
+        assert!(!out.capped);
+        assert!(out.stream_tables.is_empty());
+        // Microseconds, from the packets' nanosecond timestamps.
+        assert_eq!(out.min_us, 1_700_000_000_000_005);
+        assert_eq!(out.max_us, 1_700_000_002_000_005);
+    }
+
+    #[test]
+    fn partition_without_packets_has_no_time_range() {
+        let sub = ParseSubscription::tables_full(["frames"]).unwrap();
+        let out = parse(&sub, 1000, &[], None);
+        assert_eq!((out.min_us, out.max_us), (i64::MAX, i64::MIN));
+        assert_eq!(out.packets, 0);
+        assert!(!out.capped);
+        assert!(out.batches["frames"].is_empty());
+    }
+
+    #[test]
+    fn partition_materializes_the_column_subset() {
+        let mut sub = ParseSubscription::default();
+        sub.subscribe_table(
+            "tcp",
+            TableSubscription {
+                columns: names(&["frame_number", "dst_port"]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let out = parse(&sub, 1000, &[tcp_frame(80)], None);
+        let tcp = &out.batches["tcp"];
+        assert_eq!(tcp.len(), 1);
+        let schema = tcp[0].schema();
+        assert_eq!(schema.fields().len(), 2);
+        assert!(schema.field_with_name("frame_number").is_ok());
+        assert!(schema.field_with_name("dst_port").is_ok());
+        assert_eq!(u16s(tcp, "dst_port"), [80]);
+    }
+
+    #[test]
+    fn partition_applies_the_parse_time_predicate() {
+        let (_, tcp) = Catalog::builtin().table("tcp").unwrap();
+        let (dst_port, _) = tcp.column("dst_port").unwrap();
+        let mut sub = ParseSubscription::default();
+        sub.subscribe_table(
+            "tcp",
+            TableSubscription {
+                predicate: Some(RowPredicate::cmp(dst_port, CmpOp::Eq, 443)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let frames = [
+            tcp_frame(80),
+            tcp_frame(443),
+            tcp_frame(8080),
+            tcp_frame(443),
+        ];
+        let out = parse(&sub, 1000, &frames, None);
+        assert_eq!(u64s(&out.batches["tcp"], "frame_number"), [2, 4]);
+    }
+
+    /// A row cap on every table stops the partition at the frame that
+    /// reaches the last of them.
+    #[test]
+    fn row_caps_stop_the_partition() {
+        let mut sub = ParseSubscription::default();
+        sub.subscribe_table(
+            "frames",
+            TableSubscription {
+                fetch: Some(2),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let frames: Vec<Vec<u8>> = (0..5).map(|_| tcp_frame(80)).collect();
+        let out = parse(&sub, 1000, &frames, None);
+        assert_eq!(u64s(&out.batches["frames"], "frame_number"), [1, 2]);
+        assert!(out.capped);
+        assert_eq!(out.packets, 2);
+
+        // An uncapped table keeps the partition going to its end; the
+        // capped one still stops at its cap.
+        sub.subscribe_table("tcp", TableSubscription::default())
+            .unwrap();
+        let out = parse(&sub, 1000, &frames, None);
+        assert_eq!(rows(&out.batches["frames"]), 2);
+        assert_eq!(rows(&out.batches["tcp"]), 5);
+        assert!(!out.capped);
+        assert_eq!(out.packets, 5);
+    }
+
+    #[test]
+    fn batch_size_triggers_intermediate_batches() {
+        let sub = ParseSubscription::tables_full(["frames"]).unwrap();
+        let frames: Vec<Vec<u8>> = (0..5).map(|_| tcp_frame(80)).collect();
+        let out = parse(&sub, 2, &frames, None);
+        // 5 rows at batch size 2 -> 2 full batches + 1 partial.
+        let sizes: Vec<usize> = out.batches["frames"].iter().map(|b| b.num_rows()).collect();
+        assert_eq!(sizes, [2, 2, 1]);
+        assert_eq!(
+            u64s(&out.batches["frames"], "frame_number"),
+            [1, 2, 3, 4, 5]
+        );
+    }
+
+    /// A frame with several rows in one table (a tunnel) may straddle a
+    /// batch boundary: no batch exceeds the batch size, and every row is
+    /// there once, in order.
+    #[test]
+    fn multi_row_frames_split_across_batches() {
+        let sub = ParseSubscription::tables_full(["frames", "udp"]).unwrap();
+        // 1, 2 or 3 udp layers per frame; the outermost first.
+        let mut frames = Vec::new();
+        let mut expected = Vec::new();
+        for frame in 1..=7u16 {
+            let mut data = udp_frame(1000 * frame, 9999, &[]);
+            let mut ports = vec![1000 * frame];
+            for depth in 1..=(frame % 3) {
+                data = vxlan(1000 * frame + depth, &data);
+                ports.insert(0, 1000 * frame + depth);
+            }
+            expected.extend(ports.into_iter().map(|port| (u64::from(frame), port)));
+            frames.push(data);
+        }
+        assert_eq!(expected.len(), 7 + 3 + 2 * 2);
+        for batch_size in [1, 2, 3, 4, 100] {
+            let out = parse(&sub, batch_size, &frames, None);
+            let udp = &out.batches["udp"];
+            assert!(
+                udp.iter().all(|b| b.num_rows() <= batch_size),
+                "batch size {batch_size}"
+            );
+            let got: Vec<(u64, u16)> = u64s(udp, "frame_number")
+                .into_iter()
+                .zip(u16s(udp, "src_port"))
+                .collect();
+            assert_eq!(got, expected, "batch size {batch_size}");
+            assert_eq!(rows(&out.batches["frames"]), 7);
+            assert_eq!(out.packets, 7);
+        }
+    }
+
+    /// Progress is reported per chunk of 1024 packets with the running
+    /// total, however often a batch is handed on in between, and once more
+    /// when the reader has nothing left.
+    #[test]
+    fn progress_is_reported_per_chunk() {
+        let sub = ParseSubscription::tables_full(["frames", "udp"]).unwrap();
+        let frames: Vec<Vec<u8>> = (0..2500).map(|_| udp_frame(1, 2, &[])).collect();
+        for batch_size in [7, 100, 1024, 10_000] {
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let callback: ProgressFn = {
+                let seen = Arc::clone(&seen);
+                Arc::new(move |total| seen.lock().unwrap().push(total))
+            };
+            let counter = AtomicU64::new(0);
+            let out = parse(&sub, batch_size, &frames, Some((&counter, &callback)));
+            assert_eq!(out.packets, 2500);
+            assert_eq!(
+                *seen.lock().unwrap(),
+                [1024, 2048, 2500, 2500],
+                "batch size {batch_size}"
+            );
+            assert_eq!(rows(&out.batches["udp"]), 2500);
+        }
+    }
+
+    /// A fused join is built alongside the routed tables, from the same
+    /// frames, each frame once; its row cap ends the partition when nothing
+    /// else wants frames.
+    #[test]
+    fn fused_joins_are_fed_once_per_frame() {
+        let frames: Vec<Vec<u8>> = (0..10).map(|i| tcp_frame(80 + i)).collect();
+        let mut spec = fused("fused_a");
+        spec.fetch = None;
+        let mut sub = ParseSubscription::tables_full(["tcp"]).unwrap();
+        sub.subscribe_fused(spec).unwrap();
+        // `tcp` batches of one row: every frame is handed on mid-chunk.
+        for batch_size in [1, 3, 100] {
+            let out = parse(&sub, batch_size, &frames, None);
+            let joined = &out.batches["fused_a"];
+            assert_eq!(
+                u64s(joined, "f__frame_number"),
+                (1..=10).collect::<Vec<u64>>()
+            );
+            assert_eq!(
+                u16s(joined, "tcp__dst_port"),
+                (80..90).collect::<Vec<u16>>()
+            );
+            assert_eq!(rows(&out.batches["tcp"]), 10);
+            assert!(!out.capped);
+        }
+
+        // Capped at 4 rows and alone: the partition is cut short.
+        let mut sub = ParseSubscription::default();
+        sub.subscribe_fused(fused("fused_a")).unwrap();
+        let out = parse(&sub, 100, &frames, None);
+        assert_eq!(
+            u64s(&out.batches["fused_a"], "f__frame_number"),
+            [1, 2, 3, 4]
+        );
+        assert!(out.capped);
     }
 }

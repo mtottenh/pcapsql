@@ -104,6 +104,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   own tests (every kind with and without NULL, lists, empty and
   NUL-containing strings, `Full` exactly at capacity, reuse after a drain,
   outputs without columns).
+- **`pcapsql-core`: the scan driver.** `scan::PartitionScan` reads one
+  partition of a `CompiledScan` (a whole capture, or one range of it) step
+  by step: `step(sinks, max_packets)` reads packets, parses them with the
+  plan's scope and routes their rows, and returns when the caller has
+  something to do (`scan::Step`): `Flush(output)` when an output's sink is
+  full or the output reached its row cap, `More` after `max_packets`,
+  `Done` when every output is capped or closed (the rest of the partition
+  is not read), `End` at the end of the partition. The scan resumes where
+  it stopped, so an engine that pushes batches to its consumer loops over
+  `step`, and one whose consumer pulls a fixed-size chunk calls it once per
+  chunk. Whatever the size of the sinks, no sink is written to beyond its
+  capacity and no row is lost or written twice; a frame whose rows did not
+  all fit is shown again by the reader (`Pause::Before`) and may have more
+  rows than a sink holds. `ScanStats` counts the packets consumed, their
+  timestamp range and the rows written per output. A `scan::FrameObserver`
+  (a type parameter, `NoObserver` by default) is shown every frame exactly
+  once, parsed, before its rows are routed: the hook for what a frontend
+  still builds itself (fused joins, stream reassembly).
+- **`pcapsql-core`: partition planning.** `scan::partition_target` decides
+  how many partitions a capture is worth from what a seek costs
+  (`SeekCost`), its size, a requested count and the available parallelism,
+  with the thresholds of `scan::PartitionPolicy` (1 MiB for a memory map
+  left to itself, 4 MiB for a local file, 16 MiB for a remote object).
+  `scan::PartitionQueue` hands the partitions of a scan out to any number
+  of workers, each exactly once and in capture order, with its ordinal.
 
 ### Changed
 
@@ -176,6 +201,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `col_kind_to_arrow_type`.
   - Fused joins (`FusedBatchBuilder`) still build their own columns, with
     the same conversion rules as the tables.
+- **`pcapsql-datafusion`: a parse pass runs on the core scan driver.** Each
+  partition of a pass, materialized or streamed, is a `scan::PartitionScan`
+  that the engine steps, delivering a table's batch when the scan hands it
+  out. Query results are unchanged, and so are progress reporting (per 1024
+  packets), read timeouts, cancellation, the time-based flush of a
+  continuous engine and the delivery rules of the exchange. What differs:
+  - A partition whose tables have all reached their row cap (a pushed-down
+    `LIMIT`), or lost their consumers, now stops at the frame that reached
+    the last cap. Before, it read on to the end of the current chunk of
+    1024 packets. `--stats` therefore reports fewer packets scanned for
+    such a query, and on a live stream the producer no longer waits for
+    packets nobody wants.
+  - `NormalizedBatchSet` is reduced to what is specific to DataFusion:
+    delivery (`deliver`), the fused joins and the stream subscriber, which
+    it feeds as the scan's `FrameObserver`. `new` and `new_streaming` also
+    return the `ArrowSink`s the scan writes to, and `finish` /
+    `finish_streaming` take them back. `add_packet_from_ref`,
+    `flush_partial`, `all_capped` and `row_count` are gone (the scan's
+    `step`, `output_done` and `ScanStats` replace them; `rows_built` gives
+    the rows per table).
+  - `CompiledSubscription::shared_scan` gives the compiled plan as an
+    `Arc`.
+  - The partition count comes from `scan::partition_target`, with the same
+    decisions as before; `auto_target_partitions` is unchanged.
 
 ### Fixed
 
