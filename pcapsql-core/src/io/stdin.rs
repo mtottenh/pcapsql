@@ -153,6 +153,8 @@ struct ReadTimeout {
 }
 
 impl ReadTimeout {
+    // Only a descriptor-backed source has one (`StdinPacketSource::from_fd_reader`).
+    #[cfg(unix)]
     fn new() -> Self {
         Self {
             millis: AtomicI64::new(-1),

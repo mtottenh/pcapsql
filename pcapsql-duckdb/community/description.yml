@@ -5,7 +5,7 @@ extension:
   language: Rust
   build: cargo
   license: MIT
-  excluded_platforms: "windows_amd64;windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads"
+  excluded_platforms: "windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads"
   requires_toolchains: "rust;python3"
   maintainers:
     - mtottenh

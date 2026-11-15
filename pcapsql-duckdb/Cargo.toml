@@ -22,7 +22,9 @@ loadable = ["duckdb-neo/build-extension"]
 static = ["duckdb-neo/build-extension-static"]
 
 [dependencies]
-pcapsql-core = { path = "../pcapsql-core" }
+# Not core's defaults: they include `mmap`, and the extension opens every file through DuckDB's
+# file system (`make check_no_std_fs`). gzip and zstd are the compressed captures it reads.
+pcapsql-core = { path = "../pcapsql-core", default-features = false, features = ["compress-gzip", "compress-zstd"] }
 
 # Pinned exactly: every V2 function is unstable, so a build only loads in the DuckDB release this
 # version targets (2.0.0). Bump together with TARGET_DUCKDB_VERSION in the Makefile.

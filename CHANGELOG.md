@@ -289,8 +289,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`pcapsql-duckdb-extension-<tag>-duckdb-<DuckDB version>-<platform>.tar.gz`)
   with a checksum file. `pcapsql-duckdb/community/description.yml` is the
   descriptor for `INSTALL pcapsql FROM community`; it has not been
-  submitted. Windows is not built: `pcapsql-core` does not compile there.
-  WebAssembly is not built either.
+  submitted. `windows_amd64` is in the build matrix too, but has not run on
+  a Windows runner. WebAssembly is not built.
 - **DuckDB extension: documentation.** A function reference,
   `docs/duckdb-extension-reference.md`, which `make check_reference_release`
   compares with what the built artifact registers in DuckDB; a section in the
@@ -345,6 +345,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`pcapsql-core` builds for Windows.** Its manifest listed most
+  dependencies under `[target.'cfg(unix)'.dependencies]` by accident, and
+  depended on the Unix-only `netlink-packet-route` without using it. Checked
+  by cross-compiling for `x86_64-pc-windows-gnu`; the read timeout and
+  cancellation of a stdin source remain Unix-only. The DuckDB extension is
+  built for `windows_amd64` as a result.
+- **Minimum Rust versions are declared.** `pcapsql-core` needs Rust 1.87
+  (`is_multiple_of`), `pcapsql-datafusion` 1.88 (DataFusion 51) and
+  `pcapsql-testgen` 1.73; the DuckDB crates already declared 1.88. Cargo
+  now refuses an older compiler with that message instead of a compile error.
+- **Unused dependencies removed**: `anyhow`, `netlink-packet-route` and
+  `netlink-packet-utils` from `pcapsql-core`; `serde`, `bytes`,
+  `datafusion-catalog` and `datafusion-datasource` from `pcapsql-datafusion`.
 - **DuckDB extension: the message of a truncated capture** names the last
   complete frame and no longer counts the bytes after it: the scan now takes
   the truncation from the packet reader (`PacketReader::truncated`) instead

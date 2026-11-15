@@ -12,10 +12,10 @@ name: DuckDB extension distribution
 # pcapsql-duckdb/scripts/check-pins.sh fails when they drift, and
 # docs/duckdb-upgrade-runbook.md says how to move them.
 #
-# Platforms: linux_amd64, linux_arm64, osx_arm64. Not built, and excluded in
+# Platforms: linux_amd64, linux_arm64, osx_arm64, windows_amd64. Not built, and excluded in
 # pcapsql-duckdb/community/description.yml too:
-#   - windows_amd64 and windows_amd64_mingw: pcapsql-core does not compile for Windows (its
-#     netlink parser depends on a Unix-only crate).
+#   - windows_amd64_mingw: the crates compile and link for x86_64-pc-windows-gnu, but
+#     extension-ci-tools skips the SQL tests on that platform, so nothing would test the artifact.
 #   - wasm_mvp, wasm_eh, wasm_threads: not shown to build (roadmap section 10, U10).
 # The remaining platforms of extension-ci-tools/config/distribution_matrix.json are opt-in and
 # not opted into.
@@ -48,14 +48,16 @@ jobs:
       ci_tools_version: c286b12cee2aa16b714e76d0b46e530fcdb6dc05
       build_directory: pcapsql-duckdb
       extra_toolchains: rust;python3
-      exclude_archs: windows_amd64;windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads
+      exclude_archs: windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads
       # `auto` would leave out linux_arm64 and osx_arm64 for some events.
       reduced_ci_mode: disabled
 
-  # The reusable workflow runs the SQL tests on osx_arm64 only (its makefile skips them for
-  # linux_amd64, its script for linux_arm64), and never starts the DuckDB shell. This job takes
-  # each artifact as it was uploaded and runs both: test/sql in DuckDB's Python package, and
-  # scripts/load-test.sh in the release's command-line shell.
+  # The reusable workflow runs the SQL tests on osx_arm64 and windows_amd64 only (its makefile
+  # skips them for linux_amd64, its script for linux_arm64), and never starts the DuckDB shell.
+  # This job takes each artifact as it was uploaded and runs both: test/sql in DuckDB's Python
+  # package, and scripts/load-test.sh in the release's command-line shell. windows_amd64 is not in
+  # its matrix: scripts/fetch-duckdb.sh knows no Windows archive of the DuckDB release, so that
+  # artifact is tested by the reusable workflow's `make test_release` alone.
   verify:
     name: Load ${{ matrix.duckdb_arch }} in DuckDB
     needs: build

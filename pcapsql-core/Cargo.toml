@@ -2,6 +2,7 @@
 name = "pcapsql-core"
 version.workspace = true
 edition.workspace = true
+rust-version = "1.87"
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -57,11 +58,6 @@ tokio = { workspace = true, optional = true }
 
 # Error handling
 thiserror.workspace = true
-anyhow.workspace = true
-
-[target.'cfg(unix)'.dependencies]
-# poll(2) on the stdin fd: timed reads for a continuous engine's flush cadence
-libc = "0.2"
 
 # Logging
 tracing.workspace = true
@@ -87,11 +83,14 @@ hpack.workspace = true
 
 # Netlink protocol parsing
 netlink-packet-core.workspace = true
-netlink-packet-route.workspace = true
-netlink-packet-utils.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
 hex.workspace = true
 proptest.workspace = true
 pcapsql-testgen.workspace = true
+
+# Keep this table last: every dependency written below a target table belongs to it.
+[target.'cfg(unix)'.dependencies]
+# poll(2) on the stdin fd: timed reads for a continuous engine's flush cadence
+libc = "0.2"

@@ -379,21 +379,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "netlink-packet-route"
-version = "0.21.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "483325d4bfef65699214858f097d504eb812c38ce7077d165f301ec406c3066e"
-dependencies = [
- "anyhow",
- "bitflags",
- "byteorder",
- "libc",
- "log 0.4.34",
- "netlink-packet-core",
- "netlink-packet-utils",
-]
-
-[[package]]
 name = "netlink-packet-utils"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -495,7 +480,6 @@ dependencies = [
 name = "pcapsql-core"
 version = "0.4.2"
 dependencies = [
- "anyhow",
  "bytes",
  "compact_str",
  "etherparse",
@@ -506,8 +490,6 @@ dependencies = [
  "md5",
  "memmap2",
  "netlink-packet-core",
- "netlink-packet-route",
- "netlink-packet-utils",
  "nom 7.1.3",
  "pcap-parser",
  "ring",

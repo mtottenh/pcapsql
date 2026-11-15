@@ -53,7 +53,7 @@ yay -S pcapsql
 
 ### Build from Source
 
-Requires Rust 1.70+:
+Requires Rust 1.88 or later:
 
 ```bash
 cargo install --git https://github.com/mtottenh/pcapsql pcapsql-datafusion

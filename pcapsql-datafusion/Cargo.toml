@@ -2,6 +2,7 @@
 name = "pcapsql-datafusion"
 version.workspace = true
 edition.workspace = true
+rust-version = "1.88"
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -39,8 +40,6 @@ pcapsql-core = { version = "0.4.2", path = "../pcapsql-core" }
 # DataFusion ecosystem
 arrow.workspace = true
 datafusion.workspace = true
-datafusion-catalog.workspace = true
-datafusion-datasource.workspace = true
 parquet.workspace = true
 tokio.workspace = true
 futures.workspace = true
@@ -56,14 +55,10 @@ dirs.workspace = true
 
 # Shared
 anyhow.workspace = true
-serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-
-# Needed for bytes in streaming
-bytes.workspace = true
 
 # HdrHistogram for latency analysis
 hdrhistogram.workspace = true

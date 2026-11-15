@@ -82,7 +82,7 @@ duckdb -unsigned -c "LOAD '$PWD/build/release/pcapsql.duckdb_extension'; SELECT 
 | Workflow | When | What |
 |---|---|---|
 | `duckdb.yml` | Every push and pull request | Builds for `linux_amd64` on the runner; SQL tests, load test, reference check, `itest`, the containment and pin checks |
-| `duckdb-dist.yml` | Pushes to `main` that touch the extension; called by `release.yml` | Builds `linux_amd64`, `linux_arm64` and `osx_arm64` with the reusable workflow of `extension-ci-tools` (Linux in its manylinux containers), then runs the SQL tests and the load test against each uploaded artifact on a runner of its platform |
+| `duckdb-dist.yml` | Pushes to `main` that touch the extension; called by `release.yml` | Builds `linux_amd64`, `linux_arm64`, `osx_arm64` and `windows_amd64` with the reusable workflow of `extension-ci-tools` (Linux in its manylinux containers), then runs the SQL tests and the load test against each uploaded Linux and macOS artifact on a runner of its platform |
 | `release.yml` | A `v*` tag | Calls `duckdb-dist.yml` and attaches `pcapsql-duckdb-extension-<tag>-duckdb-<DuckDB version>-<platform>.tar.gz` for each platform, and a `SHA256SUMS` file, to the GitHub release |
 | `duckdb-canary.yml` | Weekly, and by hand | `scripts/canary.sh` against the newest `duckdb-neo` on crates.io and against `duckdb-rs` main |
 
@@ -93,12 +93,17 @@ reusable workflow, at the commit the submodule is at, with
 
 Platforms that are not built:
 
-- **Windows.** `pcapsql-core` does not compile for Windows: its netlink
-  parser uses `netlink-packet-route`, which is Unix-only, and its manifest
-  lists most dependencies under `[target.'cfg(unix)'.dependencies]`.
 - **WebAssembly.** Not shown to build; see U10 in the roadmap.
-- `osx_amd64` and the musl and MinGW variants are opt-in platforms of
+- **`windows_amd64_mingw`.** The crates compile and link for
+  `x86_64-pc-windows-gnu`, but `extension-ci-tools` skips the SQL tests on
+  that platform, so nothing would test the artifact.
+- `osx_amd64` and the musl variants are opt-in platforms of
   `extension-ci-tools` and are not opted into.
+
+`windows_amd64` is built since `pcapsql-core` compiles for Windows (U13 in
+the roadmap). That was checked by cross-compiling; the workflow has not run
+on a Windows runner yet, and the load-test job does not cover the platform
+(`scripts/fetch-duckdb.sh` knows no Windows archive).
 
 ## Usage
 

@@ -41,8 +41,6 @@ tracing = "0.1"
 # DataFusion dependencies (used by pcapsql-datafusion)
 arrow = "57"
 datafusion = "51"
-datafusion-catalog = "51"
-datafusion-datasource = "51"
 parquet = "57"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signal"] }
 futures = "0.3"
@@ -57,7 +55,6 @@ dirs = "5"
 
 # Shared
 anyhow = "1.0"
-serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 parking_lot = "0.12"
@@ -94,8 +91,6 @@ hpack = { package = "hpack-patched", version = "0.3" }
 
 # Netlink protocol parsing
 netlink-packet-core = "0.7"
-netlink-packet-route = "0.21"
-netlink-packet-utils = "0.5"
 
 # SQLite database support
 rusqlite = { version = "0.31", features = ["bundled"] }
