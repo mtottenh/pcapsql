@@ -85,16 +85,5 @@ impl From<arrow::error::ArrowError> for Error {
     }
 }
 
-// Allow conversion from our Error to pcapsql_core Error for ? operator
-impl From<Error> for pcapsql_core::Error {
-    fn from(err: Error) -> Self {
-        match err {
-            Error::Core(e) => e,
-            Error::Query(e) => pcapsql_core::Error::Io(std::io::Error::other(e.to_string())),
-            Error::Io(e) => pcapsql_core::Error::Io(e),
-        }
-    }
-}
-
 /// Result type alias using our Error type.
 pub type Result<T> = std::result::Result<T, Error>;
