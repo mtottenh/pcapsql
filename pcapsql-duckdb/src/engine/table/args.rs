@@ -10,7 +10,7 @@ use duckdb_neo::{
     Result,
 };
 
-use super::{PcapScan, FILENAME};
+use super::{PcapScan, FILENAME, KEYLOG};
 use crate::engine::{
     fs,
     relation::{self, Relation},
@@ -25,23 +25,27 @@ pub(super) struct ArgumentPositions {
     pub(super) protocol: Option<usize>,
     pub(super) strict: usize,
     pub(super) filename: usize,
+    /// `keylog`, on the functions that take it ([`PcapScan::takes_keylog`]).
+    pub(super) keylog: Option<usize>,
 }
 
 impl PcapScan {
     const FILE: usize = 0;
 
+    /// Whether the function has the `keylog` parameter: the functions that can read a stream
+    /// table, which are those of the stream tables and `read_pcap`.
+    pub(super) fn takes_keylog(&self) -> bool {
+        self.relation.is_none_or(Relation::is_stream)
+    }
+
     pub(super) fn positions(&self) -> ArgumentPositions {
-        match self.relation {
-            Some(_) => ArgumentPositions {
-                protocol: None,
-                strict: 1,
-                filename: 2,
-            },
-            None => ArgumentPositions {
-                protocol: Some(1),
-                strict: 2,
-                filename: 3,
-            },
+        let protocol = self.relation.is_none().then_some(Self::FILE + 1);
+        let strict = protocol.unwrap_or(Self::FILE) + 1;
+        ArgumentPositions {
+            protocol,
+            strict,
+            filename: strict + 1,
+            keylog: self.takes_keylog().then_some(strict + 2),
         }
     }
 
@@ -53,7 +57,7 @@ impl PcapScan {
                     .kind(FunctionParameterKind::Named),
             );
         }
-        signature
+        signature = signature
             .param(
                 FunctionParameter::with_default::<bool>("strict", false)
                     .kind(FunctionParameterKind::Named),
@@ -61,7 +65,17 @@ impl PcapScan {
             .param(
                 FunctionParameter::with_default::<bool>(FILENAME, false)
                     .kind(FunctionParameterKind::Named),
-            )
+            );
+        if self.takes_keylog() {
+            // NULL when the call does not give it: the setting then decides
+            // (`table::keylog`).
+            signature = signature.param(
+                FunctionParameter::new::<String>(KEYLOG)
+                    .default_value(None::<String>)
+                    .kind(FunctionParameterKind::Named),
+            );
+        }
+        signature
     }
 
     /// The entries of the one positional argument: the path or pattern, or those of the list,

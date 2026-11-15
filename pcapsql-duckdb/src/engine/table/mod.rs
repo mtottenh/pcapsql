@@ -1,9 +1,10 @@
 //! The scan table functions: `read_pcap(files, protocol := 'frames')`, one
-//! `read_<table>(files)` per table of the catalogue this engine reads, and one
-//! `read_<proto>_packets(files)` per `*_packets` view of the shared scan layer.
+//! `read_<table>(files)` per table of the catalogue (the four stream tables among them), and
+//! one `read_<proto>_packets(files)` per `*_packets` view of the shared scan layer.
 //!
 //! ```sql
 //! SELECT * FROM read_tcp('capture.pcap') WHERE dst_port = 443;
+//! SELECT sni, is_decrypted FROM read_tls_sessions('capture.pcap', keylog := 'keys.log');
 //! SELECT * FROM read_pcap('capture.pcapng.gz', protocol := 'dns');
 //! SELECT count(*) FROM read_frames('capture.pcap', strict := true);
 //! SELECT filename, count(*) FROM read_dns(['monday/*.pcap', 'tuesday.pcapng.gz'], filename := true)
@@ -21,7 +22,7 @@
 //!
 //! | Callback | Work | State |
 //! |---|---|---|
-//! | `bind` | Resolve the table or view, declare its columns, expand the files argument through DuckDB's file system, open and probe every file, estimate the row count | [`BindData`]: the files, table, `strict`, `filename`, and the predicate `pushdown_filter` fills in |
+//! | `bind` | Resolve the table or view, declare its columns, expand the files argument through DuckDB's file system, open and probe every file, read the key log of a stream table, estimate the row count | [`BindData`]: the files, table, `strict`, `filename`, the key log, and the predicate `pushdown_filter` fills in |
 //! | `pushdown_filter` | Read what the filters say about `frame_number` and `timestamp` as a `FramePredicate` (`engine::pushdown`), accepting none | The predicate, in [`BindData`] |
 //! | `init_global_state` | Map the projected columns and the predicate to a `ScanPlan` (a table scan, or a view's fused scan) and compile it; decide the partitions of every file, which for a capture worth splitting takes one pass over it, and leave out those the predicate rules out | [`Shared`]: the compiled plan, the partition queue over all files and the indexes it was cut from, the progress counter |
 //! | `max_threads` | The number of partitions | |
@@ -35,7 +36,8 @@
 //!
 //! The captures are the only positional argument, declared `ANY` because it is a `VARCHAR` or a
 //! list of them. Everything else is a named parameter: `strict` and `filename` on every
-//! function, and `protocol` on `read_pcap`.
+//! function, `protocol` on `read_pcap`, and `keylog` on `read_pcap` and the functions of the
+//! stream tables (the `keylog` module).
 //!
 //! # Files
 //!
@@ -88,6 +90,43 @@
 //! worker claims the next one in `claim_batch`, scans it to its end and claims again; DuckDB
 //! runs up to as many workers as there are partitions. Work is therefore spread across files
 //! and within a large one alike: eight small captures are read by eight workers, one each.
+//!
+//! # Stream tables
+//!
+//! `tcp_connections`, `tls_sessions`, `http_messages` and `http2` are not rows of a frame. The
+//! scan layer reassembles the TCP streams of a capture while it reads it, and the tables are
+//! what that holds when the capture ends (`pcapsql_core::scan`, `ScanPlan::streams`). The
+//! functions of these tables are the same implementation as the others, and differ where the
+//! scan layer does:
+//!
+//! - **One partition per file, always.** Reassembly needs the frames of a capture in order
+//!   from the first (`CompiledScan::requires_single_partition`), so a capture is never split,
+//!   whatever its size and the settings. Several files are still several partitions, read by
+//!   as many workers.
+//! - **A file is a scan of its own.** Connections are numbered within a capture, so
+//!   `connection_id` starts again in each file, as `frame_number` does: across the files of a
+//!   call a connection is its `connection_id` and its file (`filename := true`). A
+//!   connection whose packets are in two files is two connections.
+//! - **No frame predicate.** Every frame goes into reassembly, and a plan with a stream table
+//!   compiles with no other predicate. None arises: no column of a stream table is the
+//!   frame's own (its `frame_number` is where the row begins or was complete, a value like
+//!   any other), so [`engine::pushdown`](super::pushdown) finds nothing to use among the
+//!   filters DuckDB offers, and DuckDB applies them all to the rows.
+//! - **The rows come at the end.** `PartitionScan::step` reports `More` without a row for as
+//!   long as it reads the capture, then the rows. `exec` steps until its chunk is full or the
+//!   partition ends and never returns a chunk without rows before that, so the first `exec`
+//!   of a partition lasts as long as the read of its file. A callback cannot ask whether the
+//!   query was interrupted, and DuckDB looks when a chunk with rows comes back: a query is
+//!   cancelled once the file that is being read has been read. Returning to DuckDB during
+//!   the read was tried and gains nothing: a chunk without rows makes it claim and call
+//!   again without looking (DuckDB 2.0.0; a 16 s read interrupted after 1.6 s ended after
+//!   17 s either way). The same holds for a packet table over a capture that has no row of
+//!   it. A `LIMIT` saves writing rows, not reading: the capture is read to its end first.
+//! - **`strict` and truncation** are as for any scan of one partition: the capture is read
+//!   to its end, so a truncated one is always found, and with `strict := true` the query
+//!   fails with no row returned.
+//! - **A key log** decrypts TLS (the `keylog` module): `tls_sessions.is_decrypted`, and the
+//!   rows of `http2`, which without one has none.
 //!
 //! # Filters
 //!
@@ -169,6 +208,7 @@
 //! partition under a `LIMIT` that ends before the tail returns its rows.
 
 mod args;
+mod keylog;
 mod layout;
 mod reader;
 mod report;
@@ -198,7 +238,8 @@ use pcapsql_core::io::{BoundaryIndex, PacketReader};
 use pcapsql_core::scan::{Catalog, CompiledScan, OutColumn, PartitionQueue, Step};
 use pcapsql_core::{default_registry, ProtocolRegistry};
 
-use self::layout::estimated_rows;
+use self::keylog::Keys;
+use self::layout::{estimated_rows, Layout};
 use self::reader::Scanning;
 use super::{
     fs::DuckFile,
@@ -213,6 +254,9 @@ use super::{
 /// The column `filename := true` adds. No table of the catalogue has a column of this name
 /// (a unit test below says so).
 const FILENAME: &str = "filename";
+
+/// The parameter that names a TLS key log (see the `keylog` module).
+const KEYLOG: &str = "keylog";
 
 /// The log type of the records this module writes to DuckDB's log.
 const LOG_TYPE: &str = "pcapsql";
@@ -300,6 +344,9 @@ struct BindData {
     /// asked for it.
     filename: Option<usize>,
     strict: bool,
+    /// The key log a scan of a stream table decrypts TLS with, if the call or the setting
+    /// names one.
+    keylog: Option<Keys>,
     /// What the filters DuckDB offered the scan say about the frames to read, as one
     /// predicate.
     pushed: Pushed,
@@ -387,6 +434,7 @@ impl TableFunctionCallbacks for PcapScan {
         let positions = self.positions();
         let strict: bool = self.named(&arguments, positions.strict, "strict")?;
         let filename: bool = self.named(&arguments, positions.filename, FILENAME)?;
+        let keylog = self.keylog(context, &arguments, relation)?;
 
         // Where the two columns a pushed-down filter can be about are declared. In a view they
         // are the frame's own, so a filter on them says which frames to read, as for a table.
@@ -436,6 +484,7 @@ impl TableFunctionCallbacks for PcapScan {
             columns,
             filename,
             strict,
+            keylog,
             pushed: Pushed::new(frame_number, timestamp),
         })
     }
@@ -465,14 +514,18 @@ impl TableFunctionCallbacks for PcapScan {
         let (mut ranges, mut owners) = (Vec::new(), Vec::new());
         let mut files = Vec::with_capacity(bound.files.len());
         for (number, path) in bound.files.iter().enumerate() {
-            let layout = self.layout(context, &settings, path, bound.strict, &frames)?;
+            let layout = if plan.requires_single_partition() {
+                Layout::in_order()
+            } else {
+                self.layout(context, &settings, path, bound.strict, &frames)?
+            };
             // What the scan will do, for whoever asks DuckDB's log (`enable_logging`) why a
             // query is slow. As for the truncation warning, the log is not worth failing a
             // query for.
             let _ = Log::log_on_context(
                 context,
                 LogLevel::Debug,
-                &self.describe(path, &plan, &layout),
+                &self.describe(path, &plan, &layout, bound.keylog.as_ref()),
                 LOG_TYPE,
             );
             owners.resize(owners.len() + layout.ranges.len(), number);
@@ -564,6 +617,9 @@ impl TableFunctionCallbacks for PcapScan {
                 // The chunk is full: it goes back to DuckDB before the scan is stepped again.
                 Step::Flush(_) => break,
                 Step::More => {
+                    // Without rows the scan goes on, however long: a stream table has none
+                    // before its capture is read, and a chunk without rows would not give
+                    // DuckDB a chance to cancel the query (see the module documentation).
                     let read = scan.stats().packets - before;
                     if writer.rows() > 0 && read >= PACKETS_PER_CHUNK as u64 {
                         break;

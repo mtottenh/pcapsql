@@ -568,7 +568,7 @@ fn a_damaged_capture_fails_the_query_instead_of_ending_it() -> Result<()> {
     assert!(rows(&connection, "SELECT * FROM damaged").is_err());
     assert_eq!(
         value(&connection, "SELECT count(*) FROM pcap_protocols()")?,
-        "28"
+        "32"
     );
     Ok(())
 }

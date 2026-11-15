@@ -222,7 +222,7 @@ fn assert_usable(connection: &Connection) {
     assert_eq!(value(connection, "SELECT 42").unwrap(), "42");
     assert_eq!(
         value(connection, "SELECT count(*) FROM pcap_protocols()").unwrap(),
-        "28"
+        "32"
     );
     assert_eq!(
         value(connection, "SELECT ip4_to_string(ip4('10.0.0.1'))").unwrap(),

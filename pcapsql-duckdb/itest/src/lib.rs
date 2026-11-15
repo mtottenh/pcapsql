@@ -12,9 +12,9 @@
 //! [`replay`] holds `chunk_rows`, the test-only table function that drives the extension's
 //! `ChunkWriter` from a list of rows, for the tests of the writer. [`golden`] holds the captures
 //! and queries of the DataFusion frontend's golden corpus and the frame builders they are made
-//! with. [`Fixture`] writes captures to files, and [`reference_rows`] and
-//! [`reference_view_rows`] read a capture with the shared scan layer alone, which is what a scan
-//! function must return.
+//! with. [`Fixture`] writes captures to files, and [`reference_rows`] (with a key log,
+//! [`reference_rows_decrypted`]) and [`reference_view_rows`] read a capture with the shared scan
+//! layer alone, which is what a scan function must return.
 
 pub mod golden;
 pub mod replay;
@@ -35,6 +35,7 @@ use pcapsql_core::scan::{
     testing::{Cell, RecordingSink},
     Catalog, OutColumn, PacketsView, PartitionScan, ScanPlan, Step, TableScan, TimestampUnit,
 };
+use pcapsql_core::KeyLog;
 
 /// A directory of capture files that is removed when the value is dropped.
 #[derive(Debug)]
@@ -70,19 +71,42 @@ impl Fixture {
 /// The rows of `table` in the capture `bytes`, every column the extension exposes, as the
 /// shared scan layer produces them without DuckDB: core's driver over an in-memory reader into
 /// a recording sink that never fills. Timestamps are in nanoseconds, as in the extension.
+///
+/// A stream table is read without a key log: see [`reference_rows_decrypted`].
 pub fn reference_rows(bytes: &[u8], table: &str) -> (Vec<OutColumn>, Vec<Vec<Cell>>) {
+    reference(bytes, table_plan(table), None)
+}
+
+/// [`reference_rows`] of a stream table, with TLS decrypted by the key log `keylog` (the
+/// text of the file).
+pub fn reference_rows_decrypted(
+    bytes: &[u8],
+    table: &str,
+    keylog: &str,
+) -> (Vec<OutColumn>, Vec<Vec<Cell>>) {
+    let keylog = KeyLog::parse(keylog).expect("the key log parses");
+    reference(bytes, table_plan(table), Some(&keylog))
+}
+
+/// The plan of a scan of every column of `table`: a table of the frames, or a stream table.
+fn table_plan(table: &str) -> ScanPlan {
     let catalog = Catalog::builtin();
     let (id, definition) = catalog.table(table).expect("the table is in the catalogue");
-    reference(
-        bytes,
+    let scan = vec![TableScan::new(
+        id,
+        definition.columns().map(|(column, _)| column).collect(),
+    )];
+    if definition.is_stream() {
         ScanPlan {
-            tables: vec![TableScan::new(
-                id,
-                definition.columns().map(|(column, _)| column).collect(),
-            )],
+            streams: scan,
             ..ScanPlan::default()
-        },
-    )
+        }
+    } else {
+        ScanPlan {
+            tables: scan,
+            ..ScanPlan::default()
+        }
+    }
 }
 
 /// The rows of the `*_packets` view `view` in the capture `bytes`, every column, as the shared
@@ -95,12 +119,17 @@ pub fn reference_view_rows(bytes: &[u8], view: &PacketsView) -> (Vec<OutColumn>,
             fused: vec![view.full_scan()],
             ..ScanPlan::default()
         },
+        None,
     )
 }
 
 /// The rows of the one output of `plan` over the capture `bytes`, with timestamps in
-/// nanoseconds.
-fn reference(bytes: &[u8], plan: ScanPlan) -> (Vec<OutColumn>, Vec<Vec<Cell>>) {
+/// nanoseconds and TLS decrypted with `keylog`.
+fn reference(
+    bytes: &[u8],
+    plan: ScanPlan,
+    keylog: Option<&KeyLog>,
+) -> (Vec<OutColumn>, Vec<Vec<Cell>>) {
     let registry = Arc::new(pcapsql_core::default_registry());
     let plan = ScanPlan {
         timestamps: TimestampUnit::Nanos,
@@ -114,6 +143,9 @@ fn reference(bytes: &[u8], plan: ScanPlan) -> (Vec<OutColumn>, Vec<Vec<Cell>>) {
     let (header, head) = StreamHeader::probe(&mut input).expect("the capture has a header");
     let reader = ReadPacketReader::sequential(input, &header, head).expect("the reader opens");
     let mut scan = PartitionScan::new(reader, Arc::new(plan), registry);
+    if let Some(keylog) = keylog {
+        scan = scan.with_keylog(keylog);
+    }
     let mut sinks = [RecordingSink::new(&columns, None)];
     loop {
         match scan.step(&mut sinks, 1000).expect("the capture reads") {

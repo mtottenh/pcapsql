@@ -19,13 +19,13 @@ query I
 SELECT count(*) FROM duckdb_functions()
 WHERE function_type = 'table' AND function_name IN (SELECT 'read_' || name FROM pcap_protocols());
 ----
-28
+32
 
 query TTT
 SELECT function_name, parameters, parameter_types FROM duckdb_functions()
 WHERE function_name IN ('read_pcap', 'read_tcp') ORDER BY function_name;
 ----
-read_pcap	[files, protocol, strict, filename]	[ANY, VARCHAR, BOOLEAN, BOOLEAN]
+read_pcap	[files, protocol, strict, filename, keylog]	[ANY, VARCHAR, BOOLEAN, BOOLEAN, VARCHAR]
 read_tcp	[files, strict, filename]	[ANY, BOOLEAN, BOOLEAN]
 
 # read_pcap reads frames unless a protocol is named
@@ -184,8 +184,8 @@ SELECT * FROM read_tcp('../fuzz/corpus/fuzz_pcap_reader/dns.cap', strict := NULL
 ----
 read_tcp: strict must be a constant and must not be NULL
 
-# The stream tables have no function yet
-statement error
-SELECT * FROM read_tcp_connections('../fuzz/corpus/fuzz_pcap_reader/dns.cap');
+# The stream tables have functions too (stream_tables.test); a capture without TCP has no row
+query I
+SELECT count(*) FROM read_tcp_connections('../fuzz/corpus/fuzz_pcap_reader/dns.cap');
 ----
-read_tcp_connections
+0

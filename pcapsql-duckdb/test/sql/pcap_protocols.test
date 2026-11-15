@@ -1,5 +1,5 @@
 # name: test/sql/pcap_protocols.test
-# description: pcap_protocols() lists the protocol tables of the extension
+# description: pcap_protocols() lists the tables of the extension
 # group: [pcapsql]
 
 statement error
@@ -17,11 +17,11 @@ description	VARCHAR
 field_count	UINTEGER
 kind	VARCHAR
 
-# frames and the 27 protocol tables of the shared catalogue
+# frames, the 27 protocol tables and the 4 stream tables of the shared catalogue
 query I
 SELECT count(*) FROM pcap_protocols();
 ----
-28
+32
 
 query TTIT
 SELECT name, description, field_count, kind FROM pcap_protocols() WHERE name = 'frames';
@@ -48,18 +48,22 @@ SELECT count(*) FROM pcap_protocols() WHERE field_count = 0 OR description = '';
 ----
 0
 
-# One frames table; every other table holds the layers of one protocol
+# One frames table; a table per protocol, which holds its layers; and the stream tables, which
+# are built from the reassembled TCP streams of a capture
 query TI
 SELECT kind, count(*) FROM pcap_protocols() GROUP BY kind ORDER BY kind;
 ----
 frames	1
 protocol	27
+stream	4
 
-# The stream tables of the catalogue are not read by the extension yet
-query I
-SELECT count(*) FROM pcap_protocols() WHERE name IN ('tcp_connections', 'tls_sessions', 'http_messages', 'http2');
+query TT
+SELECT name, description FROM pcap_protocols() WHERE kind = 'stream' ORDER BY name;
 ----
-0
+http2	HTTP/2 frames of decrypted TLS streams
+http_messages	HTTP/1.x messages of reassembled connections
+tcp_connections	Reassembled TCP connections
+tls_sessions	TLS sessions of reassembled connections
 
 # field_count is the number of columns pcap_schema() lists
 query II
@@ -82,4 +86,4 @@ pcap_protocols
 query I
 SELECT count(*) FROM pcap_protocols() a JOIN pcap_protocols() b USING (name);
 ----
-28
+32

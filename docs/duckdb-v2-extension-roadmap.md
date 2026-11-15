@@ -143,6 +143,7 @@ Notes:
 | `read_pcap(files, protocol := 'frames', ...)` | Generic entry; schema depends on `protocol` |
 | `read_<table>(files, ...)` for every protocol table in the catalogue | Generated from the catalogue at load, not a hand-kept list |
 | `read_<proto>_packets(files, ...)` for every view of `pcapsql_core::scan::views` (P8) | The DataFusion `*_packets` views, each one fused scan: one pass, no join. Generated from the view definitions at load |
+| `read_tcp_connections`, `read_tls_sessions`, `read_http_messages`, `read_http2` `(files, ..., keylog := NULL)` (P8) | The stream tables of the catalogue: one partition per file, no filter pushdown. `keylog` (also on `read_pcap`) names a TLS key log; without it the setting `pcapsql_keylog` does |
 | `pcap_protocols()`, `pcap_schema(protocol)` | Read the same catalogue the scans use. `pcap_schema` also takes a view |
 | `pcap_views()` (P8) | The views: `name`, `description`, `protocol`, `column_count`. Not rows of `pcap_protocols()`, whose result is unchanged |
 
@@ -194,8 +195,8 @@ counter. Type mapping from `ColKind` is in `engine/types.rs`; lists map to
 As built, the surface is listed in
 [`duckdb-extension-reference.md`](duckdb-extension-reference.md), which is
 checked against the artifact. It differs from this section in the settings:
-there are four (`pcapsql_parallel_scan`, `pcapsql_parallel_min_file_size`,
-`pcapsql_index_stride`, `pcapsql_filter_pushdown`) and no
+there are five (`pcapsql_parallel_scan`, `pcapsql_parallel_min_file_size`,
+`pcapsql_index_stride`, `pcapsql_filter_pushdown`, `pcapsql_keylog`) and no
 `pcapsql_index_cache_dir`, because there is no index cache (P4).
 
 ## 6. Scan architecture
@@ -344,7 +345,7 @@ of P1. P3 to P6 are independent of each other after P2 and can be reordered.
 | P5 Multi-file, replacement scan, remote | done except the remote exit check: lists, globs, `filename`, and `FROM 'x.pcap'`, with the partition queue spanning the files. The HTTP test is written and has not run: `make remote_test_release` (`scripts/remote-test.sh`) reads captures through `httpfs` from a local HTTP server that answers Range requests and compares them with the files, and `duckdb.yml` and the `verify` job of `duckdb-dist.yml` run it, failing if `httpfs` cannot be installed. `httpfs` could not be installed where it was written, so there only the server was tested (with curl) and the test takes its skip path; until the first GitHub run no `http://` capture has been read. No `s3://` capture has been read, no secret tried (U7), and remote buffer sizes are untuned |
 | P6 Filter pushdown | done, with two limits found on the way. DuckDB 2.0.0 hands two bounds on one column to the scan as a single `BETWEEN` node whose inclusivity the C API does not expose, so a range is used to narrow the read but not accepted: `EXPLAIN` still shows the filter for a time window. And `plan_ranges` keeps the last checkpoint window of an indexed capture unless an upper frame bound excludes it, so a time window never rules out a whole file |
 | P7 Distribution and documentation | done as far as it can be without running on GitHub or submitting anything. Workflows for `linux_amd64`, `linux_arm64`, `osx_arm64` and `windows_amd64` (build through `extension-ci-tools`, then a load test of each artifact), release assets on a tag, the community descriptor, the function reference with a check against the artifact, the upgrade runbook with its dry run, and a canary. None of the new workflows has run on GitHub, and the descriptor has not been submitted, so the exit check is open. `windows_amd64` was added after P7, once `pcapsql-core` compiled for Windows (U13); it has not been built on a runner either, and no job loads its artifact. WebAssembly is not built (U10) |
-| P8 Backlog | first item done: `read_<proto>_packets(files)` for the 21 `*_packets` views that are a join within one encapsulation level, as fused scans of the shared layer (S4b), with `pcap_views()`. Each equals the DataFusion SQL view of its name (DataFusion test over 23 captures) and the DuckDB join of the `read_<table>` functions (itest over 24 captures, 1 and 4 threads, split and not, pushdown on and off); the 14 golden-corpus queries over these views now match the DataFusion snapshots too (59 compared in all). `packets`, `tunneled_packets`, `ip4_in_ip6` and `ip6_in_ip6` are not fusable shapes and are not offered. Not benchmarked. The other items are not started |
+| P8 Backlog | first item done: `read_<proto>_packets(files)` for the 21 `*_packets` views that are a join within one encapsulation level, as fused scans of the shared layer (S4b), with `pcap_views()`. Each equals the DataFusion SQL view of its name (DataFusion test over 23 captures) and the DuckDB join of the `read_<table>` functions (itest over 24 captures, 1 and 4 threads, split and not, pushdown on and off); the 14 golden-corpus queries over these views now match the DataFusion snapshots too (59 compared in all). `packets`, `tunneled_packets`, `ip4_in_ip6` and `ip6_in_ip6` are not fusable shapes and are not offered. Not benchmarked. Second item done: the stream tables (`read_tcp_connections`, `read_tls_sessions`, `read_http_messages`, `read_http2`, and through `read_pcap`) and TLS decryption with a key log (`keylog := 'path'`, or the setting `pcapsql_keylog`). Each equals the shared scan layer cell by cell (itest over 8 captures, one of 5,000 connections) and the 6 golden-corpus queries over stream tables match the DataFusion snapshots (65 compared in all); decryption is tested on a generated TLS 1.3 + HTTP/2 capture only. The other items are not started |
 | P9 Follow V2 to stability | not started |
 
 ### 8.1 Review follow-ups and what remains
@@ -370,6 +371,7 @@ Done:
 | Benchmarks | A thin-LTO bench profile, so they link on a small machine; the `with_payload` case runs again |
 | One set of name tables | The parsers' name columns read the tables of `pcapsql_core::format::names` and keep none of their own, so `icmp.type_name` is `icmp_type_name(type)`; a number without a name carries the number (`Unknown (n)`, `Type n`), which changes column values (CHANGELOG). A lookup returns a `Copy` `Name` and allocates nothing; `protocol/name_columns_tests.rs` checks every name column against its table over every number |
 | The DataFusion scan path (S4c) | The stream tables (`tcp_connections`, `tls_sessions`, `http_messages`, `http2`) are outputs of the shared scan layer: `PartitionScan` reassembles the TCP streams while it reads and writes the tables through `RowSink` when the capture ends (`scan/stream.rs`), decrypting TLS with the key log given to `PartitionScan::with_keylog`. DataFusion's Arrow builders (`stream_tables.rs`) and the scan's frame observer are gone; `providers/shared.rs` is six modules; a pass keeps its tables by `OutputId` and takes its parameters as a `PassOptions`. Rows unchanged: no snapshot changed. Instructions per packet through `PartitionScan` into a sink that stores nothing: `frames` 593 to 555, `udp` 2,529 to 2,415, `tcp` 4,036 to 3,922; one iteration of a scan benchmark within 0.3 percent in instructions, and the benchmark's wall-clock medians within its run-to-run spread (design, section 5.1.2) |
+| Stream tables and TLS decryption in the extension (P8) | `read_tcp_connections`, `read_tls_sessions`, `read_http_messages`, `read_http2` and `read_pcap(protocol := ...)` of them: a stream output of the shared layer, one partition per file whatever the settings, no filter taken over, `connection_id` per file. A key log (`keylog := 'path'`, else the setting `pcapsql_keylog`) is read through DuckDB's file system at bind and given to `PartitionScan::with_keylog`; no message or log record repeats its content. `http2.connection_id`, always NULL before, is the TCP connection's id in both engines, and `tls_sessions.version` of a TLS 1.3 session read with a key log is no longer `TLS 1.2`. Open: a scan cannot be cancelled while it reads a file (the C API has no way to ask, and an empty chunk does not make DuckDB look); the C API v2 has no secret types, so the key log is a path; TLS 1.2 decryption is untested |
 
 Remaining, in the order intended:
 
@@ -382,8 +384,8 @@ Remaining, in the order intended:
    lazily built validity bitmap).
 4. A benchmark run of the whole (P3 projection, P4 scaling, a view against
    its join), recorded here.
-5. P8: stream tables and TLS decryption in the extension, the remaining
-   UDFs as wrappers, `COPY ... TO 'x.pcap'`.
+5. P8: the remaining UDFs as wrappers, `COPY ... TO 'x.pcap'`. (Stream
+   tables and TLS decryption in the extension: done, in the table above.)
 6. The S3 half of the P5 remote test, once the HTTP half has run.
 
 Decisions taken:
@@ -590,8 +592,28 @@ Not scheduled.
   - Open: a benchmark of a view scan against the join it replaces; an
     arbitrary set of tables in one pass (a user-defined fused scan) is not
     exposed.
-- Stream tables and TLS decryption (S4c, plus a keylog named parameter or
-  secret).
+- **Done.** Stream tables and TLS decryption (S4c, plus a keylog named
+  parameter). Decisions taken on the way:
+  - A stream table is a table like the others: `read_<table>(files)`,
+    `read_pcap(files, protocol := ...)`, a row of `pcap_protocols()` with
+    `kind = 'stream'`, the columns of `pcap_schema()`. Nothing in `exec` is
+    particular to it; the plan (`ScanPlan::streams`) and the layout (one
+    partition per file) are.
+  - Each file of a call is a scan of its own, so `connection_id` starts again
+    in every file, as `frame_number` does; `filename := true` tells the files
+    apart. One reassembly across files would make the files one capture,
+    which their order and their overlap do not say they are.
+  - The key log is a path, in the `keylog` parameter or the setting
+    `pcapsql_keylog` (the parameter wins; `''` is "none"). A DuckDB secret
+    was not possible: the C API v2 of DuckDB 2.0.0 has no function for
+    secret types or secret lookup, and `duckdb-neo` 0.20000.2 none either.
+  - `read_pcap` accepts `keylog` for a packet table or a view and ignores it
+    (the file is not opened); the `read_<table>` functions of packet tables
+    do not have the parameter.
+  - Open: cancelling during the read of a file (no interrupt query in the
+    C API; returning empty chunks was tried and DuckDB does not look), a
+    `LIMIT` that ends the read (the tables are complete only at the end),
+    TLS 1.2 decryption (untested), HTTP/1.x inside TLS (not parsed).
 - Remaining DataFusion UDFs, as wrappers once their kernels are in core.
 - `COPY ... TO 'x.pcap'`.
 

@@ -13,14 +13,20 @@ use pcapsql_core::io::PacketReader;
 use pcapsql_core::scan::CompiledScan;
 
 use super::{
-    layout::Layout, reader::Scanning, BindData, PcapScan, Shared, Worker, LOG_TYPE,
+    keylog::Keys, layout::Layout, reader::Scanning, BindData, PcapScan, Shared, Worker, LOG_TYPE,
     PACKETS_PER_STEP,
 };
 use crate::engine::pushdown;
 
 impl PcapScan {
     /// One line on what a scan reads of one of its files, and parses.
-    pub(super) fn describe(&self, path: &str, plan: &CompiledScan, layout: &Layout) -> String {
+    pub(super) fn describe(
+        &self,
+        path: &str,
+        plan: &CompiledScan,
+        layout: &Layout,
+        keylog: Option<&Keys>,
+    ) -> String {
         let columns: Vec<&str> = plan.outputs()[0].columns.iter().map(|c| c.name).collect();
         let columns = if columns.is_empty() {
             "none (row count)".to_owned()
@@ -32,8 +38,13 @@ impl PcapScan {
         } else {
             format!("; filter: {}", pushdown::describe(plan.frames()))
         };
+        // How much the key log holds, which is what tells a wrong one from a right one.
+        let keylog = keylog.map_or_else(String::new, |keys| {
+            format!("; key log: secrets of {} TLS sessions", keys.sessions())
+        });
         format!(
-            "{}: scanning '{}': partitions: {}; columns: {columns}; protocols parsed: {}{filter}",
+            "{}: scanning '{}': partitions: {}; columns: {columns}; protocols parsed: \
+             {}{filter}{keylog}",
             self.name,
             path,
             layout.note,
