@@ -31,7 +31,8 @@ v6.pcap	161	161
 
 query T
 SELECT DISTINCT parse_filename(filename)
-FROM read_pcap('../fuzz/corpus/fuzz_pcap_reader/v6*', filename := true);
+FROM read_pcap('../fuzz/corpus/fuzz_pcap_reader/v6*', filename := true)
+ORDER BY 1;
 ----
 v6-http.cap
 v6.pcap
