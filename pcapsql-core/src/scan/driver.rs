@@ -213,7 +213,9 @@ impl FrameObserver for NoObserver {
 /// The outputs it writes are the plan's per-packet outputs (what a
 /// [`Router`] routes): `frames`, the protocol tables and the fused joins.
 /// Stream tables are not built here yet; a frontend that has them builds
-/// them in its [`FrameObserver`].
+/// them in its [`FrameObserver`], and compiles its plan with
+/// [`ScanPlan::compile_with_streams`](super::ScanPlan::compile_with_streams)
+/// to say so.
 pub struct PartitionScan<R: PacketReader, O: FrameObserver = NoObserver> {
     reader: R,
     plan: Arc<CompiledScan>,

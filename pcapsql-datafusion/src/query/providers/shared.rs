@@ -264,7 +264,13 @@ impl ParseSubscription {
     /// Arrow schema, predicate and row cap.
     pub fn compile(&self, registry: &ProtocolRegistry) -> Result<CompiledSubscription, Error> {
         let catalog = Catalog::builtin();
-        let scan = Arc::new(self.plan.compile(catalog, registry).map_err(plan_error)?);
+        // The stream tables of the plan are built here, by the pass's
+        // `StreamSubscriber`, not by the scan driver.
+        let scan = Arc::new(
+            self.plan
+                .compile_with_streams(catalog, registry)
+                .map_err(plan_error)?,
+        );
         // `scan.outputs()` is the plan's tables, then its fused joins.
         let tables = self
             .plan

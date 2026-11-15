@@ -253,6 +253,13 @@ pub enum PlanError {
         /// The index of the member in [`FusedScan::members`].
         member: usize,
     },
+    /// A plan with [stream tables](ScanPlan::streams) given to
+    /// [`ScanPlan::compile`]. The scan driver builds no stream table: run as
+    /// it is, the plan would give that table no rows. A frontend that
+    /// builds stream tables itself says so with
+    /// [`ScanPlan::compile_with_streams`].
+    #[error("the scan driver does not build stream table {0}")]
+    StreamsNotBuilt(&'static str),
     /// More outputs or output columns than an [`OutputId`] or [`OutCol`]
     /// can number.
     #[error("the plan has too many outputs or columns")]
@@ -350,6 +357,8 @@ impl CompiledScan {
     }
 
     /// The stream-table outputs, in the order of [`ScanPlan::streams`].
+    /// Empty unless the plan was compiled with
+    /// [`ScanPlan::compile_with_streams`]: the frontend builds them.
     pub fn stream_outputs(&self) -> &[OutputPlan] {
         &self.stream_outputs
     }
@@ -418,7 +427,32 @@ impl ScanPlan {
     /// Check the plan against `catalog` and resolve everything a packet loop
     /// must not look up: the [`ParseScope`] for `registry` and, per output,
     /// its columns.
+    ///
+    /// The compiled scan is one a [`PartitionScan`](super::PartitionScan)
+    /// runs in full: every output of the plan gets its rows. A plan with
+    /// [stream tables](Self::streams), which the driver does not build, is
+    /// therefore refused ([`PlanError::StreamsNotBuilt`]); see
+    /// [`compile_with_streams`](Self::compile_with_streams).
     pub fn compile(
+        &self,
+        catalog: &Catalog,
+        registry: &ProtocolRegistry,
+    ) -> Result<CompiledScan, PlanError> {
+        if let Some(scan) = self.streams.first() {
+            let table = catalog
+                .try_get(scan.table)
+                .ok_or(PlanError::UnknownTable(scan.table))?;
+            return Err(PlanError::StreamsNotBuilt(table.name));
+        }
+        self.compile_with_streams(catalog, registry)
+    }
+
+    /// [`compile`](Self::compile), for a frontend that builds the plan's
+    /// [stream tables](Self::streams) itself: from the frames a
+    /// [`FrameObserver`](super::FrameObserver) is shown, with the columns of
+    /// [`CompiledScan::stream_outputs`]. The scan driver produces the
+    /// per-packet outputs only, and parses what stream analysis needs.
+    pub fn compile_with_streams(
         &self,
         catalog: &Catalog,
         registry: &ProtocolRegistry,
@@ -775,8 +809,48 @@ mod tests {
         TableScan::new(id(table), default_cols(table))
     }
 
+    /// Compiled as by a frontend that builds stream tables: several plans
+    /// here have some.
     fn compile(plan: &ScanPlan) -> Result<CompiledScan, PlanError> {
-        plan.compile(catalog(), &default_registry())
+        plan.compile_with_streams(catalog(), &default_registry())
+    }
+
+    /// A plan with stream tables compiles only for a frontend that says it
+    /// builds them: the scan driver would give them no rows.
+    #[test]
+    fn stream_tables_need_a_frontend_that_builds_them() {
+        let registry = default_registry();
+        let plan = ScanPlan {
+            tables: vec![full("frames")],
+            streams: vec![scan("tls_sessions", &[]), full("tcp_connections")],
+            ..ScanPlan::default()
+        };
+        assert_eq!(
+            plan.compile(catalog(), &registry).unwrap_err(),
+            PlanError::StreamsNotBuilt("tls_sessions")
+        );
+        let compiled = plan.compile_with_streams(catalog(), &registry).unwrap();
+        assert_eq!(compiled.outputs().len(), 1);
+        assert_eq!(compiled.stream_outputs().len(), 2);
+        // Without stream tables the two are the same.
+        let plain = ScanPlan {
+            tables: vec![full("frames"), full("tcp")],
+            fused: plan.fused.clone(),
+            ..ScanPlan::default()
+        };
+        let compiled = plain.compile(catalog(), &registry).unwrap();
+        assert_eq!(compiled.outputs().len(), 2);
+        assert!(compiled.stream_outputs().is_empty());
+        // A stream table the catalogue does not have is that error first.
+        let nowhere = TableId(u16::MAX);
+        let unknown = ScanPlan {
+            streams: vec![TableScan::new(nowhere, vec![])],
+            ..ScanPlan::default()
+        };
+        assert_eq!(
+            unknown.compile(catalog(), &registry).unwrap_err(),
+            PlanError::UnknownTable(nowhere)
+        );
     }
 
     fn set(names: &[&str]) -> HashSet<String> {
@@ -969,7 +1043,7 @@ mod tests {
             ..ScanPlan::default()
         };
         let registry = default_registry();
-        let compiled = plan.compile(catalog(), &registry).unwrap();
+        let compiled = plan.compile_with_streams(catalog(), &registry).unwrap();
         assert!(compiled.requires_single_partition());
         assert_eq!(compiled.outputs().len(), 3);
         let [http, tls] = compiled.stream_outputs() else {
@@ -999,7 +1073,7 @@ mod tests {
             streams: vec![full("tcp_connections")],
             ..ScanPlan::default()
         };
-        let compiled = plan.compile(catalog(), &registry).unwrap();
+        let compiled = plan.compile_with_streams(catalog(), &registry).unwrap();
         assert!(compiled.requires_single_partition());
         assert!(compiled.outputs().is_empty());
         assert_eq!(
