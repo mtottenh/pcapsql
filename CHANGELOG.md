@@ -531,6 +531,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`--filter` with non-ASCII text in the query.** The BPF filter is spliced
+  into the query at the position of its `WHERE` (or of the clause a `WHERE`
+  goes in front of), and that position was found in `query.to_uppercase()`,
+  whose bytes are not the query's: upper-casing changes the length of some
+  text (`ﬁ` becomes `FI`, `ı` becomes `I`). A query with such a character
+  before the keyword had the filter spliced in a few bytes off, into the
+  middle of a word, and any non-ASCII character outside parentheses, such
+  as `SELECT 'é' AS label …`, made the keyword search panic. The search now
+  runs over the bytes of an ASCII-upper-cased copy, which has the query's
+  own offsets.
+
 - **Streaming queries could return rows out of capture order.** In the
   bounded exchange between a parse pass and DataFusion, the consumer read
   the channel and then the overflow queue without the queue's lock. A
