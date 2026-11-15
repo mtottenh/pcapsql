@@ -23,11 +23,14 @@
 //!   predicates, row caps and sinks of bounded size ([`Router`]);
 //! - the [`driver`]: one partition of a scan, read step by step
 //!   ([`PartitionScan`]). It reads the packets, parses them and routes
-//!   their rows, and returns whenever the frontend has something to do, so
+//!   their rows (of the frames the plan's [`FramePredicate`] accepts, and
+//!   no further than it can accept any), and returns whenever the frontend
+//!   has something to do, so
 //!   that an engine that pushes rows to its consumer and one whose consumer
 //!   pulls a chunk at a time run the same loop;
 //! - [`partition`]: how many partitions a capture is worth
-//!   ([`partition_target`]) and a queue workers claim them from
+//!   ([`partition_target`]), which ranges of it a plan's frame predicate
+//!   leaves to scan ([`plan_ranges`]) and a queue workers claim them from
 //!   ([`PartitionQueue`]);
 //! - [`testing`]: a recording sink and the conformance suite a sink
 //!   implementation runs in its tests.
@@ -51,7 +54,7 @@ pub use catalog::{
     TimestampUnit, UnsupportedKind,
 };
 pub use driver::{FrameObserver, NoObserver, PartitionScan, ScanStats, Step};
-pub use partition::{partition_target, PartitionPolicy, PartitionQueue};
+pub use partition::{partition_target, plan_ranges, PartitionPolicy, PartitionQueue};
 pub use plan::{
     CompiledScan, FusedMember, FusedScan, JoinKind, MemberJoin, OutCol, OutColumn, OutputId,
     OutputPlan, PlanError, ScanPlan, TableScan,

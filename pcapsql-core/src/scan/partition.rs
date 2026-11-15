@@ -8,11 +8,13 @@
 //! size that depends on what starting a reader costs
 //! ([`SeekCost`]). [`partition_target`] is that decision; the ranges
 //! themselves come from the index
-//! ([`BoundaryIndex::partition_ranges`](crate::io::BoundaryIndex::partition_ranges)).
+//! ([`BoundaryIndex::partition_ranges`]), less what the plan's frame
+//! predicate rules out ([`plan_ranges`]).
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::io::{PacketRange, SeekCost};
+use super::predicate::FramePredicate;
+use crate::io::{BoundaryIndex, Checkpoint, PacketPosition, PacketRange, SeekCost};
 
 /// The sizes below which a capture is read as one partition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +81,117 @@ pub fn partition_target(
     }
 }
 
+/// The ranges to scan for a plan whose frame predicate is `frames`: the
+/// index's partition ranges
+/// ([`BoundaryIndex::partition_ranges`]`(want)`), each shrunk to the part
+/// that can hold a matching packet, and left out when no part can. They
+/// are in capture order and do not overlap. The result is empty when no
+/// packet of the capture can match.
+///
+/// Trimming only saves reading. The scan driver applies the predicate to
+/// every packet it reads, so the rows are those of the untrimmed ranges as
+/// long as no matching packet is left out, and none is:
+///
+/// - The index has a checkpoint every `stride` frames; the *window* of a
+///   checkpoint is the frames from it up to the next checkpoint (to the
+///   end of the capture for the last). A window is ruled out by the frame
+///   bounds exactly (its frame numbers are known), and by the time bounds
+///   when the smallest and largest timestamp the index recorded for it
+///   show that none of its packets is inside them. Timestamps need not
+///   ascend, so every window is tested on its own.
+/// - The **last window** of the capture is ruled out by the upper frame
+///   bound only. The index describes the packets that were there when it
+///   was built, and a range to the end of the capture also delivers packets
+///   appended since: nothing is known of their timestamps, nor of how many
+///   there are.
+/// - A window whose timestamps the index does not have is kept.
+///
+/// A range is shrunk to run from its first window that may match to its
+/// last one. It therefore still starts and ends on checkpoints, as a
+/// partition reader needs (the reader finds the capture's interface state
+/// at the checkpoint it starts on). Windows ruled out *between* two that
+/// may match stay inside the range: their packets are read and rejected by
+/// the driver, unparsed. A range is never split, so there are at most as
+/// many ranges as the index would give for `want`, and fewer workers than
+/// `want` may find work when the predicate is narrow.
+///
+/// With a predicate that accepts [all](FramePredicate::all) packets the
+/// result is `partition_ranges(want)` unchanged. Without an index it is
+/// the one [whole](PacketRange::whole) range a caller reads a capture it
+/// cannot split with, whatever the predicate (the driver ends such a scan
+/// at the upper frame bound).
+pub fn plan_ranges(
+    index: Option<&BoundaryIndex>,
+    want: usize,
+    frames: &FramePredicate,
+) -> Vec<PacketRange> {
+    let Some(index) = index else {
+        return vec![PacketRange::whole()];
+    };
+    let ranges = index.partition_ranges(want);
+    if frames.is_all() {
+        return ranges;
+    }
+    if frames.is_empty() {
+        return Vec::new();
+    }
+    ranges
+        .into_iter()
+        .filter_map(|range| trim(index, range, frames))
+        .collect()
+}
+
+/// `range` shrunk to its windows that may hold a packet `frames` accepts;
+/// `None` when none may.
+fn trim(index: &BoundaryIndex, range: PacketRange, frames: &FramePredicate) -> Option<PacketRange> {
+    let checkpoints = &index.checkpoints;
+    let at = |frame: u64| {
+        checkpoints
+            .binary_search_by_key(&frame, |c| c.frame_number)
+            .ok()
+    };
+    // The range's windows are those of `checkpoints[first..end]`.
+    let first = at(range.start.frame_number);
+    let end = match &range.end {
+        Some(end) => at(end.frame_number),
+        None => Some(checkpoints.len()),
+    };
+    let (Some(first), Some(end)) = (first, end) else {
+        // Not a range of this index (an index without checkpoints gives
+        // the whole capture): it can only be taken or left as it is.
+        return frames.may_overlap(&range, None).then_some(range);
+    };
+    let position = |checkpoint: &Checkpoint| PacketPosition {
+        byte_offset: checkpoint.byte_offset,
+        frame_number: checkpoint.frame_number,
+    };
+    let window = |i: usize| PacketRange {
+        start: position(&checkpoints[i]),
+        end: checkpoints.get(i + 1).map(position),
+    };
+    let may_match = |i: usize| {
+        let checkpoint = &checkpoints[i];
+        // The last window may have grown since the index was built.
+        let time_ns = match (checkpoint.min_ts, checkpoint.max_ts) {
+            (Some(min), Some(max)) if i + 1 < checkpoints.len() => Some((min, max)),
+            _ => None,
+        };
+        frames.may_overlap(&window(i), time_ns)
+    };
+    let from = (first..end).find(|i| may_match(*i))?;
+    let to = (from..end).rfind(|i| may_match(*i))?;
+    Some(PacketRange {
+        start: position(&checkpoints[from]),
+        // The range's own end when its last window is kept, which is `None`
+        // for the range that runs to the end of the capture.
+        end: if to + 1 == end {
+            range.end
+        } else {
+            Some(position(&checkpoints[to + 1]))
+        },
+    })
+}
+
 /// The partitions of one scan, claimed one at a time by any number of
 /// workers: what an engine that pulls (each worker asks for its next piece
 /// of work) uses in place of a thread per partition.
@@ -122,7 +235,7 @@ impl PartitionQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::io::PacketPosition;
+    use std::ops::Bound;
 
     const KIB: u64 = 1024;
     const MIB: u64 = 1024 * KIB;
@@ -276,6 +389,286 @@ mod tests {
                 end: (i + 1 < count).then(|| at(i + 1)),
             })
             .collect()
+    }
+
+    /// An index with a checkpoint every 10 frames: checkpoint `i` at frame
+    /// `1 + 10 * i`, with the window timestamps given (`None`: not known).
+    fn index(windows: &[Option<(i64, i64)>]) -> BoundaryIndex {
+        BoundaryIndex {
+            source_len: 24 + 100 * windows.len() as u64,
+            source_mtime: None,
+            header_hash: 0,
+            source_etag: None,
+            format: crate::io::PcapFormat::LegacyLeMicro,
+            link_type: 1,
+            snaplen: 65535,
+            packet_count: 10 * windows.len() as u64,
+            stride: 10,
+            checkpoints: windows
+                .iter()
+                .enumerate()
+                .map(|(i, time)| Checkpoint {
+                    frame_number: 1 + 10 * i as u64,
+                    byte_offset: 24 + 100 * i as u64,
+                    interface_state: None,
+                    min_ts: time.map(|t| t.0),
+                    max_ts: time.map(|t| t.1),
+                })
+                .collect(),
+        }
+    }
+
+    /// Ranges as `(first frame, end frame)`.
+    fn spans(ranges: &[PacketRange]) -> Vec<(u64, Option<u64>)> {
+        ranges
+            .iter()
+            .map(|r| (r.start.frame_number, r.end.as_ref().map(|e| e.frame_number)))
+            .collect()
+    }
+
+    fn frame_bounds(lower: Bound<u64>, upper: Bound<u64>) -> FramePredicate {
+        FramePredicate {
+            frames: (lower, upper),
+            ..FramePredicate::all()
+        }
+    }
+
+    fn time_bounds(lower: Bound<i64>, upper: Bound<i64>) -> FramePredicate {
+        FramePredicate {
+            time_ns: (lower, upper),
+            ..FramePredicate::all()
+        }
+    }
+
+    /// Eight windows whose timestamps do not ascend: the fourth is earlier
+    /// than the ones around it.
+    fn eight() -> BoundaryIndex {
+        index(&[
+            Some((100, 199)),
+            Some((200, 299)),
+            Some((300, 399)),
+            Some((50, 60)),
+            Some((400, 499)),
+            Some((500, 599)),
+            Some((600, 699)),
+            Some((700, 799)),
+        ])
+    }
+
+    #[test]
+    fn plan_ranges_without_an_index_or_a_predicate_changes_nothing() {
+        let all = FramePredicate::all();
+        let narrow = frame_bounds(Bound::Included(3), Bound::Included(4));
+        assert_eq!(plan_ranges(None, 4, &all), [PacketRange::whole()]);
+        assert_eq!(plan_ranges(None, 4, &narrow), [PacketRange::whole()]);
+        let index = eight();
+        for want in 0..12 {
+            assert_eq!(
+                plan_ranges(Some(&index), want, &all),
+                index.partition_ranges(want)
+            );
+        }
+        // An index of an empty capture has the whole range only.
+        let empty = BoundaryIndex {
+            packet_count: 0,
+            checkpoints: Vec::new(),
+            ..eight()
+        };
+        assert_eq!(
+            plan_ranges(Some(&empty), 4, &narrow),
+            [PacketRange::whole()]
+        );
+    }
+
+    #[test]
+    fn plan_ranges_trims_by_frame_number_exactly() {
+        use Bound::*;
+        let index = eight();
+        // Four ranges of two windows: frames 1-20, 21-40, 41-60, 61-.
+        assert_eq!(
+            spans(&index.partition_ranges(4)),
+            [(1, Some(21)), (21, Some(41)), (41, Some(61)), (61, None)]
+        );
+        let planned =
+            |lower, upper| spans(&plan_ranges(Some(&index), 4, &frame_bounds(lower, upper)));
+        // Inside one window: the range shrinks to it.
+        assert_eq!(planned(Included(25), Included(26)), [(21, Some(31))]);
+        assert_eq!(planned(Included(31), Excluded(41)), [(31, Some(41))]);
+        // The window boundaries, with both kinds of bound.
+        assert_eq!(planned(Included(30), Included(31)), [(21, Some(41))]);
+        assert_eq!(planned(Excluded(30), Included(31)), [(31, Some(41))]);
+        assert_eq!(planned(Included(30), Excluded(31)), [(21, Some(31))]);
+        assert_eq!(planned(Excluded(30), Excluded(31)), []);
+        // Across ranges: the first and the last one shrink.
+        assert_eq!(
+            planned(Included(15), Included(45)),
+            [(11, Some(21)), (21, Some(41)), (41, Some(51))]
+        );
+        // An upper bound alone, also in the range to the end of the capture.
+        assert_eq!(
+            planned(Unbounded, Included(65)),
+            [
+                (1, Some(21)),
+                (21, Some(41)),
+                (41, Some(61)),
+                (61, Some(71))
+            ]
+        );
+        assert_eq!(planned(Unbounded, Excluded(1)), []);
+        // A lower bound alone. The last window stays whatever the bound:
+        // the capture may have grown since the index was built.
+        assert_eq!(
+            planned(Included(55), Unbounded),
+            [(51, Some(61)), (61, None)]
+        );
+        assert_eq!(planned(Included(75), Unbounded), [(71, None)]);
+        assert_eq!(planned(Excluded(1_000), Unbounded), [(71, None)]);
+        // Nothing can match: no ranges.
+        assert_eq!(planned(Included(9), Included(8)), []);
+        assert_eq!(planned(Excluded(8), Excluded(9)), []);
+        // One partition: the same, as one range.
+        assert_eq!(
+            spans(&plan_ranges(
+                Some(&index),
+                1,
+                &frame_bounds(Included(15), Included(45))
+            )),
+            [(11, Some(51))]
+        );
+    }
+
+    #[test]
+    fn plan_ranges_trims_by_time_window_by_window() {
+        use Bound::*;
+        let index = eight();
+        let planned = |want, lower, upper| {
+            spans(&plan_ranges(Some(&index), want, &time_bounds(lower, upper)))
+        };
+        // Window 3 (frames 21-30): its range shrinks, the others go, except
+        // the last window of the capture, which a time bound never rules
+        // out.
+        assert_eq!(
+            planned(4, Included(300), Included(399)),
+            [(21, Some(31)), (71, None)]
+        );
+        // The bounds of a window, inclusive and exclusive.
+        assert_eq!(
+            planned(8, Included(299), Included(300)),
+            [(11, Some(21)), (21, Some(31)), (71, None)]
+        );
+        assert_eq!(
+            planned(8, Excluded(299), Unbounded).first(),
+            Some(&(21, Some(31)))
+        );
+        assert_eq!(
+            planned(8, Excluded(399), Unbounded).first(),
+            Some(&(41, Some(51)))
+        );
+        assert_eq!(
+            planned(8, Unbounded, Excluded(200)),
+            [(1, Some(11)), (31, Some(41)), (71, None)]
+        );
+        assert_eq!(
+            planned(8, Unbounded, Included(200)),
+            [(1, Some(11)), (11, Some(21)), (31, Some(41)), (71, None)]
+        );
+        // Timestamps do not ascend: the early window in the middle matches
+        // on its own, and a range is not cut around a window that does not.
+        assert_eq!(
+            planned(8, Unbounded, Included(60)),
+            [(31, Some(41)), (71, None)]
+        );
+        assert_eq!(
+            planned(2, Unbounded, Included(199)),
+            [(1, Some(41)), (71, None)]
+        );
+        assert_eq!(planned(1, Unbounded, Included(199)), [(1, None)]);
+        assert_eq!(planned(1, Included(300), Included(450)), [(21, None)]);
+        // Nothing can match.
+        assert_eq!(planned(8, Included(5), Excluded(5)), []);
+
+        // Frame and time bounds together.
+        let both = FramePredicate {
+            frames: (Included(12), Included(64)),
+            time_ns: (Included(250), Included(450)),
+        };
+        assert_eq!(
+            spans(&plan_ranges(Some(&index), 8, &both)),
+            [(11, Some(21)), (21, Some(31)), (41, Some(51))]
+        );
+        assert_eq!(
+            spans(&plan_ranges(Some(&index), 2, &both)),
+            [(11, Some(31)), (41, Some(51))]
+        );
+    }
+
+    /// A window without timestamps in the index is never ruled out by time.
+    #[test]
+    fn plan_ranges_keeps_windows_of_unknown_time() {
+        let index = index(&[Some((100, 199)), None, Some((300, 399)), Some((400, 499))]);
+        let late = time_bounds(Bound::Included(1_000), Bound::Unbounded);
+        assert_eq!(
+            spans(&plan_ranges(Some(&index), 4, &late)),
+            [(11, Some(21)), (31, None)]
+        );
+    }
+
+    /// Whatever the predicate, a planned range starts and ends on
+    /// checkpoints of the index and the ranges ascend without overlap.
+    #[test]
+    fn planned_ranges_are_checkpoint_aligned() {
+        use Bound::*;
+        let index = eight();
+        let frame_bounds_of = |v: u64| [Unbounded, Included(v), Excluded(v)];
+        let time_bounds_of = |v: i64| [Unbounded, Included(v), Excluded(v)];
+        for want in [1, 2, 3, 8] {
+            for low in (0..90).step_by(7) {
+                for high in (0..90).step_by(11) {
+                    for (fl, tl) in frame_bounds_of(low)
+                        .into_iter()
+                        .zip(time_bounds_of(low as i64 * 9))
+                    {
+                        for (fu, tu) in frame_bounds_of(high)
+                            .into_iter()
+                            .zip(time_bounds_of(high as i64 * 9))
+                        {
+                            for predicate in [
+                                frame_bounds(fl, fu),
+                                time_bounds(tl, tu),
+                                FramePredicate {
+                                    frames: (fl, Unbounded),
+                                    time_ns: (Unbounded, tu),
+                                },
+                            ] {
+                                let ranges = plan_ranges(Some(&index), want, &predicate);
+                                assert!(ranges.len() <= index.partition_ranges(want).len());
+                                let mut previous_end = Some(0);
+                                for range in &ranges {
+                                    let start = index.checkpoint_at(range.start.frame_number);
+                                    assert_eq!(
+                                        start.map(|c| c.byte_offset),
+                                        Some(range.start.byte_offset),
+                                        "{predicate:?}"
+                                    );
+                                    assert!(previous_end
+                                        .is_some_and(|end| end <= range.start.frame_number));
+                                    previous_end = range.end.as_ref().map(|e| e.frame_number);
+                                    if let Some(end) = &range.end {
+                                        assert!(end.frame_number > range.start.frame_number);
+                                        assert_eq!(
+                                            index
+                                                .checkpoint_at(end.frame_number)
+                                                .map(|c| c.byte_offset),
+                                            Some(end.byte_offset)
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

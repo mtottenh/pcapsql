@@ -112,7 +112,11 @@ pub struct ScanPlan {
     /// Scans of [stream tables](TableKind::Stream). At most one per table.
     /// Any of these pins the pass to one partition.
     pub streams: Vec<TableScan>,
-    /// Which frames the pass covers.
+    /// Which frames the pass covers: exactly the packets this accepts give
+    /// rows, to every per-packet output. Must be
+    /// [all](FramePredicate::all) in a plan with stream tables, whose rows
+    /// are derived from the whole capture
+    /// ([`PlanError::StreamFramePredicate`]).
     pub frames: FramePredicate,
     /// The unit timestamp columns are produced in.
     pub timestamps: TimestampUnit,
@@ -140,6 +144,13 @@ pub enum PlanError {
     NotAStreamTable(&'static str),
     /// A row predicate on a stream table.
     StreamPredicate(&'static str),
+    /// A [frame predicate](ScanPlan::frames) other than
+    /// [all](FramePredicate::all) in a plan with stream tables. A stream
+    /// table is assembled from every packet of the capture in order
+    /// (a connection whose first segments are skipped is a different
+    /// connection), and its rows belong to no single frame, so there is no
+    /// set of frames the predicate could soundly restrict it to.
+    StreamFramePredicate,
     /// A fused join that is not well formed.
     InvalidFused {
         /// Its index in [`ScanPlan::fused`].
@@ -167,6 +178,10 @@ impl fmt::Display for PlanError {
             PlanError::StreamPredicate(table) => {
                 write!(f, "stream table {table} cannot take a row predicate")
             }
+            PlanError::StreamFramePredicate => write!(
+                f,
+                "a plan with stream tables cannot restrict the frames it covers"
+            ),
             PlanError::InvalidFused { fused, reason } => {
                 write!(f, "fused join {fused}: {reason}")
             }
@@ -240,6 +255,7 @@ pub struct CompiledScan {
     scope: ParseScope,
     outputs: Box<[OutputPlan]>,
     stream_outputs: Box<[OutputPlan]>,
+    frames: FramePredicate,
     timestamps: TimestampUnit,
 }
 
@@ -267,6 +283,13 @@ impl CompiledScan {
     /// stream table cannot be split into partitions.
     pub fn requires_single_partition(&self) -> bool {
         !self.stream_outputs.is_empty()
+    }
+
+    /// Which frames the pass covers ([`ScanPlan::frames`]). The scan
+    /// driver enforces it; a frontend also plans its partitions with it
+    /// ([`plan_ranges`](super::partition::plan_ranges)).
+    pub fn frames(&self) -> &FramePredicate {
+        &self.frames
     }
 
     /// The unit timestamp columns are produced in.
@@ -437,6 +460,9 @@ impl ScanPlan {
             return Err(PlanError::TooLarge);
         }
 
+        if !self.streams.is_empty() && !self.frames.is_all() {
+            return Err(PlanError::StreamFramePredicate);
+        }
         let mut stream_outputs = Vec::with_capacity(self.streams.len());
         let mut seen = HashSet::new();
         for scan in &self.streams {
@@ -463,6 +489,7 @@ impl ScanPlan {
             scope: parse_scope(catalog, registry, &needs, !self.streams.is_empty()),
             outputs: outputs.into(),
             stream_outputs: stream_outputs.into(),
+            frames: self.frames.clone(),
             timestamps: self.timestamps,
         })
     }
@@ -1073,6 +1100,47 @@ mod tests {
             })),
             PlanError::StreamPredicate("tls_sessions")
         );
+        // A frame predicate and stream tables do not go together, whatever
+        // else the plan holds; either alone is fine.
+        let bounded = FramePredicate {
+            frames: (std::ops::Bound::Unbounded, std::ops::Bound::Included(10)),
+            ..FramePredicate::all()
+        };
+        let timed = FramePredicate {
+            time_ns: (std::ops::Bound::Excluded(0), std::ops::Bound::Unbounded),
+            ..FramePredicate::all()
+        };
+        for frames in [&bounded, &timed] {
+            assert_eq!(
+                with(&|p| {
+                    p.frames = frames.clone();
+                    p.streams.push(full("tcp_connections"));
+                }),
+                PlanError::StreamFramePredicate
+            );
+            assert_eq!(
+                with(&|p| {
+                    p.frames = frames.clone();
+                    p.tables.push(full("frames"));
+                    p.streams.push(scan("tls_sessions", &[]));
+                }),
+                PlanError::StreamFramePredicate
+            );
+            let alone = ScanPlan {
+                tables: vec![full("frames"), full("tcp")],
+                frames: frames.clone(),
+                ..Default::default()
+            };
+            let compiled = compile(&alone).unwrap();
+            assert_eq!(compiled.frames(), frames);
+            assert!(!compiled.requires_single_partition());
+        }
+        let streams = ScanPlan {
+            tables: vec![full("frames")],
+            streams: vec![full("tcp_connections")],
+            ..Default::default()
+        };
+        assert!(compile(&streams).unwrap().frames().is_all());
         // The same table as a scan and as a fused member is fine.
         let plan = ScanPlan {
             tables: vec![full("tcp")],
