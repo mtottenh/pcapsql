@@ -31,6 +31,7 @@
 //! header synthesis used by seekable sources.
 
 use std::io::{BufReader, Read};
+use std::ops::ControlFlow;
 
 use pcap_parser::pcapng::Block;
 use pcap_parser::traits::{PcapNGPacketBlock, PcapReaderIterator};
@@ -259,6 +260,29 @@ impl PcapFormat {
     }
 }
 
+/// What a reader does with the packet its callback was just shown, when the
+/// callback stops the loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pause {
+    /// The packet is consumed. The next call starts at the following record.
+    After,
+    /// The packet is not consumed and its frame number is given back. The
+    /// next call delivers the same packet again.
+    Before,
+}
+
+/// Outcome of one [`GenericPcapReader::process_packets_flow`] call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Delivered {
+    /// Packets consumed by this call. A packet the callback paused
+    /// [`Pause::Before`] is not counted.
+    pub consumed: usize,
+    /// How the callback stopped the loop, if it did. `None` with fewer
+    /// packets than asked for means the source has no more to give for now
+    /// (end of the capture or of the reader's range).
+    pub paused: Option<Pause>,
+}
+
 /// Generic PCAP/PCAPNG reader over any Read source.
 pub struct GenericPcapReader<R: Read> {
     inner: ReaderInner<R>,
@@ -413,9 +437,32 @@ impl<R: Read> GenericPcapReader<R> {
     /// a caller that uses an error to pause resumes at the next record with
     /// no re-delivery.
     #[inline]
-    pub fn process_packets<F>(&mut self, max: usize, f: F) -> Result<usize, Error>
+    pub fn process_packets<F>(&mut self, max: usize, mut f: F) -> Result<usize, Error>
     where
         F: FnMut(PacketRef<'_>) -> Result<(), Error>,
+    {
+        let mut failed = None;
+        let delivered = self.process_packets_flow(max, |packet| match f(packet) {
+            Ok(()) => ControlFlow::Continue(()),
+            Err(e) => {
+                failed = Some(e);
+                ControlFlow::Break(Pause::After)
+            }
+        })?;
+        match failed {
+            Some(e) => Err(e),
+            None => Ok(delivered.consumed),
+        }
+    }
+
+    /// Process up to `max` packets, letting `f` stop the loop without an
+    /// error: `Break(Pause::After)` consumes the packet it was shown,
+    /// `Break(Pause::Before)` leaves it for the next call, which delivers it
+    /// again with the same frame number and bytes.
+    #[inline]
+    pub fn process_packets_flow<F>(&mut self, max: usize, f: F) -> Result<Delivered, Error>
+    where
+        F: FnMut(PacketRef<'_>) -> ControlFlow<Pause>,
     {
         let nano = self.format.legacy_is_nano();
         match &mut self.inner {
@@ -441,6 +488,34 @@ impl<R: Read> GenericPcapReader<R> {
             ),
         }
     }
+}
+
+/// Apply the callback's verdict on the packet it was just shown. Returns the
+/// call's outcome when the loop must stop.
+#[inline]
+fn settle<I: PcapReaderIterator>(
+    flow: ControlFlow<Pause>,
+    reader: &mut I,
+    offset: usize,
+    count: &mut usize,
+    frame_number: &mut u64,
+) -> Option<Delivered> {
+    let paused = match flow {
+        ControlFlow::Continue(()) => None,
+        ControlFlow::Break(pause) => Some(pause),
+    };
+    if paused == Some(Pause::Before) {
+        // Not consumed: the parser hands the same block out again on the
+        // next call, so its frame number is given back too.
+        *frame_number -= 1;
+    } else {
+        reader.consume(offset);
+        *count += 1;
+    }
+    paused.map(|pause| Delivered {
+        consumed: *count,
+        paused: Some(pause),
+    })
 }
 
 /// Log that a capture ended inside a record (truncated file or stalled stream).
@@ -486,9 +561,9 @@ fn process_legacy_packets<S: Read, F>(
     nano: bool,
     capacity: &mut usize,
     mut f: F,
-) -> Result<usize, Error>
+) -> Result<Delivered, Error>
 where
-    F: FnMut(PacketRef<'_>) -> Result<(), Error>,
+    F: FnMut(PacketRef<'_>) -> ControlFlow<Pause>,
 {
     let mut count = 0;
     while count < max {
@@ -505,13 +580,10 @@ where
                         link_type: *link_type as u16,
                         data: packet.data,
                     };
-                    // The packet has been delivered: consume it before
-                    // propagating a callback error, so a caller that stops
-                    // early resumes at the next record (no re-delivery).
-                    let r = f(packet_ref);
-                    reader.consume(offset);
-                    count += 1;
-                    r?;
+                    let flow = f(packet_ref);
+                    if let Some(outcome) = settle(flow, reader, offset, &mut count, frame_number) {
+                        return Ok(outcome);
+                    }
                 }
                 PcapBlockOwned::LegacyHeader(header) => {
                     *link_type = header.network.0 as u32;
@@ -551,7 +623,10 @@ where
             }
         }
     }
-    Ok(count)
+    Ok(Delivered {
+        consumed: count,
+        paused: None,
+    })
 }
 
 /// Process packets from a PCAPNG reader with zero-copy, honoring per-interface
@@ -567,9 +642,9 @@ fn process_pcapng_packets<S: Read, F>(
     capacity: &mut usize,
     warned_bad_if_id: &mut bool,
     mut f: F,
-) -> Result<usize, Error>
+) -> Result<Delivered, Error>
 where
-    F: FnMut(PacketRef<'_>) -> Result<(), Error>,
+    F: FnMut(PacketRef<'_>) -> ControlFlow<Pause>,
 {
     let mut count = 0;
     while count < max {
@@ -637,10 +712,12 @@ where
                                 link_type: lt as u16,
                                 data,
                             };
-                            let r = f(packet_ref);
-                            reader.consume(offset);
-                            count += 1;
-                            r?;
+                            let flow = f(packet_ref);
+                            if let Some(outcome) =
+                                settle(flow, reader, offset, &mut count, frame_number)
+                            {
+                                return Ok(outcome);
+                            }
                         }
                         Block::SimplePacket(spb) => {
                             *frame_number += 1;
@@ -666,10 +743,12 @@ where
                                 link_type: lt as u16,
                                 data,
                             };
-                            let r = f(packet_ref);
-                            reader.consume(offset);
-                            count += 1;
-                            r?;
+                            let flow = f(packet_ref);
+                            if let Some(outcome) =
+                                settle(flow, reader, offset, &mut count, frame_number)
+                            {
+                                return Ok(outcome);
+                            }
                         }
                         _ => {
                             reader.consume(offset);
@@ -707,7 +786,10 @@ where
             }
         }
     }
-    Ok(count)
+    Ok(Delivered {
+        consumed: count,
+        paused: None,
+    })
 }
 
 // GenericPcapReader is Send when R is Send
@@ -763,6 +845,146 @@ mod tests {
         assert_eq!(n, 3);
         assert_eq!(rest, vec![3, 4, 5]);
         assert_eq!(reader.process_packets(10, |_| Ok(())).unwrap(), 0);
+    }
+
+    /// Frame number and bytes of every packet a `process_packets_flow` call
+    /// shows its callback, with the callback's verdict chosen per frame.
+    fn deliver(
+        reader: &mut GenericPcapReader<Cursor<Vec<u8>>>,
+        mut verdict: impl FnMut(u64) -> ControlFlow<Pause>,
+    ) -> (Delivered, Vec<(u64, Vec<u8>)>) {
+        let mut shown = Vec::new();
+        let delivered = reader
+            .process_packets_flow(10, |p| {
+                shown.push((p.frame_number, p.data.to_vec()));
+                verdict(p.frame_number)
+            })
+            .unwrap();
+        (delivered, shown)
+    }
+
+    /// Four-packet captures covering the three record kinds a reader
+    /// delivers: legacy records, pcapng EPBs and pcapng SPBs.
+    fn four_packet_captures() -> Vec<(Vec<u8>, PcapFormat)> {
+        use pcapsql_testgen::{legacy_pcap, GenPacket, LegacyVariant};
+        let packets: Vec<GenPacket> = (0..4u32)
+            .map(|i| GenPacket {
+                ts_sec: 1_700_000_000 + i,
+                ts_frac: 0,
+                data: vec![i as u8 + 1; 20 + i as usize],
+                origlen: 20 + i,
+            })
+            .collect();
+        let legacy = legacy_pcap(LegacyVariant::LeMicro, 1, 65535, &packets).bytes;
+
+        let mut epbs = ng::shb(false);
+        epbs.extend(ng::idb(false, 1, 65535, 6, 0));
+        let mut spbs = ng::shb(false);
+        spbs.extend(ng::idb(false, 1, 65535, 6, 0));
+        for i in 0..4u8 {
+            let data = vec![i + 1; 20 + i as usize];
+            epbs.extend(ng::epb(false, 0, 1_000_000 * (i as u64 + 1), &data));
+            spbs.extend(ng::spb(false, data.len() as u32, &data));
+        }
+        vec![
+            (legacy, PcapFormat::LegacyLeMicro),
+            (epbs, PcapFormat::PcapNg),
+            (spbs, PcapFormat::PcapNg),
+        ]
+    }
+
+    /// `Pause::Before` leaves the packet with the parser and gives its frame
+    /// number back: the next call shows the same record again, as often as
+    /// the callback refuses it, and nothing is skipped once it is accepted.
+    #[test]
+    fn pause_before_redelivers_the_same_packet() {
+        for (bytes, format) in four_packet_captures() {
+            let mut reader = GenericPcapReader::with_format(Cursor::new(bytes), format).unwrap();
+
+            let (delivered, first) = deliver(&mut reader, |frame| {
+                if frame == 2 {
+                    ControlFlow::Break(Pause::Before)
+                } else {
+                    ControlFlow::Continue(())
+                }
+            });
+            assert_eq!(
+                delivered,
+                Delivered {
+                    consumed: 1,
+                    paused: Some(Pause::Before)
+                },
+                "{format:?}"
+            );
+            assert_eq!(
+                reader.frame_count(),
+                1,
+                "{format:?}: frame number given back"
+            );
+            assert_eq!(first.len(), 2);
+
+            // Refused a second time: still frame 2, same bytes, nothing consumed.
+            let (delivered, again) = deliver(&mut reader, |_| ControlFlow::Break(Pause::Before));
+            assert_eq!(delivered.consumed, 0);
+            assert_eq!(delivered.paused, Some(Pause::Before));
+            assert_eq!(again, vec![first[1].clone()], "{format:?}");
+
+            // Accepted: frames 2, 3, 4 follow, then the end.
+            let (delivered, rest) = deliver(&mut reader, |_| ControlFlow::Continue(()));
+            assert_eq!(
+                delivered,
+                Delivered {
+                    consumed: 3,
+                    paused: None
+                }
+            );
+            assert_eq!(rest[0], first[1], "{format:?}");
+            assert_eq!(
+                rest.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+                vec![2, 3, 4]
+            );
+            let (delivered, none) = deliver(&mut reader, |_| ControlFlow::Continue(()));
+            assert_eq!(
+                delivered,
+                Delivered {
+                    consumed: 0,
+                    paused: None
+                }
+            );
+            assert!(none.is_empty());
+        }
+    }
+
+    /// `Pause::After` stops the loop with the packet consumed.
+    #[test]
+    fn pause_after_consumes_the_packet() {
+        for (bytes, format) in four_packet_captures() {
+            let mut reader = GenericPcapReader::with_format(Cursor::new(bytes), format).unwrap();
+            let (delivered, shown) = deliver(&mut reader, |frame| {
+                if frame == 2 {
+                    ControlFlow::Break(Pause::After)
+                } else {
+                    ControlFlow::Continue(())
+                }
+            });
+            assert_eq!(
+                delivered,
+                Delivered {
+                    consumed: 2,
+                    paused: Some(Pause::After)
+                },
+                "{format:?}"
+            );
+            assert_eq!(shown.len(), 2);
+            assert_eq!(reader.frame_count(), 2);
+            let (delivered, rest) = deliver(&mut reader, |_| ControlFlow::Continue(()));
+            assert_eq!(delivered.consumed, 2);
+            assert_eq!(
+                rest.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+                vec![3, 4],
+                "{format:?}"
+            );
+        }
     }
 
     #[test]
