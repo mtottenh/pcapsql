@@ -287,6 +287,13 @@ pub struct Delivered {
 pub struct GenericPcapReader<R: Read> {
     inner: ReaderInner<R>,
     format: PcapFormat,
+    state: ReadState,
+}
+
+/// What the read loop carries from one packet, and from one call, to the
+/// next, apart from the parser itself (which is borrowed separately, so the
+/// loop can hold both).
+struct ReadState {
     frame_number: u64,
     link_type: u32,
     /// PCAPNG interface table for the current section (empty for legacy).
@@ -355,13 +362,15 @@ impl<R: Read> GenericPcapReader<R> {
         Ok(GenericPcapReader {
             inner,
             format,
-            frame_number: initial_frame,
-            link_type,
-            interfaces: Vec::new(),
-            big_endian: false,
-            capacity: BUFFER_SIZE,
-            warned_bad_if_id: false,
-            truncated: false,
+            state: ReadState {
+                frame_number: initial_frame,
+                link_type,
+                interfaces: Vec::new(),
+                big_endian: false,
+                capacity: BUFFER_SIZE,
+                warned_bad_if_id: false,
+                truncated: false,
+            },
         })
     }
 
@@ -408,13 +417,13 @@ impl<R: Read> GenericPcapReader<R> {
     /// Get the link type (e.g., 1 = Ethernet). For PCAPNG this reflects the most
     /// recently seen interface.
     pub fn link_type(&self) -> u32 {
-        self.link_type
+        self.state.link_type
     }
 
     /// Get the current frame count (number of packets emitted so far, offset by
     /// the starting frame for mid-file readers).
     pub fn frame_count(&self) -> u64 {
-        self.frame_number
+        self.state.frame_number
     }
 
     /// Number of bytes consumed from the underlying stream so far.
@@ -436,14 +445,14 @@ impl<R: Read> GenericPcapReader<R> {
     /// inside a record the answer goes back to `false` when a later call finds
     /// the rest of the record.
     pub fn truncated(&self) -> bool {
-        self.truncated
+        self.state.truncated
     }
 
     /// Snapshot of the current PCAPNG interface table.
     pub fn interface_state(&self) -> InterfaceState {
         InterfaceState {
-            interfaces: self.interfaces.clone(),
-            big_endian: self.big_endian,
+            interfaces: self.state.interfaces.clone(),
+            big_endian: self.state.big_endian,
         }
     }
 
@@ -485,31 +494,11 @@ impl<R: Read> GenericPcapReader<R> {
         let nano = self.format.legacy_is_nano();
         if max > 0 {
             // This call reads: what it finds replaces what the last one found.
-            self.truncated = false;
+            self.state.truncated = false;
         }
         match &mut self.inner {
-            ReaderInner::Legacy(reader) => process_legacy_packets(
-                reader,
-                max,
-                &mut self.frame_number,
-                &mut self.link_type,
-                nano,
-                &mut self.capacity,
-                &mut self.truncated,
-                f,
-            ),
-            ReaderInner::Ng(reader) => process_pcapng_packets(
-                reader,
-                max,
-                &mut self.frame_number,
-                &mut self.link_type,
-                &mut self.interfaces,
-                &mut self.big_endian,
-                &mut self.capacity,
-                &mut self.warned_bad_if_id,
-                &mut self.truncated,
-                f,
-            ),
+            ReaderInner::Legacy(reader) => self.state.process_legacy(reader, max, nano, f),
+            ReaderInner::Ng(reader) => self.state.process_pcapng(reader, max, f),
         }
     }
 }
@@ -575,249 +564,246 @@ fn grow_buffer<I: PcapReaderIterator>(
     })
 }
 
-/// Process packets from a legacy PCAP reader with zero-copy.
-#[allow(clippy::too_many_arguments)]
-fn process_legacy_packets<S: Read, F>(
-    reader: &mut LegacyPcapReader<S>,
-    max: usize,
-    frame_number: &mut u64,
-    link_type: &mut u32,
-    nano: bool,
-    capacity: &mut usize,
-    truncated: &mut bool,
-    mut f: F,
-) -> Result<Delivered, Error>
-where
-    F: FnMut(PacketRef<'_>) -> ControlFlow<Pause>,
-{
-    let mut count = 0;
-    while count < max {
-        match reader.next() {
-            Ok((offset, block)) => match block {
-                PcapBlockOwned::Legacy(packet) => {
-                    *frame_number += 1;
-                    let timestamp_ns = ns_from_legacy(packet.ts_sec, packet.ts_usec, nano);
-                    let packet_ref = PacketRef {
-                        frame_number: *frame_number,
-                        timestamp_ns,
-                        captured_len: packet.caplen,
-                        original_len: packet.origlen,
-                        link_type: *link_type as u16,
-                        data: packet.data,
-                    };
-                    let flow = f(packet_ref);
-                    if let Some(outcome) = settle(flow, reader, offset, &mut count, frame_number) {
-                        return Ok(outcome);
+impl ReadState {
+    /// Process packets from a legacy PCAP reader with zero-copy.
+    fn process_legacy<S: Read, F>(
+        &mut self,
+        reader: &mut LegacyPcapReader<S>,
+        max: usize,
+        nano: bool,
+        mut f: F,
+    ) -> Result<Delivered, Error>
+    where
+        F: FnMut(PacketRef<'_>) -> ControlFlow<Pause>,
+    {
+        let mut count = 0;
+        while count < max {
+            match reader.next() {
+                Ok((offset, block)) => match block {
+                    PcapBlockOwned::Legacy(packet) => {
+                        self.frame_number += 1;
+                        let timestamp_ns = ns_from_legacy(packet.ts_sec, packet.ts_usec, nano);
+                        let packet_ref = PacketRef {
+                            frame_number: self.frame_number,
+                            timestamp_ns,
+                            captured_len: packet.caplen,
+                            original_len: packet.origlen,
+                            link_type: self.link_type as u16,
+                            data: packet.data,
+                        };
+                        let flow = f(packet_ref);
+                        if let Some(outcome) =
+                            settle(flow, reader, offset, &mut count, &mut self.frame_number)
+                        {
+                            return Ok(outcome);
+                        }
                     }
-                }
-                PcapBlockOwned::LegacyHeader(header) => {
-                    *link_type = header.network.0 as u32;
-                    reader.consume(offset);
-                }
-                _ => {
-                    reader.consume(offset);
-                }
-            },
-            Err(PcapParserError::Eof) => break,
-            // Truncated capture: the last record declares more bytes than are
-            // present. Stop cleanly with the complete prefix, but say so.
-            Err(PcapParserError::UnexpectedEof) => {
-                warn_truncated("Legacy PCAP", reader.consumed(), *frame_number);
-                *truncated = true;
-                break;
-            }
-            Err(PcapParserError::Incomplete(_)) => {
-                if let Err(e) = reader.refill() {
-                    // Packets already delivered in this call are reported
-                    // first; the read error recurs on the next call (a
-                    // cancelled or timed-out reader fails again at once).
-                    if count > 0 {
-                        break;
+                    PcapBlockOwned::LegacyHeader(header) => {
+                        self.link_type = header.network.0 as u32;
+                        reader.consume(offset);
                     }
-                    return Err(Error::Pcap(PcapError::InvalidFormat {
-                        reason: format!("Legacy PCAP refill error: {e:?}"),
-                    }));
-                }
-            }
-            Err(PcapParserError::BufferTooSmall) => {
-                grow_buffer(reader, capacity, "Legacy PCAP")?;
-            }
-            Err(e) => {
-                return Err(Error::Pcap(PcapError::InvalidFormat {
-                    reason: format!("Legacy PCAP parse error: {e:?}"),
-                }));
-            }
-        }
-    }
-    Ok(Delivered {
-        consumed: count,
-        paused: None,
-    })
-}
-
-/// Process packets from a PCAPNG reader with zero-copy, honoring per-interface
-/// link type and timestamp resolution.
-#[allow(clippy::too_many_arguments)]
-fn process_pcapng_packets<S: Read, F>(
-    reader: &mut PcapNGReader<S>,
-    max: usize,
-    frame_number: &mut u64,
-    link_type: &mut u32,
-    interfaces: &mut Vec<InterfaceInfo>,
-    big_endian: &mut bool,
-    capacity: &mut usize,
-    warned_bad_if_id: &mut bool,
-    truncated: &mut bool,
-    mut f: F,
-) -> Result<Delivered, Error>
-where
-    F: FnMut(PacketRef<'_>) -> ControlFlow<Pause>,
-{
-    let mut count = 0;
-    while count < max {
-        match reader.next() {
-            Ok((offset, block)) => {
-                match block {
-                    PcapBlockOwned::NG(ng_block) => match ng_block {
-                        Block::SectionHeader(shb) => {
-                            // New section: interface namespace resets; byte
-                            // order may change.
-                            interfaces.clear();
-                            *big_endian = shb.big_endian();
-                            reader.consume(offset);
-                        }
-                        Block::InterfaceDescription(idb) => {
-                            let (info, invalid_tsresol) =
-                                InterfaceInfo::from_idb(&idb, *big_endian);
-                            if invalid_tsresol {
-                                tracing::warn!(
-                                    if_tsresol = idb.if_tsresol,
-                                    interface = interfaces.len(),
-                                    "PCAPNG: invalid if_tsresol; assuming microseconds"
-                                );
-                            }
-                            *link_type = info.link_type;
-                            interfaces.push(info);
-                            reader.consume(offset);
-                        }
-                        Block::EnhancedPacket(epb) => {
-                            *frame_number += 1;
-                            let (lt, timestamp_ns) = match interfaces.get(epb.if_id as usize) {
-                                Some(i) => (i.link_type, i.timestamp_ns(epb.ts_high, epb.ts_low)),
-                                None => {
-                                    // Malformed: no IDB for this id. Fall back to
-                                    // the most recent interface (or the section
-                                    // default) and say so once.
-                                    if !*warned_bad_if_id {
-                                        *warned_bad_if_id = true;
-                                        tracing::warn!(
-                                            interface_id = epb.if_id,
-                                            interfaces = interfaces.len(),
-                                            frame = *frame_number,
-                                            "PCAPNG: EPB interface id has no IDB; using the \
-                                             last interface's link type and microseconds"
-                                        );
-                                    }
-                                    (
-                                        *link_type,
-                                        ns_from_ticks(
-                                            epb.ts_high,
-                                            epb.ts_low,
-                                            DEFAULT_RESOLUTION,
-                                            0,
-                                        ),
-                                    )
-                                }
-                            };
-                            // `packet_data()` strips the on-disk 32-bit padding.
-                            let data = epb.packet_data();
-                            let packet_ref = PacketRef {
-                                frame_number: *frame_number,
-                                timestamp_ns,
-                                captured_len: epb.caplen,
-                                original_len: epb.origlen,
-                                link_type: lt as u16,
-                                data,
-                            };
-                            let flow = f(packet_ref);
-                            if let Some(outcome) =
-                                settle(flow, reader, offset, &mut count, frame_number)
-                            {
-                                return Ok(outcome);
-                            }
-                        }
-                        Block::SimplePacket(spb) => {
-                            *frame_number += 1;
-                            // An SPB belongs to interface 0; its captured
-                            // length is min(origlen, snaplen) and the block's
-                            // 32-bit padding is not packet data.
-                            let (lt, snaplen) = interfaces
-                                .first()
-                                .map(|i| (i.link_type, i.snaplen))
-                                .unwrap_or((*link_type, 0));
-                            let data = spb.packet_data();
-                            let mut caplen = spb.origlen as usize;
-                            if snaplen != 0 {
-                                caplen = caplen.min(snaplen as usize);
-                            }
-                            let caplen = caplen.min(data.len());
-                            let data = &data[..caplen];
-                            let packet_ref = PacketRef {
-                                frame_number: *frame_number,
-                                timestamp_ns: 0,
-                                captured_len: caplen as u32,
-                                original_len: spb.origlen,
-                                link_type: lt as u16,
-                                data,
-                            };
-                            let flow = f(packet_ref);
-                            if let Some(outcome) =
-                                settle(flow, reader, offset, &mut count, frame_number)
-                            {
-                                return Ok(outcome);
-                            }
-                        }
-                        _ => {
-                            reader.consume(offset);
-                        }
-                    },
                     _ => {
                         reader.consume(offset);
                     }
+                },
+                Err(PcapParserError::Eof) => break,
+                // Truncated capture: the last record declares more bytes than are
+                // present. Stop cleanly with the complete prefix, but say so.
+                Err(PcapParserError::UnexpectedEof) => {
+                    warn_truncated("Legacy PCAP", reader.consumed(), self.frame_number);
+                    self.truncated = true;
+                    break;
                 }
-            }
-            Err(PcapParserError::Eof) => break,
-            Err(PcapParserError::UnexpectedEof) => {
-                warn_truncated("PCAPNG", reader.consumed(), *frame_number);
-                *truncated = true;
-                break;
-            }
-            Err(PcapParserError::Incomplete(_)) => {
-                if let Err(e) = reader.refill() {
-                    // As for legacy pcap: report the packets delivered so
-                    // far, the error recurs on the next call.
-                    if count > 0 {
-                        break;
+                Err(PcapParserError::Incomplete(_)) => {
+                    if let Err(e) = reader.refill() {
+                        // Packets already delivered in this call are reported
+                        // first; the read error recurs on the next call (a
+                        // cancelled or timed-out reader fails again at once).
+                        if count > 0 {
+                            break;
+                        }
+                        return Err(Error::Pcap(PcapError::InvalidFormat {
+                            reason: format!("Legacy PCAP refill error: {e:?}"),
+                        }));
                     }
+                }
+                Err(PcapParserError::BufferTooSmall) => {
+                    grow_buffer(reader, &mut self.capacity, "Legacy PCAP")?;
+                }
+                Err(e) => {
                     return Err(Error::Pcap(PcapError::InvalidFormat {
-                        reason: format!("PCAPNG refill error: {e:?}"),
+                        reason: format!("Legacy PCAP parse error: {e:?}"),
                     }));
                 }
             }
-            Err(PcapParserError::BufferTooSmall) => {
-                grow_buffer(reader, capacity, "PCAPNG")?;
-            }
-            Err(e) => {
-                return Err(Error::Pcap(PcapError::InvalidFormat {
-                    reason: format!("PCAPNG parse error: {e:?}"),
-                }));
+        }
+        Ok(Delivered {
+            consumed: count,
+            paused: None,
+        })
+    }
+
+    /// Process packets from a PCAPNG reader with zero-copy, honoring per-interface
+    /// link type and timestamp resolution.
+    fn process_pcapng<S: Read, F>(
+        &mut self,
+        reader: &mut PcapNGReader<S>,
+        max: usize,
+        mut f: F,
+    ) -> Result<Delivered, Error>
+    where
+        F: FnMut(PacketRef<'_>) -> ControlFlow<Pause>,
+    {
+        let mut count = 0;
+        while count < max {
+            match reader.next() {
+                Ok((offset, block)) => {
+                    match block {
+                        PcapBlockOwned::NG(ng_block) => match ng_block {
+                            Block::SectionHeader(shb) => {
+                                // New section: interface namespace resets; byte
+                                // order may change.
+                                self.interfaces.clear();
+                                self.big_endian = shb.big_endian();
+                                reader.consume(offset);
+                            }
+                            Block::InterfaceDescription(idb) => {
+                                let (info, invalid_tsresol) =
+                                    InterfaceInfo::from_idb(&idb, self.big_endian);
+                                if invalid_tsresol {
+                                    tracing::warn!(
+                                        if_tsresol = idb.if_tsresol,
+                                        interface = self.interfaces.len(),
+                                        "PCAPNG: invalid if_tsresol; assuming microseconds"
+                                    );
+                                }
+                                self.link_type = info.link_type;
+                                self.interfaces.push(info);
+                                reader.consume(offset);
+                            }
+                            Block::EnhancedPacket(epb) => {
+                                self.frame_number += 1;
+                                let (lt, timestamp_ns) =
+                                    match self.interfaces.get(epb.if_id as usize) {
+                                        Some(i) => {
+                                            (i.link_type, i.timestamp_ns(epb.ts_high, epb.ts_low))
+                                        }
+                                        None => {
+                                            // Malformed: no IDB for this id. Fall back to
+                                            // the most recent interface (or the section
+                                            // default) and say so once.
+                                            if !self.warned_bad_if_id {
+                                                self.warned_bad_if_id = true;
+                                                tracing::warn!(
+                                                interface_id = epb.if_id,
+                                                interfaces = self.interfaces.len(),
+                                                frame = self.frame_number,
+                                                "PCAPNG: EPB interface id has no IDB; using the \
+                                                 last interface's link type and microseconds"
+                                            );
+                                            }
+                                            (
+                                                self.link_type,
+                                                ns_from_ticks(
+                                                    epb.ts_high,
+                                                    epb.ts_low,
+                                                    DEFAULT_RESOLUTION,
+                                                    0,
+                                                ),
+                                            )
+                                        }
+                                    };
+                                // `packet_data()` strips the on-disk 32-bit padding.
+                                let data = epb.packet_data();
+                                let packet_ref = PacketRef {
+                                    frame_number: self.frame_number,
+                                    timestamp_ns,
+                                    captured_len: epb.caplen,
+                                    original_len: epb.origlen,
+                                    link_type: lt as u16,
+                                    data,
+                                };
+                                let flow = f(packet_ref);
+                                if let Some(outcome) =
+                                    settle(flow, reader, offset, &mut count, &mut self.frame_number)
+                                {
+                                    return Ok(outcome);
+                                }
+                            }
+                            Block::SimplePacket(spb) => {
+                                self.frame_number += 1;
+                                // An SPB belongs to interface 0; its captured
+                                // length is min(origlen, snaplen) and the block's
+                                // 32-bit padding is not packet data.
+                                let (lt, snaplen) = self
+                                    .interfaces
+                                    .first()
+                                    .map(|i| (i.link_type, i.snaplen))
+                                    .unwrap_or((self.link_type, 0));
+                                let data = spb.packet_data();
+                                let mut caplen = spb.origlen as usize;
+                                if snaplen != 0 {
+                                    caplen = caplen.min(snaplen as usize);
+                                }
+                                let caplen = caplen.min(data.len());
+                                let data = &data[..caplen];
+                                let packet_ref = PacketRef {
+                                    frame_number: self.frame_number,
+                                    timestamp_ns: 0,
+                                    captured_len: caplen as u32,
+                                    original_len: spb.origlen,
+                                    link_type: lt as u16,
+                                    data,
+                                };
+                                let flow = f(packet_ref);
+                                if let Some(outcome) =
+                                    settle(flow, reader, offset, &mut count, &mut self.frame_number)
+                                {
+                                    return Ok(outcome);
+                                }
+                            }
+                            _ => {
+                                reader.consume(offset);
+                            }
+                        },
+                        _ => {
+                            reader.consume(offset);
+                        }
+                    }
+                }
+                Err(PcapParserError::Eof) => break,
+                Err(PcapParserError::UnexpectedEof) => {
+                    warn_truncated("PCAPNG", reader.consumed(), self.frame_number);
+                    self.truncated = true;
+                    break;
+                }
+                Err(PcapParserError::Incomplete(_)) => {
+                    if let Err(e) = reader.refill() {
+                        // As for legacy pcap: report the packets delivered so
+                        // far, the error recurs on the next call.
+                        if count > 0 {
+                            break;
+                        }
+                        return Err(Error::Pcap(PcapError::InvalidFormat {
+                            reason: format!("PCAPNG refill error: {e:?}"),
+                        }));
+                    }
+                }
+                Err(PcapParserError::BufferTooSmall) => {
+                    grow_buffer(reader, &mut self.capacity, "PCAPNG")?;
+                }
+                Err(e) => {
+                    return Err(Error::Pcap(PcapError::InvalidFormat {
+                        reason: format!("PCAPNG parse error: {e:?}"),
+                    }));
+                }
             }
         }
+        Ok(Delivered {
+            consumed: count,
+            paused: None,
+        })
     }
-    Ok(Delivered {
-        consumed: count,
-        paused: None,
-    })
 }
 
 // A reader is moved to the thread that scans with it, so it must be `Send` over any `Send`
