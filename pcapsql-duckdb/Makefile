@@ -4,6 +4,7 @@
 #   make release            build/release/pcapsql.duckdb_extension
 #   make test_release       run test/sql against it (DuckDB's Python package)
 #   make load_test_release  LOAD it in the stock DuckDB command-line shell
+#   make check_reference_release  docs/duckdb-extension-reference.md lists what it registers
 #   make itest              in-process tests (itest/) against a linked libduckdb
 #   make check              duckdb_neo containment, no std::fs in the extension, and fmt and
 #                           clippy for itest/
@@ -11,6 +12,7 @@
 # `debug`, `test_debug` and `load_test_debug` do the same for an unoptimised build.
 
 .PHONY: all configure debug release test test_debug test_release load_test load_test_debug load_test_release
+.PHONY: check_reference check_reference_debug check_reference_release
 .PHONY: itest lint_itest check_containment check_no_std_fs check clean clean_all
 
 PROJ_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
@@ -52,6 +54,13 @@ load_test_debug:
 	scripts/load-test.sh build/debug/$(EXTENSION_FILENAME) $(TARGET_DUCKDB_VERSION) $(EXTENSION_VERSION)
 load_test_release:
 	scripts/load-test.sh build/release/$(EXTENSION_FILENAME) $(TARGET_DUCKDB_VERSION) $(EXTENSION_VERSION)
+
+# The function reference against what the artifact registers in the DuckDB command-line shell.
+check_reference: check_reference_debug
+check_reference_debug:
+	scripts/check-reference.sh build/debug/$(EXTENSION_FILENAME) $(TARGET_DUCKDB_VERSION)
+check_reference_release:
+	scripts/check-reference.sh build/release/$(EXTENSION_FILENAME) $(TARGET_DUCKDB_VERSION)
 
 # itest/ is its own cargo workspace (see its Cargo.toml) and links the libduckdb of the release.
 ITEST_CARGO = lib=$$(DUCKDB_VERSION=$(TARGET_DUCKDB_VERSION) scripts/fetch-duckdb.sh lib) && \
