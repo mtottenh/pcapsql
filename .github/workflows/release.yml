@@ -273,6 +273,63 @@ jobs:
           git commit -m "Update apt repository for ${RELEASE_TAG}" || echo "No changes to commit"
           git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}" HEAD:gh-pages
 
+  # The DuckDB extension, for every platform it is distributed for: built by DuckDB's
+  # extension-ci-tools and loaded in the DuckDB release it targets (duckdb-dist.yml). The packages
+  # above do not wait for it, and a failure here leaves the release without the extension only.
+  duckdb-extension:
+    if: github.event_name != 'workflow_dispatch'
+    uses: ./.github/workflows/duckdb-dist.yml
+
+  duckdb-extension-assets:
+    if: github.event_name != 'workflow_dispatch'
+    needs: [release, duckdb-extension]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_REF }}
+
+      # The artifacts are stamped with the workspace version (pcapsql-duckdb/Makefile), which is
+      # what `duckdb_extensions()` reports. A tag that says otherwise would mislabel them.
+      - name: Check that the tag is the workspace version
+        run: |
+          version=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
+          if [ "$RELEASE_TAG" != "v$version" ]; then
+            echo "::error::tag $RELEASE_TAG, but the extension is stamped v$version (Cargo.toml)"
+            exit 1
+          fi
+
+      - name: Download the extension artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: pcapsql-v*-extension-*
+          path: extension-artifacts
+
+      # One archive per platform, named for the pcapsql release, the DuckDB release the build
+      # loads in and the DuckDB platform. The file inside keeps its name: DuckDB derives the
+      # extension's name, and with it the entrypoint it calls, from the file name.
+      - name: Package
+        run: |
+          mkdir release-assets
+          for dir in extension-artifacts/pcapsql-v*-extension-*; do
+            name=$(basename "$dir")
+            duckdb=${name#pcapsql-}
+            duckdb=${duckdb%%-extension-*}
+            platform=${name##*-extension-}
+            test -f "$dir/pcapsql.duckdb_extension"
+            tar -czf "release-assets/pcapsql-duckdb-extension-${RELEASE_TAG}-duckdb-${duckdb}-${platform}.tar.gz" \
+              -C "$dir" pcapsql.duckdb_extension
+          done
+          (cd release-assets && sha256sum -- *.tar.gz > "pcapsql-duckdb-extension-${RELEASE_TAG}-SHA256SUMS")
+          ls -la release-assets/
+
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "$RELEASE_TAG" release-assets/* --clobber
+
   release:
     if: github.event_name != 'workflow_dispatch'
     needs: [build-deb, build-rpm]
