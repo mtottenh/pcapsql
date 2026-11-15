@@ -387,6 +387,11 @@ impl ScanPlan {
     /// (shared.rs:138-200 moved here), per-output column plans, layer routing.
     pub fn compile(&self, catalog: &Catalog, registry: &ProtocolRegistry)
         -> Result<CompiledScan, PlanError>;
+    /// Until the driver builds stream tables (S4c), `compile` refuses a plan
+    /// that has any (it would give them no rows), and a frontend that builds
+    /// them itself, from a `FrameObserver`, compiles with this.
+    pub fn compile_with_streams(&self, catalog: &Catalog, registry: &ProtocolRegistry)
+        -> Result<CompiledScan, PlanError>;
 }
 pub struct OutColumn { pub name: &'static str, pub kind: ColKind, pub nullable: bool, pub source: ColumnSource }
 pub struct OutputPlan { pub table: Option<TableId>, pub columns: Box<[OutColumn]> /* + private routing */ }
