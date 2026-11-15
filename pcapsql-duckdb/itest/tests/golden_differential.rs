@@ -5,19 +5,24 @@
 //! (`build.rs` takes them from that file), and the expected results are the snapshots in
 //! `pcapsql-datafusion/tests/golden/`, which are Arrow's pretty-printed tables. For each corpus
 //! capture a DuckDB database gets one view per scan table (`CREATE VIEW tcp AS SELECT * FROM
-//! read_tcp('<capture>')`), so that the corpus SQL runs as it is written.
+//! read_tcp('<capture>')`) and one per packets view (`CREATE VIEW tcp_packets AS SELECT * FROM
+//! read_tcp_packets('<capture>')`), so that the corpus SQL runs as it is written.
 //!
 //! # What is compared
 //!
-//! Every corpus query over the per-packet tables: [`COMPARED`]. A query runs unchanged unless
-//! DuckDB's SQL means something else by it; the two that do are rewritten, with the reason.
+//! Every corpus query over the per-packet tables and the `*_packets` views the extension has:
+//! [`COMPARED`]. A query runs unchanged unless DuckDB's SQL means something else by it; the
+//! two that do are rewritten, with the reason. A view here is one fused scan
+//! (`read_<proto>_packets`), where the snapshot was made by DataFusion from its SQL view: that
+//! the two agree is what `tests/packets_views.rs` and the DataFusion frontend's own test show
+//! in general, and this shows on the queries users were given as examples.
 //!
 //! # What is not, and why
 //!
-//! [`NOT_COMPARED`] lists every other corpus query with its reason: it reads a view DataFusion
-//! defines (`*_packets`, `packets`, `tunneled_packets`) or a stream table, which the extension
-//! does not have; it calls a DataFusion-only function; or its row order is not determined by the
-//! query. A corpus query in neither list fails the test, so a query added to the corpus has to
+//! [`NOT_COMPARED`] lists every other corpus query with its reason: it reads a view of the
+//! DataFusion frontend the extension does not offer (`packets`, `tunneled_packets`) or a stream
+//! table, which the extension does not have; it calls a DataFusion-only function; or its row
+//! order is not determined by the query. A corpus query in neither list fails the test, so a query added to the corpus has to
 //! be put in one of them.
 //!
 //! # What is normalised
@@ -95,9 +100,27 @@ const COMPARED: &[(&str, Option<(&str, &str)>)] = &[
     ("v09_one_header_per_level", None),
     ("f01_same_table_two_aliases", None),
     ("f02_order_by_root_depth", None),
+    // The `*_packets` views: each a fused scan here.
+    ("q16_tcp_packets_view", None),
+    ("q26_udp_packets_vxlan_levels", None),
+    ("q28_view_plus_member", None),
+    ("u07_http_packets_view", None),
+    ("v05_bgp_packets_view", None),
+    ("v06_ospf_packets_view", None),
+    ("v07_gtp_packets_view", None),
+    ("v08_gtp_frame_levels", None),
+    ("t01_tcp_packets_levels", None),
+    ("t02_udp_packets_levels", None),
+    ("t03_icmp_packets_levels", None),
+    ("t04_arp_packets_levels", None),
+    // No ORDER BY: a view scan returns its rows in capture order, as DataFusion's fused join
+    // does.
+    ("f03_view_limit_offset", None),
+    ("f06_view_joined_with_member", None),
 ];
 
-const VIEW: &str = "reads a view the DataFusion frontend defines; the extension has no views";
+const VIEW: &str = "reads `packets` or `tunneled_packets`, views of the DataFusion frontend that \
+                    join across encapsulation levels; the extension does not offer them";
 const STREAM: &str = "reads a stream table, which the extension does not build yet";
 const TIME_UDF: &str = "calls a time function only the DataFusion frontend has";
 const WINDOW: &str = "calls a window table function only the DataFusion frontend has";
@@ -105,10 +128,7 @@ const UNORDERED: &str = "its rows depend on an order the query does not fix";
 
 /// The corpus queries that are not compared, each with the reason.
 const NOT_COMPARED: &[(&str, &str)] = &[
-    ("q16_tcp_packets_view", VIEW),
-    ("q26_udp_packets_vxlan_levels", VIEW),
     ("q27_packets_view_vxlan_levels", VIEW),
-    ("q28_view_plus_member", VIEW),
     ("q24_time_udfs", TIME_UDF),
     ("q25_time_range_only", TIME_UDF),
     ("q30_tumble", WINDOW),
@@ -119,24 +139,13 @@ const NOT_COMPARED: &[(&str, &str)] = &[
     ("u03_tls_sessions", STREAM),
     ("u04_stream_join_packet", STREAM),
     ("u05_http2_empty", STREAM),
-    ("u07_http_packets_view", VIEW),
     ("u08_packets_view_http_columns", VIEW),
     ("u09_http_vs_http_messages", STREAM),
-    ("v05_bgp_packets_view", VIEW),
-    ("v06_ospf_packets_view", VIEW),
-    ("v07_gtp_packets_view", VIEW),
-    ("v08_gtp_frame_levels", VIEW),
-    ("t01_tcp_packets_levels", VIEW),
-    ("t02_udp_packets_levels", VIEW),
-    ("t03_icmp_packets_levels", VIEW),
-    ("t04_arp_packets_levels", VIEW),
     ("t05_packets_levels", VIEW),
     ("t06_packets_one_row_per_level", VIEW),
     ("t07_tunneled_packets", VIEW),
-    ("f03_view_limit_offset", VIEW),
     ("f04_derived_table_limit_under_left_join", UNORDERED),
     ("f05_left_join_under_limit", UNORDERED),
-    ("f06_view_joined_with_member", VIEW),
 ];
 
 /// The per-packet tables the snapshots that are compared read. The test fails if a query stops
@@ -282,11 +291,13 @@ fn without_d5_timestamp(mut actual: Table, expected: &Table) -> (Table, bool) {
     (actual, true)
 }
 
-/// A database with a view of every scan table over one corpus capture.
+/// A database with a view of every scan table and of every packets view over one corpus
+/// capture.
 fn database(fixture: &Fixture, capture: &str) -> Result<Connection> {
     let connection = connect()?;
     let path = fixture.write(&format!("{capture}.pcap"), &golden::capture(capture));
-    for table in column(&connection, "SELECT name FROM pcap_protocols()")? {
+    let relations = "SELECT name FROM pcap_protocols() UNION ALL SELECT name FROM pcap_views()";
+    for table in column(&connection, relations)? {
         connection.execute(
             format!("CREATE VIEW \"{table}\" AS SELECT * FROM read_{table}('{path}')"),
             Parameters::None,

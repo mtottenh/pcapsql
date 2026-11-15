@@ -14,7 +14,9 @@
 //! SELECT * FROM read_pcap('capture.pcapng.gz', protocol := 'dns');
 //! SELECT filename, count(*) FROM read_dns(['a.pcap', 'b/*.pcapng'], filename := true) GROUP BY ALL;
 //! SELECT count(*) FROM 'capture.pcap' WHERE frame_number <= 1000;
+//! SELECT timestamp, ip4_to_string(src_ip_v4), dst_port FROM read_tcp_packets('capture.pcap');
 //! SELECT * FROM pcap_protocols();          -- name, description, field_count, kind
+//! SELECT * FROM pcap_views();              -- name, description, protocol, column_count
 //! SELECT * FROM pcap_schema('tcp');        -- column_name, column_type, nullable
 //! SELECT ip4('192.168.1.1');               -- 3232235777
 //! SELECT ip4_to_string(3232235777);        -- 192.168.1.1
@@ -22,12 +24,15 @@
 //! SELECT format_mac(mac('aabbccddeeff'));  -- aa:bb:cc:dd:ee:ff
 //! ```
 //!
-//! That is the scan functions (`read_pcap` and one `read_<table>` per table), `pcap_protocols()`
-//! and `pcap_schema()`, the sixteen scalar functions and the six `format_*` macros; the README
+//! That is the scan functions (`read_pcap`, one `read_<table>` per table and one
+//! `read_<proto>_packets` per packets view), `pcap_protocols()`, `pcap_views()` and
+//! `pcap_schema()`, the sixteen scalar functions and the six `format_*` macros; the README
 //! lists them. None of them has logic of its own. The scan functions run the shared scan layer,
 //! `pcapsql_core::scan`, which the DataFusion engine runs too: the tables and columns are those
-//! of `pcapsql_core::scan::Catalog`, and its driver decides what every row holds. The scalar
-//! functions are loops over the kernels of `pcapsql_core::format`.
+//! of `pcapsql_core::scan::Catalog`, the views those of `pcapsql_core::scan::PacketsView` (each
+//! a join the scan layer evaluates frame by frame, in the same pass), and its driver decides
+//! what every row holds. The scalar functions are loops over the kernels of
+//! `pcapsql_core::format`.
 //!
 //! What is here is the DuckDB side: `engine::table` is the table function behind every scan
 //! function, [`engine::writer::ChunkWriter`] stores the rows of the scan layer in a DuckDB
