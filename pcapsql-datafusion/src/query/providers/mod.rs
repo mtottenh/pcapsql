@@ -6,7 +6,7 @@
 //!                    SharedParseState (ONE parse pass)
 //!              ┌──────────────┬───┴───┬──────────────┐   parallel partitions
 //!              ▼              ▼        ▼              ▼   (seekable sources)
-//!         per-protocol Arrow builders (NormalizedBatchSet fan-out)
+//!      a PartitionScan each, fanning out to an ArrowSink per table
 //!              │              │        │              │
 //!              ▼              ▼        ▼              ▼
 //!        frames table    ipv4 table  tcp table   dns table   ...
