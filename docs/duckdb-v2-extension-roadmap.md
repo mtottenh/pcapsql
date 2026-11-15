@@ -267,6 +267,16 @@ Predicates on parsed protocol fields are not accepted in this
 roadmap: the shared `RowPredicate` is conservative, and V2 requires accepted
 filters to be exact.
 
+As built (P6): single comparisons, and conjunctions of them, are accepted.
+Two bounds on one column reach the callback as one `BETWEEN` node, combined
+by DuckDB's optimizer whether or not the query says `BETWEEN`, and the C API
+has no accessor for whether its bounds are inclusive. Such a node is read as
+the inclusive range, which holds every row the filter keeps, and folded into
+the `FramePredicate` without being accepted: the scan trims and filters by
+it, and DuckDB still applies the real filter to the rows. An accessor for the
+inclusivity (or the node arriving as two comparisons) would let it be
+accepted.
+
 ### 6.6 Errors, panics, logging
 
 - I/O and format errors return a `duckdb_neo::Error` from the callback. `exec`
@@ -304,7 +314,8 @@ of P1. P3 to P6 are independent of each other after P2 and can be reordered.
 | P2 Sequential reader | done: `read_<table>` and `read_pcap`, scalars, macros, `pcap_schema`, `pcap_protocols`. 45 golden-corpus queries match the DataFusion snapshots; every table matches the core driver cell by cell |
 | P3 Projection, cardinality, progress | done except the benchmark exit check. The cardinality is an estimate from the file size |
 | P4 Parallel scans | done for local uncompressed captures; the index is rebuilt per scan (no cache: the file API exposes no modification time to validate one) |
-| P5 Multi-file, replacement scan; P6 Filter pushdown | in progress |
+| P5 Multi-file, replacement scan, remote | done except the remote tests: lists, globs, `filename`, and `FROM 'x.pcap'`, with the partition queue spanning the files. `httpfs` could not be installed where this was built, so no `https://` or `s3://` capture has been read and remote buffer sizes are untuned |
+| P6 Filter pushdown | done, with two limits found on the way. DuckDB 2.0.0 hands two bounds on one column to the scan as a single `BETWEEN` node whose inclusivity the C API does not expose, so a range is used to narrow the read but not accepted: `EXPLAIN` still shows the filter for a time window. And `plan_ranges` keeps the last checkpoint window of an indexed capture unless an upper frame bound excludes it, so a time window never rules out a whole file |
 | P7 to P9 | not started |
 
 ### P0: Spike and scaffolding

@@ -12,6 +12,8 @@
 //! ```sql
 //! SELECT * FROM read_tcp('capture.pcap') WHERE dst_port = 443;
 //! SELECT * FROM read_pcap('capture.pcapng.gz', protocol := 'dns');
+//! SELECT filename, count(*) FROM read_dns(['a.pcap', 'b/*.pcapng'], filename := true) GROUP BY ALL;
+//! SELECT count(*) FROM 'capture.pcap' WHERE frame_number <= 1000;
 //! SELECT * FROM pcap_protocols();          -- name, description, field_count, kind
 //! SELECT * FROM pcap_schema('tcp');        -- column_name, column_type, nullable
 //! SELECT ip4('192.168.1.1');               -- 3232235777
@@ -29,8 +31,10 @@
 //!
 //! What is here is the DuckDB side: `engine::table` is the table function behind every scan
 //! function, [`engine::writer::ChunkWriter`] stores the rows of the scan layer in a DuckDB
-//! chunk, [`engine::fs::DuckFile`] reads a capture through DuckDB's file system, and
-//! [`engine::types`] maps the catalogue's column kinds to DuckDB types.
+//! chunk, [`engine::fs::DuckFile`] reads a capture through DuckDB's file system,
+//! [`engine::types`] maps the catalogue's column kinds to DuckDB types, [`engine::pushdown`]
+//! turns the filters DuckDB offers a scan into the scan layer's frame predicate, and
+//! [`engine::replacement`] answers a capture path named where a table is expected.
 //!
 //! See `docs/duckdb-v2-extension-roadmap.md` for the plan this follows.
 

@@ -58,6 +58,9 @@ SELECT parse_filename(filename), count(*), max(frame_number) FROM read_frames(['
 SELECT frame_number FROM read_udp(['$captures/dns.cap', '$scratch/dns.cap.gz'], strict := true) WHERE frame_number IN (1, 38);
 SELECT count(*), sum(length) FROM '$captures/dns.cap';
 SELECT count(*) FROM '$scratch/*.cap.gz' WHERE length > 100;
+SELECT current_setting('pcapsql_filter_pushdown'), count(*), min(frame_number), max(frame_number) FROM read_frames('$scratch/dns.cap.gz') WHERE frame_number > 4 AND frame_number < 10;
+SELECT frame_number FROM read_dns('$captures/dns.cap') WHERE timestamp >= TIMESTAMP '2005-03-30 08:47:50' AND timestamp < TIMESTAMP '2005-03-30 08:48:00';
+SELECT count(*) FROM read_udp('$scratch/cut.cap', strict := true) WHERE frame_number <= 10;
 "
 expected="pcapsql,true,$extension_version
 28
@@ -88,7 +91,13 @@ v6.pcap,161,161
 1
 38
 38,3706
-11"
+11
+true,5,5,9
+3
+4
+5
+6
+10"
 
 actual=$("$duckdb" -unsigned -csv -noheader -c "$sql")
 if [ "$actual" != "$expected" ]; then

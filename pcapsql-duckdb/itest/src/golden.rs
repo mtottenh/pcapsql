@@ -210,6 +210,53 @@ pub fn legacy_nanos(frames: Vec<Vec<u8>>) -> Vec<u8> {
     legacy_pcap(LegacyVariant::LeNano, LINKTYPE_ETHERNET, 65535, &packets).bytes
 }
 
+/// A legacy pcap capture with nanosecond timestamps of `frames`, with frame `i` (counted from
+/// 0) at `at(i)`: seconds since the epoch and nanoseconds within the second. The timestamps
+/// need not ascend.
+pub fn legacy_nanos_at(frames: Vec<Vec<u8>>, at: impl Fn(usize) -> (u32, u32)) -> Vec<u8> {
+    let packets: Vec<GenPacket> = frames
+        .into_iter()
+        .enumerate()
+        .map(|(i, data)| {
+            let (ts_sec, ts_frac) = at(i);
+            GenPacket {
+                ts_sec,
+                ts_frac,
+                origlen: data.len() as u32,
+                data,
+            }
+        })
+        .collect();
+    legacy_pcap(LegacyVariant::LeNano, LINKTYPE_ETHERNET, 65535, &packets).bytes
+}
+
+/// A pcapng capture of `frames` whose interface has the time offset `offset` seconds: frame
+/// `i` has the timestamp `offset + i` seconds and [`nanos_of`]`(i)` nanoseconds, which is
+/// before 1970 for a negative offset.
+pub fn pcapng_from(frames: Vec<Vec<u8>>, offset: i64) -> Vec<u8> {
+    let packets = frames
+        .into_iter()
+        .enumerate()
+        .map(|(i, data)| PcapngPacket {
+            interface_id: 0,
+            ts_sec: i as u64,
+            ts_frac_units: u64::from(nanos_of(i)),
+            origlen: data.len() as u32,
+            data,
+        })
+        .collect();
+    pcapsql_testgen::pcapng(&[PcapngSection {
+        interfaces: vec![PcapngInterface {
+            link_type: LINKTYPE_ETHERNET,
+            tsresol: 9,
+            snaplen: 65535,
+            if_tsoffset: offset,
+        }],
+        packets,
+    }])
+    .bytes
+}
+
 /// A pcapng capture of `frames`: one section, one Ethernet interface with nanosecond
 /// resolution, an Enhanced Packet Block per frame, with the timestamps of [`legacy_nanos`].
 pub fn pcapng(frames: Vec<Vec<u8>>) -> Vec<u8> {

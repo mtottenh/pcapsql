@@ -253,6 +253,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   table or view of that name comes first. DuckDB's multi-file reader is not
   used (it forwards neither named parameters nor filters), so
   `hive_partitioning` and `union_by_name` are not offered.
+- **DuckDB extension (C API v2): filter pushdown on `frame_number` and
+  `timestamp`.** A scan takes over the filters DuckDB offers it that are
+  exactly a range of frame numbers or of timestamps (core's
+  `FramePredicate`): a comparison (`=`, `<`, `<=`, `>`, `>=`) of
+  `frame_number` or `timestamp` with a constant, in either order, and any
+  `AND` of them. DuckDB no longer evaluates those; the scan enforces them
+  before a packet is parsed. A constant is only used in the type DuckDB
+  compares the stored value with (a `UBIGINT`, a `TIMESTAMP_NS`, or a
+  `HUGEINT` against the widened frame number), so nothing is rounded: a
+  `TIMESTAMP`, `DATE` or text constant has been converted to nanoseconds by
+  DuckDB, and a filter on a cast of the column (`timestamp::DATE`,
+  `frame_number < 2.5`) is left to DuckDB, as are `<>`, `IN`, `OR` and
+  filters on other columns. Two bounds on one column reach the scan as a
+  single `BETWEEN` whose inclusivity DuckDB 2.0.0's C API does not expose:
+  the scan narrows its read by the inclusive range and leaves the filter
+  with DuckDB, so a time window reads as little, and `EXPLAIN` still shows
+  its filter. What is saved: a capture read as one partition ends its read
+  after the last frame an upper frame bound admits (`frame_number <= 1000`
+  on a compressed capture reads 1,000 packets); a capture read in partitions
+  is planned with `plan_ranges`, which leaves out the checkpoint windows
+  whose frame numbers or recorded timestamps cannot match; a filter no frame
+  satisfies opens no file. With several files a `frame_number` filter
+  applies to each file's own numbering. A prepared statement with parameters
+  is planned again by DuckDB at each execution, and its filter is taken over
+  then. `pcapsql_filter_pushdown = false` leaves every filter to DuckDB. The
+  scan's debug log records name the predicate and count the packets it
+  rejected.
 
 ### Changed
 
