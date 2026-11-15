@@ -372,6 +372,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Unused dependencies removed**: `anyhow`, `netlink-packet-route` and
   `netlink-packet-utils` from `pcapsql-core`; `serde`, `bytes`,
   `datafusion-catalog` and `datafusion-datasource` from `pcapsql-datafusion`.
+- **`pcapsql-core`: the `scan` API is tightened** (it is unstable). Its
+  items have one path each, `scan::Name`: the submodules but `testing` are
+  private. `ScanPlan::compile` refuses a plan with stream tables
+  (`PlanError::StreamsNotBuilt`), which the scan driver would give no rows;
+  a frontend that builds them itself calls `compile_with_streams`.
+  `FrameObserver` has an associated `Error`, which `PartitionScan::step`
+  returns. `PlanError` converts into `pcapsql_core::Error` (`Error::Plan`).
+  `FramePredicate` gains `none`, `frame_number`, `timestamp_ns` and
+  `intersect`; `TableDef` a `description`. Gone, for want of a user:
+  `StreamTable` (`TableKind::Stream` is a unit variant), `UnsupportedKind`,
+  `ColKind::data_kind` and `TryFrom<&DataKind> for ColKind`.
+- **A stream reassembly failure is reported as what it is.** The CLI's
+  message read "I/O error: Query error: Query execution error: Stream
+  processing error: ..."; the "I/O error: " in front is gone.
 - **DuckDB extension: the message of a truncated capture** names the last
   complete frame and no longer counts the bytes after it: the scan now takes
   the truncation from the packet reader (`PacketReader::truncated`) instead
