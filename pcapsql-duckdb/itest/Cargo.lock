@@ -535,8 +535,14 @@ dependencies = [
  "flate2",
  "pcapsql-core",
  "pcapsql-duckdb",
+ "pcapsql-testgen",
  "tempfile",
+ "zstd",
 ]
+
+[[package]]
+name = "pcapsql-testgen"
+version = "0.4.2"
 
 [[package]]
 name = "phf"
