@@ -5,12 +5,13 @@
 #   make test_release       run test/sql against it (DuckDB's Python package)
 #   make load_test_release  LOAD it in the stock DuckDB command-line shell
 #   make itest              in-process tests (itest/) against a linked libduckdb
-#   make check              duckdb_neo containment, and fmt and clippy for itest/
+#   make check              duckdb_neo containment, no std::fs in the extension, and fmt and
+#                           clippy for itest/
 #
 # `debug`, `test_debug` and `load_test_debug` do the same for an unoptimised build.
 
 .PHONY: all configure debug release test test_debug test_release load_test load_test_debug load_test_release
-.PHONY: itest lint_itest check_containment check clean clean_all
+.PHONY: itest lint_itest check_containment check_no_std_fs check clean clean_all
 
 PROJ_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
@@ -66,7 +67,10 @@ lint_itest:
 check_containment:
 	scripts/check-neo-containment.sh
 
-check: check_containment lint_itest
+check_no_std_fs:
+	scripts/check-no-std-fs.sh
+
+check: check_containment check_no_std_fs lint_itest
 
 clean: clean_build
 	cargo clean --package pcapsql-duckdb-ext --package pcapsql-duckdb

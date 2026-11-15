@@ -1,0 +1,127 @@
+# name: test/sql/pcap_schema.test
+# description: pcap_schema(protocol) lists the columns a scan of a protocol table returns
+# group: [pcapsql]
+
+statement error
+SELECT * FROM pcap_schema('tcp');
+----
+pcap_schema
+
+require pcapsql
+
+query TT
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM pcap_schema('tcp'));
+----
+column_name	VARCHAR
+column_type	VARCHAR
+nullable	BOOLEAN
+
+# frames: one row per packet, from the packet record. Timestamps are nanoseconds
+query TTT
+SELECT * FROM pcap_schema('frames');
+----
+frame_number	UBIGINT	false
+timestamp	TIMESTAMP_NS	false
+length	UINTEGER	false
+original_length	UINTEGER	false
+link_type	USMALLINT	false
+raw_data	BLOB	false
+
+# A protocol table: frame_number and timestamp, the protocol's fields, the encapsulation columns.
+# MAC addresses are 6-byte BLOBs
+query TTT
+SELECT * FROM pcap_schema('ethernet');
+----
+frame_number	UBIGINT	false
+timestamp	TIMESTAMP_NS	false
+src_mac	BLOB	true
+dst_mac	BLOB	true
+ethertype	USMALLINT	true
+encap_depth	UTINYINT	false
+tunnel_type	VARCHAR	true
+tunnel_id	UBIGINT	true
+
+# IPv4 addresses are UINTEGER, IPv6 addresses 16-byte BLOBs: what ip4_to_string() and
+# ip6_to_string() take
+query TT
+SELECT column_name, column_type FROM pcap_schema('ipv4') WHERE column_name IN ('src_ip', 'dst_ip');
+----
+src_ip	UINTEGER
+dst_ip	UINTEGER
+
+query TT
+SELECT column_name, column_type FROM pcap_schema('ipv6') WHERE column_name IN ('src_ip', 'dst_ip');
+----
+src_ip	BLOB
+dst_ip	BLOB
+
+# Lists
+query TT
+SELECT column_name, column_type FROM pcap_schema('dns') WHERE column_type LIKE '%[]' ORDER BY column_name;
+----
+answer_cnames	VARCHAR[]
+answer_ip4s	UINTEGER[]
+answer_ip6s	BLOB[]
+answer_ttls	UINTEGER[]
+answer_types	USMALLINT[]
+
+# Every protocol table starts with frame_number and timestamp and ends with the encapsulation
+# columns
+query TT
+SELECT column_name, column_type FROM pcap_schema('tcp') LIMIT 2;
+----
+frame_number	UBIGINT
+timestamp	TIMESTAMP_NS
+
+query TTT
+SELECT * FROM pcap_schema('tcp') OFFSET (SELECT count(*) - 3 FROM pcap_schema('tcp'));
+----
+encap_depth	UTINYINT	false
+tunnel_type	VARCHAR	true
+tunnel_id	UBIGINT	true
+
+# The type names are the ones DuckDB uses
+query I
+SELECT bool_and(column_type = typeof(NULL::UBIGINT)) FROM pcap_schema('frames') WHERE column_name = 'frame_number';
+----
+true
+
+# Column names are unique within a table
+query I
+SELECT count(*) = count(DISTINCT column_name) FROM pcap_schema('dns');
+----
+true
+
+# The name is matched whatever its case
+query I
+SELECT count(*) FROM pcap_schema('Ethernet');
+----
+8
+
+statement error
+SELECT * FROM pcap_schema('nope');
+----
+pcap_protocols() lists the tables
+
+# The stream tables are not read by the extension yet
+statement error
+SELECT * FROM pcap_schema('tcp_connections');
+----
+no protocol table 'tcp_connections'
+
+statement error
+SELECT * FROM pcap_schema(NULL);
+----
+must not be NULL
+
+# The protocol is required
+statement error
+SELECT * FROM pcap_schema();
+----
+pcap_schema
+
+# Two scans of the function in one query are independent
+query I
+SELECT count(*) FROM pcap_schema('ethernet') a JOIN pcap_schema('ethernet') b USING (column_name);
+----
+8

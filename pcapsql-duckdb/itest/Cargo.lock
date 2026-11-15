@@ -532,6 +532,7 @@ name = "pcapsql-duckdb-itest"
 version = "0.0.0"
 dependencies = [
  "duckdb-neo",
+ "flate2",
  "pcapsql-core",
  "pcapsql-duckdb",
  "tempfile",

@@ -129,6 +129,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   left to itself, 4 MiB for a local file, 16 MiB for a remote object).
   `scan::PartitionQueue` hands the partitions of a scan out to any number
   of workers, each exactly once and in capture order, with its ordinal.
+- **DuckDB extension (C API v2): `pcap_schema(protocol)`, and the building
+  blocks of the packet readers.** `pcap_schema('tcp')` lists the columns a
+  scan of a table returns (`column_name`, `column_type`, `nullable`), from
+  the shared catalogue, with the type DuckDB shows for each: timestamps are
+  `TIMESTAMP_NS`, IPv4 addresses `UINTEGER`, MAC and IPv6 addresses `BLOB`,
+  lists `USMALLINT[]`, `UINTEGER[]`, `VARCHAR[]` or `BLOB[]`, and every
+  protocol table has a `timestamp` column after `frame_number`. The readers
+  themselves (`read_pcap`, `read_<protocol>`) are not registered yet; three
+  parts of them are in place. `engine::types` maps each column kind of the
+  catalogue to a DuckDB logical type. `engine::writer::ChunkWriter` is the
+  scan layer's `RowSink` over a table function's output chunk: values go
+  straight into DuckDB's vectors (strings and blobs inline or into the
+  vector's arena, list items into the list's child vector), it reports `Full`
+  at the chunk's capacity of 2,048 rows and refuses a row past it, and it
+  passes the sink conformance suite of `pcapsql_core::scan::testing` through
+  real chunks. `engine::fs::DuckFile` is a buffered `Read` over a file opened
+  through DuckDB's file system (1 MiB at a time, 4 MiB for a remote file), at
+  the start of the file or at a byte offset, so that a capture is read with
+  core's `ReadPacketReader` and DuckDB's access rules
+  (`enable_external_access`, `allowed_directories`) decide what may be
+  opened. The extension's sources use no `std::fs`; a `clippy.toml` scoped to
+  the extension and `make check` enforce it.
 
 ### Changed
 
@@ -152,6 +174,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `MPLS Multicast`, ...); `mac()` accepts the bare 12-digit form and
   surrounding whitespace; `pcap_unhex()` accepts surrounding whitespace and a
   `0x` prefix.
+- **DuckDB extension: `pcap_protocols()` reads the shared catalogue.** It
+  lists `frames` and the 27 protocol tables, as before, and gains a fourth
+  column, `kind` (`frames` or `protocol`). `field_count` is now the number of
+  columns of the table, the ones `pcap_schema()` lists (`frame_number`,
+  `timestamp` and the encapsulation columns included), where it was the
+  number of fields of the protocol's parser; `frames` has 6, with `raw_data`,
+  not 5. The catalogue's stream tables (`tcp_connections`, `tls_sessions`,
+  `http_messages`, `http2`) are not listed, since the extension does not read
+  them.
 - **The scalar SQL functions call the core kernels.** `ip_proto_name()`,
   `tcp_flags_str()`, `ip_in_cidr()`, `mac()`, `hex()` and the rest of the
   network, protocol and utility functions are now Arrow wrappers over

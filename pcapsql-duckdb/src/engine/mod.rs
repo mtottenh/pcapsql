@@ -4,10 +4,13 @@
 //! that touches either is kept below this module. `scripts/check-neo-containment.sh` enforces
 //! that in CI.
 
+pub mod fs;
 pub mod guard;
 mod macros;
 mod registry;
 mod scalar;
+pub mod types;
+pub mod writer;
 
 use duckdb_neo::{extension::Extension, Result};
 

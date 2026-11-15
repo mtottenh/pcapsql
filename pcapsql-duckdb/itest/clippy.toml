@@ -1,0 +1,4 @@
+# Deliberately empty. Clippy takes the first clippy.toml it finds from a crate's directory
+# upwards; without this file the tests would inherit ../clippy.toml, which forbids `std::fs` in
+# the extension. The tests use `std::fs` to write their fixture files and to check what the
+# extension read through DuckDB's file system.

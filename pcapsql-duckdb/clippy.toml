@@ -1,0 +1,43 @@
+# Clippy configuration of the DuckDB extension: `pcapsql-duckdb` (src/) and `pcapsql-duckdb-ext`
+# (ext/). Clippy takes the first clippy.toml it finds from a crate's directory upwards, so this
+# file does not reach the other crates of the workspace, and itest/ has a file of its own.
+#
+# The extension reads files only through DuckDB's file system (src/engine/fs.rs), so that remote
+# paths work and DuckDB's access rules (`enable_external_access`, `allowed_directories`) hold.
+# Nothing here may open, list or inspect a path itself. `scripts/check-no-std-fs.sh` checks the
+# same by text, and also catches pcapsql-core's own file readers (`FilePacketSource`,
+# `MmapPacketSource`), which open with `std::fs` on the caller's behalf.
+
+disallowed-types = [
+    { path = "std::fs::File", reason = "open files through DuckDB's file system: engine::fs::DuckFile" },
+    { path = "std::fs::OpenOptions", reason = "open files through DuckDB's file system: engine::fs::DuckFile" },
+    { path = "std::fs::ReadDir", reason = "list files with DuckDB's FileSystem::glob" },
+    { path = "std::fs::DirEntry", reason = "list files with DuckDB's FileSystem::glob" },
+    { path = "std::fs::Metadata", reason = "ask DuckDB's file system: DuckFile::size, FileSystem::exists" },
+]
+
+disallowed-methods = [
+    { path = "std::fs::read", reason = "read files through DuckDB's file system: engine::fs::DuckFile" },
+    { path = "std::fs::read_to_string", reason = "read files through DuckDB's file system: engine::fs::DuckFile" },
+    { path = "std::fs::write", reason = "write files through DuckDB's file system" },
+    { path = "std::fs::copy", reason = "use DuckDB's file system" },
+    { path = "std::fs::rename", reason = "use DuckDB's FileSystem::move_item" },
+    { path = "std::fs::remove_file", reason = "use DuckDB's FileSystem::remove" },
+    { path = "std::fs::remove_dir", reason = "use DuckDB's file system" },
+    { path = "std::fs::remove_dir_all", reason = "use DuckDB's file system" },
+    { path = "std::fs::create_dir", reason = "use DuckDB's file system" },
+    { path = "std::fs::create_dir_all", reason = "use DuckDB's file system" },
+    { path = "std::fs::read_dir", reason = "list files with DuckDB's FileSystem::glob" },
+    { path = "std::fs::metadata", reason = "ask DuckDB's file system: DuckFile::size, FileSystem::exists" },
+    { path = "std::fs::symlink_metadata", reason = "ask DuckDB's file system" },
+    { path = "std::fs::canonicalize", reason = "use DuckDB's FileSystem::expand" },
+    { path = "std::fs::exists", reason = "use DuckDB's FileSystem::exists" },
+    { path = "std::path::Path::exists", reason = "use DuckDB's FileSystem::exists" },
+    { path = "std::path::Path::try_exists", reason = "use DuckDB's FileSystem::exists" },
+    { path = "std::path::Path::is_file", reason = "use DuckDB's FileSystem::exists" },
+    { path = "std::path::Path::is_dir", reason = "use DuckDB's file system" },
+    { path = "std::path::Path::metadata", reason = "ask DuckDB's file system" },
+    { path = "std::path::Path::symlink_metadata", reason = "ask DuckDB's file system" },
+    { path = "std::path::Path::read_dir", reason = "list files with DuckDB's FileSystem::glob" },
+    { path = "std::path::Path::canonicalize", reason = "use DuckDB's FileSystem::expand" },
+]

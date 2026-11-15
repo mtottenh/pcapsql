@@ -26,7 +26,8 @@ sql="
 LOAD '$extension';
 SELECT extension_name, loaded, extension_version FROM duckdb_extensions() WHERE extension_name = 'pcapsql';
 SELECT count(*) FROM pcap_protocols();
-SELECT name, field_count FROM pcap_protocols() WHERE name = 'frames';
+SELECT name, field_count, kind FROM pcap_protocols() WHERE name = 'frames';
+SELECT column_name, column_type, nullable FROM pcap_schema('ethernet') WHERE column_name IN ('timestamp', 'src_mac');
 SELECT ip4('192.168.1.1'), ip4_to_string(3232235777), ip4('not an address') IS NULL, ip4_to_string(NULL) IS NULL;
 SELECT count(*), count(DISTINCT ip4_to_string(i::UINTEGER)) FROM range(5000) t(i);
 SELECT count(*) FROM duckdb_functions() WHERE function_type = 'scalar' AND function_name IN (
@@ -41,7 +42,9 @@ SELECT format_ip4(3232235777), format_ip6(ip6('::1')), format_mac(mac('AABBCCDDE
 "
 expected="pcapsql,true,$extension_version
 28
-frames,5
+frames,6,frames
+timestamp,TIMESTAMP_NS,false
+src_mac,BLOB,true
 3232235777,192.168.1.1,true,true
 5000,5000
 16

@@ -13,7 +13,7 @@ the `duckdb-neo` pin in the `Cargo.toml` files and
 
 | Path | What it is |
 |---|---|
-| `src/` | Library `pcapsql_duckdb`: what the extension registers. `duckdb_neo` is used only under `src/engine/` |
+| `src/` | Library `pcapsql_duckdb`: what the extension registers. `duckdb_neo` is used only under `src/engine/`, and no file is opened except through DuckDB's file system (`src/engine/fs.rs`) |
 | `ext/` | The loadable extension, a `cdylib` named `pcapsql` that holds only the entrypoint |
 | `itest/` | In-process tests: links libduckdb, registers the same entrypoint statically, runs SQL from `cargo test` |
 | `test/sql/` | sqllogictest files, run against the built `pcapsql.duckdb_extension` |
@@ -36,7 +36,7 @@ make release            # build/release/pcapsql.duckdb_extension
 make test_release       # test/sql against the artifact, in DuckDB's Python package
 make load_test_release  # LOAD the artifact in the DuckDB command-line shell
 make itest              # in-process tests against libduckdb
-make check              # duckdb_neo containment; fmt and clippy for itest/
+make check              # duckdb_neo containment; no std::fs in the extension; fmt and clippy for itest/
 ```
 
 `make debug`, `make test_debug` and `make load_test_debug` do the same for an
@@ -51,6 +51,12 @@ The crates also build with the rest of the workspace (`cargo build --workspace`,
 `cargo test --workspace`), which needs no DuckDB library: that covers the
 library's unit tests, not the SQL behaviour.
 
+`clippy.toml` forbids `std::fs` and the path queries of `std::path` in `src/`
+and `ext/` (clippy's `disallowed_types` and `disallowed_methods`); it applies
+to these two crates only, and `itest/` has an empty one of its own because the
+tests write their fixtures with `std::fs`. `scripts/check-no-std-fs.sh`, part
+of `make check`, looks for the same by text without a build.
+
 ## Load
 
 The artifact is unsigned, so DuckDB has to be started with `-unsigned`, and
@@ -62,11 +68,35 @@ duckdb -unsigned -c "LOAD '$PWD/build/release/pcapsql.duckdb_extension'; SELECT 
 
 ## What is registered
 
-One table function:
+Two table functions, which list what the shared catalogue
+(`pcapsql_core::scan::Catalog`) says the extension reads:
 
 | Function | Result |
 |---|---|
-| `pcap_protocols()` | One row per protocol table: `name`, `description`, `field_count` |
+| `pcap_protocols()` | One row per table, sorted by name: `name`, `description`, `field_count` (the number of columns), `kind` (`frames` for the table of packets, `protocol` for a table of one protocol's layers) |
+| `pcap_schema(protocol)` | One row per column of the table, in order: `column_name`, `column_type` (the DuckDB type), `nullable`. The name is matched in any case; an unknown one is an error |
+
+The tables are `frames` and the 27 protocol tables. The catalogue's stream
+tables (`tcp_connections`, `tls_sessions`, `http_messages`, `http2`) are not
+listed: the extension does not read them yet.
+
+Columns have the names and order of the DataFusion engine's tables, with two
+differences. Timestamps are `TIMESTAMP_NS`, where DataFusion has microseconds.
+And every protocol table has a `timestamp` column after `frame_number`, which
+DataFusion leaves to a join with `frames`; DuckDB cannot turn that join into
+one pass over the capture.
+
+| Stored value | DuckDB type |
+|---|---|
+| Booleans | `BOOLEAN` |
+| Unsigned integers of 8, 16, 32, 64 bits | `UTINYINT`, `USMALLINT`, `UINTEGER`, `UBIGINT` |
+| Signed integers of 8, 64 bits | `TINYINT`, `BIGINT` |
+| Floating point | `DOUBLE` |
+| Text | `VARCHAR` |
+| Bytes, of any or of a fixed length (a MAC address is 6, an IPv6 address 16) | `BLOB` |
+| IPv4 addresses | `UINTEGER` |
+| Packet timestamps | `TIMESTAMP_NS` |
+| Lists | `USMALLINT[]`, `UINTEGER[]`, `VARCHAR[]`, `BLOB[]` |
 
 Sixteen scalar functions. Each is a loop over a kernel of
 `pcapsql_core::format`, the same kernels the DataFusion engine calls, so the
@@ -113,6 +143,50 @@ database file):
 The packet readers (`read_pcap`, `read_<protocol>`) arrive with phase P2 of
 the roadmap.
 
+## Building blocks of the packet readers
+
+The readers are not registered yet; what they are made of is in `src/engine/`
+and tested on its own.
+
+| Module | What it does |
+|---|---|
+| `types.rs` | The DuckDB logical type of each column kind of the catalogue (the table above), and the name DuckDB prints for it |
+| `writer.rs` | `ChunkWriter`: stores the rows the shared scan layer produces (`pcapsql_core::scan::RowSink`) in the output chunk of one `exec` call |
+| `fs.rs` | `DuckFile`: a buffered `std::io::Read` over a file opened through DuckDB's file system, for core's `ReadPacketReader` |
+
+`ChunkWriter` writes each value straight into the DuckDB vector of its column:
+fixed-width values through the vector's data pointer, strings and blobs inline
+or into the vector's arena, list items into the list's child vector, NULLs
+into the validity mask. It reports `Full` with the row that reaches the
+chunk's capacity (2,048 rows) and refuses any row after that, because DuckDB
+accepts an oversized chunk and then fails with an error that invalidates the
+database. `finish` gives the chunk its row count; a writer dropped without it
+leaves the chunk empty. For an output without columns it only counts: DuckDB
+hands a scan at least one vector even for `count(*)`, and the rows of a vector
+nobody wrote are NULL. It is the one module with `unsafe` code, and its header
+states the invariants that make the pointer writes sound.
+
+`DuckFile` reads 1 MiB at a time from a local file and 4 MiB from a remote
+one, never more than the file holds. `DuckFile::open` starts at the first
+byte, `DuckFile::open_at` at a byte offset (a partition of a capture), and
+`seek` moves within an open file. An open that DuckDB does not allow
+(`enable_external_access = false`, a path outside `allowed_directories`)
+fails with DuckDB's error.
+
+Tests, in `itest/`:
+
+- `tests/chunk_writer.rs` runs the sink conformance suite of
+  `pcapsql_core::scan::testing` against `ChunkWriter` through the test-only
+  table function `chunk_rows` (`src/replay.rs`), which writes given rows with
+  a `ChunkWriter` in each `exec` call; the cells are read back from the query
+  result. It also covers every column type with and without NULL, lists that
+  outgrow their child vector, strings with a NUL in them, nanosecond
+  timestamps, scans of more than one chunk, projection, and a misused writer.
+- `tests/duck_file.rs` counts the packets of real and generated captures,
+  plain and gzip-compressed, with `StreamHeader::probe` and
+  `ReadPacketReader::sequential` over a `DuckFile` kept in a table function's
+  local state, and checks offsets, seeks and DuckDB's access rules.
+
 ### Differences from the extension for DuckDB 1.x
 
 The scalar functions now answer as the DataFusion engine does:
@@ -128,3 +202,13 @@ The scalar functions now answer as the DataFusion engine does:
   `MPLS-MC`, and others.
 - `mac()` accepts the bare 12-digit form and surrounding whitespace.
 - `pcap_unhex()` accepts surrounding whitespace and a `0x` prefix.
+
+The listing functions now show the shared catalogue:
+
+- `pcap_protocols()` has a fourth column, `kind`. `field_count` is the number
+  of columns of the table (what `pcap_schema()` lists), where it was the
+  number of fields of the parser; `frames` has 6, with `raw_data`, not 5.
+- `pcap_schema()` lists the columns the readers will return, with the type
+  DuckDB will show for each: it used to list the parser's field descriptors,
+  which left out `timestamp` and the encapsulation columns, gave `frames` a
+  `BIGINT` timestamp, and typed addresses as text.

@@ -8,6 +8,11 @@
 //! The tests named `spike_*` do not test pcapsql. They pin down DuckDB 2.0.0 and `duckdb-neo`
 //! behaviour the design relies on (section 10 of `docs/duckdb-v2-extension-roadmap.md`), with
 //! test-only table functions, so that an upgrade of either shows what changed.
+//!
+//! [`replay`] holds `chunk_rows`, the test-only table function that drives the extension's
+//! `ChunkWriter` from a list of rows, for the tests of the writer.
+
+pub mod replay;
 
 use duckdb_neo::{
     connection::Connection,
