@@ -507,8 +507,8 @@ impl<'a> PacketLayers<'_, 'a> {
             bump: self.bump,
         };
         let parsed = match projection {
-            None => parser.parse_into(data, context, &mut sink),
-            Some(_) => parser.parse_projected_into(data, context, projection, &mut sink),
+            None => parser.parse(data, context, &mut sink),
+            Some(_) => parser.parse_projected(data, context, projection, &mut sink),
         };
         let error = match parsed.status {
             Status::Ok => None,
@@ -700,26 +700,5 @@ impl<'l, 'a> LayerRef<'l, 'a> {
         let (key, value) = &self.fields[position];
         *hint = FieldHint { position, key };
         Some(value)
-    }
-}
-
-/// MIGRATION: the result of a parser that returns its fields, written to a
-/// sink.
-pub(super) fn adapt<'a>(
-    result: super::ParseResult<'a>,
-    fields: &mut FieldSink<'_, 'a>,
-) -> Parsed<'a> {
-    let status = match &result.error {
-        None => Status::Ok,
-        Some(error) if result.fields.is_empty() => Status::Error(fields.text(error)),
-        Some(error) => Status::Partial(fields.text(error)),
-    };
-    for field in result.fields {
-        fields.push(field);
-    }
-    Parsed {
-        remaining: result.remaining,
-        child_hints: result.child_hints,
-        status,
     }
 }

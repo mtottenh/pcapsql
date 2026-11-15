@@ -43,7 +43,7 @@ impl Protocol for UdpProtocol {
         }
     }
 
-    fn parse_into<'a>(
+    fn parse<'a>(
         &self,
         data: &'a [u8],
         _context: &ParseContext,
@@ -85,7 +85,7 @@ impl Protocol for UdpProtocol {
         &["ipv4", "ipv6"]
     }
 
-    fn parse_projected_into<'a>(
+    fn parse_projected<'a>(
         &self,
         data: &'a [u8],
         _context: &ParseContext,
@@ -94,8 +94,8 @@ impl Protocol for UdpProtocol {
     ) -> Parsed<'a> {
         // If no projection, use full parse
         let fields = match fields {
-            None => return self.parse_into(data, _context, result_fields),
-            Some(f) if f.is_empty() => return self.parse_into(data, _context, result_fields),
+            None => return self.parse(data, _context, result_fields),
+            Some(f) if f.is_empty() => return self.parse(data, _context, result_fields),
             Some(f) => f,
         };
 

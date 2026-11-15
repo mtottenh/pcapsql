@@ -113,9 +113,8 @@ pub use protocol::OwnedFieldValue;
 pub use protocol::{
     chain_fields_for_protocol, compute_required_protocols, default_registry,
     merge_with_chain_fields, parse_packet, should_run_parser, BuiltinProtocol, FieldHint, FieldSet,
-    FieldSink, FieldValue, LayerRef, PacketLayers, ParseBuf, ParseContext, ParseResult, ParseScope,
-    Parsed, PayloadMode, ProjectionConfig, Protocol, ProtocolRegistry, Status, TunnelLayer,
-    TunnelType,
+    FieldSink, FieldValue, LayerRef, PacketLayers, ParseBuf, ParseContext, ParseScope, Parsed,
+    PayloadMode, ProjectionConfig, Protocol, ProtocolRegistry, Status, TunnelLayer, TunnelType,
 };
 pub use schema::{DataKind, FieldDescriptor, ProtocolSchema};
 pub use stream::{

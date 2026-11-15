@@ -72,7 +72,7 @@ impl Protocol for QuicProtocol {
         }
     }
 
-    fn parse_into<'a>(
+    fn parse<'a>(
         &self,
         data: &'a [u8],
         _context: &ParseContext,

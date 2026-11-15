@@ -79,7 +79,6 @@ url = { workspace = true, optional = true }
 criterion.workspace = true
 tempfile.workspace = true
 hex.workspace = true
-smallvec.workspace = true
 compact_str.workspace = true
 
 # Cloud storage for integration tests; the sink conformance suite

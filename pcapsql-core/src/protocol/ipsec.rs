@@ -135,7 +135,7 @@ impl Protocol for IpsecProtocol {
         }
     }
 
-    fn parse_into<'a>(
+    fn parse<'a>(
         &self,
         data: &'a [u8],
         context: &ParseContext,

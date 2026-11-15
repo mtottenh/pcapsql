@@ -152,7 +152,7 @@ impl Protocol for GtpProtocol {
         }
     }
 
-    fn parse_into<'a>(
+    fn parse<'a>(
         &self,
         data: &'a [u8],
         context: &ParseContext,

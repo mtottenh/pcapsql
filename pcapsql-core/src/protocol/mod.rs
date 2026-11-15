@@ -81,7 +81,7 @@ mod vxlan;
 #[cfg(test)]
 pub mod test_utils;
 
-pub use context::{FieldEntry, HintKey, Hints, ParseContext, ParseResult, TunnelLayer, TunnelType};
+pub use context::{FieldEntry, HintKey, Hints, ParseContext, TunnelLayer, TunnelType};
 pub use field::{FieldValue, OwnedFieldValue};
 pub use layers::{
     FieldHint, FieldSink, LayerRef, ListBuilder, PacketLayers, ParseBuf, Parsed, Status,

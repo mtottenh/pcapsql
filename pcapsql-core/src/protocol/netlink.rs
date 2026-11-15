@@ -137,7 +137,7 @@ impl Protocol for NetlinkProtocol {
         None
     }
 
-    fn parse_into<'a>(
+    fn parse<'a>(
         &self,
         data: &'a [u8],
         context: &ParseContext,
