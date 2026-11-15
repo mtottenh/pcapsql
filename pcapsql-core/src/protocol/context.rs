@@ -1,10 +1,10 @@
-//! Parse context and result types.
+//! The context a layer is parsed in, and the hints layers leave each other.
 
 use smallvec::SmallVec;
 
 use super::FieldValue;
 
-/// Field entry for parse results: (field_name, value).
+/// A field of a layer: (field_name, value).
 /// Field names are always static strings (protocol-defined).
 /// The lifetime parameter ties the value to the packet/buffer data.
 pub type FieldEntry<'data> = (&'static str, FieldValue<'data>);
@@ -388,113 +388,6 @@ impl ParseContext {
     }
 }
 
-/// Result of parsing a protocol layer.
-///
-/// Uses SmallVec for inline storage to avoid HashMap allocation overhead.
-/// Most protocols have <16 fields and <4 child hints, so these fit inline.
-///
-/// The lifetime parameter `'data` ties the result to the packet/buffer data,
-/// allowing zero-copy parsing where field values reference the packet directly.
-#[derive(Debug, Clone)]
-pub struct ParseResult<'data> {
-    /// Extracted field values. Most protocols have <16 fields.
-    /// Field values may reference the packet data (zero-copy).
-    pub fields: SmallVec<[FieldEntry<'data>; 16]>,
-
-    /// Remaining unparsed bytes (payload for next layer).
-    pub remaining: &'data [u8],
-
-    /// Hints for child protocol identification.
-    pub child_hints: Hints,
-
-    /// Parse error if partial parsing occurred.
-    pub error: Option<String>,
-
-    /// Encapsulation depth when this protocol was parsed (0 = outer layer).
-    pub encap_depth: u8,
-
-    /// Type of the innermost enclosing tunnel (if inside a tunnel).
-    pub tunnel_type: TunnelType,
-
-    /// Identifier of the innermost enclosing tunnel (VNI, GRE key, TEID, etc.).
-    pub tunnel_id: Option<u64>,
-}
-
-impl<'data> ParseResult<'data> {
-    /// Create a successful parse result.
-    ///
-    /// Note: `encap_depth`, `tunnel_type`, and `tunnel_id` default to 0/None.
-    /// These are populated by the parse loop from the ParseContext after parsing.
-    pub fn success(
-        fields: SmallVec<[FieldEntry<'data>; 16]>,
-        remaining: &'data [u8],
-        child_hints: Hints,
-    ) -> Self {
-        Self {
-            fields,
-            remaining,
-            child_hints,
-            error: None,
-            encap_depth: 0,
-            tunnel_type: TunnelType::None,
-            tunnel_id: None,
-        }
-    }
-
-    /// Create an error parse result.
-    pub fn error(error: String, remaining: &'data [u8]) -> Self {
-        Self {
-            fields: SmallVec::new(),
-            remaining,
-            child_hints: Hints::new(),
-            error: Some(error),
-            encap_depth: 0,
-            tunnel_type: TunnelType::None,
-            tunnel_id: None,
-        }
-    }
-
-    /// Create a result with partial fields and an error.
-    pub fn partial(
-        fields: SmallVec<[FieldEntry<'data>; 16]>,
-        remaining: &'data [u8],
-        error: String,
-    ) -> Self {
-        Self {
-            fields,
-            remaining,
-            child_hints: Hints::new(),
-            error: Some(error),
-            encap_depth: 0,
-            tunnel_type: TunnelType::None,
-            tunnel_id: None,
-        }
-    }
-
-    /// Set encapsulation context from a ParseContext.
-    pub fn set_encap_context(&mut self, ctx: &ParseContext) {
-        self.encap_depth = ctx.encap_depth;
-        self.tunnel_type = ctx.current_tunnel_type();
-        self.tunnel_id = ctx.current_tunnel_id();
-    }
-
-    /// Get a field value by name (linear search, but N is small).
-    pub fn get(&self, name: &str) -> Option<&FieldValue<'data>> {
-        self.fields.iter().find(|(k, _)| *k == name).map(|(_, v)| v)
-    }
-
-    /// Get a child hint value by key.
-    #[inline]
-    pub fn hint(&self, key: HintKey) -> Option<u64> {
-        self.child_hints.get(key)
-    }
-
-    /// Check if parsing was successful.
-    pub fn is_ok(&self) -> bool {
-        self.error.is_none()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -542,22 +435,6 @@ mod tests {
         assert_eq!(ctx.tunnel_stack.len(), 2);
         assert_eq!(ctx.tunnel_stack[0].tunnel_type, TunnelType::Vxlan);
         assert_eq!(ctx.tunnel_stack[1].tunnel_type, TunnelType::IpInIp);
-    }
-
-    #[test]
-    fn test_parse_result_encap_context() {
-        let mut ctx = ParseContext::new(1);
-        ctx.push_tunnel(TunnelType::Gtp, Some(0x12345678));
-
-        let mut result = ParseResult::success(SmallVec::new(), &[], Hints::new());
-        assert_eq!(result.encap_depth, 0);
-        assert_eq!(result.tunnel_type, TunnelType::None);
-        assert_eq!(result.tunnel_id, None);
-
-        result.set_encap_context(&ctx);
-        assert_eq!(result.encap_depth, 1);
-        assert_eq!(result.tunnel_type, TunnelType::Gtp);
-        assert_eq!(result.tunnel_id, Some(0x12345678));
     }
 
     #[test]
@@ -627,29 +504,5 @@ mod tests {
         assert!(hints.is_empty());
         assert_eq!(hints.get(HintKey::EtherType), None);
         assert_eq!(hints.iter().count(), 0);
-    }
-
-    #[test]
-    fn test_parse_result_success() {
-        let mut fields = SmallVec::new();
-        fields.push(("src_port", FieldValue::UInt16(80)));
-
-        let mut hints = Hints::new();
-        hints.insert(HintKey::Transport, 6u64);
-
-        let result = ParseResult::success(fields, &[], hints);
-
-        assert!(result.is_ok());
-        assert_eq!(result.get("src_port"), Some(&FieldValue::UInt16(80)));
-        assert_eq!(result.hint(HintKey::Transport), Some(6));
-    }
-
-    #[test]
-    fn test_parse_result_error() {
-        let result = ParseResult::error("test error".to_string(), &[1, 2, 3]);
-
-        assert!(!result.is_ok());
-        assert_eq!(result.error, Some("test error".to_string()));
-        assert_eq!(result.remaining, &[1, 2, 3]);
     }
 }

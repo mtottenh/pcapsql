@@ -73,7 +73,7 @@ impl Protocol for DnsProtocol {
         }
     }
 
-    fn parse_into<'a>(
+    fn parse<'a>(
         &self,
         data: &'a [u8],
         context: &ParseContext,
@@ -165,7 +165,7 @@ impl Protocol for DnsProtocol {
         &["udp", "tcp"] // DNS runs over UDP (primarily) and TCP
     }
 
-    fn parse_projected_into<'a>(
+    fn parse_projected<'a>(
         &self,
         data: &'a [u8],
         context: &ParseContext,
@@ -174,8 +174,8 @@ impl Protocol for DnsProtocol {
     ) -> Parsed<'a> {
         // If no projection, use full parse
         let requested = match requested_fields {
-            None => return self.parse_into(data, context, fields),
-            Some(f) if f.is_empty() => return self.parse_into(data, context, fields),
+            None => return self.parse(data, context, fields),
+            Some(f) if f.is_empty() => return self.parse(data, context, fields),
             Some(f) => f,
         };
 

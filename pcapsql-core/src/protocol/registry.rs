@@ -9,8 +9,8 @@ use super::{
     ArpProtocol, BgpProtocol, DhcpProtocol, DnsProtocol, EthernetProtocol, FieldSet, GreProtocol,
     GtpProtocol, HintKey, Hints, HttpProtocol, IcmpProtocol, Icmpv6Protocol, IpsecProtocol,
     Ipv4Protocol, Ipv6Protocol, LinuxSllProtocol, MplsProtocol, NetlinkProtocol, NtpProtocol,
-    OspfProtocol, ParseContext, ParseResult, Parsed, QuicProtocol, RtnetlinkProtocol, Sll2Protocol,
-    SshProtocol, TcpProtocol, TlsProtocol, UdpProtocol, VlanProtocol, VxlanProtocol,
+    OspfProtocol, ParseContext, Parsed, QuicProtocol, RtnetlinkProtocol, Sll2Protocol, SshProtocol,
+    TcpProtocol, TlsProtocol, UdpProtocol, VlanProtocol, VxlanProtocol,
 };
 
 /// How a protocol's remaining bytes should be handled.
@@ -212,22 +212,14 @@ pub trait Protocol: Send + Sync {
         None
     }
 
-    /// MIGRATION: the parse of a parser that returns its fields. A ported
-    /// parser implements [`parse_into`](Self::parse_into) and not this.
-    fn parse<'a>(&self, _data: &'a [u8], _context: &ParseContext) -> ParseResult<'a> {
-        unreachable!("{} is ported: it implements parse_into", self.name())
-    }
-
     /// Parse bytes into structured fields: write the layer's fields to
     /// `fields` and return what is left.
-    fn parse_into<'a>(
+    fn parse<'a>(
         &self,
         data: &'a [u8],
         context: &ParseContext,
         fields: &mut FieldSink<'_, 'a>,
-    ) -> Parsed<'a> {
-        super::layers::adapt(self.parse(data, context), fields)
-    }
+    ) -> Parsed<'a>;
 
     /// Return the schema fields this protocol produces.
     fn schema_fields(&self) -> Vec<FieldDescriptor>;
@@ -258,16 +250,6 @@ pub trait Protocol: Send + Sync {
         &[] // Default: no dependencies (link layer protocols)
     }
 
-    /// MIGRATION: the projected parse of a parser that returns its fields.
-    fn parse_projected<'a>(
-        &self,
-        data: &'a [u8],
-        context: &ParseContext,
-        _fields: Option<&FieldSet>,
-    ) -> ParseResult<'a> {
-        self.parse(data, context)
-    }
-
     /// Parse with field projection - only extract requested fields.
     ///
     /// If `projection` is None, extract all fields (default behavior).
@@ -277,9 +259,9 @@ pub trait Protocol: Send + Sync {
     /// the packet metadata, not from parsing.
     ///
     /// The default implementation ignores projection and calls
-    /// [`parse_into`](Self::parse_into). Protocols can override this to skip
+    /// [`parse`](Self::parse). Protocols can override this to skip
     /// expensive field extraction.
-    fn parse_projected_into<'a>(
+    fn parse_projected<'a>(
         &self,
         data: &'a [u8],
         context: &ParseContext,
@@ -287,7 +269,7 @@ pub trait Protocol: Send + Sync {
         fields: &mut FieldSink<'_, 'a>,
     ) -> Parsed<'a> {
         // Default: ignore projection, parse everything
-        self.parse_into(data, context, fields)
+        self.parse(data, context, fields)
     }
 
     /// Returns fields that are "cheap" to extract (header fields parsed anyway).
@@ -404,13 +386,13 @@ impl Protocol for BuiltinProtocol {
     }
 
     #[inline]
-    fn parse_into<'a>(
+    fn parse<'a>(
         &self,
         data: &'a [u8],
         context: &ParseContext,
         fields: &mut FieldSink<'_, 'a>,
     ) -> Parsed<'a> {
-        delegate_protocol!(self, parse_into, data, context, fields)
+        delegate_protocol!(self, parse, data, context, fields)
     }
 
     #[inline]
@@ -434,21 +416,14 @@ impl Protocol for BuiltinProtocol {
     }
 
     #[inline]
-    fn parse_projected_into<'a>(
+    fn parse_projected<'a>(
         &self,
         data: &'a [u8],
         context: &ParseContext,
         projection: Option<&FieldSet>,
         fields: &mut FieldSink<'_, 'a>,
     ) -> Parsed<'a> {
-        delegate_protocol!(
-            self,
-            parse_projected_into,
-            data,
-            context,
-            projection,
-            fields
-        )
+        delegate_protocol!(self, parse_projected, data, context, projection, fields)
     }
 
     #[inline]

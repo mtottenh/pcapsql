@@ -3220,7 +3220,6 @@ dependencies = [
  "rusqlite",
  "rustyline",
  "serde_json",
- "smallvec",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",

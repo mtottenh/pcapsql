@@ -279,7 +279,7 @@ impl Protocol for HttpProtocol {
         Some(CONTENT_PRIORITY)
     }
 
-    fn parse_into<'a>(
+    fn parse<'a>(
         &self,
         data: &'a [u8],
         _context: &ParseContext,
