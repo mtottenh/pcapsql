@@ -1199,7 +1199,7 @@ pub const CORPUS: &[(Capture, &str, &str)] = &[
         "t05_sll2_tcp_only",
         "SELECT frame_number, src_port, dst_port, flag_syn FROM tcp ORDER BY frame_number",
     ),
-    // --- Stream analysis: tables built by the stream subscriber of the pass ---
+    // --- Stream analysis: tables built by the scan when the capture ends ---
     (
         Capture::Http,
         "u01_tcp_connections",

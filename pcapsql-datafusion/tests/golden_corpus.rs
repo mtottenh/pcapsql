@@ -235,7 +235,7 @@ async fn golden_corpus_matches_snapshots() {
     );
 }
 
-/// Stream tables are built by a subscriber of the one packet pass: a query
+/// Stream tables are built by the scan of the one packet pass: a query
 /// mixing a stream table and a packet table reads the capture once, as one
 /// partition (reassembly order), and reports which tables pinned it. Under
 /// `CacheOnTouch` the stream table is then served from cache.

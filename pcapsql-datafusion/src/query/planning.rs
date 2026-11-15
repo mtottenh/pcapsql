@@ -197,13 +197,16 @@ pub(super) async fn fold_producers(
                     if p.max_us != i64::MIN {
                         end = end.max(p.max_us);
                     }
-                    for (t, n) in p.rows_built {
-                        *stats.rows_built.entry(t).or_insert(0) += n;
-                    }
-                    for (t, o) in p.overflow {
-                        if o.total_bytes > 0 {
-                            *stats.overflowed_bytes.entry(t.clone()).or_insert(0) += o.total_bytes;
-                            *stats.overflow_peak_bytes.entry(t).or_insert(0) += o.peak_bytes;
+                    for output in p.outputs {
+                        let table = output.table.to_string();
+                        let rows = usize::try_from(output.rows).unwrap_or(usize::MAX);
+                        *stats.rows_built.entry(table.clone()).or_insert(0) += rows;
+                        let overflow = output.overflow;
+                        if overflow.total_bytes > 0 {
+                            *stats.overflowed_bytes.entry(table.clone()).or_insert(0) +=
+                                overflow.total_bytes;
+                            *stats.overflow_peak_bytes.entry(table).or_insert(0) +=
+                                overflow.peak_bytes;
                         }
                     }
                 }

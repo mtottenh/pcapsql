@@ -8,7 +8,12 @@
 //! row to the protocol table named after it, subject to the output's row
 //! predicate and row cap, and the frame's joined rows to each fused join
 //! ([`FusedScan`](super::FusedScan)). It is the per-partition state of a
-//! scan's per-packet outputs: make one per partition.
+//! scan's outputs: make one per partition.
+//!
+//! A [stream table](super::TableKind::Stream) of the plan is an output
+//! like the others (it has a row cap, it can be closed, its rows are
+//! counted) that no frame adds a row to: the scan driver writes its rows
+//! when the partition ends.
 //!
 //! # Bounded sinks
 //!
@@ -93,11 +98,6 @@ impl Cursor {
     #[inline]
     fn done(&self) -> bool {
         self.rows >= self.limit
-    }
-
-    #[inline]
-    fn routed(&self) -> bool {
-        matches!(self.feed, Feed::Frames | Feed::Layer(_) | Feed::Fused)
     }
 }
 
@@ -323,11 +323,18 @@ impl Router {
         self.outputs[usize::from(output.0)].done()
     }
 
-    /// True when every output this router feeds (`frames`, the protocol
-    /// tables and the fused joins) is done, so that nothing it could still
-    /// write would be observed. Also true when it feeds none.
+    /// True when every output of the plan is done, so that nothing the
+    /// scan could still write would be observed. Also true when the plan
+    /// has none. A stream table that is not closed is not done before the
+    /// partition ends: its rows are written then.
     pub fn all_done(&self) -> bool {
-        self.outputs.iter().all(|out| !out.routed() || out.done())
+        self.outputs.iter().all(Cursor::done)
+    }
+
+    /// One row was written to `output` by something other than
+    /// [`route_frame`](Self::route_frame): a stream table's row.
+    pub(crate) fn count_row(&mut self, output: OutputId) {
+        self.outputs[usize::from(output.0)].rows += 1;
     }
 
     /// The rows written to `output` so far.

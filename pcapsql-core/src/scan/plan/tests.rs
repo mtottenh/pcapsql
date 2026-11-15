@@ -31,39 +31,43 @@ fn full(table: &str) -> TableScan {
     TableScan::new(id(table), default_cols(table))
 }
 
-/// Compiled as by a frontend that builds stream tables: several plans
-/// here have some.
 fn compile(plan: &ScanPlan) -> Result<CompiledScan, PlanError> {
-    plan.compile_with_streams(catalog(), &default_registry())
+    plan.compile(catalog(), &default_registry())
 }
 
-/// A plan with stream tables compiles only for a frontend that says it
-/// builds them: the scan driver would give them no rows.
+/// The stream tables of a plan are outputs like the others, after the
+/// per-packet ones.
 #[test]
-fn stream_tables_need_a_frontend_that_builds_them() {
+fn stream_tables_are_the_last_outputs() {
     let registry = default_registry();
     let plan = ScanPlan {
         tables: vec![full("frames")],
         streams: vec![scan("tls_sessions", &[]), full("tcp_connections")],
         ..ScanPlan::default()
     };
+    let compiled = plan.compile(catalog(), &registry).unwrap();
+    let tables: Vec<_> = compiled.outputs().iter().map(|o| o.table).collect();
     assert_eq!(
-        plan.compile(catalog(), &registry).unwrap_err(),
-        PlanError::StreamsNotBuilt("tls_sessions")
+        tables,
+        [
+            Some(id("frames")),
+            Some(id("tls_sessions")),
+            Some(id("tcp_connections"))
+        ]
     );
-    let compiled = plan.compile_with_streams(catalog(), &registry).unwrap();
-    assert_eq!(compiled.outputs().len(), 1);
-    assert_eq!(compiled.stream_outputs().len(), 2);
-    // Without stream tables the two are the same.
-    let plain = ScanPlan {
-        tables: vec![full("frames"), full("tcp")],
-        fused: plan.fused.clone(),
-        ..ScanPlan::default()
-    };
-    let compiled = plain.compile(catalog(), &registry).unwrap();
-    assert_eq!(compiled.outputs().len(), 2);
-    assert!(compiled.stream_outputs().is_empty());
-    // A stream table the catalogue does not have is that error first.
+    assert!(compiled.requires_single_partition());
+    // Every stream table of the catalogue is one stream analysis builds,
+    // with every column.
+    for (table, def) in catalog().tables().filter(|(_, t)| t.is_stream()) {
+        let all = ScanPlan {
+            streams: vec![TableScan::new(
+                table,
+                def.columns().map(|(c, _)| c).collect(),
+            )],
+            ..ScanPlan::default()
+        };
+        assert!(all.compile(catalog(), &registry).is_ok(), "{}", def.name);
+    }
     let nowhere = TableId(u16::MAX);
     let unknown = ScanPlan {
         streams: vec![TableScan::new(nowhere, vec![])],
@@ -124,7 +128,6 @@ fn reads(protocols: &[(&str, Option<&[&str]>)]) -> HashMap<String, Option<HashSe
 fn an_empty_plan_parses_nothing() {
     let compiled = compile(&ScanPlan::default()).unwrap();
     assert!(compiled.outputs().is_empty());
-    assert!(compiled.stream_outputs().is_empty());
     assert!(!compiled.requires_single_partition());
     assert_eq!(compiled.scope().required(), Some(&set(&["frames"])));
     assert!(compiled.scope().projections().is_empty());
@@ -270,7 +273,7 @@ fn timestamp_unit_applies_to_every_timestamp_column() {
         let frames = &compiled.outputs()[0];
         assert_eq!(frames.columns[0].kind, ColKind::U64);
         assert_eq!(frames.columns[1].kind, kind);
-        let stream = &compiled.stream_outputs()[0];
+        let stream = &compiled.outputs()[1];
         let stamps: Vec<ColKind> = stream
             .columns
             .iter()
@@ -335,11 +338,10 @@ fn stream_tables_pin_one_partition_and_parse_tcp_in_full() {
         ..ScanPlan::default()
     };
     let registry = default_registry();
-    let compiled = plan.compile_with_streams(catalog(), &registry).unwrap();
+    let compiled = plan.compile(catalog(), &registry).unwrap();
     assert!(compiled.requires_single_partition());
-    assert_eq!(compiled.outputs().len(), 3);
-    let [http, tls] = compiled.stream_outputs() else {
-        panic!("two stream outputs");
+    let [_, _, _, http, tls] = compiled.outputs() else {
+        panic!("three tables and two stream tables");
     };
     assert_eq!(http.table, Some(id("http_messages")));
     assert_eq!(catalog().get(id("http_messages")).kind, TableKind::Stream);
@@ -370,9 +372,9 @@ fn stream_tables_pin_one_partition_and_parse_tcp_in_full() {
         streams: vec![full("tcp_connections")],
         ..ScanPlan::default()
     };
-    let compiled = plan.compile_with_streams(catalog(), &registry).unwrap();
+    let compiled = plan.compile(catalog(), &registry).unwrap();
     assert!(compiled.requires_single_partition());
-    assert!(compiled.outputs().is_empty());
+    assert_eq!(compiled.outputs().len(), 1);
     assert_eq!(
         compiled.scope().required(),
         ParseScope::for_tables(&["tcp"], &registry).required()

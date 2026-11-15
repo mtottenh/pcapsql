@@ -21,7 +21,7 @@ use std::sync::Arc;
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use pcapsql_core::io::{FilePacketSource, MmapPacketSource, SeekablePacketSource};
 use pcapsql_core::{default_registry, ProtocolRegistry};
-use pcapsql_datafusion::query::providers::{run_shared_parse, ParseSubscription};
+use pcapsql_datafusion::query::providers::{run_shared_parse, ParseSubscription, PassOptions};
 use pcapsql_datafusion::query::{EngineOptions, QueryEngine, RetentionPolicy, SourceSpec};
 use pcapsql_testgen::{legacy_pcap, GenPacket, LegacyVariant};
 use tempfile::TempDir;
@@ -180,17 +180,13 @@ fn parse_pass<S: SeekablePacketSource>(
     partitions: usize,
 ) -> usize {
     let subscription = ParseSubscription::tables_full(tables).expect("known tables");
-    let (tables, _stats) = run_shared_parse(
-        source,
-        registry,
-        BATCH_SIZE,
-        partitions,
-        None,
-        &subscription,
-        None,
-    )
-    .expect("parse pass")
-    .into_tables();
+    let options = PassOptions {
+        target_partitions: partitions,
+        ..PassOptions::new(BATCH_SIZE)
+    };
+    let (tables, _stats) = run_shared_parse(source, registry, &subscription, &options)
+        .expect("parse pass")
+        .into_tables();
     tables.values().map(|t| t.total_rows()).sum()
 }
 
