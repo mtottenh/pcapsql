@@ -55,7 +55,8 @@ jobs:
   # The reusable workflow runs the SQL tests on osx_arm64 and windows_amd64 only (its makefile
   # skips them for linux_amd64, its script for linux_arm64), and never starts the DuckDB shell.
   # This job takes each artifact as it was uploaded and runs both: test/sql in DuckDB's Python
-  # package, and scripts/load-test.sh in the release's command-line shell. windows_amd64 is not in
+  # package, and scripts/load-test.sh in the release's command-line shell; and then
+  # scripts/remote-test.sh, which reads captures over HTTP with the platform's `httpfs`. windows_amd64 is not in
   # its matrix: scripts/fetch-duckdb.sh knows no Windows archive of the DuckDB release, so that
   # artifact is tested by the reusable workflow's `make test_release` alone.
   verify:
@@ -105,3 +106,8 @@ jobs:
 
       - name: The function reference lists everything the artifact registers
         run: make -C pcapsql-duckdb check_reference_release
+
+      # `httpfs` of this platform, installed by the shell from extensions.duckdb.org; a test that
+      # was skipped for want of it fails the job.
+      - name: Captures over HTTP, through DuckDB's httpfs extension
+        run: make -C pcapsql-duckdb remote_test_release REMOTE_TEST_ARGS=--require-httpfs
