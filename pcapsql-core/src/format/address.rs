@@ -5,7 +5,6 @@
 //! - Detect which columns represent network addresses based on type and name
 
 use std::fmt;
-use std::net::Ipv6Addr;
 
 use super::hex::HEX_DIGITS;
 use crate::schema::{DataKind, FieldDescriptor};
@@ -40,6 +39,11 @@ pub const IPV4_TEXT_LEN: usize = 15;
 
 /// The length of a colon-separated MAC address.
 pub const MAC_TEXT_LEN: usize = 17;
+
+/// The length of the longest text form an IPv6 address has: eight groups of
+/// four hex digits with the last two written as a dotted IPv4 address. What
+/// [`ipv6_text`] writes is at most 39 bytes long, eight groups in hex.
+pub const IPV6_TEXT_LEN: usize = 45;
 
 /// `value` in dotted-decimal notation, written to `buf`: what
 /// `Ipv4Addr`'s `Display` gives, without going through `fmt`.
@@ -98,6 +102,105 @@ pub fn mac_text<'b>(bytes: &[u8; 6], buf: &'b mut [u8; MAC_TEXT_LEN]) -> &'b str
     ascii(buf)
 }
 
+/// `bytes` as an IPv6 address in RFC 5952 form, written to `buf`: what
+/// `Ipv6Addr`'s `Display` gives, without going through `fmt`.
+///
+/// The groups are in lowercase hex without leading zeros, and the longest
+/// run of two or more zero groups, the first of them when several are as
+/// long, is written as `::`. An IPv4-mapped address (`::ffff:0:0/96`) has
+/// its last 32 bits in dotted-decimal notation: `::ffff:192.0.2.1`. No other
+/// address has a dotted part, so an IPv4-compatible one is `::c000:201`.
+///
+/// # Example
+///
+/// ```
+/// use pcapsql_core::format::{ipv6_text, IPV6_TEXT_LEN};
+///
+/// let mut buf = [0; IPV6_TEXT_LEN];
+/// let bytes = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+/// assert_eq!(ipv6_text(&bytes, &mut buf), "2001:db8::1");
+/// ```
+#[inline]
+pub fn ipv6_text<'b>(bytes: &[u8; 16], buf: &'b mut [u8; IPV6_TEXT_LEN]) -> &'b str {
+    let value = u128::from_be_bytes(*bytes);
+    if value >> 32 == 0xffff {
+        const PREFIX: &[u8; 7] = b"::ffff:";
+        let mut dotted = [0; IPV4_TEXT_LEN];
+        let v4 = u32::from_be_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]);
+        let dotted = ipv4_text(v4, &mut dotted).as_bytes();
+        let len = PREFIX.len() + dotted.len();
+        buf[..PREFIX.len()].copy_from_slice(PREFIX);
+        buf[PREFIX.len()..len].copy_from_slice(dotted);
+        return ascii(&buf[..len]);
+    }
+
+    let groups: [u16; 8] =
+        std::array::from_fn(|i| u16::from_be_bytes([bytes[2 * i], bytes[2 * i + 1]]));
+
+    // The longest run of zero groups, the first one of that length.
+    let (mut zeros_start, mut zeros_len) = (0, 0);
+    let mut i = 0;
+    while i < 8 {
+        if groups[i] != 0 {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < 8 && groups[i] == 0 {
+            i += 1;
+        }
+        if i - start > zeros_len {
+            (zeros_start, zeros_len) = (start, i - start);
+        }
+    }
+    // One zero group alone is written out.
+    if zeros_len < 2 {
+        (zeros_start, zeros_len) = (8, 0);
+    }
+
+    let mut len = 0;
+    for (i, &group) in groups[..zeros_start].iter().enumerate() {
+        if i > 0 {
+            buf[len] = b':';
+            len += 1;
+        }
+        len = hex_group(group, buf, len);
+    }
+    if zeros_len > 0 {
+        buf[len] = b':';
+        buf[len + 1] = b':';
+        len += 2;
+        for (i, &group) in groups[zeros_start + zeros_len..].iter().enumerate() {
+            if i > 0 {
+                buf[len] = b':';
+                len += 1;
+            }
+            len = hex_group(group, buf, len);
+        }
+    }
+    ascii(&buf[..len])
+}
+
+/// Write `group` in lowercase hex without leading zeros at `buf[len..]`;
+/// returns the length after it.
+#[inline]
+fn hex_group(group: u16, buf: &mut [u8; IPV6_TEXT_LEN], mut len: usize) -> usize {
+    if group >= 0x1000 {
+        buf[len] = HEX_DIGITS[usize::from(group >> 12)];
+        len += 1;
+    }
+    if group >= 0x100 {
+        buf[len] = HEX_DIGITS[usize::from(group >> 8 & 0xf)];
+        len += 1;
+    }
+    if group >= 0x10 {
+        buf[len] = HEX_DIGITS[usize::from(group >> 4 & 0xf)];
+        len += 1;
+    }
+    buf[len] = HEX_DIGITS[usize::from(group & 0xf)];
+    len + 1
+}
+
 /// Text made of ASCII digits and punctuation only, as a `&str`.
 #[inline]
 fn ascii(text: &[u8]) -> &str {
@@ -120,11 +223,8 @@ fn ascii(text: &[u8]) -> &str {
 /// assert_eq!(format_ipv6(&bytes), Some("2001:db8::1".to_string()));
 /// ```
 pub fn format_ipv6(bytes: &[u8]) -> Option<String> {
-    if bytes.len() != 16 {
-        return None;
-    }
-    let octets: [u8; 16] = bytes.try_into().ok()?;
-    Some(Ipv6Addr::from(octets).to_string())
+    let bytes: &[u8; 16] = bytes.try_into().ok()?;
+    Some(ipv6_text(bytes, &mut [0; IPV6_TEXT_LEN]).to_owned())
 }
 
 /// Format 6 bytes as a MAC address string in colon-separated hex format.
@@ -151,9 +251,9 @@ pub fn write_ipv4(value: u32, out: &mut impl fmt::Write) -> fmt::Result {
 }
 
 /// Write 16 bytes as an IPv6 address in RFC 5952 form: [`format_ipv6`]
-/// without the `String`.
+/// without the `String`. The sink gets the address in one `write_str`.
 pub fn write_ipv6(bytes: &[u8; 16], out: &mut impl fmt::Write) -> fmt::Result {
-    write!(out, "{}", Ipv6Addr::from(*bytes))
+    out.write_str(ipv6_text(bytes, &mut [0; IPV6_TEXT_LEN]))
 }
 
 /// Write 6 bytes as a colon-separated lowercase MAC address: [`format_mac`]
@@ -599,6 +699,197 @@ mod tests {
             let mut pieces = Pieces::default();
             write_mac(&bytes, &mut pieces).unwrap();
             assert_eq!(pieces.0, [expected]);
+        }
+    }
+
+    // ========== ipv6_text against std's `Display for Ipv6Addr` ==========
+    //
+    // `ipv6_text` is what std printed when it was written (Rust 1.97): RFC
+    // 5952, and the dotted form for IPv4-mapped addresses only. These tests
+    // compare with the std the tests are built with, so they fail if a later
+    // std prints an address differently; the text stays as it is until
+    // `ipv6_text` is changed.
+
+    fn std_ipv6(bytes: &[u8; 16]) -> String {
+        std::net::Ipv6Addr::from(*bytes).to_string()
+    }
+
+    fn v6(groups: [u16; 8]) -> [u8; 16] {
+        let mut bytes = [0; 16];
+        for (pair, group) in bytes.chunks_mut(2).zip(groups) {
+            pair.copy_from_slice(&group.to_be_bytes());
+        }
+        bytes
+    }
+
+    /// The kernel alone: the comparison the exhaustive loops make.
+    fn check_ipv6(bytes: [u8; 16]) {
+        let expected = std_ipv6(&bytes);
+        let mut buf = [0xffu8; IPV6_TEXT_LEN];
+        assert_eq!(ipv6_text(&bytes, &mut buf), expected, "{bytes:02x?}");
+    }
+
+    /// The kernel, the `String` form and the writer, which hands its sink
+    /// one piece.
+    fn check_ipv6_forms(bytes: [u8; 16]) {
+        let expected = std_ipv6(&bytes);
+        check_ipv6(bytes);
+        assert_eq!(format_ipv6(&bytes), Some(expected.clone()));
+        let mut pieces = Pieces::default();
+        write_ipv6(&bytes, &mut pieces).unwrap();
+        assert_eq!(pieces.0, [expected]);
+    }
+
+    /// SplitMix64: a fixed sequence of well-mixed values.
+    struct Random(u64);
+
+    impl Random {
+        fn next(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            z ^ (z >> 31)
+        }
+
+        fn address(&mut self) -> [u8; 16] {
+            ((u128::from(self.next()) << 64) | u128::from(self.next())).to_be_bytes()
+        }
+    }
+
+    /// Non-zero groups of each width in hex digits, among them ones whose
+    /// leading nibbles are zero.
+    const FILLS: [u16; 6] = [0x1, 0xf, 0x10, 0x0a0, 0x0fff, 0xffff];
+
+    /// Each group takes every value: alone among zeros, and among groups of
+    /// one to four hex digits.
+    #[test]
+    fn ipv6_text_is_std_display_for_every_value_of_each_group() {
+        for position in 0..8 {
+            for fill in [0, 0x1, 0x0a0, 0x0fff, 0xffff] {
+                for group in 0..=u16::MAX {
+                    let mut groups = [fill; 8];
+                    groups[position] = group;
+                    check_ipv6(v6(groups));
+                }
+            }
+        }
+    }
+
+    /// Every arrangement of zero and non-zero groups: each position and
+    /// length of a run of zeros, and each set of runs to choose among.
+    #[test]
+    fn ipv6_text_is_std_display_for_every_zero_run_pattern() {
+        for mask in 0..=u8::MAX {
+            for fill in FILLS {
+                let uniform = std::array::from_fn(|i| if mask >> i & 1 == 0 { 0 } else { fill });
+                check_ipv6_forms(v6(uniform));
+                // The same pattern with a different width in each group.
+                let mixed = std::array::from_fn(|i| {
+                    if mask >> i & 1 == 0 {
+                        0
+                    } else {
+                        FILLS[(i + usize::from(fill)) % FILLS.len()]
+                    }
+                });
+                check_ipv6_forms(v6(mixed));
+            }
+        }
+    }
+
+    /// The prefixes std has or had a form of its own for: `::` and `::1`,
+    /// IPv4-mapped (`::ffff:a.b.c.d`), IPv4-compatible (`::a.b.c.d` in an
+    /// earlier std, `::xxxx:xxxx` in this one), and their neighbours, which
+    /// never had one.
+    const SPECIAL_PREFIXES: [[u16; 6]; 8] = [
+        [0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0xffff],
+        [0, 0, 0, 0, 0xffff, 0],
+        [0, 0, 0, 0, 0, 0xfffe],
+        [0, 0, 0, 0, 0, 0x0fff],
+        [0, 0, 0, 0, 1, 0xffff],
+        [0x64, 0xff9b, 0, 0, 0, 0],
+        [1, 0, 0, 0, 0, 0xffff],
+    ];
+
+    fn with_low_bits(prefix: [u16; 6], low: u32) -> [u8; 16] {
+        let mut bytes = v6([
+            prefix[0], prefix[1], prefix[2], prefix[3], prefix[4], prefix[5], 0, 0,
+        ]);
+        bytes[12..].copy_from_slice(&low.to_be_bytes());
+        bytes
+    }
+
+    #[test]
+    fn ipv6_text_is_std_display_for_the_special_prefixes() {
+        let mut random = Random(0x5eed_0006);
+        for prefix in SPECIAL_PREFIXES {
+            for low in 0..=u32::from(u16::MAX) {
+                // The last group, the one before it, the two octets in the
+                // middle of the dotted form, and the first group again with
+                // the last one not zero.
+                check_ipv6(with_low_bits(prefix, low));
+                check_ipv6(with_low_bits(prefix, low << 16));
+                check_ipv6(with_low_bits(prefix, low << 8));
+                check_ipv6(with_low_bits(prefix, low << 16 | 0x0101));
+            }
+            for _ in 0..50_000 {
+                let low = u32::try_from(random.next() >> 32).unwrap();
+                check_ipv6_forms(with_low_bits(prefix, low));
+            }
+        }
+    }
+
+    /// What the text is, said without std: these hold whatever std does.
+    #[test]
+    fn ipv6_text_special_cases() {
+        let text = |groups| format_ipv6(&v6(groups)).unwrap();
+        assert_eq!(text([0; 8]), "::");
+        assert_eq!(text([0, 0, 0, 0, 0, 0, 0, 1]), "::1");
+        assert_eq!(
+            text([0, 0, 0, 0, 0, 0xffff, 0xc000, 0x0201]),
+            "::ffff:192.0.2.1"
+        );
+        assert_eq!(text([0, 0, 0, 0, 0, 0xffff, 0, 0]), "::ffff:0.0.0.0");
+        assert_eq!(
+            text([0, 0, 0, 0, 0, 0xffff, 0xffff, 0xffff]),
+            "::ffff:255.255.255.255"
+        );
+        // IPv4-compatible and the NAT64 prefix are in hex.
+        assert_eq!(text([0, 0, 0, 0, 0, 0, 0xc000, 0x0201]), "::c000:201");
+        assert_eq!(
+            text([0x64, 0xff9b, 0, 0, 0, 0, 0xc000, 0x0201]),
+            "64:ff9b::c000:201"
+        );
+        // The first of two runs as long; a longer second run; one zero alone.
+        assert_eq!(text([1, 0, 0, 2, 0, 0, 3, 4]), "1::2:0:0:3:4");
+        assert_eq!(text([1, 0, 0, 2, 0, 0, 0, 4]), "1:0:0:2::4");
+        assert_eq!(text([1, 0, 2, 0, 3, 0, 4, 0]), "1:0:2:0:3:0:4:0");
+        assert_eq!(text([1, 2, 3, 4, 5, 6, 0, 0]), "1:2:3:4:5:6::");
+        assert_eq!(text([0, 0, 1, 2, 3, 4, 5, 6]), "::1:2:3:4:5:6");
+        assert_eq!(text([0xffff; 8]), "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff");
+        assert_eq!(
+            text([0x0abc, 0x00de, 0x000f, 0x1000, 0x0100, 0x0010, 1, 0xa]),
+            "abc:de:f:1000:100:10:1:a"
+        );
+    }
+
+    #[test]
+    fn ipv6_text_is_std_display_for_random_addresses() {
+        let mut random = Random(0x5eed_0006_0000_0001);
+        for _ in 0..200_000 {
+            check_ipv6_forms(random.address());
+        }
+        // Random bits seldom make a zero group: the same with groups zeroed.
+        for _ in 0..200_000 {
+            let mut bytes = random.address();
+            let mask = random.next();
+            for (group, pair) in bytes.chunks_mut(2).enumerate() {
+                if mask >> group & 1 == 0 {
+                    pair.fill(0);
+                }
+            }
+            check_ipv6_forms(bytes);
         }
     }
 

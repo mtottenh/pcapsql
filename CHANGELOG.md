@@ -545,6 +545,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `VARCHAR` cast: 19) and 32 → 26 over 20M rows on one thread, down from 69
   before the kernels stopped using `fmt`. `ip6_to_string` is still `std`'s
   formatting, at 82.
+- **IPv6 text without `fmt`.** New `format::ipv6_text(bytes, &mut buf)`
+  (with `IPV6_TEXT_LEN`) writes the RFC 5952 form into a buffer on the
+  caller's stack; `write_ipv6` and `format_ipv6` use it, and `write_ipv6`
+  hands its sink the address in one piece. The text is byte for byte what
+  `std`'s `Display for Ipv6Addr` prints (Rust 1.97): the longest run of two
+  or more zero groups as `::`, the first when several are as long, and
+  IPv4-mapped addresses, and only those, with a dotted tail
+  (`::ffff:192.0.2.1`); tested against `std` for every value of each group,
+  every arrangement of zero groups and 400,000 sampled addresses. Per call
+  over 1M random addresses: `write_ipv6` 128 → 32 ns, `format_ipv6` 189 →
+  54. `ip6_to_string` in DuckDB stores the text from the buffer like
+  `ip4_to_string`: `sum(length(ip6_to_string(addr)))` over 20M rows on one
+  thread 184 → 83 ns/row (`hex(addr)` in its place: 65; reading the column
+  alone: 31). The text a string column gets for an IPv6 *field value* in a
+  scan (`scan/row.rs`) still goes through `std`.
 - **Performance: a layer's parser is looked up in a table.** The parse loop
   asked the candidate parsers of each layer in turn (31 `can_parse` calls
   for an Ethernet/IPv4/UDP packet), and each compared hint names as strings.

@@ -4,9 +4,10 @@
 //!
 //! - [`Map`]: one argument, the kernel returns the value (`ip4`, `mac`, `dns_type_name`, ...);
 //! - [`MapInto`]: one argument, the kernel puts the value in a buffer the loop lends it and
-//!   returns the part it filled (`pcap_unhex`, `ip4_to_string`, `mac_to_string`);
-//! - [`Format`]: one argument, the kernel writes text of any length (`ip6_to_string`,
-//!   `tcp_flags_str`, `pcap_hex`);
+//!   returns the part it filled (`pcap_unhex`, `ip4_to_string`, `ip6_to_string`,
+//!   `mac_to_string`);
+//! - [`Format`]: one argument, the kernel writes text of any length (`tcp_flags_str`,
+//!   `pcap_hex`);
 //! - [`Match`]: a value and a text pattern, tested for each row (`ip6_in_cidr`);
 //! - [`MatchPlain`]: the same for a fixed-width value whose test always has an answer
 //!   (`ip_in_cidr`, `has_tcp_flag`), with the answers of a chunk stored as one slice when the
@@ -75,8 +76,8 @@ pub(super) fn register(extension: &Extension) -> Result<()> {
         .example("ip6_to_string(ip6('2001:db8::1'))")
         .register::<String, _>(
             extension,
-            Format::<BlobValue, _>::new(|address, out| {
-                format::write_ipv6(address.try_into().ok()?, out).ok()
+            MapInto::<BlobValue, String, Ipv6Text, _>::new(|address, text| {
+                Some(format::ipv6_text(address.try_into().ok()?, &mut text.0))
             }),
         )?;
     Function::new("mac", "The 6 bytes of a MAC address.")
@@ -369,6 +370,16 @@ where
             writer.set_option(row, result)?;
         }
         Ok(())
+    }
+}
+
+/// The buffer [`MapInto`] lends the kernel of `ip6_to_string`: an array this long has no
+/// `Default` of its own.
+struct Ipv6Text([u8; format::IPV6_TEXT_LEN]);
+
+impl Default for Ipv6Text {
+    fn default() -> Self {
+        Self([0; format::IPV6_TEXT_LEN])
     }
 }
 
