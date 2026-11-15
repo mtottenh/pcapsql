@@ -102,11 +102,15 @@ pcapsql-duckdb/
       scalar.rs, macros.rs, replacement.rs, options.rs, registry.rs
       guard.rs            # catch_unwind + error conversion for every callback
   ext/                    # cdylib "pcapsql": entrypoint only, feature build-extension
-  ext-wasm/               # staticlib, added in P7
   itest/                  # in-process tests: build-extension-static + linked libduckdb
   test/sql/               # sqllogictest files run against the built artifact
+  community/              # descriptor for DuckDB's community-extensions repository (P7)
+  scripts/                # DuckDB release download, load test, containment, pin and reference checks, canary
   Makefile                # includes extension-ci-tools c_api_extensions makefiles
 ```
+
+`ext-wasm/`, a `staticlib` for the WebAssembly platforms, was planned for P7
+and is not there: see U10.
 
 Notes:
 
@@ -177,6 +181,13 @@ counter. Type mapping from `ColKind` is in `engine/types.rs`; lists map to
 - A replacement scan maps `FROM 'x.pcap'`, `.pcapng`, `.cap` and their `.gz` /
   `.zst` forms to `read_pcap(path)`.
 - One setting to start with: `pcapsql_index_cache_dir` (section 6.4).
+
+As built, the surface is listed in
+[`duckdb-extension-reference.md`](duckdb-extension-reference.md), which is
+checked against the artifact. It differs from this section in the settings:
+there are four (`pcapsql_parallel_scan`, `pcapsql_parallel_min_file_size`,
+`pcapsql_index_stride`, `pcapsql_filter_pushdown`) and no
+`pcapsql_index_cache_dir`, because there is no index cache (P4).
 
 ## 6. Scan architecture
 
@@ -316,7 +327,8 @@ of P1. P3 to P6 are independent of each other after P2 and can be reordered.
 | P4 Parallel scans | done for local uncompressed captures; the index is rebuilt per scan (no cache: the file API exposes no modification time to validate one) |
 | P5 Multi-file, replacement scan, remote | done except the remote tests: lists, globs, `filename`, and `FROM 'x.pcap'`, with the partition queue spanning the files. `httpfs` could not be installed where this was built, so no `https://` or `s3://` capture has been read and remote buffer sizes are untuned |
 | P6 Filter pushdown | done, with two limits found on the way. DuckDB 2.0.0 hands two bounds on one column to the scan as a single `BETWEEN` node whose inclusivity the C API does not expose, so a range is used to narrow the read but not accepted: `EXPLAIN` still shows the filter for a time window. And `plan_ranges` keeps the last checkpoint window of an indexed capture unless an upper frame bound excludes it, so a time window never rules out a whole file |
-| P7 to P9 | not started |
+| P7 Distribution and documentation | done as far as it can be without running on GitHub or submitting anything. Workflows for `linux_amd64`, `linux_arm64` and `osx_arm64` (build through `extension-ci-tools`, then a load test of each artifact), release assets on a tag, the community descriptor, the function reference with a check against the artifact, the upgrade runbook with its dry run, and a canary. None of the new workflows has run on GitHub, and the descriptor has not been submitted, so the exit check is open. `windows_amd64` is not built: `pcapsql-core` does not compile for Windows (U13). WebAssembly is not built (U10) |
+| P8, P9 | not started |
 
 ### P0: Spike and scaffolding
 
@@ -428,6 +440,28 @@ filter.
 Exit: `INSTALL pcapsql FROM community; LOAD pcapsql;` works on the supported
 platforms.
 
+As built:
+
+- `.github/workflows/duckdb-dist.yml` calls the reusable workflow of
+  `extension-ci-tools` at the commit the submodule is at, on the
+  `v2.0-cyanoptera` branch, which is what community-extensions builds DuckDB
+  2.0.0 with. That branch has a `build_directory` input, so the build runs in
+  `pcapsql-duckdb/` and the repository needs no Makefile at its root. The
+  submodule was on `main` before P7 and was moved to the branch.
+- The reusable workflow runs the SQL tests on `osx_arm64` only, so a second
+  job downloads each artifact on a runner of its platform and runs
+  `test/sql` and `scripts/load-test.sh` against it.
+- `release.yml` calls the same workflow for a tag and attaches one archive
+  per platform to the GitHub release, after the release exists.
+- The supported platforms are `linux_amd64`, `linux_arm64` and `osx_arm64`
+  (U10, U13).
+- `pcapsql-duckdb/community/description.yml` with `repo.build_directory`; its
+  `repo.ref` is a placeholder until a release commit exists.
+- `docs/duckdb-extension-reference.md`, and `make check_reference_release`,
+  which asks DuckDB what the artifact registered and compares.
+- `docs/duckdb-upgrade-runbook.md`; `make check_pins`; `make canary` and
+  `duckdb-canary.yml`.
+
 ### P8: Backlog after the reader
 
 Not scheduled.
@@ -452,12 +486,17 @@ Not scheduled.
 ## 9. Tracking an unstable API
 
 - **Pin.** `duckdb-neo = "=0.20000.x"`. `TARGET_DUCKDB_VERSION` in the
-  Makefile and the pin move together in one commit.
-- **Canary.** A scheduled CI job builds against `duckdb-rs` `main` and is
-  allowed to fail. Its purpose is to show upcoming breakage early.
-- **Upgrade runbook per DuckDB release.** Bump the pin and target; fix
-  `engine/`; run `itest/` and the sqllogictests; tag; update the community
-  descriptor's `ref`.
+  Makefile and the pin move together in one commit, with the other places
+  that name the release; `make check_pins` fails when they disagree.
+- **Canary.** `duckdb-canary.yml` runs `scripts/canary.sh` weekly against the
+  newest `duckdb-neo` on crates.io and against `duckdb-rs` `main`. It is a
+  workflow of its own that nothing depends on. Its purpose is to show
+  upcoming breakage early.
+- **Upgrade runbook per DuckDB release.**
+  [`duckdb-upgrade-runbook.md`](duckdb-upgrade-runbook.md): bump the pin and
+  target; fix `engine/`; run `itest/` and the sqllogictests; tag; update the
+  community descriptor's `ref`. It was walked once against 2.0.0 (no newer
+  release existed) and records what that showed.
 - **Containment check.** A CI grep fails the build if `duckdb_neo` is
   imported outside `engine/`, `ext/` and `itest/`.
 - **Expected cost.** Until stabilisation, users on a new DuckDB release have
@@ -479,9 +518,11 @@ by the make targets in `pcapsql-duckdb/Makefile`.
 | U7 | Do `s3://` and `https://` opens through `FileSystem` pick up secrets? | Not answered: `httpfs` cannot be installed where `extensions.duckdb.org` is unreachable. Opens of such paths correctly report that `httpfs` is needed. To be tested in CI or on a machine with access (P5) |
 | U8 | Which vector writers exist, and are pointers stable for one `exec`? | Ran. Checked writers for UBIGINT, TIMESTAMP_NS, VARCHAR, BLOB, BOOLEAN, UINTEGER, LIST(UINTEGER), LIST(VARCHAR) and NULLs; a raw path (`as_mut_ptr`, `validity_mut`, `arena()`). Data pointers stay put while a chunk is written; growing a LIST child moves the child's. Chunk capacity is 2,048; the row count is the first vector's size; setting it past capacity is not refused and can invalidate the database |
 | U9 | Can a replacement scan pass a named parameter? | Yes when it targets our function directly (ran); not through the multi-file wrapper |
-| U10 | Does the stack compile for `wasm32-unknown-emscripten`? | Partly: `duckdb-neo` and `libduckdb-sys` type-check; `ring` and `zstd-sys` need `emcc`, which was not installed, so `pcapsql-core` was not checked |
+| U10 | Does the stack compile for `wasm32-unknown-emscripten`? | Not shown, and WebAssembly is left out of the platform matrix (P7). Checked with `cargo check --target wasm32-unknown-emscripten`: every Rust-only dependency type-checks, including `duckdb-neo`, `libduckdb-sys`, `netlink-packet-route`, `memmap2`, `pcap-parser` and `tls-parser`. `ring` and `zstd-sys` compile C and need `emcc`; the Emscripten SDK was not installed (about 1 GB), so `pcapsql-core` and the extension were not checked. Beyond compiling, three things are missing: an `ext-wasm/` `staticlib` crate for `emcc -sSIDE_MODULE=2` to link (the `cdylib` in `ext/` is not what `extension-ci-tools` links for Wasm); a DuckDB-Wasm build that loads `C_STRUCT_UNSTABLE` extensions of exactly 2.0.0; and a way to load the result in CI, since the distribution workflow has no test step for Wasm. `ring` is in core for TLS decryption, which the extension does not use, so a core feature that drops it would remove one of the two C dependencies. To pick this up: install emsdk, run the `cargo check` above for `pcapsql-duckdb-ext`, then add `ext-wasm/` after the `crates/wasm` of DuckDB's Rust template |
 | U11 | Does `pcap_parser` re-deliver a block that was not consumed? | Yes (ran: `pause_before_redelivers_the_same_packet`, for legacy records, EPBs and SPBs) |
 | U12 | Is the Arrow importer a better way to emit rows than direct writes? | No (D3) |
+| U13 | Does the stack compile for Windows? (asked in P7) | No (ran: `cargo check --target x86_64-pc-windows-gnu -p pcapsql-duckdb-ext`, with MinGW for the C dependencies). Two causes, both in `pcapsql-core`. Its manifest has `[target.'cfg(unix)'.dependencies]` above `tracing`, `smallvec`, `compact_str`, `tls-parser`, `nom`, `md5`, `ring`, `hpack` and the netlink crates, so on Windows none of them is a dependency; only `libc` was meant to be there. With that table moved to the end, `netlink-packet-route` 0.21 fails to compile (`std::os::unix`, `libc::AF_*`): it is a Unix-only crate, used by the `netlink` and `rtnetlink` parsers. Nothing past that was reached. `windows_amd64` is therefore excluded from the workflows and from the community descriptor. Supporting it needs a change to core (move the table; put the netlink parsers behind `cfg(unix)` or a feature, which removes two tables on Windows), which is a decision about the released library and was not made in P7 |
+| U14 | Can community-extensions build an extension that is not at the root of its repository? (asked in P7) | Yes, by reading its build scripts: `repo.build_directory` in the descriptor is passed as the `build_directory` input of the reusable workflow on the `v2.0-cyanoptera` branch of `extension-ci-tools`, which runs every make target there and mounts the repository root into the Linux build container. Not run |
 
 ## 11. Risks
 
@@ -497,3 +538,5 @@ by the make targets in `pcapsql-duckdb/Makefile`.
 | Index build over a remote file is a full sequential read | Remote files partition only from a cached index (6.4) |
 | DuckDB 2.1 changes arrive mid-roadmap | Canary job; finish P2 before chasing new API |
 | CI cost of linking DuckDB for `itest/` | U2; fall back to sqllogictests against the CLI only |
+| The distribution and release workflows were written without a run on GitHub | `duckdb-dist.yml` runs on pushes to `main`, so a failure shows before a tag; the release job for the extension's assets is separate from the package jobs and cannot fail them |
+| No Windows build (U13) | Excluded explicitly in the workflow and the descriptor, so the gap is visible rather than a failing job |
