@@ -292,7 +292,7 @@ fn bench_one_shot_queries(c: &mut Criterion) {
         ),
         (
             "with_payload",
-            "SELECT frame_number, octet_length(raw_data) AS len FROM frames \
+            "SELECT frame_number, length(hex(raw_data)) / 2 AS len FROM frames \
              ORDER BY len DESC LIMIT 5",
         ),
         (
