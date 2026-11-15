@@ -922,3 +922,48 @@ fn dictionary_vectors() -> Result<()> {
     );
     Ok(())
 }
+
+/// `ip_in_cidr` and `has_tcp_flag` with a literal pattern store the answers of a chunk at once
+/// and then make the rows of NULL values NULL from the input's validity mask: a NULL at any row
+/// of a chunk (the first and last of a 64-row word of the mask, a run across two chunks) stays
+/// NULL, and every other row has its own answer.
+#[test]
+fn a_constant_pattern_keeps_nulls_at_any_row() -> Result<()> {
+    let connection = connect()?;
+    connection.execute(
+        "CREATE TABLE sparse AS SELECT i,
+             CASE WHEN i % 64 IN (0, 63) OR i % 7 = 3 OR i BETWEEN 2040 AND 2110
+                       OR i BETWEEN 4096 AND 4159
+                  THEN NULL ELSE i END AS x
+         FROM range(10000) t(i)",
+        Parameters::None,
+    )?;
+    // The scanned vectors, then the same rows behind the selection of a hash join.
+    for from in [
+        "FROM sparse",
+        "FROM sparse JOIN (SELECT i FROM range(0, 10000, 3) t(i)) USING (i)",
+    ] {
+        assert_eq!(
+            rows(
+                &connection,
+                &format!(
+                    "SELECT count(*) = count(*) FILTER (
+                                ip_in_cidr(x::UINTEGER, '0.0.16.0/20')
+                                IS NOT DISTINCT FROM ((x & 4294963200) = 4096)),
+                            count(*) = count(*) FILTER (
+                                has_tcp_flag((x % 512)::USMALLINT, 'syn')
+                                IS NOT DISTINCT FROM (((x % 512) & 2) <> 0)),
+                            count(*) - count(x) = count(*) FILTER (
+                                ip_in_cidr(x::UINTEGER, '0.0.16.0/20') IS NULL),
+                            count(*) FILTER (ip_in_cidr(x::UINTEGER, '0.0.16.0/20')) > 0,
+                            count(*) FILTER (ip_in_cidr(x::UINTEGER, 'no network') IS NULL)
+                                = count(*)
+                     {from}"
+                ),
+            )?,
+            [row(&["true", "true", "true", "true", "true"])],
+            "{from}"
+        );
+    }
+    Ok(())
+}
