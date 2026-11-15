@@ -29,8 +29,20 @@
 //! supplying a byte stream that begins with a (real or synthesized) header
 //! followed by record data at a record boundary — see [`crate::io::index`] for the
 //! header synthesis used by seekable sources.
+//!
+//! ## Buffering
+//!
+//! The source is read straight into `pcap_parser`'s buffer ([`BUFFER_SIZE`],
+//! grown for an oversized frame): one `read` of the source per refill, for
+//! all the room the buffer has, which is nearly all of it since a refill
+//! happens when only the head of one record is left. There is no `BufReader`
+//! in between. One of the same size used to sit there and added a copy of
+//! every byte and nothing else: it read the source once per refill too, and
+//! never ahead of what the parser asked for. A source whose `read` is
+//! expensive per call for another reason (an object store, a file system
+//! reached through a callback) buffers for itself.
 
-use std::io::{BufReader, Read};
+use std::io::Read;
 use std::ops::ControlFlow;
 
 use pcap_parser::pcapng::Block;
@@ -312,8 +324,8 @@ struct ReadState {
 
 /// Inner reader using enum dispatch for format-specific handling.
 enum ReaderInner<R: Read> {
-    Legacy(LegacyPcapReader<BufReader<R>>),
-    Ng(PcapNGReader<BufReader<R>>),
+    Legacy(LegacyPcapReader<R>),
+    Ng(PcapNGReader<R>),
 }
 
 impl<R: Read> GenericPcapReader<R> {
@@ -340,17 +352,17 @@ impl<R: Read> GenericPcapReader<R> {
     }
 
     fn build(source: R, format: PcapFormat, initial_frame: u64) -> Result<Self, Error> {
-        let buf_reader = BufReader::with_capacity(BUFFER_SIZE, source);
-
+        // `source` is not wrapped in a `BufReader`: see "Buffering" in the
+        // module documentation.
         let (inner, link_type) = if format.is_pcapng() {
-            let reader = PcapNGReader::new(BUFFER_SIZE, buf_reader).map_err(|e| {
+            let reader = PcapNGReader::new(BUFFER_SIZE, source).map_err(|e| {
                 Error::Pcap(PcapError::InvalidFormat {
                     reason: format!("Failed to parse PCAPNG: {e:?}"),
                 })
             })?;
             (ReaderInner::Ng(reader), 1u32)
         } else {
-            let mut reader = LegacyPcapReader::new(BUFFER_SIZE, buf_reader).map_err(|e| {
+            let mut reader = LegacyPcapReader::new(BUFFER_SIZE, source).map_err(|e| {
                 Error::Pcap(PcapError::InvalidFormat {
                     reason: format!("Failed to parse legacy PCAP: {e:?}"),
                 })
@@ -1352,5 +1364,122 @@ mod tests {
             })
             .expect("read");
         assert_eq!(first_frame, Some(100));
+    }
+
+    /// A source that gives at most `limit` bytes per `read` (the first read
+    /// excepted, which is where `pcap_parser` wants the whole capture
+    /// header) and records how many bytes each `read` was asked for.
+    struct Metered {
+        data: Vec<u8>,
+        pos: usize,
+        limit: usize,
+        asked: std::rc::Rc<std::cell::RefCell<Vec<usize>>>,
+    }
+
+    impl Read for Metered {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let mut asked = self.asked.borrow_mut();
+            let limit = if asked.is_empty() {
+                self.limit.max(4096)
+            } else {
+                self.limit
+            };
+            asked.push(buf.len());
+            let n = limit.min(buf.len()).min(self.data.len() - self.pos);
+            buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+            self.pos += n;
+            Ok(n)
+        }
+    }
+
+    /// Captures of several buffers' worth of packets, legacy and pcapng.
+    fn long_captures() -> Vec<(Vec<u8>, PcapFormat)> {
+        use pcapsql_testgen::{legacy_pcap, GenPacket, LegacyVariant};
+        let data = |i: u32| vec![i as u8; 700 + (i % 600) as usize];
+        let packets: Vec<GenPacket> = (0..700u32)
+            .map(|i| GenPacket {
+                ts_sec: 1_700_000_000 + i,
+                ts_frac: i,
+                data: data(i),
+                origlen: 2000,
+            })
+            .collect();
+        let legacy = legacy_pcap(LegacyVariant::LeMicro, 1, 65535, &packets).bytes;
+        let mut epbs = ng::shb(false);
+        epbs.extend(ng::idb(false, 1, 65535, 6, 0));
+        for i in 0..700u32 {
+            epbs.extend(ng::epb(false, 0, u64::from(i), &data(i)));
+        }
+        assert!(legacy.len() > 2 * BUFFER_SIZE && epbs.len() > 2 * BUFFER_SIZE);
+        vec![
+            (legacy, PcapFormat::LegacyLeMicro),
+            (epbs, PcapFormat::PcapNg),
+        ]
+    }
+
+    fn every_packet<R: Read>(mut reader: GenericPcapReader<R>) -> Vec<(u64, i64, Vec<u8>)> {
+        let mut packets = Vec::new();
+        loop {
+            let n = reader
+                .process_packets(64, |p| {
+                    packets.push((p.frame_number, p.timestamp_ns, p.data.to_vec()));
+                    Ok(())
+                })
+                .unwrap();
+            if n == 0 {
+                break;
+            }
+        }
+        assert!(!reader.truncated());
+        packets
+    }
+
+    /// The reader has no buffer of its own between the source and the
+    /// parser's: the source is read once per refill, for all the room the
+    /// parser's buffer has, and a source that gives less than it was asked
+    /// for (a pipe, a socket, a decompressor) delivers the same packets.
+    #[test]
+    fn the_source_is_read_straight_into_the_parser_buffer() {
+        for (bytes, format) in long_captures() {
+            let expected = every_packet(
+                GenericPcapReader::with_format(Cursor::new(bytes.clone()), format).unwrap(),
+            );
+            assert_eq!(expected.len(), 700);
+
+            for limit in [usize::MAX, 65_536, 4096, 7, 1] {
+                let asked = std::rc::Rc::default();
+                let source = Metered {
+                    data: bytes.clone(),
+                    pos: 0,
+                    limit,
+                    asked: std::rc::Rc::clone(&asked),
+                };
+                let packets = every_packet(GenericPcapReader::with_format(source, format).unwrap());
+                assert_eq!(packets, expected, "{format:?}, {limit} bytes per read");
+
+                let asked = asked.borrow();
+                // Every request is for the room in the parser's buffer, never
+                // for a buffer in between (which would ask for its own size).
+                assert_eq!(asked[0], BUFFER_SIZE, "{format:?}");
+                assert!(asked.iter().all(|n| (1..=BUFFER_SIZE).contains(n)));
+                if limit == usize::MAX {
+                    // A source that fills every request: each refill but the
+                    // last has less than one record left over, so it asks
+                    // for nearly the whole buffer, and the reads are as few
+                    // as the capture's length allows, plus the one that
+                    // finds the end.
+                    let room = BUFFER_SIZE - 2000;
+                    assert!(asked.iter().all(|n| *n >= room), "{asked:?}");
+                    assert!(asked.len() <= bytes.len() / room + 2, "{asked:?}");
+                    // What is left over is what a refill does not ask for
+                    // (the last read excepted, which finds the end with the
+                    // buffer empty): a buffer in between would be asked for
+                    // its whole size every time.
+                    let refills = &asked[1..asked.len() - 1];
+                    assert!(refills.len() >= 2, "{asked:?}");
+                    assert!(refills.iter().all(|n| *n < BUFFER_SIZE), "{asked:?}");
+                }
+            }
+        }
     }
 }

@@ -505,6 +505,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   byte what it was (lowercase hex, colons, no leading zeros in an octet),
   checked against the standard library for every pair of adjacent octets.
   IPv6 still goes through `std`.
+- **Performance: the capture reader copies every byte once less.**
+  `GenericPcapReader` put a 256 KiB `BufReader` under `pcap_parser`'s own
+  256 KiB buffer; the source is now read straight into the parser's buffer.
+  The `BufReader` read the source once per refill, as the parser does now,
+  and never ahead of it, so files, pipes with a read timeout, decompressors
+  and the DuckDB file system see the same number of reads and deliver the
+  same packets. Reading `frames` from memory: 430 → 364 instructions per
+  74-byte packet, and 202 → 102 ns (3,926 → 2,473 instructions) per
+  1,442-byte packet.
 
 ### Fixed
 
