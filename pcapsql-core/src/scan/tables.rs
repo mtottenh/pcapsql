@@ -25,47 +25,80 @@ pub(super) fn builtin_tables() -> Vec<TableDef> {
     vec![
         TableDef {
             name: "frames",
+            description: "Raw frame metadata (timestamp, length, etc.)",
             kind: TableKind::Frames,
             columns: frames().into(),
         },
-        protocol_table("ethernet", ethernet()),
-        protocol_table("linux_sll", linux_sll()),
-        protocol_table("sll2", sll2()),
-        protocol_table("arp", arp()),
-        protocol_table("vlan", vlan()),
-        protocol_table("mpls", mpls()),
-        protocol_table("ipv4", ipv4()),
-        protocol_table("ipv6", ipv6()),
-        protocol_table("tcp", tcp()),
-        protocol_table("udp", udp()),
-        protocol_table("icmp", icmp()),
-        protocol_table("icmpv6", icmpv6()),
-        protocol_table("gre", gre()),
-        protocol_table("vxlan", vxlan()),
-        protocol_table("gtp", gtp()),
-        protocol_table("ipsec", ipsec()),
-        protocol_table("bgp", bgp()),
-        protocol_table("ospf", ospf()),
-        protocol_table("dns", dns()),
-        protocol_table("dhcp", dhcp()),
-        protocol_table("ntp", ntp()),
-        protocol_table("http", http()),
-        stream_table("http2", http2()),
-        protocol_table("tls", tls()),
-        protocol_table("ssh", ssh()),
-        protocol_table("quic", quic()),
-        protocol_table("netlink", netlink()),
-        protocol_table("rtnetlink", rtnetlink()),
-        stream_table("tcp_connections", tcp_connections()),
-        stream_table("tls_sessions", tls_sessions()),
-        stream_table("http_messages", http_messages()),
+        protocol_table("ethernet", "Ethernet II frames (Layer 2)", ethernet()),
+        protocol_table(
+            "linux_sll",
+            "Linux cooked capture v1 (tcpdump -i any)",
+            linux_sll(),
+        ),
+        protocol_table("sll2", "Linux cooked capture v2", sll2()),
+        protocol_table("arp", "Address Resolution Protocol", arp()),
+        protocol_table("vlan", "IEEE 802.1Q VLAN tags", vlan()),
+        protocol_table("mpls", "Multiprotocol Label Switching", mpls()),
+        protocol_table("ipv4", "Internet Protocol version 4", ipv4()),
+        protocol_table("ipv6", "Internet Protocol version 6", ipv6()),
+        protocol_table("tcp", "Transmission Control Protocol", tcp()),
+        protocol_table("udp", "User Datagram Protocol", udp()),
+        protocol_table("icmp", "Internet Control Message Protocol", icmp()),
+        protocol_table("icmpv6", "ICMPv6 for IPv6", icmpv6()),
+        protocol_table("gre", "Generic Routing Encapsulation", gre()),
+        protocol_table("vxlan", "Virtual Extensible LAN", vxlan()),
+        protocol_table("gtp", "GPRS Tunneling Protocol", gtp()),
+        protocol_table("ipsec", "IP Security (ESP/AH)", ipsec()),
+        protocol_table("bgp", "Border Gateway Protocol", bgp()),
+        protocol_table("ospf", "Open Shortest Path First", ospf()),
+        protocol_table("dns", "Domain Name System", dns()),
+        protocol_table("dhcp", "Dynamic Host Configuration Protocol", dhcp()),
+        protocol_table("ntp", "Network Time Protocol", ntp()),
+        protocol_table(
+            "http",
+            "HTTP/1.x request and status lines with headers (per packet)",
+            http(),
+        ),
+        stream_table("http2", "HTTP/2 frames of decrypted TLS streams", http2()),
+        protocol_table("tls", "Transport Layer Security", tls()),
+        protocol_table("ssh", "Secure Shell Protocol", ssh()),
+        protocol_table("quic", "QUIC Transport Protocol", quic()),
+        protocol_table(
+            "netlink",
+            "Linux netlink messages (nlmon captures)",
+            netlink(),
+        ),
+        protocol_table(
+            "rtnetlink",
+            "Linux rtnetlink (route/link/address messages)",
+            rtnetlink(),
+        ),
+        stream_table(
+            "tcp_connections",
+            "Reassembled TCP connections",
+            tcp_connections(),
+        ),
+        stream_table(
+            "tls_sessions",
+            "TLS sessions of reassembled connections",
+            tls_sessions(),
+        ),
+        stream_table(
+            "http_messages",
+            "HTTP/1.x messages of reassembled connections",
+            http_messages(),
+        ),
     ]
 }
 
 /// A protocol table: `frame_number`, the opt-in `timestamp`, the parser's
 /// `fields`, then the encapsulation columns of the layer the row was parsed
 /// from.
-fn protocol_table(name: &'static str, fields: Vec<ColumnDef>) -> TableDef {
+fn protocol_table(
+    name: &'static str,
+    description: &'static str,
+    fields: Vec<ColumnDef>,
+) -> TableDef {
     let mut columns = vec![
         ColumnDef::new("frame_number", U64, ColumnSource::FrameNumber).required(),
         ColumnDef::new("timestamp", TsMicros, ColumnSource::Timestamp)
@@ -83,6 +116,7 @@ fn protocol_table(name: &'static str, fields: Vec<ColumnDef>) -> TableDef {
     ]);
     TableDef {
         name,
+        description,
         kind: TableKind::Protocol,
         columns: columns.into(),
     }
@@ -92,7 +126,11 @@ fn protocol_table(name: &'static str, fields: Vec<ColumnDef>) -> TableDef {
 /// the table's own `columns`, then the encapsulation columns. Reassembly
 /// follows the innermost TCP flow and does not attribute a row to a tunnel,
 /// so the stream builders fill those with depth 0 and no tunnel.
-fn stream_table(name: &'static str, columns: Vec<ColumnDef>) -> TableDef {
+fn stream_table(
+    name: &'static str,
+    description: &'static str,
+    columns: Vec<ColumnDef>,
+) -> TableDef {
     let mut all = vec![stream("frame_number", U64).required()];
     all.extend(columns);
     all.extend([
@@ -102,6 +140,7 @@ fn stream_table(name: &'static str, columns: Vec<ColumnDef>) -> TableDef {
     ]);
     TableDef {
         name,
+        description,
         kind: TableKind::Stream,
         columns: all.into(),
     }
