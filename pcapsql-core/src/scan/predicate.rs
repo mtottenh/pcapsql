@@ -305,12 +305,103 @@ fn below<T: PartialOrd>(upper: &Bound<T>, value: &T) -> bool {
     }
 }
 
+/// The range of the values `v` with `v <op> constant`. `None` for `<>`,
+/// whose values are not a range.
+fn range_of<T: Copy>(op: CmpOp, constant: T) -> Option<(Bound<T>, Bound<T>)> {
+    Some(match op {
+        CmpOp::Eq => (Bound::Included(constant), Bound::Included(constant)),
+        CmpOp::Lt => (Bound::Unbounded, Bound::Excluded(constant)),
+        CmpOp::LtEq => (Bound::Unbounded, Bound::Included(constant)),
+        CmpOp::Gt => (Bound::Excluded(constant), Bound::Unbounded),
+        CmpOp::GtEq => (Bound::Included(constant), Bound::Unbounded),
+        CmpOp::NotEq => return None,
+    })
+}
+
+/// The tighter of two lower bounds.
+fn tighter_lower<T: Copy + Ord>(a: Bound<T>, b: Bound<T>) -> Bound<T> {
+    match (a, b) {
+        (Bound::Unbounded, other) | (other, Bound::Unbounded) => other,
+        (Bound::Included(x), Bound::Included(y)) => Bound::Included(x.max(y)),
+        (Bound::Excluded(x), Bound::Excluded(y)) => Bound::Excluded(x.max(y)),
+        // `> x` is tighter than `>= x`.
+        (Bound::Included(i), Bound::Excluded(e)) | (Bound::Excluded(e), Bound::Included(i)) => {
+            if i > e {
+                Bound::Included(i)
+            } else {
+                Bound::Excluded(e)
+            }
+        }
+    }
+}
+
+/// The tighter of two upper bounds.
+fn tighter_upper<T: Copy + Ord>(a: Bound<T>, b: Bound<T>) -> Bound<T> {
+    match (a, b) {
+        (Bound::Unbounded, other) | (other, Bound::Unbounded) => other,
+        (Bound::Included(x), Bound::Included(y)) => Bound::Included(x.min(y)),
+        (Bound::Excluded(x), Bound::Excluded(y)) => Bound::Excluded(x.min(y)),
+        // `< x` is tighter than `<= x`.
+        (Bound::Included(i), Bound::Excluded(e)) | (Bound::Excluded(e), Bound::Included(i)) => {
+            if i < e {
+                Bound::Included(i)
+            } else {
+                Bound::Excluded(e)
+            }
+        }
+    }
+}
+
 impl FramePredicate {
     /// Every packet.
     pub const fn all() -> Self {
         Self {
             frames: (Bound::Unbounded, Bound::Unbounded),
             time_ns: (Bound::Unbounded, Bound::Unbounded),
+        }
+    }
+
+    /// No packet: a predicate that [is empty](Self::is_empty).
+    pub const fn none() -> Self {
+        Self {
+            frames: (Bound::Included(1), Bound::Included(0)),
+            time_ns: (Bound::Unbounded, Bound::Unbounded),
+        }
+    }
+
+    /// The packets whose frame number `n` satisfies `n <op> constant`, at
+    /// any time. `None` for `<>`, which is not a range.
+    pub fn frame_number(op: CmpOp, constant: u64) -> Option<Self> {
+        Some(Self {
+            frames: range_of(op, constant)?,
+            ..Self::all()
+        })
+    }
+
+    /// The packets whose timestamp `t`, in nanoseconds since the Unix
+    /// epoch, satisfies `t <op> constant`, whatever their frame number.
+    /// `None` for `<>`, which is not a range.
+    pub fn timestamp_ns(op: CmpOp, constant: i64) -> Option<Self> {
+        Some(Self {
+            time_ns: range_of(op, constant)?,
+            ..Self::all()
+        })
+    }
+
+    /// The predicate that accepts exactly the packets both `self` and
+    /// `other` accept: per range, the tighter of each pair of bounds.
+    /// Intersecting is commutative and idempotent.
+    #[must_use]
+    pub fn intersect(&self, other: &Self) -> Self {
+        Self {
+            frames: (
+                tighter_lower(self.frames.0, other.frames.0),
+                tighter_upper(self.frames.1, other.frames.1),
+            ),
+            time_ns: (
+                tighter_lower(self.time_ns.0, other.time_ns.0),
+                tighter_upper(self.time_ns.1, other.time_ns.1),
+            ),
         }
     }
 
@@ -753,6 +844,109 @@ mod tests {
         ] {
             assert!(!bounded.is_all(), "{bounded:?}");
         }
+    }
+
+    #[test]
+    fn none_accepts_nothing() {
+        let none = FramePredicate::none();
+        assert!(none.is_empty());
+        assert!(!none.is_all());
+        assert!(!none.accepts(&packet(1, 0)));
+        assert!(!none.accepts(&packet(0, 0)));
+        assert!(none.past_end(1));
+        assert_eq!(none.intersect(&FramePredicate::all()), none);
+    }
+
+    /// A comparison with a constant is the range of the values it holds
+    /// for, on the frame number or on the timestamp and nothing else.
+    #[test]
+    fn a_comparison_is_its_range() {
+        const OPS: [CmpOp; 5] = [CmpOp::Eq, CmpOp::Lt, CmpOp::LtEq, CmpOp::Gt, CmpOp::GtEq];
+        let frames = [1, 2, 3, 4, 5, 6, 100, u64::MAX - 1, u64::MAX];
+        let times = [i64::MIN, -1_000_000_001, -1, 0, 1, 999, 1000, i64::MAX];
+        for op in OPS {
+            for constant in frames.into_iter().chain([0]) {
+                let predicate = FramePredicate::frame_number(op, constant).unwrap();
+                assert_eq!(predicate.time_ns, FramePredicate::all().time_ns);
+                for frame in frames {
+                    assert_eq!(
+                        predicate.accepts(&packet(frame, 0)),
+                        op.holds(&frame, &constant),
+                        "frame {frame} {op:?} {constant}"
+                    );
+                }
+            }
+            for constant in times {
+                let predicate = FramePredicate::timestamp_ns(op, constant).unwrap();
+                assert_eq!(predicate.frames, FramePredicate::all().frames);
+                for time in times {
+                    assert_eq!(
+                        predicate.accepts(&packet(1, time)),
+                        op.holds(&time, &constant),
+                        "time {time} {op:?} {constant}"
+                    );
+                }
+            }
+        }
+        // `<>` leaves a hole: not a range.
+        assert_eq!(FramePredicate::frame_number(CmpOp::NotEq, 5), None);
+        assert_eq!(FramePredicate::timestamp_ns(CmpOp::NotEq, 5), None);
+    }
+
+    /// Every pair of bounds on a small domain: the intersection accepts
+    /// what both accept, in either order, and intersecting again changes
+    /// nothing.
+    #[test]
+    fn intersection_is_exact_commutative_and_idempotent() {
+        let bounds = |values: std::ops::RangeInclusive<u64>| -> Vec<Bound<u64>> {
+            let mut bounds = vec![Bound::Unbounded];
+            for value in values {
+                bounds.push(Bound::Included(value));
+                bounds.push(Bound::Excluded(value));
+            }
+            bounds
+        };
+        let mut predicates = Vec::new();
+        for lower in bounds(1..=4) {
+            for upper in bounds(1..=4) {
+                predicates.push(FramePredicate {
+                    frames: (lower, upper),
+                    ..FramePredicate::all()
+                });
+            }
+        }
+        for a in &predicates {
+            for b in &predicates {
+                let both = a.intersect(b);
+                for frame in 0..=6 {
+                    assert_eq!(
+                        both.accepts(&packet(frame, 0)),
+                        a.accepts(&packet(frame, 0)) && b.accepts(&packet(frame, 0)),
+                        "{a:?} and {b:?}: frame {frame}"
+                    );
+                }
+                assert_eq!(both, b.intersect(a), "{a:?} and {b:?}");
+                assert_eq!(both.intersect(b), both, "{a:?} and {b:?}");
+                assert_eq!(both.intersect(a), both, "{a:?} and {b:?}");
+            }
+        }
+        // The same on timestamps, across zero, and both ranges at once.
+        let early = FramePredicate {
+            time_ns: (Bound::Included(-5), Bound::Excluded(7)),
+            ..FramePredicate::all()
+        };
+        let late = FramePredicate {
+            frames: (Bound::Unbounded, Bound::Included(9)),
+            time_ns: (Bound::Excluded(-5), Bound::Included(9)),
+        };
+        assert_eq!(
+            early.intersect(&late),
+            FramePredicate {
+                frames: (Bound::Unbounded, Bound::Included(9)),
+                time_ns: (Bound::Excluded(-5), Bound::Excluded(7)),
+            }
+        );
+        assert_eq!(early.intersect(&FramePredicate::all()), early);
     }
 
     #[test]

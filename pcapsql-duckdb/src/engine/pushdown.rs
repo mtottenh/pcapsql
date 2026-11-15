@@ -118,7 +118,7 @@ use duckdb_neo::{
     types::TimestampNsValue,
     Result,
 };
-use pcapsql_core::scan::FramePredicate;
+use pcapsql_core::scan::{CmpOp, FramePredicate};
 
 /// The columns a [`FramePredicate`] is about.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -127,29 +127,6 @@ pub enum Column {
     FrameNumber,
     /// `timestamp`, a `TIMESTAMP_NS`.
     Timestamp,
-}
-
-/// The comparisons a [`FramePredicate`] can express.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Comparison {
-    Equal,
-    Less,
-    LessOrEqual,
-    Greater,
-    GreaterOrEqual,
-}
-
-impl Comparison {
-    /// The comparison with its operands exchanged: `a < b` is `b > a`.
-    pub const fn reversed(self) -> Self {
-        match self {
-            Self::Equal => Self::Equal,
-            Self::Less => Self::Greater,
-            Self::LessOrEqual => Self::GreaterOrEqual,
-            Self::Greater => Self::Less,
-            Self::GreaterOrEqual => Self::LessOrEqual,
-        }
-    }
 }
 
 /// One side of a comparison, as far as the translation reads it.
@@ -172,7 +149,8 @@ pub enum Operand {
 /// A filter expression, as far as the translation reads it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Filter {
-    Compare(Comparison, Operand, Operand),
+    /// `left <op> right`. `<>` is never read: its frames are not a range.
+    Compare(CmpOp, Operand, Operand),
     /// `value BETWEEN lower AND upper`, in that order, each bound inclusive or not: the
     /// expression does not say which.
     Between(Operand, Operand, Operand),
@@ -191,68 +169,37 @@ pub struct Reading {
     pub exact: bool,
 }
 
-/// A predicate no frame satisfies.
-fn nothing() -> FramePredicate {
-    FramePredicate {
-        frames: (Bound::Included(1), Bound::Included(0)),
-        ..FramePredicate::all()
-    }
-}
-
-/// The range of the values `v` with `v <comparison> constant`.
-fn range<T: Copy>(comparison: Comparison, constant: T) -> (Bound<T>, Bound<T>) {
-    match comparison {
-        Comparison::Equal => (Bound::Included(constant), Bound::Included(constant)),
-        Comparison::Less => (Bound::Unbounded, Bound::Excluded(constant)),
-        Comparison::LessOrEqual => (Bound::Unbounded, Bound::Included(constant)),
-        Comparison::Greater => (Bound::Excluded(constant), Bound::Unbounded),
-        Comparison::GreaterOrEqual => (Bound::Included(constant), Bound::Unbounded),
-    }
-}
-
 /// The frames whose number `n` satisfies `n <comparison> constant`, both taken as integers.
-fn wide_frames(comparison: Comparison, constant: i128) -> FramePredicate {
+fn wide_frames(comparison: CmpOp, constant: i128) -> Option<FramePredicate> {
     if let Ok(constant) = u64::try_from(constant) {
-        return FramePredicate {
-            frames: range(comparison, constant),
-            ..FramePredicate::all()
-        };
+        return FramePredicate::frame_number(comparison, constant);
     }
     // Every frame number is above a negative constant and below one past `u64::MAX`.
     let above = constant < 0;
     let holds = match comparison {
-        Comparison::Equal => false,
-        Comparison::Less | Comparison::LessOrEqual => !above,
-        Comparison::Greater | Comparison::GreaterOrEqual => above,
+        CmpOp::Eq => false,
+        CmpOp::Lt | CmpOp::LtEq => !above,
+        CmpOp::Gt | CmpOp::GtEq => above,
+        CmpOp::NotEq => return None,
     };
-    if holds {
+    Some(if holds {
         FramePredicate::all()
     } else {
-        nothing()
-    }
+        FramePredicate::none()
+    })
 }
 
 /// The frames `column <comparison> constant` holds for, if the two are a column and a constant
 /// of the one type DuckDB compares the column's stored values with.
-fn compared(
-    comparison: Comparison,
-    column: &Operand,
-    constant: &Operand,
-) -> Option<FramePredicate> {
+fn compared(comparison: CmpOp, column: &Operand, constant: &Operand) -> Option<FramePredicate> {
     match (column, constant) {
         (Operand::Column(Column::FrameNumber), Operand::Unsigned(constant)) => {
-            Some(FramePredicate {
-                frames: range(comparison, *constant),
-                ..FramePredicate::all()
-            })
+            FramePredicate::frame_number(comparison, *constant)
         }
-        (Operand::WideFrameNumber, Operand::Wide(constant)) => {
-            Some(wide_frames(comparison, *constant))
+        (Operand::WideFrameNumber, Operand::Wide(constant)) => wide_frames(comparison, *constant),
+        (Operand::Column(Column::Timestamp), Operand::Nanos(constant)) => {
+            FramePredicate::timestamp_ns(comparison, *constant)
         }
-        (Operand::Column(Column::Timestamp), Operand::Nanos(constant)) => Some(FramePredicate {
-            time_ns: range(comparison, *constant),
-            ..FramePredicate::all()
-        }),
         _ => None,
     }
 }
@@ -267,7 +214,7 @@ pub fn read(filter: &Filter) -> Option<Reading> {
             let (comparison, column, constant) = match (left, right) {
                 (Operand::Column(_) | Operand::WideFrameNumber, _) => (*comparison, left, right),
                 (_, Operand::Column(_) | Operand::WideFrameNumber) => {
-                    (comparison.reversed(), right, left)
+                    (comparison.swapped(), right, left)
                 }
                 _ => return None,
             };
@@ -279,10 +226,10 @@ pub fn read(filter: &Filter) -> Option<Reading> {
         Filter::Between(value, lower, upper) => {
             // With both bounds inclusive: every frame the filter holds for, whichever its
             // bounds are, and at most the frames at the two bounds besides.
-            let from = compared(Comparison::GreaterOrEqual, value, lower)?;
-            let to = compared(Comparison::LessOrEqual, value, upper)?;
+            let from = compared(CmpOp::GtEq, value, lower)?;
+            let to = compared(CmpOp::LtEq, value, upper)?;
             Some(Reading {
-                predicate: intersect(&from, &to),
+                predicate: from.intersect(&to),
                 exact: false,
             })
         }
@@ -298,7 +245,7 @@ pub fn read(filter: &Filter) -> Option<Reading> {
             for filter in filters {
                 match read(filter) {
                     Some(part) => {
-                        all.predicate = intersect(&all.predicate, &part.predicate);
+                        all.predicate = all.predicate.intersect(&part.predicate);
                         all.exact &= part.exact;
                         any = true;
                     }
@@ -307,51 +254,6 @@ pub fn read(filter: &Filter) -> Option<Reading> {
             }
             any.then_some(all)
         }
-    }
-}
-
-/// The tighter of two lower bounds.
-fn lower<T: Copy + Ord>(a: Bound<T>, b: Bound<T>) -> Bound<T> {
-    match (a, b) {
-        (Bound::Unbounded, other) | (other, Bound::Unbounded) => other,
-        (Bound::Included(x), Bound::Included(y)) => Bound::Included(x.max(y)),
-        (Bound::Excluded(x), Bound::Excluded(y)) => Bound::Excluded(x.max(y)),
-        // `> x` is tighter than `>= x`.
-        (Bound::Included(i), Bound::Excluded(e)) | (Bound::Excluded(e), Bound::Included(i)) => {
-            if i > e {
-                Bound::Included(i)
-            } else {
-                Bound::Excluded(e)
-            }
-        }
-    }
-}
-
-/// The tighter of two upper bounds.
-fn upper<T: Copy + Ord>(a: Bound<T>, b: Bound<T>) -> Bound<T> {
-    match (a, b) {
-        (Bound::Unbounded, other) | (other, Bound::Unbounded) => other,
-        (Bound::Included(x), Bound::Included(y)) => Bound::Included(x.min(y)),
-        (Bound::Excluded(x), Bound::Excluded(y)) => Bound::Excluded(x.min(y)),
-        // `< x` is tighter than `<= x`.
-        (Bound::Included(i), Bound::Excluded(e)) | (Bound::Excluded(e), Bound::Included(i)) => {
-            if i < e {
-                Bound::Included(i)
-            } else {
-                Bound::Excluded(e)
-            }
-        }
-    }
-}
-
-/// The predicate that accepts the frames both `a` and `b` accept.
-pub fn intersect(a: &FramePredicate, b: &FramePredicate) -> FramePredicate {
-    FramePredicate {
-        frames: (lower(a.frames.0, b.frames.0), upper(a.frames.1, b.frames.1)),
-        time_ns: (
-            lower(a.time_ns.0, b.time_ns.0),
-            upper(a.time_ns.1, b.time_ns.1),
-        ),
     }
 }
 
@@ -440,7 +342,7 @@ impl Pushed {
                     .understood
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                *understood = intersect(&understood, &reading.predicate);
+                *understood = understood.intersect(&reading.predicate);
             }
             if reading.exact {
                 offered.accept_pushdown(index)?;
@@ -471,11 +373,11 @@ impl Pushed {
                     self.operand(offered, &expression.child(2)?)?,
                 ));
             }
-            ExpressionType::CompareEqual => Comparison::Equal,
-            ExpressionType::CompareLessThan => Comparison::Less,
-            ExpressionType::CompareLessThanOrEqualTo => Comparison::LessOrEqual,
-            ExpressionType::CompareGreaterThan => Comparison::Greater,
-            ExpressionType::CompareGreaterThanOrEqualTo => Comparison::GreaterOrEqual,
+            ExpressionType::CompareEqual => CmpOp::Eq,
+            ExpressionType::CompareLessThan => CmpOp::Lt,
+            ExpressionType::CompareLessThanOrEqualTo => CmpOp::LtEq,
+            ExpressionType::CompareGreaterThan => CmpOp::Gt,
+            ExpressionType::CompareGreaterThanOrEqualTo => CmpOp::GtEq,
             _ => return Ok(Filter::Other),
         };
         if expression.child_count()? != 2 {
@@ -553,19 +455,22 @@ impl Pushed {
 mod tests {
     use super::*;
 
-    use Comparison::{Equal, Greater, GreaterOrEqual, Less, LessOrEqual};
+    use CmpOp::{
+        Eq as Equal, Gt as Greater, GtEq as GreaterOrEqual, Lt as Less, LtEq as LessOrEqual,
+    };
 
     const FRAME: Operand = Operand::Column(Column::FrameNumber);
     const TIME: Operand = Operand::Column(Column::Timestamp);
-    const COMPARISONS: [Comparison; 5] = [Equal, Less, LessOrEqual, Greater, GreaterOrEqual];
+    const COMPARISONS: [CmpOp; 5] = [Equal, Less, LessOrEqual, Greater, GreaterOrEqual];
 
-    fn holds<T: Ord>(comparison: Comparison, value: T, constant: T) -> bool {
+    fn holds<T: Ord>(comparison: CmpOp, value: T, constant: T) -> bool {
         match comparison {
             Equal => value == constant,
             Less => value < constant,
             LessOrEqual => value <= constant,
             Greater => value > constant,
             GreaterOrEqual => value >= constant,
+            CmpOp::NotEq => value != constant,
         }
     }
 
@@ -602,7 +507,7 @@ mod tests {
             for constant in FRAMES.into_iter().chain([0]) {
                 let filters = [
                     Filter::Compare(comparison, FRAME, Operand::Unsigned(constant)),
-                    Filter::Compare(comparison.reversed(), Operand::Unsigned(constant), FRAME),
+                    Filter::Compare(comparison.swapped(), Operand::Unsigned(constant), FRAME),
                 ];
                 for filter in filters {
                     let predicate = exact(&filter);
@@ -619,7 +524,7 @@ mod tests {
             for constant in TIMES {
                 let filters = [
                     Filter::Compare(comparison, TIME, Operand::Nanos(constant)),
-                    Filter::Compare(comparison.reversed(), Operand::Nanos(constant), TIME),
+                    Filter::Compare(comparison.swapped(), Operand::Nanos(constant), TIME),
                 ];
                 for filter in filters {
                     let predicate = exact(&filter);
@@ -658,7 +563,7 @@ mod tests {
                         Operand::Wide(constant),
                     ),
                     Filter::Compare(
-                        comparison.reversed(),
+                        comparison.swapped(),
                         Operand::Wide(constant),
                         Operand::WideFrameNumber,
                     ),
@@ -697,6 +602,11 @@ mod tests {
             Filter::Compare(Less, TIME, Operand::Wide(5)),
             Filter::Compare(Less, Operand::WideFrameNumber, Operand::Unsigned(5)),
             Filter::Compare(Less, Operand::WideFrameNumber, Operand::Nanos(5)),
+            // `<>`: the frames it holds for are not a range.
+            Filter::Compare(CmpOp::NotEq, FRAME, Operand::Unsigned(5)),
+            Filter::Compare(CmpOp::NotEq, Operand::WideFrameNumber, Operand::Wide(5)),
+            Filter::Compare(CmpOp::NotEq, Operand::WideFrameNumber, Operand::Wide(-5)),
+            Filter::Compare(CmpOp::NotEq, Operand::Nanos(5), TIME),
             // A NULL, a parameter, a cast, another column: anything that is not a constant.
             Filter::Compare(Equal, FRAME, Operand::Other),
             Filter::Compare(Equal, Operand::Other, TIME),
@@ -859,63 +769,10 @@ mod tests {
         }
     }
 
-    /// Every pair of bounds on a small domain: the intersection accepts what both accept, in
-    /// either order, and intersecting again changes nothing.
-    #[test]
-    fn intersection_is_exact_commutative_and_idempotent() {
-        let bounds = |values: std::ops::RangeInclusive<u64>| -> Vec<Bound<u64>> {
-            let mut bounds = vec![Bound::Unbounded];
-            for value in values {
-                bounds.push(Bound::Included(value));
-                bounds.push(Bound::Excluded(value));
-            }
-            bounds
-        };
-        let mut predicates = Vec::new();
-        for lower in bounds(1..=4) {
-            for upper in bounds(1..=4) {
-                predicates.push(FramePredicate {
-                    frames: (lower, upper),
-                    ..FramePredicate::all()
-                });
-            }
-        }
-        for a in &predicates {
-            for b in &predicates {
-                let both = intersect(a, b);
-                for frame in 0..=6 {
-                    assert_eq!(
-                        accepts(&both, frame, 0),
-                        accepts(a, frame, 0) && accepts(b, frame, 0),
-                        "{a:?} and {b:?}: frame {frame}"
-                    );
-                }
-                assert_eq!(both, intersect(b, a), "{a:?} and {b:?}");
-                assert_eq!(intersect(&both, b), both, "{a:?} and {b:?}");
-                assert_eq!(intersect(&both, a), both, "{a:?} and {b:?}");
-            }
-        }
-        // The same on timestamps, across zero.
-        let early = FramePredicate {
-            time_ns: (Bound::Included(-5), Bound::Excluded(7)),
-            ..FramePredicate::all()
-        };
-        let late = FramePredicate {
-            time_ns: (Bound::Excluded(-5), Bound::Included(9)),
-            ..FramePredicate::all()
-        };
-        assert_eq!(
-            intersect(&early, &late).time_ns,
-            (Bound::Excluded(-5), Bound::Excluded(7))
-        );
-        assert_eq!(intersect(&early, &FramePredicate::all()), early);
-    }
-
     #[test]
     fn predicates_are_described_by_their_bounds() {
         assert_eq!(describe(&FramePredicate::all()), "every frame");
-        assert_eq!(describe(&nothing()), "no frame");
-        assert!(nothing().is_empty());
+        assert_eq!(describe(&FramePredicate::none()), "no frame");
         let cases = [
             (
                 Filter::Compare(Equal, FRAME, Operand::Unsigned(7)),
