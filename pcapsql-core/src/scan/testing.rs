@@ -325,7 +325,7 @@ fn conformance_row(id: u64) -> Vec<Cell> {
     let mut row = vec![Cell::U64(id)];
     match id % 5 {
         0 => row.extend([
-            Cell::Bool(id % 2 == 0),
+            Cell::Bool(id.is_multiple_of(2)),
             Cell::U8(low),
             Cell::U16(id as u16),
             Cell::U32(id as u32),

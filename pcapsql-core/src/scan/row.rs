@@ -563,7 +563,10 @@ mod tests {
         assert_eq!(cell(ColKind::I8, &V::UInt8(1)), C::Null);
 
         assert_eq!(cell(ColKind::I64, &V::Int8(-3)), C::I64(-3));
-        assert_eq!(cell(ColKind::I64, &V::UInt32(u32::MAX)), C::I64(0xFFFF_FFFF));
+        assert_eq!(
+            cell(ColKind::I64, &V::UInt32(u32::MAX)),
+            C::I64(0xFFFF_FFFF)
+        );
         assert_eq!(cell(ColKind::I64, &V::UInt64(7)), C::I64(7));
         assert_eq!(cell(ColKind::I64, &V::UInt64(u64::MAX)), C::Null);
         assert_eq!(cell(ColKind::I64, &V::Float64(1.0)), C::Null);
@@ -587,7 +590,10 @@ mod tests {
         assert_eq!(cell(ColKind::Str, &v4()), s("192.0.2.1"));
         assert_eq!(cell(ColKind::Str, &v6()), s("2001:db8::1"));
         assert_eq!(cell(ColKind::Str, &MAC), s("02:00:00:00:00:01"));
-        assert_eq!(cell(ColKind::Str, &V::UInt64(u64::MAX)), s("18446744073709551615"));
+        assert_eq!(
+            cell(ColKind::Str, &V::UInt64(u64::MAX)),
+            s("18446744073709551615")
+        );
         assert_eq!(cell(ColKind::Str, &V::Int8(-3)), s("-3"));
         assert_eq!(cell(ColKind::Str, &V::Float64(1.5)), s("1.5"));
         assert_eq!(cell(ColKind::Str, &V::Bool(false)), s("false"));
@@ -668,7 +674,10 @@ mod tests {
         octets[15] = 1;
         assert_eq!(cell(ColKind::Fixed(16), &v6()), C::Bytes(octets));
         assert_eq!(cell(ColKind::Fixed(16), &MAC), C::Null);
-        assert_eq!(cell(ColKind::Fixed(16), &V::OwnedBytes(vec![1; 6])), C::Null);
+        assert_eq!(
+            cell(ColKind::Fixed(16), &V::OwnedBytes(vec![1; 6])),
+            C::Null
+        );
         assert_eq!(cell(ColKind::Fixed(16), &V::Bytes(&[])), C::Null);
     }
 
