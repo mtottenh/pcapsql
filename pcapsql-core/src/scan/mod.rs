@@ -21,13 +21,23 @@
 //!   stores the same cells;
 //! - the [`route`]: which rows a frame adds to which output, with row
 //!   predicates, row caps and sinks of bounded size ([`Router`]);
+//! - the [`driver`]: one partition of a scan, read step by step
+//!   ([`PartitionScan`]). It reads the packets, parses them and routes
+//!   their rows, and returns whenever the frontend has something to do, so
+//!   that an engine that pushes rows to its consumer and one whose consumer
+//!   pulls a chunk at a time run the same loop;
+//! - [`partition`]: how many partitions a capture is worth
+//!   ([`partition_target`]) and a queue workers claim them from
+//!   ([`PartitionQueue`]);
 //! - [`testing`]: a recording sink and the conformance suite a sink
 //!   implementation runs in its tests.
 //!
-//! Nothing in core reads a capture for a [`CompiledScan`] yet: the
-//! frontends run their own packet loops and call the [`Router`] per frame.
+//! Fused joins and stream tables are not built here yet: a frontend that
+//! has them feeds its own builders from a [`FrameObserver`].
 
 pub mod catalog;
+pub mod driver;
+pub mod partition;
 pub mod plan;
 pub mod predicate;
 pub mod route;
@@ -40,6 +50,8 @@ pub use catalog::{
     Catalog, ColId, ColKind, ColumnDef, ColumnSource, StreamTable, TableDef, TableId, TableKind,
     TimestampUnit, UnsupportedKind,
 };
+pub use driver::{FrameObserver, NoObserver, PartitionScan, ScanStats, Step};
+pub use partition::{partition_target, PartitionPolicy, PartitionQueue};
 pub use plan::{
     CompiledScan, FusedMember, FusedScan, JoinKind, MemberJoin, OutCol, OutColumn, OutputId,
     OutputPlan, PlanError, ScanPlan, TableScan,
