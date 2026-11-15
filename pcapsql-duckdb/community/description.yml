@@ -1,0 +1,53 @@
+extension:
+  name: pcapsql
+  description: Query network captures (pcap, pcapng) with SQL, with a table per protocol
+  version: 0.4.2
+  language: Rust
+  build: cargo
+  license: MIT
+  excluded_platforms: "windows_amd64;windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads"
+  requires_toolchains: "rust;python3"
+  maintainers:
+    - mtottenh
+
+repo:
+  github: mtottenh/pcapsql
+  # PLACEHOLDER, not a commit. Replace with the full 40-character SHA of the release commit
+  # when the descriptor is submitted (see README.md in this directory).
+  ref: REPLACE_WITH_RELEASE_COMMIT_SHA
+  build_directory: pcapsql-duckdb
+
+docs:
+  hello_world: |
+    -- The tables the extension reads, and the columns of one
+    SELECT name, description FROM pcap_protocols();
+    SELECT * FROM pcap_schema('dns');
+
+    -- One row per packet of a capture
+    SELECT frame_number, timestamp, length FROM read_pcap('capture.pcap') LIMIT 5;
+
+    -- One row per TCP header, with its frame's number and timestamp
+    SELECT frame_number, timestamp, src_port, dst_port, tcp_flags_str(flags) AS flags
+    FROM read_tcp('capture.pcap')
+    WHERE dst_port = 443;
+  extended_description: |
+    pcapsql reads network captures as tables. `read_pcap('capture.pcap')` returns one row per
+    packet, and `read_<protocol>(files)` one row per protocol header: `read_ethernet`,
+    `read_ipv4`, `read_ipv6`, `read_tcp`, `read_udp`, `read_dns`, `read_tls`, `read_http` and
+    19 more, listed by `pcap_protocols()`. A capture file can also be named directly:
+    `FROM 'capture.pcap'`.
+
+    - Legacy pcap and pcapng, plain or compressed with gzip or zstd.
+    - A path, a glob pattern or a list of either; `filename := true` adds the source file.
+    - Files are opened through DuckDB's file system, so DuckDB's access settings apply.
+    - Only the columns a query uses are produced and only the protocols they need are parsed.
+    - Filters on `frame_number` and `timestamp` are applied while the capture is read, and
+      large uncompressed captures are scanned on several threads.
+    - Scalar functions for addresses and protocol numbers: `ip4_to_string`, `ip_in_cidr`,
+      `mac_to_string`, `tcp_flags_str`, `dns_type_name` and others.
+
+    The function reference is at
+    https://github.com/mtottenh/pcapsql/blob/main/docs/duckdb-extension-reference.md.
+
+    The extension uses DuckDB's C API v2, which is not stable yet: each build loads in exactly
+    one DuckDB release.
