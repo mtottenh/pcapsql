@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`pcapsql-testgen`: a capture of HTTP/2 over TLS 1.3 with its key log.**
+  `pcapsql_testgen::tls` describes one connection (a TLS 1.3 handshake up to
+  both `Finished` messages, one request and its response, a close) and holds
+  the capture and the key log as `fixtures/tls13_http2.pcap` and `.keys`.
+  The crate has no dependencies and does not encrypt:
+  `pcapsql-core/tests/tls13_http2.rs` seals the records with the keys the
+  decryption derives and fails if the result is not the committed file
+  (`PCAPSQL_FIXTURE_UPDATE=1` writes it again). It is the first capture in
+  the repository that the key log path decrypts end to end; the tests of
+  core and of the DataFusion engine (`e2e_tls_http2.rs`) read it.
 - **DuckDB extension: a test that reads captures over HTTP.**
   `make remote_test_release` (`scripts/remote-test.sh`) serves captures from
   a local HTTP server with Range support (`scripts/range-http-server.py`) and
@@ -794,6 +804,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`http2.connection_id` was always NULL.** The column was filled from a
+  message field of that name, which the HTTP/2 stream parser never sets. It
+  is now the id of the TCP connection that carried the frame, as in
+  `http_messages`, `tls_sessions` and `tcp_connections`, so the four tables
+  join on it (`http2 JOIN tcp_connections USING (connection_id)` matches
+  every frame), and it is declared not nullable. Both engines. No golden
+  snapshot changed: none has an `http2` row, since no capture of the corpus
+  was decrypted until now.
+- **`tls_sessions.version` of a TLS 1.3 session read with a key log was
+  `TLS 1.2`.** The decrypting TLS parser reported the record layer's version
+  as the selected one; without a key log the same session was `TLS 1.3`.
+  Found by the first capture that is decrypted in a test.
 - **`--filter` with non-ASCII text in the query.** The BPF filter is spliced
   into the query at the position of its `WHERE` (or of the clause a `WHERE`
   goes in front of), and that position was found in `query.to_uppercase()`,

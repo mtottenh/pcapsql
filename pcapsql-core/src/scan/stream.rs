@@ -134,8 +134,9 @@ impl StreamTable {
             }),
             Self::Http2 => Cell::Message(match name {
                 "frame_number" => MessageCell::FrameNumber,
-                // `connection_id` included: the table has always shown the
-                // parser's field, which the HTTP/2 parser does not set.
+                // The TCP connection that carried the TLS stream the frame
+                // was decrypted from: `tcp_connections.connection_id`.
+                "connection_id" => MessageCell::ConnectionId,
                 field => MessageCell::Field(field),
             }),
         };
