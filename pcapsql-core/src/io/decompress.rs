@@ -246,8 +246,15 @@ impl<R: Read> Read for DecompressReader<R> {
     }
 }
 
-// DecompressReader is Send when R is Send
-unsafe impl<R: Read + Send> Send for DecompressReader<R> {}
+// A reader is moved to the thread that scans with it, so every decoder that is compiled in must
+// be `Send` over a `Send` input; fail here, not at the first reader that crosses a thread.
+const _: fn() = || {
+    fn assert_send<T: Send>() {}
+    fn over<R: Read + Send>() {
+        assert_send::<DecompressReader<R>>();
+    }
+    over::<std::fs::File>();
+};
 
 // Required for async compatibility
 impl<R: Read + Unpin> Unpin for DecompressReader<R> {}

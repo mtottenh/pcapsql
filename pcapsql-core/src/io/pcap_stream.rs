@@ -820,8 +820,15 @@ where
     })
 }
 
-// GenericPcapReader is Send when R is Send
-unsafe impl<R: Read + Send> Send for GenericPcapReader<R> {}
+// A reader is moved to the thread that scans with it, so it must be `Send` over any `Send`
+// input; fail here, not at the first reader that crosses a thread.
+const _: fn() = || {
+    fn assert_send<T: Send>() {}
+    fn over<R: Read + Send>() {
+        assert_send::<GenericPcapReader<R>>();
+    }
+    over::<std::fs::File>();
+};
 
 // Required for async compatibility
 impl<R: Read> Unpin for GenericPcapReader<R> {}
