@@ -54,12 +54,15 @@ Non-goals for this roadmap:
 | D4 | Column names and types come from the shared catalogue, i.e. the DataFusion tables | IPv4 is UINTEGER, IPv6 and MAC are fixed-length BLOB, names are unprefixed, `encap_depth` is UTINYINT. The existing scalars (`ip4_to_string(UINTEGER)`, `ip_in_cidr`) already assume this typing |
 | D5 | `timestamp` is a column of every scan table in DuckDB. DataFusion's protocol tables are unchanged | DuckDB cannot fuse a join against `frames`, so without the column a time-aware query scans the capture twice. With projection pushdown an unselected column costs nothing. DataFusion already serves this through the `*_packets` views and frame-join fusion, and adding a column there would change `SELECT *` for released users. The catalogue carries the column with `default = false`; each engine decides whether to expose it |
 | D6 | DuckDB timestamps are TIMESTAMP_NS; DataFusion stays on microseconds | Core has nanoseconds; the old extension truncated them. Unit is a per-plan setting (`ScanPlan::timestamps`) |
-| D7 | Coercion change: a value of the wrong length for a fixed-size binary column becomes NULL | Today the Arrow append error is discarded and the whole batch fails later with a length mismatch. One malformed field should not fail a query |
+| D7 | Coercion change: a value of the wrong length for a fixed-size binary column becomes NULL, and so does a wrong-length item of a fixed-size binary list | Today the Arrow append error is discarded: for a column the batch then fails later with a length mismatch, and for a list the item silently disappears, shortening the list. One malformed field should not fail a query or shift a list |
 | D8 | Coercion change: an unsigned 64-bit value above `i64::MAX` written to a timestamp column becomes NULL | Today it wraps to a negative timestamp. This matches the rule the builders already apply to integer narrowing: out of range is NULL, never wrapped |
 
 D7 and D8 change DataFusion output in corner cases only. They land in S4a
-with a regression test each and a CHANGELOG entry, and the S0 coercion
-snapshot must show exactly these two differences and no others.
+with a regression test each and a CHANGELOG entry. The S0 coercion snapshot
+(`pcapsql-datafusion/src/query/builders/coercion.snap`) records today's
+behaviour for every column type and value kind; at S4a its diff must be
+exactly the lines D7 and D8 describe (the `(no value appended)` cells, the
+shortened fixed-size binary lists, and `Timestamp(us) <- UInt64(MAX)`).
 
 ## 3. Constraints that shape the design
 
