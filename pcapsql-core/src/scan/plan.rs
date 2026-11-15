@@ -740,7 +740,7 @@ fn parse_scope(
 mod tests {
     use super::*;
     use crate::default_registry;
-    use crate::scan::{CmpOp, StreamTable};
+    use crate::scan::CmpOp;
 
     fn catalog() -> &'static Catalog {
         Catalog::builtin()
@@ -972,10 +972,7 @@ mod tests {
             panic!("two stream outputs");
         };
         assert_eq!(http.table, Some(id("http_messages")));
-        assert_eq!(
-            catalog().get(id("http_messages")).kind,
-            TableKind::Stream(StreamTable::HttpMessages)
-        );
+        assert_eq!(catalog().get(id("http_messages")).kind, TableKind::Stream);
         assert_eq!(http.columns.len(), default_cols("http_messages").len());
         assert!(http
             .columns

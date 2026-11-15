@@ -195,7 +195,7 @@ fn kind_name(kind: TableKind) -> &'static str {
     match kind {
         TableKind::Frames => "frames",
         TableKind::Protocol => "protocol",
-        TableKind::Stream(_) => "stream",
+        TableKind::Stream => "stream",
     }
 }
 

@@ -17,7 +17,7 @@
 //! head a group of columns.
 
 use super::catalog::ColKind::*;
-use super::catalog::{ColKind, ColumnDef, ColumnSource, StreamTable, TableDef, TableKind};
+use super::catalog::{ColKind, ColumnDef, ColumnSource, TableDef, TableKind};
 
 /// Every built-in table. The order is the order tables are listed in and
 /// defines their [`TableId`](super::TableId)s.
@@ -50,19 +50,15 @@ pub(super) fn builtin_tables() -> Vec<TableDef> {
         protocol_table("dhcp", dhcp()),
         protocol_table("ntp", ntp()),
         protocol_table("http", http()),
-        stream_table("http2", StreamTable::Http2, http2()),
+        stream_table("http2", http2()),
         protocol_table("tls", tls()),
         protocol_table("ssh", ssh()),
         protocol_table("quic", quic()),
         protocol_table("netlink", netlink()),
         protocol_table("rtnetlink", rtnetlink()),
-        stream_table(
-            "tcp_connections",
-            StreamTable::TcpConnections,
-            tcp_connections(),
-        ),
-        stream_table("tls_sessions", StreamTable::TlsSessions, tls_sessions()),
-        stream_table("http_messages", StreamTable::HttpMessages, http_messages()),
+        stream_table("tcp_connections", tcp_connections()),
+        stream_table("tls_sessions", tls_sessions()),
+        stream_table("http_messages", http_messages()),
     ]
 }
 
@@ -96,7 +92,7 @@ fn protocol_table(name: &'static str, fields: Vec<ColumnDef>) -> TableDef {
 /// the table's own `columns`, then the encapsulation columns. Reassembly
 /// follows the innermost TCP flow and does not attribute a row to a tunnel,
 /// so the stream builders fill those with depth 0 and no tunnel.
-fn stream_table(name: &'static str, table: StreamTable, columns: Vec<ColumnDef>) -> TableDef {
+fn stream_table(name: &'static str, columns: Vec<ColumnDef>) -> TableDef {
     let mut all = vec![stream("frame_number", U64).required()];
     all.extend(columns);
     all.extend([
@@ -106,7 +102,7 @@ fn stream_table(name: &'static str, table: StreamTable, columns: Vec<ColumnDef>)
     ]);
     TableDef {
         name,
-        kind: TableKind::Stream(table),
+        kind: TableKind::Stream,
         columns: all.into(),
     }
 }
