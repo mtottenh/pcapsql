@@ -1,568 +1,26 @@
-//! Scalar functions: vector loops over the kernels of `pcapsql_core::format`.
+//! The loops over fixed-width values whose test always has an answer, [`TestPlain`] and
+//! [`MatchPlain`]: the answers of a chunk are computed over slices of its values.
 //!
-//! No function has logic of its own here. Each is one of five loops, instantiated with a kernel:
-//!
-//! - [`Map`]: one argument, the kernel returns the value (`ip4`, `mac`, `dns_type_name`, ...);
-//! - [`MapInto`]: one argument, the kernel puts the value in a buffer the loop lends it and
-//!   returns the part it filled (`pcap_unhex`, `ip4_to_string`, `ip6_to_string`,
-//!   `mac_to_string`);
-//! - [`Format`]: one argument, the kernel writes text of any length (`tcp_flags_str`,
-//!   `pcap_hex`);
-//! - [`Match`]: a value and a text pattern, tested for each row (`ip6_in_cidr`);
-//! - [`MatchPlain`]: the same for a fixed-width value whose test always has an answer
-//!   (`ip_in_cidr`, `has_tcp_flag`), with the answers of a chunk computed over slices of its
-//!   values and stored as one slice when the pattern is constant.
-//!
-//! The kernel is a type parameter of the loop (a function item or a closure that captures
-//! nothing), not a function pointer in it: each function gets its own copy of the loop, with the
-//! kernel inlined into it.
-//!
-//! Inputs are read through `duckdb-neo`'s vector reader, which maps rows through the vector's
-//! selection, so flat, constant and dictionary inputs all work. NULL in gives NULL out, and so
-//! does a value the kernel rejects: no function raises an error for its input.
-//!
-//! One module here has `unsafe` code, the second of the two places in the crate that do
+//! This file has the one module of the crate outside `engine::writer` with `unsafe` code
 //! (`scripts/check-unsafe.sh`): [`valid`] borrows the values of rows of a flat vector as a
 //! slice when none of those rows is NULL, and says why it may.
 
-use std::borrow::{Borrow, Cow};
 use std::marker::PhantomData;
 use std::ops::Range;
 
 use duckdb_neo::{
     connection::Context,
     data_chunk::VectorCollection,
-    extension::Extension,
     scalar::ScalarCallbacks,
-    signature::{FunctionDocumentationBuilder, FunctionParameter, SignatureBuilder},
-    types::BlobValue,
     vector::{
         NativeElement, PlainNative, ReadableNativeElement, Selection, StorageKind, Unknown, Vector,
-        VectorReader, VectorWriter, WritableNativeElement,
+        VectorReader, VectorWriter,
     },
-    DuckDBType, Result,
+    Result,
 };
-use pcapsql_core::format;
 
-use super::guard;
-
-pub(super) fn register(extension: &Extension) -> Result<()> {
-    // Addresses.
-    Function::new("ip4", "The UINTEGER value of a dotted-quad IPv4 address.")
-        .parameter::<String>("address")
-        .example("ip4('192.168.1.1')")
-        .register::<u32, _>(extension, Map::<String, u32, _, _>::new(format::parse_ipv4))?;
-    Function::new(
-        "ip4_to_string",
-        "Dotted-quad text of a UINTEGER IPv4 address.",
-    )
-    .parameter::<u32>("address")
-    .example("ip4_to_string(3232235777)")
-    .register::<String, _>(
-        extension,
-        // The text goes from the kernel's buffer, on the stack, into the vector.
-        MapInto::<u32, String, [u8; format::IPV4_TEXT_LEN], _>::new(|address, text| {
-            Some(format::ipv4_text(*address, text))
-        }),
-    )?;
-    Function::new("ip6", "The 16 bytes of an IPv6 address.")
-        .parameter::<String>("address")
-        .example("ip6('2001:db8::1')")
-        .register::<BlobValue, _>(
-            extension,
-            Map::<String, BlobValue, _, _>::new(format::parse_ipv6),
-        )?;
-    Function::new("ip6_to_string", "RFC 5952 text of a 16-byte IPv6 address.")
-        .parameter::<BlobValue>("address")
-        .example("ip6_to_string(ip6('2001:db8::1'))")
-        .register::<String, _>(
-            extension,
-            MapInto::<BlobValue, String, Ipv6Text, _>::new(|address, text| {
-                Some(format::ipv6_text(address.try_into().ok()?, &mut text.0))
-            }),
-        )?;
-    Function::new("mac", "The 6 bytes of a MAC address.")
-        .parameter::<String>("address")
-        .example("mac('aa:bb:cc:dd:ee:ff')")
-        .register::<BlobValue, _>(
-            extension,
-            Map::<String, BlobValue, _, _>::new(format::parse_mac),
-        )?;
-    Function::new(
-        "mac_to_string",
-        "Colon-separated hex text of a 6-byte MAC address.",
-    )
-    .parameter::<BlobValue>("address")
-    .example("mac_to_string(mac('aa-bb-cc-dd-ee-ff'))")
-    .register::<String, _>(
-        extension,
-        MapInto::<BlobValue, String, [u8; format::MAC_TEXT_LEN], _>::new(|address, text| {
-            Some(format::mac_text(address.try_into().ok()?, text))
-        }),
-    )?;
-
-    // CIDR membership.
-    Function::new(
-        "ip_in_cidr",
-        "Whether a UINTEGER IPv4 address is in a network given in CIDR notation.",
-    )
-    .parameter::<u32>("address")
-    .parameter::<String>("cidr")
-    .example("ip_in_cidr(ip4('192.168.1.100'), '192.168.0.0/16')")
-    .register::<bool, _>(
-        extension,
-        MatchPlain::<u32, _, _, _>::new(format::parse_cidr_v4, |address, &(network, mask)| {
-            format::ipv4_in_cidr(address, network, mask)
-        }),
-    )?;
-    Function::new(
-        "ip6_in_cidr",
-        "Whether a 16-byte IPv6 address is in a network given in CIDR notation.",
-    )
-    .parameter::<BlobValue>("address")
-    .parameter::<String>("cidr")
-    .example("ip6_in_cidr(ip6('fe80::1'), 'fe80::/10')")
-    .register::<bool, _>(
-        extension,
-        Match::<BlobValue, _, _, _>::new(
-            format::parse_cidr_v6,
-            |address, (network, prefix_len)| {
-                // The kernel answers false for a blob that is not an address; in SQL that is NULL.
-                (address.len() == 16).then(|| format::ipv6_in_prefix(address, network, *prefix_len))
-            },
-        ),
-    )?;
-
-    // TCP flags.
-    Function::new(
-        "tcp_flags_str",
-        "The names of the set TCP flags, comma-separated.",
-    )
-    .parameter::<u16>("flags")
-    .example("tcp_flags_str(18)")
-    .register::<String, _>(
-        extension,
-        Format::<u16, _>::new(|flags, out| format::write_tcp_flags(*flags, out).ok()),
-    )?;
-    Function::new("has_tcp_flag", "Whether the named TCP flag is set.")
-        .parameter::<u16>("flags")
-        .parameter::<String>("flag")
-        .example("has_tcp_flag(18, 'SYN')")
-        .register::<bool, _>(
-            extension,
-            // A name that is not a flag is a valid pattern that no row matches: no bit.
-            MatchPlain::<u16, _, _, _>::new(
-                |flag| Some(format::tcp_flag_mask(flag).unwrap_or(0)),
-                |flags, mask| flags & mask != 0,
-            ),
-        )?;
-
-    // Protocol numbers to names.
-    Function::new("dns_type_name", "The name of a DNS record type.")
-        .parameter::<u16>("qtype")
-        .example("dns_type_name(28)")
-        .register::<String, _>(
-            extension,
-            Name::<u16, _>::new(|qtype| Some(format::dns_type_name(*qtype).into_cow())),
-        )?;
-    Function::new("dns_rcode_name", "The name of a DNS response code.")
-        .parameter::<u16>("rcode")
-        .example("dns_rcode_name(3)")
-        .register::<String, _>(
-            extension,
-            Name::<u16, _>::new(|rcode| Some(format::dns_rcode_name(*rcode).into_cow())),
-        )?;
-    Function::new("ip_proto_name", "The name of an IP protocol number.")
-        .parameter::<u8>("protocol")
-        .example("ip_proto_name(6)")
-        .register::<String, _>(
-            extension,
-            Name::<u8, _>::new(|protocol| Some(format::ip_proto_name(*protocol).into_cow())),
-        )?;
-    Function::new("ethertype_name", "The name of an EtherType.")
-        .parameter::<u16>("ethertype")
-        .example("ethertype_name(2048)")
-        .register::<String, _>(
-            extension,
-            Name::<u16, _>::new(|ethertype| Some(format::ethertype_name(*ethertype).into_cow())),
-        )?;
-
-    // Hex.
-    Function::new("pcap_hex", "Lowercase hexadecimal text of a BLOB.")
-        .parameter::<BlobValue>("bytes")
-        .example("pcap_hex('\\xDE\\xAD'::BLOB)")
-        .register::<String, _>(
-            extension,
-            Format::<BlobValue, _>::new(|bytes, out| format::write_hex(bytes, out).ok()),
-        )?;
-    Function::new("pcap_unhex", "The bytes that hexadecimal text encodes.")
-        .parameter::<String>("hex")
-        .example("pcap_unhex('dead')")
-        .register::<BlobValue, _>(
-            extension,
-            MapInto::<String, BlobValue, Vec<u8>, _>::new(format::parse_hex_into),
-        )
-}
-
-/// What a scalar function is registered with, apart from its implementation.
-struct Function {
-    name: &'static str,
-    parameters: Vec<FunctionParameter>,
-    documentation: FunctionDocumentationBuilder,
-}
-
-impl Function {
-    fn new(name: &'static str, description: &str) -> Self {
-        Self {
-            name,
-            parameters: Vec::new(),
-            documentation: FunctionDocumentationBuilder::new().description(description),
-        }
-    }
-
-    fn parameter<T: DuckDBType>(mut self, name: &str) -> Self {
-        self.parameters.push(FunctionParameter::new::<T>(name));
-        self
-    }
-
-    fn example(mut self, example: &str) -> Self {
-        self.documentation = self.documentation.add_example("", example);
-        self
-    }
-
-    /// Register the function with return type `O`, with its callback under the panic guard.
-    fn register<O: DuckDBType, T: ScalarCallbacks>(
-        self,
-        extension: &Extension,
-        implementation: T,
-    ) -> Result<()> {
-        let signature = self
-            .parameters
-            .into_iter()
-            .fold(SignatureBuilder::new(), SignatureBuilder::param)
-            .return_type(O::logical_type(extension)?)
-            .documentation(self.documentation);
-        guard::scalar_function(self.name, signature, implementation).register(extension)
-    }
-}
-
-/// A vector in a storage kind the vector reader accepts.
-fn readable<T: NativeElement>(mut vector: Vector<'_, T>) -> Result<Vector<'_, T>> {
-    // Sequence and FSST vectors have no selection-based view; DuckDB materialises them on request.
-    if vector.storage_kind() == StorageKind::Other {
-        vector.flatten()?;
-    }
-    Ok(vector)
-}
-
-/// The only argument of a function, ready to read.
-fn argument<T: NativeElement>(vectors: &mut VectorCollection) -> Result<Vector<'_, T>> {
-    readable(vectors.get_vector_at_mut::<T>(0)?)
-}
-
-/// `f(I) -> O`, where the kernel `K` returns the value, or `None` for NULL.
-///
-/// `R` is what the kernel returns: something that borrows as what the output vector stores, such
-/// as `[u8; 6]` or `Vec<u8>` for a BLOB.
-struct Map<I, O, R, K> {
-    kernel: K,
-    types: PhantomData<fn(I) -> (O, R)>,
-}
-
-impl<I, O, R, K> Map<I, O, R, K>
-where
-    I: ReadableNativeElement + 'static,
-    K: for<'a> Fn(I::Ref<'a>) -> Option<R>,
-{
-    fn new(kernel: K) -> Self {
-        Self {
-            kernel,
-            types: PhantomData,
-        }
-    }
-}
-
-/// `f(I) -> VARCHAR`, where the kernel returns a name. A fixed name is copied from the static
-/// string straight into the vector; only the `Unknown (n)` fallbacks allocate.
-type Name<I, K> = Map<I, String, Cow<'static, str>, K>;
-
-impl<I, O, R, K> ScalarCallbacks for Map<I, O, R, K>
-where
-    I: ReadableNativeElement + 'static,
-    O: WritableNativeElement + 'static,
-    R: Borrow<O::Write> + 'static,
-    K: for<'a> Fn(I::Ref<'a>) -> Option<R> + Send + Sync + 'static,
-{
-    type BindData = ();
-    type InitData = ();
-
-    fn exec(
-        &self,
-        _context: &Context,
-        _bind_data: Option<&()>,
-        _init_data: Option<&mut ()>,
-        vectors: &mut VectorCollection,
-        output: Vector<'_, Unknown>,
-    ) -> Result<()> {
-        let rows = vectors.row_count()?;
-        let input = argument::<I>(vectors)?;
-        let mut output = output.cast::<O>()?;
-        output.set_size(rows)?;
-        let mut writer = output.writer()?;
-        for (row, value) in input.reader()?.iter().enumerate() {
-            let result = value.and_then(&self.kernel);
-            writer.set_option(row, result.as_ref().map(Borrow::borrow))?;
-        }
-        Ok(())
-    }
-}
-
-/// `f(I) -> O`, where the kernel `K` puts the value in the buffer it is lent and returns the
-/// part of the buffer that holds it, or `None` for NULL.
-///
-/// The buffer, an `S`, is one for the chunk: a kernel whose value is a `Vec` (`parse_hex_into`)
-/// allocates when a value is longer than every one before it in the chunk, not for every row,
-/// and a kernel whose value has a longest form writes it on the stack.
-struct MapInto<I, O, S, K> {
-    kernel: K,
-    types: PhantomData<fn(I, S) -> O>,
-}
-
-impl<I, O, S, K> MapInto<I, O, S, K>
-where
-    I: ReadableNativeElement + 'static,
-    O: WritableNativeElement + 'static,
-    K: for<'a, 'b> Fn(I::Ref<'a>, &'b mut S) -> Option<&'b O::Write>,
-{
-    fn new(kernel: K) -> Self {
-        Self {
-            kernel,
-            types: PhantomData,
-        }
-    }
-}
-
-impl<I, O, S, K> ScalarCallbacks for MapInto<I, O, S, K>
-where
-    I: ReadableNativeElement + 'static,
-    O: WritableNativeElement + 'static,
-    S: Default + 'static,
-    K: for<'a, 'b> Fn(I::Ref<'a>, &'b mut S) -> Option<&'b O::Write> + Send + Sync + 'static,
-{
-    type BindData = ();
-    type InitData = ();
-
-    fn exec(
-        &self,
-        _context: &Context,
-        _bind_data: Option<&()>,
-        _init_data: Option<&mut ()>,
-        vectors: &mut VectorCollection,
-        output: Vector<'_, Unknown>,
-    ) -> Result<()> {
-        let rows = vectors.row_count()?;
-        let input = argument::<I>(vectors)?;
-        let mut output = output.cast::<O>()?;
-        output.set_size(rows)?;
-        let mut writer = output.writer()?;
-        let mut buffer = S::default();
-        for (row, value) in input.reader()?.iter().enumerate() {
-            let result = value.and_then(|value| (self.kernel)(value, &mut buffer));
-            writer.set_option(row, result)?;
-        }
-        Ok(())
-    }
-}
-
-/// The buffer [`MapInto`] lends the kernel of `ip6_to_string`: an array this long has no
-/// `Default` of its own.
-struct Ipv6Text([u8; format::IPV6_TEXT_LEN]);
-
-impl Default for Ipv6Text {
-    fn default() -> Self {
-        Self([0; format::IPV6_TEXT_LEN])
-    }
-}
-
-/// `f(I) -> VARCHAR`, where the kernel `K` writes the text, or returns `None` for NULL.
-struct Format<I, K> {
-    kernel: K,
-    input: PhantomData<fn(I)>,
-}
-
-impl<I, K> Format<I, K>
-where
-    I: ReadableNativeElement + 'static,
-    K: for<'a> Fn(I::Ref<'a>, &mut String) -> Option<()>,
-{
-    fn new(kernel: K) -> Self {
-        Self {
-            kernel,
-            input: PhantomData,
-        }
-    }
-}
-
-impl<I, K> ScalarCallbacks for Format<I, K>
-where
-    I: ReadableNativeElement + 'static,
-    K: for<'a> Fn(I::Ref<'a>, &mut String) -> Option<()> + Send + Sync + 'static,
-{
-    type BindData = ();
-    type InitData = ();
-
-    fn exec(
-        &self,
-        _context: &Context,
-        _bind_data: Option<&()>,
-        _init_data: Option<&mut ()>,
-        vectors: &mut VectorCollection,
-        output: Vector<'_, Unknown>,
-    ) -> Result<()> {
-        let rows = vectors.row_count()?;
-        let input = argument::<I>(vectors)?;
-        let mut output = output.cast::<String>()?;
-        output.set_size(rows)?;
-        let mut writer = output.writer()?;
-        // The vector writer takes finished text, not a `fmt::Write` sink, so the kernels write
-        // into one buffer that is reused for every row of the chunk. (A kernel whose text has a
-        // longest form is a `MapInto` over a buffer of that length, with no copy in between.)
-        let mut text = String::new();
-        for (row, value) in input.reader()?.iter().enumerate() {
-            text.clear();
-            let written = value.and_then(|value| (self.kernel)(value, &mut text));
-            writer.set_option(row, written.map(|()| text.as_str()))?;
-        }
-        Ok(())
-    }
-}
-
-/// The vectors of one call of a match function, `f(I, VARCHAR) -> BOOLEAN`.
-struct MatchVectors<'a, I: NativeElement> {
-    /// The rows of the chunk, which `output` is sized to.
-    rows: usize,
-    values: Vector<'a, I>,
-    patterns: Vector<'a, String>,
-    output: Vector<'a, bool>,
-}
-
-impl<'a, I: NativeElement> MatchVectors<'a, I> {
-    fn new(vectors: &'a mut VectorCollection, output: Vector<'a, Unknown>) -> Result<Self> {
-        let rows = vectors.row_count()?;
-        let [values, patterns] = vectors.get_vector_array_mut([0, 1])?;
-        let values = readable(values.cast::<I>()?)?;
-        let patterns = readable(patterns.cast::<String>()?)?;
-        let mut output = output.cast::<bool>()?;
-        output.set_size(rows)?;
-        Ok(Self {
-            rows,
-            values,
-            patterns,
-            output,
-        })
-    }
-}
-
-/// The rows of a match function, each value tested against the pattern of its own row. The
-/// pattern is parsed again whenever the text differs from the row before.
-fn match_rows<I, P>(
-    values: &VectorReader<'_, I>,
-    texts: &VectorReader<'_, String>,
-    writer: &mut VectorWriter<'_, bool>,
-    parse: impl Fn(&str) -> Option<P>,
-    test: impl for<'a> Fn(I::Ref<'a>, &P) -> Option<bool>,
-) -> Result<()>
-where
-    I: ReadableNativeElement,
-{
-    let mut parsed: Option<(&str, Option<P>)> = None;
-    for (row, (value, text)) in values.iter().zip(texts.iter()).enumerate() {
-        let result = match (value, text) {
-            (Some(value), Some(text)) => {
-                if parsed.as_ref().is_none_or(|(last, _)| *last != text) {
-                    parsed = Some((text, parse(text)));
-                }
-                let pattern = parsed.as_ref().and_then(|(_, pattern)| pattern.as_ref());
-                pattern.and_then(|pattern| test(value, pattern))
-            }
-            _ => None,
-        };
-        writer.set_option(row, result.as_ref())?;
-    }
-    Ok(())
-}
-
-/// `f(I, VARCHAR) -> BOOLEAN`: a value tested against a pattern that is parsed from text, such as
-/// a CIDR network. NULL when the text is not a pattern, or when `test` returns `None`.
-///
-/// The pattern is nearly always a literal, which arrives as a constant vector and is parsed once
-/// for the chunk. Otherwise it is parsed again whenever the text differs from the row before.
-struct Match<I, P, Parse, Test> {
-    parse: Parse,
-    test: Test,
-    types: PhantomData<fn(I) -> P>,
-}
-
-impl<I, P, Parse, Test> Match<I, P, Parse, Test>
-where
-    I: ReadableNativeElement + 'static,
-    Parse: Fn(&str) -> Option<P>,
-    Test: for<'a> Fn(I::Ref<'a>, &P) -> Option<bool>,
-{
-    fn new(parse: Parse, test: Test) -> Self {
-        Self {
-            parse,
-            test,
-            types: PhantomData,
-        }
-    }
-}
-
-impl<I, P, Parse, Test> ScalarCallbacks for Match<I, P, Parse, Test>
-where
-    I: ReadableNativeElement + 'static,
-    P: 'static,
-    Parse: Fn(&str) -> Option<P> + Send + Sync + 'static,
-    Test: for<'a> Fn(I::Ref<'a>, &P) -> Option<bool> + Send + Sync + 'static,
-{
-    type BindData = ();
-    type InitData = ();
-
-    fn exec(
-        &self,
-        _context: &Context,
-        _bind_data: Option<&()>,
-        _init_data: Option<&mut ()>,
-        vectors: &mut VectorCollection,
-        output: Vector<'_, Unknown>,
-    ) -> Result<()> {
-        let MatchVectors {
-            rows,
-            values,
-            patterns,
-            mut output,
-        } = MatchVectors::<I>::new(vectors, output)?;
-        let mut writer = output.writer()?;
-        if rows == 0 {
-            return Ok(());
-        }
-
-        let values = values.reader()?;
-        let texts = patterns.reader()?;
-        if patterns.storage_kind() == StorageKind::Constant {
-            let Some(pattern) = texts.get(0)?.and_then(&self.parse) else {
-                return writer.fill_null();
-            };
-            for (row, value) in values.iter().enumerate() {
-                let result = value.and_then(|value| (self.test)(value, &pattern));
-                writer.set_option(row, result.as_ref())?;
-            }
-            Ok(())
-        } else {
-            match_rows(&values, &texts, &mut writer, &self.parse, &self.test)
-        }
-    }
-}
+use super::argument;
+use super::pattern::{match_rows, MatchVectors};
 
 /// The values of rows of a flat vector as slices, for the rows that are not NULL.
 ///
@@ -805,7 +263,7 @@ mod valid {
             }
         }
 
-        /// What `MatchPlain` does with a chunk: the sum of the values of its rows that are not
+        /// What `answer` does with a chunk: the sum of the values of its rows that are not
         /// NULL, read as slices where the mask has no NULL and by row where it has some.
         fn sum(slots: &[MaybeUninit<u32>], validity: Option<&[u64]>, context: &str) -> u64 {
             let mut covered = 0;
@@ -1009,7 +467,7 @@ fn row_bits(first: usize, rows: usize) -> u64 {
 /// many as have nothing else; the last word has the rows there are, and its other bits say
 /// nothing. Without a mask no row is NULL, and the rows are one span.
 ///
-/// The mask has a word for every row ([`MatchPlain`] gives it no other); the rows of a word
+/// The mask has a word for every row ([`answer`] gives it no other); the rows of a word
 /// that is not there are [`Nulls::All`], which nothing reads.
 struct Spans<'a> {
     validity: Option<&'a [u64]>,
@@ -1070,7 +528,7 @@ impl Iterator for Spans<'_> {
 
 /// Make the rows among `0..rows` that are NULL in a validity mask NULL in the output: row `r`
 /// is bit `r % 64` of word `r / 64`, set when the row is not NULL. With `stored`, only the rows
-/// of the words that have a row that is not NULL, which are the ones [`MatchPlain`] stores
+/// of the words that have a row that is not NULL, which are the ones [`answer`] stores
 /// answers in.
 #[inline(always)]
 fn null_rows(
@@ -1095,19 +553,35 @@ fn null_rows(
     Ok(())
 }
 
-/// The rows of a chunk a [`MatchPlain`] has room to answer at once: DuckDB's vector size
+/// The rows of a chunk [`answer`] has room to answer at once: DuckDB's vector size
 /// (`STANDARD_VECTOR_SIZE`), which no chunk exceeds.
 const BLOCK: usize = 2048;
 
-/// [`Match`] for a value that is stored as itself (an integer) and a test that has an answer
-/// for every value: `f(I, VARCHAR) -> BOOLEAN`, NULL only for a NULL argument or text that is
-/// not a pattern.
+/// A type whose values a vector stores as themselves and the reader lends by reference: the
+/// unsigned integers of the functions here.
+pub(super) trait Plain:
+    PlainNative
+    + for<'a> ReadableNativeElement<Ref<'a> = &'a Self>
+    + for<'a> NativeElement<Native<'a> = Self>
+    + 'static
+{
+}
+
+impl<I> Plain for I where
+    I: PlainNative
+        + for<'a> ReadableNativeElement<Ref<'a> = &'a I>
+        + for<'a> NativeElement<Native<'a> = I>
+        + 'static
+{
+}
+
+/// The answers of `test`, which has one for every value, for the `rows` rows of a chunk of
+/// values that are stored as themselves: NULL for a NULL value.
 ///
-/// With a constant pattern (a literal) the answers of a chunk are computed into an array of
-/// `bool`s in a loop that does nothing else, and copied into the output as slices, which also
-/// marks the rows valid. The loop reads the values of a flat vector as a slice
-/// ([`valid::values`]) and does nothing but test them, so the compiler turns it into a SIMD
-/// compare.
+/// The answers of a chunk are computed into an array of `bool`s in a loop that does nothing
+/// else, and copied into the output as slices, which also marks the rows valid. The loop reads
+/// the values of a flat vector as a slice ([`valid::values`]) and does nothing but test them,
+/// so the compiler turns it into a SIMD compare.
 ///
 /// A slice of values is of rows that are not NULL, because the slot of a NULL row holds nothing
 /// that may be read: the whole chunk when it has no validity mask, and otherwise the rows of
@@ -1122,7 +596,199 @@ const BLOCK: usize = 2048;
 /// Where NULLs are here and there in more than three words of four, nothing is gained by
 /// telling the words apart, and the whole chunk is read through the reader; so is a chunk
 /// whose values are behind a selection (a dictionary or constant vector).
-struct MatchPlain<I, P, Parse, Test> {
+fn answer<I, Test>(
+    values: &VectorReader<'_, I>,
+    rows: usize,
+    writer: &mut VectorWriter<'_, bool>,
+    test: Test,
+) -> Result<()>
+where
+    I: Plain,
+    Test: Fn(I) -> bool,
+{
+    let mut block = [false; BLOCK];
+    let Some(answers) = block.get_mut(..rows) else {
+        // More rows than DuckDB puts in a chunk: answer them one by one.
+        for (row, value) in values.iter().enumerate() {
+            let answer = value.map(|value| test(*value));
+            writer.set_option(row, answer.as_ref())?;
+        }
+        return Ok(());
+    };
+    let validity = values.validity();
+    // A flat vector: row `r` is slot `r`, and bit `r % 64` of word `r / 64` of the mask.
+    let flat = matches!(values.selection(), Selection::Identity)
+        && validity.is_none_or(|words| words.len() >= rows.div_ceil(64));
+    // The whole words of the mask that have NULLs and rows that are not NULL.
+    let mixed = validity.filter(|_| flat).map_or(0, |words| {
+        let whole = words.iter().take(rows / 64);
+        whole
+            .filter(|word| **word != 0 && **word != u64::MAX)
+            .count()
+    });
+    if !flat || mixed * 64 > rows / 4 * 3 {
+        // The rows are behind a selection, or NULL here and there.
+        let validity = validity.map(|words| (words, flat));
+        answer_rows(values, validity, answers, writer, &test)
+    } else {
+        answer_spans(values, validity, answers, writer, &test)
+    }
+}
+
+/// The answers of a chunk, all of its rows read through the reader, which reads the ones that
+/// are not NULL: computed in `answers` and stored in the output; then its NULLs, from the mask
+/// of the rows if `validity` says it is that (the mask of a flat vector), and through the
+/// reader if it is of the slots a selection maps the rows to.
+///
+/// Not inlined, and nor is [`answer_spans`]: each loop is compiled as it is without the other
+/// beside it.
+#[inline(never)]
+fn answer_rows<I, Test>(
+    values: &VectorReader<'_, I>,
+    validity: Option<(&[u64], bool)>,
+    answers: &mut [bool],
+    writer: &mut VectorWriter<'_, bool>,
+    test: &Test,
+) -> Result<()>
+where
+    I: Plain,
+    Test: Fn(I) -> bool,
+{
+    // (`for_each`, not `for`: the reader then tells a flat, a constant and a dictionary
+    // vector apart once, not for every row.)
+    let mut slots = answers.iter_mut();
+    values.iter().for_each(|value| {
+        if let Some(answer) = slots.next() {
+            *answer = value.is_some_and(|value| test(*value));
+        }
+    });
+    // Marks the rows valid.
+    writer.write_slice(0, answers)?;
+    // The NULLs. A vector without a validity mask has none.
+    match validity {
+        Some((words, true)) => null_rows(writer, words, answers.len(), false),
+        Some((_, false)) => (0..answers.len()).try_for_each(|row| {
+            if values.is_null(row)? {
+                writer.set_null(row)?;
+            }
+            Ok(())
+        }),
+        None => Ok(()),
+    }
+}
+
+/// The answers of a flat chunk, whose `validity` has a word for each of its rows, computed in
+/// `answers` a span of the mask at a time and stored in the output; then its NULLs.
+#[inline(never)]
+fn answer_spans<I, Test>(
+    values: &VectorReader<'_, I>,
+    validity: Option<&[u64]>,
+    answers: &mut [bool],
+    writer: &mut VectorWriter<'_, bool>,
+    test: &Test,
+) -> Result<()>
+where
+    I: Plain,
+    Test: Fn(I) -> bool,
+{
+    let rows = answers.len();
+    // The answers of rows `stored..span.start` are computed and not stored yet.
+    let mut stored = 0;
+    for (span, nulls) in Spans::new(validity, rows) {
+        let slice = match nulls {
+            Nulls::None => valid::values(values, span.clone()),
+            Nulls::Some => None,
+            Nulls::All => {
+                // Nothing to read. The first such span makes every row of the output NULL,
+                // none of which has an answer stored yet; these rows stay so, and storing
+                // the answers of the rows before them marks those valid.
+                if stored == 0 {
+                    writer.fill_null()?;
+                }
+                let answers = answers.get(stored..span.start).unwrap_or_default();
+                writer.write_slice(stored, answers)?;
+                stored = span.end;
+                continue;
+            }
+        };
+        let answers = answers.get_mut(span.clone()).unwrap_or_default();
+        if let Some(values) = slice {
+            // Nothing but the test, over two slices: a SIMD compare. No row is NULL.
+            for (answer, value) in answers.iter_mut().zip(values) {
+                *answer = test(*value);
+            }
+        } else {
+            // Rows with NULLs among them, one by one: the reader reads the others.
+            for (answer, row) in answers.iter_mut().zip(span) {
+                let value = values.get(row)?;
+                *answer = value.is_some_and(|value| test(*value));
+            }
+        }
+    }
+    writer.write_slice(stored, answers.get(stored..).unwrap_or_default())?;
+    // The NULLs among the rows that were stored.
+    if let Some(words) = validity {
+        null_rows(writer, words, rows, true)?;
+    }
+    Ok(())
+}
+
+/// `f(I) -> BOOLEAN` for a value that is stored as itself (an integer) and a test that has an
+/// answer for every value: NULL only for a NULL argument. The answers of a chunk are computed
+/// over slices of its values ([`answer`]).
+pub(super) struct TestPlain<I, Test> {
+    test: Test,
+    input: PhantomData<fn(I)>,
+}
+
+impl<I, Test> TestPlain<I, Test>
+where
+    I: Plain,
+    Test: Fn(I) -> bool,
+{
+    pub(super) fn new(test: Test) -> Self {
+        Self {
+            test,
+            input: PhantomData,
+        }
+    }
+}
+
+impl<I, Test> ScalarCallbacks for TestPlain<I, Test>
+where
+    I: Plain,
+    Test: Fn(I) -> bool + Send + Sync + 'static,
+{
+    type BindData = ();
+    type InitData = ();
+
+    fn exec(
+        &self,
+        _context: &Context,
+        _bind_data: Option<&()>,
+        _init_data: Option<&mut ()>,
+        vectors: &mut VectorCollection,
+        output: Vector<'_, Unknown>,
+    ) -> Result<()> {
+        let rows = vectors.row_count()?;
+        let values = argument::<I>(vectors)?;
+        let mut output = output.cast::<bool>()?;
+        output.set_size(rows)?;
+        let mut writer = output.writer()?;
+        if rows == 0 {
+            return Ok(());
+        }
+        answer(&values.reader()?, rows, &mut writer, &self.test)
+    }
+}
+
+/// [`Match`](super::pattern::Match) for a value that is stored as itself (an integer) and a
+/// test that has an answer for every value: `f(I, VARCHAR) -> BOOLEAN`, NULL only for a NULL
+/// argument or text that is not a pattern.
+///
+/// With a constant pattern (a literal) the answers of a chunk are computed over slices of its
+/// values ([`answer`]); otherwise row by row, each value against the pattern of its own row.
+pub(super) struct MatchPlain<I, P, Parse, Test> {
     parse: Parse,
     test: Test,
     types: PhantomData<fn(I) -> P>,
@@ -1130,11 +796,11 @@ struct MatchPlain<I, P, Parse, Test> {
 
 impl<I, P, Parse, Test> MatchPlain<I, P, Parse, Test>
 where
-    I: PlainNative + 'static,
+    I: Plain,
     Parse: Fn(&str) -> Option<P>,
     Test: Fn(I, &P) -> bool,
 {
-    fn new(parse: Parse, test: Test) -> Self {
+    pub(super) fn new(parse: Parse, test: Test) -> Self {
         Self {
             parse,
             test,
@@ -1145,10 +811,7 @@ where
 
 impl<I, P, Parse, Test> ScalarCallbacks for MatchPlain<I, P, Parse, Test>
 where
-    I: PlainNative
-        + for<'a> ReadableNativeElement<Ref<'a> = &'a I>
-        + for<'a> NativeElement<Native<'a> = I>
-        + 'static,
+    I: Plain,
     P: 'static,
     Parse: Fn(&str) -> Option<P> + Send + Sync + 'static,
     Test: Fn(I, &P) -> bool + Send + Sync + 'static,
@@ -1189,134 +852,8 @@ where
         let Some(pattern) = texts.get(0)?.and_then(&self.parse) else {
             return writer.fill_null();
         };
-
-        let mut block = [false; BLOCK];
-        let Some(answers) = block.get_mut(..rows) else {
-            // More rows than DuckDB puts in a chunk: answer them one by one.
-            for (row, value) in values.iter().enumerate() {
-                let answer = value.map(|value| (self.test)(*value, &pattern));
-                writer.set_option(row, answer.as_ref())?;
-            }
-            return Ok(());
-        };
-        let validity = values.validity();
-        // A flat vector: row `r` is slot `r`, and bit `r % 64` of word `r / 64` of the mask.
-        let flat = matches!(values.selection(), Selection::Identity)
-            && validity.is_none_or(|words| words.len() >= rows.div_ceil(64));
-        // The whole words of the mask that have NULLs and rows that are not NULL.
-        let mixed = validity.filter(|_| flat).map_or(0, |words| {
-            let whole = words.iter().take(rows / 64);
-            whole
-                .filter(|word| **word != 0 && **word != u64::MAX)
-                .count()
-        });
-        if !flat || mixed * 64 > rows / 4 * 3 {
-            // The rows are behind a selection, or NULL here and there.
-            let validity = validity.map(|words| (words, flat));
-            self.answer_rows(&values, validity, answers, &mut writer, &pattern)
-        } else {
-            self.answer_spans(&values, validity, answers, &mut writer, &pattern)
-        }
-    }
-}
-
-impl<I, P, Parse, Test> MatchPlain<I, P, Parse, Test>
-where
-    I: PlainNative
-        + for<'a> ReadableNativeElement<Ref<'a> = &'a I>
-        + for<'a> NativeElement<Native<'a> = I>
-        + 'static,
-    Test: Fn(I, &P) -> bool,
-{
-    /// The answers of a chunk, all of its rows read through the reader, which reads the ones
-    /// that are not NULL: computed in `answers` and stored in the output; then its NULLs, from
-    /// the mask of the rows if `validity` says it is that (the mask of a flat vector), and
-    /// through the reader if it is of the slots a selection maps the rows to.
-    ///
-    /// Not inlined, and nor is [`Self::answer_spans`]: each loop is compiled as it is without
-    /// the other beside it.
-    #[inline(never)]
-    fn answer_rows(
-        &self,
-        values: &VectorReader<'_, I>,
-        validity: Option<(&[u64], bool)>,
-        answers: &mut [bool],
-        writer: &mut VectorWriter<'_, bool>,
-        pattern: &P,
-    ) -> Result<()> {
-        // (`for_each`, not `for`: the reader then tells a flat, a constant and a dictionary
-        // vector apart once, not for every row.)
-        let mut slots = answers.iter_mut();
-        values.iter().for_each(|value| {
-            if let Some(answer) = slots.next() {
-                *answer = value.is_some_and(|value| (self.test)(*value, pattern));
-            }
-        });
-        // Marks the rows valid.
-        writer.write_slice(0, answers)?;
-        // The NULLs. A vector without a validity mask has none.
-        match validity {
-            Some((words, true)) => null_rows(writer, words, answers.len(), false),
-            Some((_, false)) => (0..answers.len()).try_for_each(|row| {
-                if values.is_null(row)? {
-                    writer.set_null(row)?;
-                }
-                Ok(())
-            }),
-            None => Ok(()),
-        }
-    }
-
-    /// The answers of a flat chunk, whose `validity` has a word for each of its rows, computed
-    /// in `answers` a span of the mask at a time and stored in the output; then its NULLs.
-    #[inline(never)]
-    fn answer_spans(
-        &self,
-        values: &VectorReader<'_, I>,
-        validity: Option<&[u64]>,
-        answers: &mut [bool],
-        writer: &mut VectorWriter<'_, bool>,
-        pattern: &P,
-    ) -> Result<()> {
-        let rows = answers.len();
-        // The answers of rows `stored..span.start` are computed and not stored yet.
-        let mut stored = 0;
-        for (span, nulls) in Spans::new(validity, rows) {
-            let slice = match nulls {
-                Nulls::None => valid::values(values, span.clone()),
-                Nulls::Some => None,
-                Nulls::All => {
-                    // Nothing to read. The first such span makes every row of the output NULL,
-                    // none of which has an answer stored yet; these rows stay so, and storing
-                    // the answers of the rows before them marks those valid.
-                    if stored == 0 {
-                        writer.fill_null()?;
-                    }
-                    let answers = answers.get(stored..span.start).unwrap_or_default();
-                    writer.write_slice(stored, answers)?;
-                    stored = span.end;
-                    continue;
-                }
-            };
-            let answers = answers.get_mut(span.clone()).unwrap_or_default();
-            if let Some(values) = slice {
-                // Nothing but the test, over two slices: a SIMD compare. No row is NULL.
-                for (answer, value) in answers.iter_mut().zip(values) {
-                    *answer = (self.test)(*value, pattern);
-                }
-            } else {
-                // Rows with NULLs among them, one by one: the reader reads the others.
-                for (answer, row) in answers.iter_mut().zip(span) {
-                    let value = values.get(row)?;
-                    *answer = value.is_some_and(|value| (self.test)(*value, pattern));
-                }
-            }
-        }
-        writer.write_slice(stored, answers.get(stored..).unwrap_or_default())?;
-        // The NULLs among the rows that were stored.
-        if let Some(words) = validity {
-            null_rows(writer, words, rows, true)?;
-        }
-        Ok(())
+        answer(&values, rows, &mut writer, |value| {
+            (self.test)(value, &pattern)
+        })
     }
 }

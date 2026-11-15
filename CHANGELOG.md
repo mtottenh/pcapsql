@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **DuckDB extension: 24 more scalar functions, the names of protocol
+  numbers and the classes of addresses.** The functions of the command-line
+  tool of the same names, as loops over the same `pcapsql_core::format`
+  kernels: `icmp_type_name`, `icmp_code_name(type, code)`,
+  `icmpv6_type_name`, `icmpv6_code_name(type, code)`, `dns_class_name`,
+  `dscp_name`, `ecn_name`, `bgp_message_type_name`, `bgp_origin_name`,
+  `ospf_packet_type_name`, `ospf_lsa_type_name`, `gtp_message_type_name`,
+  `ntp_mode_name`, `ntp_stratum_name`, `tls_record_type_name` and
+  `tls_version_name` (`UTINYINT` arguments, `USMALLINT` for a DNS class and a
+  TLS version, as the columns are), and `is_private_ip`, `is_loopback_ip`,
+  `is_multicast_ip` (`UINTEGER`), `is_multicast_ip6`, `is_link_local_ip6`,
+  `mac_is_broadcast`, `mac_is_multicast` and `mac_is_local` (`BLOB`). That
+  makes 40. NULL in gives NULL out, a number without a name gives the text
+  the kernel makes of it (`Type 200`, `Unknown (9)`), and, as with the other
+  functions of the extension, a `BLOB` that is not 16 or 6 bytes is not an
+  address and gives NULL, where the command-line tool's `FixedSizeBinary`
+  argument cannot have another length. A name of a table goes from the
+  static string into the vector, and text made of a number through one
+  buffer per chunk; the three tests of an IPv4 address answer a chunk over
+  slices of its values, as `ip_in_cidr` with a literal network does. No
+  `unsafe` was added: `engine/scalar.rs` is now the directory
+  `engine/scalar/`, and its audited module `valid` is in `plain.rs`, where
+  `scripts/check-unsafe.sh` holds it to the same three `unsafe`s. The
+  differential tests compare every function with its kernel over every
+  `UTINYINT` and `USMALLINT`, every ICMP type and code, every /16, and
+  addresses of every length, in flat, constant and dictionary vectors with
+  NULLs. Not ported: the capture-relative time functions (`start_time`,
+  `end_time`, `relative_time`) and the `hdr_*` histogram functions, which
+  need more than a kernel; and `epoch`, `strftime` and the other date and
+  time functions, which DuckDB has.
 - **DuckDB extension: the stream tables, and TLS decryption with a key
   log.** `read_tcp_connections(files)`, `read_tls_sessions(files)`,
   `read_http_messages(files)` and `read_http2(files)`, and the same tables

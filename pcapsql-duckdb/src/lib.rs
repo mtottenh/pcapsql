@@ -28,7 +28,7 @@
 //! That is the scan functions (`read_pcap`, one `read_<table>` per table, the four stream
 //! tables among them, and one `read_<proto>_packets` per packets view), `pcap_protocols()`,
 //! `pcap_views()` and
-//! `pcap_schema()`, the sixteen scalar functions and the six `format_*` macros; the README
+//! `pcap_schema()`, the forty scalar functions and the six `format_*` macros; the README
 //! lists them. None of them has logic of its own. The scan functions run the shared scan layer,
 //! `pcapsql_core::scan`, which the DataFusion engine runs too: the tables and columns are those
 //! of `pcapsql_core::scan::Catalog`, the views those of `pcapsql_core::scan::PacketsView` (each
@@ -47,7 +47,7 @@
 
 // Unsafe code is confined to two audited places, each of which says why it is sound:
 // `engine::writer`, which stores values through the raw pointers of DuckDB's vectors, and one
-// private module of `engine::scalar`, `valid`, which borrows the values of rows of a flat
+// private module of `engine::scalar::plain`, `valid`, which borrows the values of rows of a flat
 // vector as a slice when none of those rows is NULL, and never reads the slot of a NULL row.
 // `make check_unsafe` (scripts/check-unsafe.sh) fails for a third, and for an `unsafe` in the
 // second that is not one of its three. The entrypoint that `ext/` and `itest/` expand from

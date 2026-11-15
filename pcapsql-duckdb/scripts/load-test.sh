@@ -44,7 +44,12 @@ SELECT count(*), count(DISTINCT ip4_to_string(i::UINTEGER)) FROM range(5000) t(i
 SELECT count(*) FROM duckdb_functions() WHERE function_type = 'scalar' AND function_name IN (
     'ip4', 'ip4_to_string', 'ip6', 'ip6_to_string', 'mac', 'mac_to_string', 'ip_in_cidr', 'ip6_in_cidr',
     'tcp_flags_str', 'has_tcp_flag', 'dns_type_name', 'dns_rcode_name', 'ip_proto_name', 'ethertype_name',
-    'pcap_hex', 'pcap_unhex');
+    'pcap_hex', 'pcap_unhex', 'icmp_type_name', 'icmp_code_name', 'icmpv6_type_name', 'icmpv6_code_name',
+    'dns_class_name', 'dscp_name', 'ecn_name', 'bgp_message_type_name', 'bgp_origin_name',
+    'ospf_packet_type_name', 'ospf_lsa_type_name', 'gtp_message_type_name', 'ntp_mode_name',
+    'ntp_stratum_name', 'tls_record_type_name', 'tls_version_name', 'is_private_ip', 'is_loopback_ip',
+    'is_multicast_ip', 'is_multicast_ip6', 'is_link_local_ip6', 'mac_is_broadcast', 'mac_is_multicast',
+    'mac_is_local');
 SELECT ip6_to_string(ip6('2001:db8::1')), mac_to_string(mac('AABBCCDDEEFF')), pcap_hex(pcap_unhex('0xDEAD'));
 SELECT ip_in_cidr(ip4('192.168.1.100'), '192.168.0.0/16'), ip6_in_cidr(ip6('fe80::1'), 'fe80::/10'), ip_in_cidr(1, 'bogus') IS NULL;
 SELECT tcp_flags_str(18), has_tcp_flag(18, 'syn'), dns_type_name(28), dns_rcode_name(3), ip_proto_name(6), ethertype_name(2048);
@@ -87,7 +92,7 @@ timestamp,TIMESTAMP_NS,false
 src_mac,BLOB,true
 3232235777,192.168.1.1,true,true
 5000,5000
-16
+40
 2001:db8::1,aa:bb:cc:dd:ee:ff,dead
 true,true,true
 \"SYN,ACK\",true,AAAA,NXDOMAIN,TCP,IPv4

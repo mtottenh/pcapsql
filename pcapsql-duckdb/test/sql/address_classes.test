@@ -1,0 +1,163 @@
+# name: test/sql/address_classes.test
+# description: The functions that say what kind of address an IPv4, IPv6 or MAC address is
+# group: [pcapsql]
+
+require pcapsql
+
+query TTTTTTTT
+SELECT typeof(is_private_ip(0)), typeof(is_loopback_ip(0)), typeof(is_multicast_ip(0)), typeof(is_multicast_ip6(ip6('::'))),
+       typeof(is_link_local_ip6(ip6('::'))), typeof(mac_is_broadcast(mac('00:00:00:00:00:00'))),
+       typeof(mac_is_multicast(mac('00:00:00:00:00:00'))), typeof(mac_is_local(mac('00:00:00:00:00:00')));
+----
+BOOLEAN	BOOLEAN	BOOLEAN	BOOLEAN	BOOLEAN	BOOLEAN	BOOLEAN	BOOLEAN
+
+# RFC 1918: 10.0.0.0/8, 172.16.0.0/12 and 192.168.0.0/16, and nothing else
+query TTTTTTTTTT
+SELECT is_private_ip(ip4('10.0.0.0')), is_private_ip(ip4('10.255.255.255')), is_private_ip(ip4('11.0.0.0')), is_private_ip(ip4('172.16.0.0')),
+       is_private_ip(ip4('172.31.255.255')), is_private_ip(ip4('172.32.0.0')), is_private_ip(ip4('192.168.1.1')), is_private_ip(ip4('192.169.0.0')),
+       is_private_ip(ip4('127.0.0.1')), is_private_ip(ip4('169.254.1.1'));
+----
+true	true	false	true	true	false	true	false	false	false
+
+query TTTTT
+SELECT is_loopback_ip(ip4('127.0.0.0')), is_loopback_ip(ip4('127.0.0.1')), is_loopback_ip(ip4('127.255.255.255')), is_loopback_ip(ip4('126.255.255.255')),
+       is_loopback_ip(ip4('128.0.0.0'));
+----
+true	true	true	false	false
+
+query TTTTT
+SELECT is_multicast_ip(ip4('224.0.0.0')), is_multicast_ip(ip4('224.0.0.251')), is_multicast_ip(ip4('239.255.255.255')), is_multicast_ip(ip4('223.255.255.255')),
+       is_multicast_ip(ip4('240.0.0.0'));
+----
+true	true	true	false	false
+
+# ff00::/8 and fe80::/10
+query TTTTTTT
+SELECT is_multicast_ip6(ip6('ff02::1')), is_multicast_ip6(ip6('fe80::1')), is_link_local_ip6(ip6('fe80::1')), is_link_local_ip6(ip6('febf::1')),
+       is_link_local_ip6(ip6('fec0::1')), is_link_local_ip6(ip6('fe7f::1')), is_link_local_ip6(ip6('::1'));
+----
+true	false	true	true	false	false	false
+
+# The broadcast address is a group address; the bits are the two lowest of the first byte
+query TTTTTTTT
+SELECT mac_is_broadcast(mac('ff:ff:ff:ff:ff:ff')), mac_is_broadcast(mac('ff:ff:ff:ff:ff:fe')), mac_is_multicast(mac('01:00:5e:00:00:fb')),
+       mac_is_multicast(mac('ff:ff:ff:ff:ff:ff')), mac_is_multicast(mac('02:11:22:33:44:55')), mac_is_local(mac('02:00:00:00:00:01')),
+       mac_is_local(mac('00:11:22:33:44:55')), mac_is_local(mac('01:00:5e:00:00:fb'));
+----
+true	false	true	true	false	true	false	false
+
+query TTTTTTTT
+SELECT is_private_ip(NULL), is_loopback_ip(NULL), is_multicast_ip(NULL), is_multicast_ip6(NULL), is_link_local_ip6(NULL), mac_is_broadcast(NULL),
+       mac_is_multicast(NULL), mac_is_local(NULL);
+----
+NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL
+
+# A BLOB that is not 16 bytes is not an IPv6 address, and one that is not 6 is not a MAC address
+query TTTTTTTT
+SELECT is_multicast_ip6('\xFF'::BLOB), is_multicast_ip6(mac('ff:ff:ff:ff:ff:ff')), is_link_local_ip6('\xFE\x80'::BLOB), is_link_local_ip6(''::BLOB),
+       mac_is_broadcast(ip6('ffff:ffff:ffff::')), mac_is_broadcast(from_hex(repeat('ff', 7))), mac_is_multicast('\x01'::BLOB), mac_is_local(ip6('200::'));
+----
+NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL
+
+# An IPv4 address is a UINTEGER, and the others are BLOBs
+statement error
+SELECT is_private_ip(ip6('::1'));
+----
+is_private_ip
+
+statement error
+SELECT is_multicast_ip6(ip4('224.0.0.1'));
+----
+is_multicast_ip6
+
+statement error
+SELECT is_loopback_ip(4294967296);
+----
+is_loopback_ip
+
+# NULLs are kept row by row
+query TTT
+SELECT is_private_ip(ip4(x)), is_loopback_ip(ip4(x)), is_multicast_ip(ip4(x))
+FROM (VALUES ('192.168.1.1'), (NULL), ('127.0.0.1'), ('224.0.0.1'), ('bogus'), ('1.1.1.1')) t(x);
+----
+true	false	false
+NULL	NULL	NULL
+false	true	false
+false	false	true
+NULL	NULL	NULL
+false	false	false
+
+query TTTTT
+SELECT is_multicast_ip6(x), is_link_local_ip6(x), mac_is_broadcast(x), mac_is_multicast(x), mac_is_local(x)
+FROM (VALUES (ip6('ff02::fb')), (NULL), (mac('ff:ff:ff:ff:ff:ff')), (ip6('fe80::1')), ('\x03'::BLOB), (mac('03:00:00:00:00:00'))) t(x);
+----
+true	false	NULL	NULL	NULL
+NULL	NULL	NULL	NULL	NULL
+NULL	NULL	true	true	true
+false	true	NULL	NULL	NULL
+NULL	NULL	NULL	NULL	NULL
+NULL	NULL	false	true	true
+
+# Every /16, in more rows than one vector holds: 256 + 16 + 1 private, 256 loopback, 4096 multicast
+query III
+SELECT count(*) FILTER (is_private_ip((i * 65536)::UINTEGER)), count(*) FILTER (is_loopback_ip((i * 65536)::UINTEGER)),
+       count(*) FILTER (is_multicast_ip((i * 65536)::UINTEGER))
+FROM range(65536) t(i);
+----
+273	256	4096
+
+# A constant argument next to a column
+statement ok
+CREATE TABLE one AS SELECT ip4('10.1.2.3') AS ip, ip6('fe80::1') AS ip6_bytes, mac('02:00:00:00:00:01') AS mac_bytes;
+
+query IIIIII
+SELECT count(*), count(*) FILTER (is_private_ip(ip)), count(*) FILTER (NOT is_multicast_ip(ip)), count(*) FILTER (is_link_local_ip6(ip6_bytes)),
+       count(*) FILTER (mac_is_local(mac_bytes)), count(mac_is_local(ip6_bytes))
+FROM one, range(3000) t(i);
+----
+3000	3000	3000	3000	3000	0
+
+# A stored column with NULLs in runs of 150 rows and here and there: the answers are those of the
+# expression, and NULL exactly where the address is
+statement ok
+CREATE TABLE addresses AS SELECT i,
+    CASE WHEN (i // 150) % 3 = 1 OR i % 97 = 5 THEN NULL ELSE (i * 429497)::UINTEGER END AS a
+FROM range(10000) t(i);
+
+query IIIIIII
+SELECT count(*), count(is_private_ip(a)), count(*) FILTER (is_private_ip(a)), count(*) FILTER (is_loopback_ip(a)), count(*) FILTER (is_multicast_ip(a)),
+       count(*) FILTER (is_private_ip(a) IS DISTINCT FROM ((a >> 24) = 10 OR (a >> 20) = 2753 OR (a >> 16) = 49320)
+                        OR is_loopback_ip(a) IS DISTINCT FROM ((a >> 24) = 127)
+                        OR is_multicast_ip(a) IS DISTINCT FROM ((a >> 28) = 14)),
+       count(*) FILTER ((is_private_ip(a) IS NULL) <> (a IS NULL))
+FROM addresses;
+----
+10000	6630	40	39	371	0	0
+
+# The address columns of the tables are of the types the functions take
+query TTTTI
+SELECT ip4_to_string(src_ip), is_private_ip(src_ip), is_loopback_ip(dst_ip), is_multicast_ip(dst_ip), count(*)
+FROM read_ipv4('../fuzz/corpus/fuzz_pcap_reader/dns.cap') GROUP BY ALL ORDER BY ALL;
+----
+192.168.170.20	true	false	false	14
+192.168.170.56	true	false	false	5
+192.168.170.8	true	false	false	14
+217.13.4.24	false	false	false	5
+
+query TTTI
+SELECT ip6_to_string(dst_ip), is_multicast_ip6(dst_ip), is_link_local_ip6(src_ip), count(*)
+FROM read_ipv6('../fuzz/corpus/fuzz_pcap_reader/v6.pcap') WHERE is_multicast_ip6(dst_ip) OR is_link_local_ip6(src_ip)
+GROUP BY ALL ORDER BY ALL;
+----
+fe80::200:86ff:fe05:80da	false	true	5
+fe80::260:97ff:fe07:69ea	false	true	5
+ff02::1	true	true	1
+ff02::1:ff07:69ea	true	false	1
+ff02::2	true	true	1
+ff02::9	true	true	2
+
+query TTTI
+SELECT mac_is_broadcast(dst_mac), mac_is_multicast(dst_mac), mac_is_local(src_mac), count(*)
+FROM read_ethernet('../fuzz/corpus/fuzz_pcap_reader/arp-storm.pcap') GROUP BY ALL;
+----
+true	true	false	622
