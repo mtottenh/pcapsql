@@ -19,11 +19,18 @@
 //!
 //! Each protocol table contains only the fields relevant to that protocol,
 //! with `frame_number` as the linking key for JOINs.
+//!
+//! Which rows a packet adds to `frames` and the protocol tables, and what
+//! each cell holds, is decided in `pcapsql_core::scan` (`Router`,
+//! `write_value`), which the frontends share. Here the rows land in an
+//! [`ArrowSink`] per table, and [`NormalizedBatchSet`] delivers the batches.
+//! Fused joins still have their own builder ([`FusedBatchBuilder`]).
 
+mod dynamic;
 mod fused;
 mod normalized;
-mod protocol;
+mod sink;
 
 pub use fused::FusedBatchBuilder;
 pub use normalized::NormalizedBatchSet;
-pub use protocol::ProtocolBatchBuilder;
+pub use sink::{ArrowList, ArrowSink};
