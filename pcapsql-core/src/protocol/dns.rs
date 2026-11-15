@@ -1,12 +1,10 @@
 //! DNS protocol parser using simple-dns library.
 
-use compact_str::CompactString;
 use simple_dns::{rdata::RData, Packet, PacketFlag, OPCODE, RCODE};
-use smallvec::SmallVec;
 
 use super::{
-    Cond, Dispatch, DispatchRule, FieldSet, FieldValue, HintKey, Hints, ParseContext, ParseResult,
-    Protocol,
+    Cond, Dispatch, DispatchRule, FieldSet, FieldSink, FieldValue, HintKey, Hints, ParseContext,
+    Parsed, Protocol,
 };
 use crate::schema::{DataKind, FieldDescriptor};
 
@@ -75,32 +73,37 @@ impl Protocol for DnsProtocol {
         }
     }
 
-    fn parse<'a>(&self, data: &'a [u8], context: &ParseContext) -> ParseResult<'a> {
+    fn parse_into<'a>(
+        &self,
+        data: &'a [u8],
+        context: &ParseContext,
+        fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
         let message = match dns_message(data, context) {
             Ok(m) => m,
-            Err(e) => return ParseResult::error(e, data),
+            Err(e) => return Parsed::error(fields.text(&e), data),
         };
         // Parse using simple-dns
         let packet = match Packet::parse(message) {
             Ok(p) => p,
-            Err(e) => return ParseResult::error(format!("DNS parse error: {e}"), data),
+            Err(e) => {
+                return Parsed::error(fields.text_fmt(format_args!("DNS parse error: {e}")), data)
+            }
         };
 
-        let mut fields = SmallVec::new();
-
         // Extract header fields
-        extract_header_fields(&packet, &mut fields);
+        extract_header_fields(&packet, fields);
 
         // Extract question fields (first question only)
-        extract_question_fields(&packet, &mut fields);
+        extract_question_fields(&packet, fields);
 
         // Extract answer fields (as lists)
-        extract_answer_fields(&packet, &mut fields);
+        extract_answer_fields(&packet, fields);
 
         // Extract EDNS fields
-        extract_edns_fields(&packet, &mut fields);
+        extract_edns_fields(&packet, fields);
 
-        ParseResult::success(fields, &[], Hints::new())
+        Parsed::ok(&[], Hints::new())
     }
 
     fn schema_fields(&self) -> Vec<FieldDescriptor> {
@@ -162,41 +165,31 @@ impl Protocol for DnsProtocol {
         &["udp", "tcp"] // DNS runs over UDP (primarily) and TCP
     }
 
-    // MIGRATION: until this parser writes to the sink itself.
     fn parse_projected_into<'a>(
         &self,
         data: &'a [u8],
         context: &ParseContext,
-        projection: Option<&FieldSet>,
-        fields: &mut super::layers::FieldSink<'_, 'a>,
-    ) -> super::Parsed<'a> {
-        super::layers::adapt(self.parse_projected(data, context, projection), fields)
-    }
-
-    fn parse_projected<'a>(
-        &self,
-        data: &'a [u8],
-        context: &ParseContext,
         requested_fields: Option<&FieldSet>,
-    ) -> ParseResult<'a> {
+        fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
         // If no projection, use full parse
         let requested = match requested_fields {
-            None => return self.parse(data, context),
-            Some(f) if f.is_empty() => return self.parse(data, context),
+            None => return self.parse_into(data, context, fields),
+            Some(f) if f.is_empty() => return self.parse_into(data, context, fields),
             Some(f) => f,
         };
 
         let message = match dns_message(data, context) {
             Ok(m) => m,
-            Err(e) => return ParseResult::error(e, data),
+            Err(e) => return Parsed::error(fields.text(&e), data),
         };
         // Parse using simple-dns
         let packet = match Packet::parse(message) {
             Ok(p) => p,
-            Err(e) => return ParseResult::error(format!("DNS parse error: {e}"), data),
+            Err(e) => {
+                return Parsed::error(fields.text_fmt(format_args!("DNS parse error: {e}")), data)
+            }
         };
-
-        let mut fields = SmallVec::new();
 
         // Check which field categories are needed
         let need_header = requested.iter().any(is_header_field);
@@ -205,22 +198,22 @@ impl Protocol for DnsProtocol {
         let need_edns = requested.iter().any(is_edns_field);
 
         if need_header {
-            extract_header_fields_projected(&packet, &mut fields, requested);
+            extract_header_fields_projected(&packet, fields, requested);
         }
 
         if need_question {
-            extract_question_fields_projected(&packet, &mut fields, requested);
+            extract_question_fields_projected(&packet, fields, requested);
         }
 
         if need_answers {
-            extract_answer_fields_projected(&packet, &mut fields, requested);
+            extract_answer_fields_projected(&packet, fields, requested);
         }
 
         if need_edns {
-            extract_edns_fields_projected(&packet, &mut fields, requested);
+            extract_edns_fields_projected(&packet, fields, requested);
         }
 
-        ParseResult::success(fields, &[], Hints::new())
+        Parsed::ok(&[], Hints::new())
     }
 
     fn cheap_fields(&self) -> &'static [&'static str] {
@@ -327,7 +320,7 @@ fn rcode_to_u8(rcode: RCODE) -> u8 {
 }
 
 /// Extract header fields from a DNS packet.
-fn extract_header_fields(packet: &Packet, fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) {
+fn extract_header_fields(packet: &Packet, fields: &mut FieldSink<'_, '_>) {
     fields.push(("transaction_id", FieldValue::UInt16(packet.id())));
     fields.push((
         "is_query",
@@ -375,7 +368,7 @@ fn extract_header_fields(packet: &Packet, fields: &mut SmallVec<[(&'static str, 
 /// Extract header fields from a DNS packet (projected).
 fn extract_header_fields_projected(
     packet: &Packet,
-    fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
+    fields: &mut FieldSink<'_, '_>,
     requested: &FieldSet,
 ) {
     if requested.contains("transaction_id") {
@@ -447,14 +440,11 @@ fn extract_header_fields_projected(
 }
 
 /// Extract question fields from a DNS packet.
-fn extract_question_fields(
-    packet: &Packet,
-    fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
-) {
+fn extract_question_fields(packet: &Packet, fields: &mut FieldSink<'_, '_>) {
     if let Some(question) = packet.questions.first() {
         fields.push((
             "query_name",
-            FieldValue::OwnedString(CompactString::new(question.qname.to_string())),
+            fields.format(format_args!("{}", question.qname)),
         ));
         fields.push(("query_type", FieldValue::UInt16(question.qtype.into())));
         fields.push(("query_class", FieldValue::UInt16(question.qclass.into())));
@@ -468,14 +458,14 @@ fn extract_question_fields(
 /// Extract question fields from a DNS packet (projected).
 fn extract_question_fields_projected(
     packet: &Packet,
-    fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
+    fields: &mut FieldSink<'_, '_>,
     requested: &FieldSet,
 ) {
     if let Some(question) = packet.questions.first() {
         if requested.contains("query_name") {
             fields.push((
                 "query_name",
-                FieldValue::OwnedString(CompactString::new(question.qname.to_string())),
+                fields.format(format_args!("{}", question.qname)),
             ));
         }
         if requested.contains("query_type") {
@@ -498,12 +488,12 @@ fn extract_question_fields_projected(
 }
 
 /// Extract answer fields from a DNS packet as lists.
-fn extract_answer_fields(packet: &Packet, fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) {
-    let mut ip4s: Vec<FieldValue> = Vec::new();
-    let mut ip6s: Vec<FieldValue> = Vec::new();
-    let mut cnames: Vec<FieldValue> = Vec::new();
-    let mut types: Vec<FieldValue> = Vec::new();
-    let mut ttls: Vec<FieldValue> = Vec::new();
+fn extract_answer_fields(packet: &Packet, fields: &mut FieldSink<'_, '_>) {
+    let mut ip4s = fields.list_builder();
+    let mut ip6s = fields.list_builder();
+    let mut cnames = fields.list_builder();
+    let mut types = fields.list_builder();
+    let mut ttls = fields.list_builder();
 
     for answer in &packet.answers {
         // Record type
@@ -525,26 +515,24 @@ fn extract_answer_fields(packet: &Packet, fields: &mut SmallVec<[(&'static str, 
                 )));
             }
             RData::CNAME(cname) => {
-                cnames.push(FieldValue::OwnedString(CompactString::new(
-                    cname.0.to_string(),
-                )));
+                cnames.push(fields.format(format_args!("{}", cname.0)));
             }
             _ => {}
         }
     }
 
     // Push list fields
-    fields.push(("answer_ip4s", FieldValue::List(ip4s)));
-    fields.push(("answer_ip6s", FieldValue::List(ip6s)));
-    fields.push(("answer_cnames", FieldValue::List(cnames)));
-    fields.push(("answer_types", FieldValue::List(types)));
-    fields.push(("answer_ttls", FieldValue::List(ttls)));
+    fields.push(("answer_ip4s", ip4s.finish()));
+    fields.push(("answer_ip6s", ip6s.finish()));
+    fields.push(("answer_cnames", cnames.finish()));
+    fields.push(("answer_types", types.finish()));
+    fields.push(("answer_ttls", ttls.finish()));
 }
 
 /// Extract answer fields from a DNS packet (projected).
 fn extract_answer_fields_projected(
     packet: &Packet,
-    fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
+    fields: &mut FieldSink<'_, '_>,
     requested: &FieldSet,
 ) {
     let need_ip4s = requested.contains("answer_ip4s");
@@ -553,11 +541,11 @@ fn extract_answer_fields_projected(
     let need_types = requested.contains("answer_types");
     let need_ttls = requested.contains("answer_ttls");
 
-    let mut ip4s: Vec<FieldValue> = Vec::new();
-    let mut ip6s: Vec<FieldValue> = Vec::new();
-    let mut cnames: Vec<FieldValue> = Vec::new();
-    let mut types: Vec<FieldValue> = Vec::new();
-    let mut ttls: Vec<FieldValue> = Vec::new();
+    let mut ip4s = fields.list_builder();
+    let mut ip6s = fields.list_builder();
+    let mut cnames = fields.list_builder();
+    let mut types = fields.list_builder();
+    let mut ttls = fields.list_builder();
 
     for answer in &packet.answers {
         if need_types {
@@ -580,33 +568,31 @@ fn extract_answer_fields_projected(
                 )));
             }
             RData::CNAME(cname) if need_cnames => {
-                cnames.push(FieldValue::OwnedString(CompactString::new(
-                    cname.0.to_string(),
-                )));
+                cnames.push(fields.format(format_args!("{}", cname.0)));
             }
             _ => {}
         }
     }
 
     if need_ip4s {
-        fields.push(("answer_ip4s", FieldValue::List(ip4s)));
+        fields.push(("answer_ip4s", ip4s.finish()));
     }
     if need_ip6s {
-        fields.push(("answer_ip6s", FieldValue::List(ip6s)));
+        fields.push(("answer_ip6s", ip6s.finish()));
     }
     if need_cnames {
-        fields.push(("answer_cnames", FieldValue::List(cnames)));
+        fields.push(("answer_cnames", cnames.finish()));
     }
     if need_types {
-        fields.push(("answer_types", FieldValue::List(types)));
+        fields.push(("answer_types", types.finish()));
     }
     if need_ttls {
-        fields.push(("answer_ttls", FieldValue::List(ttls)));
+        fields.push(("answer_ttls", ttls.finish()));
     }
 }
 
 /// Extract EDNS fields from a DNS packet.
-fn extract_edns_fields(packet: &Packet, fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) {
+fn extract_edns_fields(packet: &Packet, fields: &mut FieldSink<'_, '_>) {
     if let Some(opt) = packet.opt() {
         fields.push(("has_edns", FieldValue::Bool(true)));
         fields.push(("edns_udp_size", FieldValue::UInt16(opt.udp_packet_size)));
@@ -619,7 +605,7 @@ fn extract_edns_fields(packet: &Packet, fields: &mut SmallVec<[(&'static str, Fi
 /// Extract EDNS fields from a DNS packet (projected).
 fn extract_edns_fields_projected(
     packet: &Packet,
-    fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
+    fields: &mut FieldSink<'_, '_>,
     requested: &FieldSet,
 ) {
     let has_edns = packet.opt().is_some();

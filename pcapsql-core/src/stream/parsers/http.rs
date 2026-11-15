@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use compact_str::CompactString;
 use httparse::{Request, Response, Status, EMPTY_HEADER};
 
-use crate::protocol::http::{header_field, starts_http_message, HTTP_PORTS};
+use crate::protocol::http::{header_field, starts_http_message, HeaderValue, HTTP_PORTS};
 use crate::protocol::FieldValue;
 use crate::schema::{DataKind, FieldDescriptor};
 use crate::stream::{ParsedMessage, StreamContext, StreamParseResult, StreamParser};
@@ -38,7 +38,10 @@ impl HttpStreamParser {
     ) {
         for header in headers.iter().filter(|h| !h.name.is_empty()) {
             if let Some((column, value)) = header_field(header.name, header.value) {
-                let value = value.to_owned();
+                let value = match value {
+                    HeaderValue::Text(text) => FieldValue::OwnedString(CompactString::new(text)),
+                    HeaderValue::Length(length) => FieldValue::UInt64(length),
+                };
                 if column == "set_cookie" {
                     fields.entry(column).or_insert(value);
                 } else {

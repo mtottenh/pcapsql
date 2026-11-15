@@ -41,6 +41,12 @@ impl<'a> FieldSink<'_, 'a> {
         self.fields.push(field);
     }
 
+    /// The fields written to the layer so far.
+    #[inline]
+    pub fn as_slice(&self) -> &[FieldEntry<'a>] {
+        &self.fields[self.start..]
+    }
+
     /// The number of fields written to the layer so far.
     #[inline]
     pub fn len(&self) -> usize {

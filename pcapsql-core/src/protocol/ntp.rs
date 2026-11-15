@@ -3,11 +3,9 @@
 //! Parses NTP (Network Time Protocol) messages used for time synchronization.
 //! Matches on UDP port 123.
 
-use compact_str::CompactString;
-use smallvec::SmallVec;
-
 use super::{
-    Cond, Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult, Protocol,
+    Cond, Dispatch, DispatchRule, FieldSink, FieldValue, HintKey, Hints, ParseContext, Parsed,
+    Protocol,
 };
 use crate::schema::{DataKind, FieldDescriptor};
 
@@ -57,13 +55,16 @@ impl Protocol for NtpProtocol {
         }
     }
 
-    fn parse<'a>(&self, data: &'a [u8], _context: &ParseContext) -> ParseResult<'a> {
+    fn parse_into<'a>(
+        &self,
+        data: &'a [u8],
+        _context: &ParseContext,
+        fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
         // NTP header is 48 bytes
         if data.len() < NTP_HEADER_SIZE {
-            return ParseResult::error("NTP header too short".to_string(), data);
+            return Parsed::error("NTP header too short", data);
         }
-
-        let mut fields = SmallVec::new();
 
         // First byte: LI (2 bits), VN (3 bits), Mode (3 bits)
         let first_byte = data[0];
@@ -105,15 +106,15 @@ impl Protocol for NtpProtocol {
         let ref_id_bytes = &data[12..16];
         let reference_id = if stratum == 0 || stratum == 1 {
             // For stratum 0-1, it's ASCII (e.g., "GPS", "PPS")
-            CompactString::new(String::from_utf8_lossy(ref_id_bytes).trim_end_matches('\0'))
+            fields.str(String::from_utf8_lossy(ref_id_bytes).trim_end_matches('\0'))
         } else {
             // For stratum 2+, it's an IP address
-            CompactString::new(format!(
+            fields.format(format_args!(
                 "{}.{}.{}.{}",
                 ref_id_bytes[0], ref_id_bytes[1], ref_id_bytes[2], ref_id_bytes[3]
             ))
         };
-        fields.push(("reference_id", FieldValue::OwnedString(reference_id)));
+        fields.push(("reference_id", reference_id));
 
         // Reference Timestamp (8 bytes) - NTP format
         let reference_ts = read_ntp_timestamp(&data[16..24]);
@@ -134,7 +135,7 @@ impl Protocol for NtpProtocol {
         // Any remaining data would be extension fields or authentication
         let remaining = &data[NTP_HEADER_SIZE..];
 
-        ParseResult::success(fields, remaining, Hints::new())
+        Parsed::ok(remaining, Hints::new())
     }
 
     fn schema_fields(&self) -> Vec<FieldDescriptor> {

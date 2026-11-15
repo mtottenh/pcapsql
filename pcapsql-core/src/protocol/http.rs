@@ -14,13 +14,13 @@
 //! (`http_messages`, see `stream::parsers::http`), which shares the header
 //! mapping in this module.
 
-use compact_str::CompactString;
+use std::borrow::Cow;
+
 use httparse::{Request, Response, Status, EMPTY_HEADER};
-use smallvec::SmallVec;
 
 use super::{
-    Cond, Dispatch, DispatchRule, FieldEntry, FieldValue, HintKey, Hints, ParseContext,
-    ParseResult, Protocol, CONTENT_PRIORITY,
+    Cond, Dispatch, DispatchRule, FieldSink, FieldValue, HintKey, Hints, ParseContext, Parsed,
+    Protocol, CONTENT_PRIORITY,
 };
 use crate::schema::{DataKind, FieldDescriptor};
 
@@ -81,13 +81,26 @@ const HEADER_COLUMNS: &[(&str, &str)] = &[
     ("x-real-ip", "x_real_ip"),
 ];
 
+/// The value of a header that has an `http` column.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HeaderValue<'a> {
+    /// Text: borrowed from the message when it is valid UTF-8, a lossy copy
+    /// otherwise.
+    Text(Cow<'a, str>),
+    /// A `Content-Length`.
+    Length(u64),
+}
+
 /// Map one header to its `http` column and value, or `None` for a header
 /// that has no column.
 ///
 /// Values are zero-copy when valid UTF-8. `Content-Length` becomes a
-/// `UInt64` (an unparsable value yields no field). `Authorization` keeps
+/// number (an unparsable value yields no field). `Authorization` keeps
 /// only the scheme (`Bearer`, `Basic`), never the credentials.
-pub(crate) fn header_field<'a>(name: &str, value: &'a [u8]) -> Option<FieldEntry<'a>> {
+pub(crate) fn header_field<'a>(
+    name: &str,
+    value: &'a [u8],
+) -> Option<(&'static str, HeaderValue<'a>)> {
     let column = HEADER_COLUMNS
         .iter()
         .find(|(header, _)| name.eq_ignore_ascii_case(header))
@@ -100,49 +113,42 @@ pub(crate) fn header_field<'a>(name: &str, value: &'a [u8]) -> Option<FieldEntry
                 .trim()
                 .parse::<u64>()
                 .ok()
-                .map(|len| (column, FieldValue::UInt64(len)));
+                .map(|len| (column, HeaderValue::Length(len)));
         }
         "authorization" => match std::str::from_utf8(value) {
-            Ok(text) => FieldValue::Str(text.split_whitespace().next().unwrap_or(text)),
+            Ok(text) => Cow::Borrowed(text.split_whitespace().next().unwrap_or(text)),
             Err(_) => {
                 let lossy = String::from_utf8_lossy(value);
                 let scheme = lossy.split_whitespace().next().unwrap_or(&lossy);
-                FieldValue::OwnedString(CompactString::new(scheme))
+                Cow::Owned(scheme.to_string())
             }
         },
-        _ => text_value(value),
+        _ => String::from_utf8_lossy(value),
     };
-    Some((column, value))
-}
-
-/// A header value as a string field: borrowed when valid UTF-8.
-fn text_value(value: &[u8]) -> FieldValue<'_> {
-    match std::str::from_utf8(value) {
-        Ok(text) => FieldValue::Str(text),
-        Err(_) => FieldValue::OwnedString(CompactString::from(String::from_utf8_lossy(value))),
-    }
+    Some((column, HeaderValue::Text(value)))
 }
 
 /// HTTP/1.x packet parser (see the module documentation).
 #[derive(Debug, Clone, Copy)]
 pub struct HttpProtocol;
 
-type Fields<'a> = SmallVec<[FieldEntry<'a>; 16]>;
-
-/// Push a field unless the column is already set: the first occurrence of
-/// a repeated header wins (a row has one value per column).
-fn push_unique<'a>(fields: &mut Fields<'a>, entry: FieldEntry<'a>) {
-    if !fields.iter().any(|(name, _)| *name == entry.0) {
-        fields.push(entry);
-    }
-}
-
-/// Add the headers found so far (`EMPTY_HEADER` entries are unparsed).
-fn push_headers<'a>(fields: &mut Fields<'a>, headers: &[httparse::Header<'a>]) {
+/// Add the headers found so far (`EMPTY_HEADER` entries are unparsed). A
+/// column that is already set stays: the first occurrence of a repeated
+/// header wins (a row has one value per column).
+fn push_headers<'a>(fields: &mut FieldSink<'_, 'a>, headers: &[httparse::Header<'a>]) {
     for header in headers.iter().filter(|h| !h.name.is_empty()) {
-        if let Some(entry) = header_field(header.name, header.value) {
-            push_unique(fields, entry);
+        let Some((column, value)) = header_field(header.name, header.value) else {
+            continue;
+        };
+        if fields.as_slice().iter().any(|(name, _)| *name == column) {
+            continue;
         }
+        let value = match value {
+            HeaderValue::Text(Cow::Borrowed(text)) => FieldValue::Str(text),
+            HeaderValue::Text(Cow::Owned(text)) => fields.str(&text),
+            HeaderValue::Length(length) => FieldValue::UInt64(length),
+        };
+        fields.push((column, value));
     }
 }
 
@@ -163,28 +169,28 @@ fn version_str(minor: u8) -> &'static str {
 /// kept with `headers_complete = false` alongside the error; only a start
 /// line that yielded nothing is a fields-less error row.
 fn finish<'a>(
-    mut fields: Fields<'a>,
+    fields: &mut FieldSink<'_, 'a>,
     status: Result<Status<usize>, httparse::Error>,
     headers: &[httparse::Header<'a>],
     data: &'a [u8],
     kind: &str,
-) -> ParseResult<'a> {
+) -> Parsed<'a> {
     let status = match status {
         Ok(status) => status,
         Err(e) => {
-            let error = format!("HTTP {kind} parse error: {e}");
+            let error = fields.text_fmt(format_args!("HTTP {kind} parse error: {e}"));
             // `is_request` alone means nothing of the start line was read.
             if fields.len() <= 1 {
-                return ParseResult::error(error, data);
+                return Parsed::error(error, data);
             }
             fields.push(("headers_complete", FieldValue::Bool(false)));
-            push_headers(&mut fields, headers);
-            return ParseResult::partial(fields, &data[data.len()..], error);
+            push_headers(fields, headers);
+            return Parsed::partial(&data[data.len()..], error);
         }
     };
     let complete = matches!(status, Status::Complete(_));
     fields.push(("headers_complete", FieldValue::Bool(complete)));
-    push_headers(&mut fields, headers);
+    push_headers(fields, headers);
     if let Status::Complete(header_len) = status {
         fields.push((
             "body_length",
@@ -192,10 +198,10 @@ fn finish<'a>(
         ));
     }
     // Terminal layer: the body is not parsed further.
-    ParseResult::success(fields, &data[data.len()..], Hints::new())
+    Parsed::ok(&data[data.len()..], Hints::new())
 }
 
-fn parse_request(data: &[u8]) -> ParseResult<'_> {
+fn parse_request<'a>(data: &'a [u8], fields: &mut FieldSink<'_, 'a>) -> Parsed<'a> {
     let mut headers = [EMPTY_HEADER; MAX_HEADERS];
     let mut req = Request::new(&mut headers);
     let status = req.parse(data);
@@ -203,7 +209,6 @@ fn parse_request(data: &[u8]) -> ParseResult<'_> {
     // header block is incomplete or malformed.
     let (method, path, version) = (req.method, req.path, req.version);
 
-    let mut fields = Fields::new();
     fields.push(("is_request", FieldValue::Bool(true)));
     if let Some(method) = method {
         fields.push(("method", FieldValue::Str(method)));
@@ -217,13 +222,12 @@ fn parse_request(data: &[u8]) -> ParseResult<'_> {
     finish(fields, status, &headers, data, "request")
 }
 
-fn parse_response(data: &[u8]) -> ParseResult<'_> {
+fn parse_response<'a>(data: &'a [u8], fields: &mut FieldSink<'_, 'a>) -> Parsed<'a> {
     let mut headers = [EMPTY_HEADER; MAX_HEADERS];
     let mut resp = Response::new(&mut headers);
     let status = resp.parse(data);
     let (version, code, reason) = (resp.version, resp.code, resp.reason);
 
-    let mut fields = Fields::new();
     fields.push(("is_request", FieldValue::Bool(false)));
     if let Some(version) = version {
         fields.push(("version", FieldValue::Str(version_str(version))));
@@ -275,11 +279,16 @@ impl Protocol for HttpProtocol {
         Some(CONTENT_PRIORITY)
     }
 
-    fn parse<'a>(&self, data: &'a [u8], _context: &ParseContext) -> ParseResult<'a> {
+    fn parse_into<'a>(
+        &self,
+        data: &'a [u8],
+        _context: &ParseContext,
+        fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
         if data.starts_with(b"HTTP/") {
-            parse_response(data)
+            parse_response(data, fields)
         } else {
-            parse_request(data)
+            parse_request(data, fields)
         }
     }
 
@@ -597,26 +606,26 @@ mod tests {
     fn header_mapping_is_case_insensitive_and_scoped() {
         assert_eq!(
             header_field("HOST", b"a.test"),
-            Some(("host", FieldValue::Str("a.test")))
+            Some(("host", HeaderValue::Text("a.test".into())))
         );
         assert_eq!(
             header_field("Referrer", b"/r"),
-            Some(("referer", FieldValue::Str("/r")))
+            Some(("referer", HeaderValue::Text("/r".into())))
         );
         assert_eq!(
             header_field("content-length", b" 42 "),
-            Some(("content_length", FieldValue::UInt64(42)))
+            Some(("content_length", HeaderValue::Length(42)))
         );
         assert_eq!(header_field("Content-Length", b"many"), None);
         assert_eq!(
             header_field("Authorization", b"Basic dXNlcjpwYXNz"),
-            Some(("authorization", FieldValue::Str("Basic")))
+            Some(("authorization", HeaderValue::Text("Basic".into())))
         );
         assert_eq!(header_field("X-Unknown", b"v"), None);
         // Invalid UTF-8 is kept lossily instead of dropped.
         assert_eq!(
             header_field("Server", b"nginx\xff"),
-            Some(("server", FieldValue::Str("nginx\u{FFFD}")))
+            Some(("server", HeaderValue::Text("nginx\u{FFFD}".into())))
         );
     }
 
