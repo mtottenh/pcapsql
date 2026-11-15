@@ -17,10 +17,7 @@
 //! A test pins the agreement between the two.
 
 use std::collections::HashMap;
-use std::fmt;
 use std::sync::OnceLock;
-
-use crate::schema::DataKind;
 
 /// A table of a [`Catalog`]: its position in [`Catalog::tables`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -89,31 +86,6 @@ pub enum ColKind {
 }
 
 impl ColKind {
-    /// The [`DataKind`] of the same meaning. `None` for
-    /// [`ColKind::TsNanos`], which [`DataKind`] cannot express.
-    pub fn data_kind(self) -> Option<DataKind> {
-        let list = |inner: DataKind| DataKind::List(Box::new(inner));
-        Some(match self {
-            ColKind::Bool => DataKind::Bool,
-            ColKind::U8 => DataKind::UInt8,
-            ColKind::U16 => DataKind::UInt16,
-            ColKind::U32 => DataKind::UInt32,
-            ColKind::U64 => DataKind::UInt64,
-            ColKind::I8 => DataKind::Int8,
-            ColKind::I64 => DataKind::Int64,
-            ColKind::F64 => DataKind::Float64,
-            ColKind::Str => DataKind::String,
-            ColKind::Bin => DataKind::Binary,
-            ColKind::Fixed(n) => DataKind::FixedBinary(usize::from(n)),
-            ColKind::TsMicros => DataKind::TimestampMicros,
-            ColKind::TsNanos => return None,
-            ColKind::ListU16 => list(DataKind::UInt16),
-            ColKind::ListU32 => list(DataKind::UInt32),
-            ColKind::ListStr => list(DataKind::String),
-            ColKind::ListFixed(n) => list(DataKind::FixedBinary(usize::from(n))),
-        })
-    }
-
     /// True for the two timestamp kinds.
     pub const fn is_timestamp(self) -> bool {
         matches!(self, ColKind::TsMicros | ColKind::TsNanos)
@@ -127,49 +99,6 @@ impl ColKind {
             (ColKind::TsMicros | ColKind::TsNanos, TimestampUnit::Nanos) => ColKind::TsNanos,
             (other, _) => other,
         }
-    }
-}
-
-/// A [`DataKind`] no [`ColKind`] stores (a list of anything but `UInt16`,
-/// `UInt32`, `String` or `FixedBinary`, or a fixed width above `u16::MAX`).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct UnsupportedKind(pub DataKind);
-
-impl fmt::Display for UnsupportedKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "no column kind stores {:?}", self.0)
-    }
-}
-
-impl std::error::Error for UnsupportedKind {}
-
-impl TryFrom<&DataKind> for ColKind {
-    type Error = UnsupportedKind;
-
-    fn try_from(kind: &DataKind) -> Result<Self, Self::Error> {
-        let unsupported = || UnsupportedKind(kind.clone());
-        let width = |n: &usize| u16::try_from(*n).map_err(|_| unsupported());
-        Ok(match kind {
-            DataKind::Bool => ColKind::Bool,
-            DataKind::UInt8 => ColKind::U8,
-            DataKind::UInt16 => ColKind::U16,
-            DataKind::UInt32 => ColKind::U32,
-            DataKind::UInt64 => ColKind::U64,
-            DataKind::Int8 => ColKind::I8,
-            DataKind::Int64 => ColKind::I64,
-            DataKind::Float64 => ColKind::F64,
-            DataKind::String => ColKind::Str,
-            DataKind::Binary => ColKind::Bin,
-            DataKind::FixedBinary(n) => ColKind::Fixed(width(n)?),
-            DataKind::TimestampMicros => ColKind::TsMicros,
-            DataKind::List(inner) => match inner.as_ref() {
-                DataKind::UInt16 => ColKind::ListU16,
-                DataKind::UInt32 => ColKind::ListU32,
-                DataKind::String => ColKind::ListStr,
-                DataKind::FixedBinary(n) => ColKind::ListFixed(width(n)?),
-                _ => return Err(unsupported()),
-            },
-        })
     }
 }
 
@@ -263,19 +192,6 @@ impl ColumnDef {
     }
 }
 
-/// The tables built by stream analysis.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum StreamTable {
-    /// `tcp_connections`: one row per reassembled TCP connection.
-    TcpConnections,
-    /// `tls_sessions`: one row per TLS session.
-    TlsSessions,
-    /// `http_messages`: one row per HTTP/1.x message.
-    HttpMessages,
-    /// `http2`: one row per HTTP/2 frame of a decrypted TLS stream.
-    Http2,
-}
-
 /// How a table's rows are produced.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TableKind {
@@ -285,7 +201,7 @@ pub enum TableKind {
     Protocol,
     /// Built by stream analysis (TCP reassembly, then TLS and HTTP) from the
     /// whole capture in order, not per packet.
-    Stream(StreamTable),
+    Stream,
 }
 
 /// One table: its name, how it is produced, and its columns in order.
@@ -331,7 +247,7 @@ impl TableDef {
 
     /// True for a table built by stream analysis.
     pub const fn is_stream(&self) -> bool {
-        matches!(self.kind, TableKind::Stream(_))
+        matches!(self.kind, TableKind::Stream)
     }
 }
 
@@ -414,7 +330,37 @@ impl Catalog {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schema::DataKind;
     use crate::{default_registry, Protocol};
+
+    /// The column kind that stores what a parser declares as `kind`. `None`
+    /// for a kind no column stores: a list of anything but `UInt16`,
+    /// `UInt32`, `String` or `FixedBinary`, or a fixed width above
+    /// `u16::MAX`.
+    fn col_kind(kind: &DataKind) -> Option<ColKind> {
+        let width = |n: &usize| u16::try_from(*n).ok();
+        Some(match kind {
+            DataKind::Bool => ColKind::Bool,
+            DataKind::UInt8 => ColKind::U8,
+            DataKind::UInt16 => ColKind::U16,
+            DataKind::UInt32 => ColKind::U32,
+            DataKind::UInt64 => ColKind::U64,
+            DataKind::Int8 => ColKind::I8,
+            DataKind::Int64 => ColKind::I64,
+            DataKind::Float64 => ColKind::F64,
+            DataKind::String => ColKind::Str,
+            DataKind::Binary => ColKind::Bin,
+            DataKind::FixedBinary(n) => ColKind::Fixed(width(n)?),
+            DataKind::TimestampMicros => ColKind::TsMicros,
+            DataKind::List(inner) => match inner.as_ref() {
+                DataKind::UInt16 => ColKind::ListU16,
+                DataKind::UInt32 => ColKind::ListU32,
+                DataKind::String => ColKind::ListStr,
+                DataKind::FixedBinary(n) => ColKind::ListFixed(width(n)?),
+                _ => return None,
+            },
+        })
+    }
 
     /// Parser fields (`proto.field` descriptors) that the protocol's table
     /// does not expose as a column yet. The builders drop these values; the
@@ -491,13 +437,16 @@ mod tests {
                                 column.kind,
                                 ColKind::U32 | ColKind::Fixed(16) | ColKind::Fixed(6)
                             );
-                        match ColKind::try_from(&fd.kind) {
-                            Ok(want) if want == column.kind || typed_address => {}
-                            Ok(want) => problems.push(format!(
+                        match col_kind(&fd.kind) {
+                            Some(want) if want == column.kind || typed_address => {}
+                            Some(want) => problems.push(format!(
                                 "{name}.{field}: descriptor {want:?} vs table column {:?}",
                                 column.kind
                             )),
-                            Err(e) => problems.push(format!("{name}.{field}: {e}")),
+                            None => problems.push(format!(
+                                "{name}.{field}: no column kind stores {:?}",
+                                fd.kind
+                            )),
                         }
                     }
                 }
@@ -573,22 +522,15 @@ mod tests {
     }
 
     #[test]
-    fn stream_tables_are_the_four_stream_kinds() {
+    fn stream_tables_are_the_four_built_by_stream_analysis() {
         let streams: Vec<_> = Catalog::builtin()
             .tables()
-            .filter_map(|(_, t)| match t.kind {
-                TableKind::Stream(s) => Some((t.name, s)),
-                _ => None,
-            })
+            .filter(|(_, t)| t.kind == TableKind::Stream)
+            .map(|(_, t)| t.name)
             .collect();
         assert_eq!(
             streams,
-            [
-                ("http2", StreamTable::Http2),
-                ("tcp_connections", StreamTable::TcpConnections),
-                ("tls_sessions", StreamTable::TlsSessions),
-                ("http_messages", StreamTable::HttpMessages),
-            ]
+            ["http2", "tcp_connections", "tls_sessions", "http_messages"]
         );
         assert!(Catalog::builtin().table("http2").unwrap().1.is_stream());
         assert!(!Catalog::builtin().table("http").unwrap().1.is_stream());
@@ -690,7 +632,7 @@ mod tests {
                         table.name
                     );
                 }
-                TableKind::Frames | TableKind::Stream(_) => {
+                TableKind::Frames | TableKind::Stream => {
                     assert!(opt_in.is_empty(), "{}", table.name);
                 }
             }
@@ -718,7 +660,7 @@ mod tests {
                         Field(field) => field == column.name,
                         _ => false,
                     },
-                    TableKind::Stream(_) => column.source == Stream,
+                    TableKind::Stream => column.source == Stream,
                 };
                 assert!(
                     ok,
@@ -772,59 +714,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn col_kind_round_trips_through_data_kind() {
-        let kinds = [
-            ColKind::Bool,
-            ColKind::U8,
-            ColKind::U16,
-            ColKind::U32,
-            ColKind::U64,
-            ColKind::I8,
-            ColKind::I64,
-            ColKind::F64,
-            ColKind::Str,
-            ColKind::Bin,
-            ColKind::Fixed(6),
-            ColKind::Fixed(32),
-            ColKind::TsMicros,
-            ColKind::ListU16,
-            ColKind::ListU32,
-            ColKind::ListStr,
-            ColKind::ListFixed(16),
-        ];
-        for kind in kinds {
-            let data_kind = kind.data_kind().expect("has a DataKind");
-            assert_eq!(ColKind::try_from(&data_kind), Ok(kind), "{kind:?}");
-        }
-        assert_eq!(ColKind::TsNanos.data_kind(), None);
-
-        let list = |inner| DataKind::List(Box::new(inner));
-        for unsupported in [
-            list(DataKind::Binary),
-            list(DataKind::UInt8),
-            list(list(DataKind::String)),
-            DataKind::FixedBinary(70_000),
-            list(DataKind::FixedBinary(70_000)),
-        ] {
-            assert_eq!(
-                ColKind::try_from(&unsupported),
-                Err(UnsupportedKind(unsupported.clone()))
-            );
-        }
-    }
-
     /// Every kind a parser declares can be stored.
     #[test]
     fn every_descriptor_kind_is_a_column_kind() {
         for parser in default_registry().all_parsers() {
             for fd in parser.schema_fields() {
-                assert!(
-                    ColKind::try_from(&fd.kind).is_ok(),
-                    "{}: {:?}",
-                    fd.name,
-                    fd.kind
-                );
+                assert!(col_kind(&fd.kind).is_some(), "{}: {:?}", fd.name, fd.kind);
             }
         }
     }

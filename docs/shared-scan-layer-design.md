@@ -294,8 +294,8 @@ pub enum ColKind {
     TsMicros, TsNanos,
     ListU16, ListU32, ListStr, ListBin, ListFixed(u16),
 }
-impl TryFrom<&DataKind> for ColKind { type Error = UnsupportedKind; /* ... */ }
-impl ColKind { pub fn data_kind(self) -> DataKind; }
+// As built there is no conversion from or to `DataKind`: the column lists
+// name their kinds, and a test compares them with the parsers' descriptors.
 
 /// Where a column's value comes from. Today three private enums say the same
 /// thing: ParsedSource and FrameSource (builders/protocol.rs:470-490) and
@@ -317,9 +317,7 @@ pub struct ColumnDef {
     /// DataFusion tables or the golden snapshots.
     pub default: bool,
 }
-pub enum TableKind { Frames, Protocol, Stream(StreamTable) }
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum StreamTable { TcpConnections, TlsSessions, HttpMessages, Http2 }
+pub enum TableKind { Frames, Protocol, Stream }  // a stream table is told from the others by its name
 pub struct TableDef {
     pub name: &'static str,
     pub kind: TableKind,

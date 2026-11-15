@@ -58,8 +58,7 @@ pub mod testing;
 pub mod views;
 
 pub use catalog::{
-    Catalog, ColId, ColKind, ColumnDef, ColumnSource, StreamTable, TableDef, TableId, TableKind,
-    TimestampUnit, UnsupportedKind,
+    Catalog, ColId, ColKind, ColumnDef, ColumnSource, TableDef, TableId, TableKind, TimestampUnit,
 };
 pub use driver::{FrameObserver, NoObserver, PartitionScan, ScanStats, Step};
 pub use partition::{partition_target, plan_ranges, PartitionPolicy, PartitionQueue};
