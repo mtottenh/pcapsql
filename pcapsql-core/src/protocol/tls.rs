@@ -1066,10 +1066,7 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(result.get("record_type"), Some(&FieldValue::UInt8(22)));
-        assert_eq!(
-            result.get("version"),
-            Some(&FieldValue::OwnedString(CompactString::new("TLS 1.2")))
-        );
+        assert_eq!(result.get("version"), Some(&FieldValue::Str("TLS 1.2")));
         assert_eq!(result.get("handshake_type"), Some(&FieldValue::UInt8(1)));
 
         // Verify client_random is extracted (decryption foundation)
@@ -1095,9 +1092,7 @@ mod tests {
         assert_eq!(result.get("handshake_type"), Some(&FieldValue::UInt8(2)));
         assert_eq!(
             result.get("selected_cipher"),
-            Some(&FieldValue::OwnedString(CompactString::new(
-                "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
-            )))
+            Some(&FieldValue::Str("TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"))
         );
         assert_eq!(
             result.get("selected_cipher_id"),
@@ -1124,12 +1119,7 @@ mod tests {
         let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
-        assert_eq!(
-            result.get("sni"),
-            Some(&FieldValue::OwnedString(CompactString::new(
-                "www.example.com"
-            )))
-        );
+        assert_eq!(result.get("sni"), Some(&FieldValue::Str("www.example.com")));
     }
 
     #[test]
@@ -1150,9 +1140,7 @@ mod tests {
         );
         assert_eq!(
             result.get("alert_description_str"),
-            Some(&FieldValue::OwnedString(CompactString::new(
-                "handshake_failure"
-            )))
+            Some(&FieldValue::Str("handshake_failure"))
         );
     }
 

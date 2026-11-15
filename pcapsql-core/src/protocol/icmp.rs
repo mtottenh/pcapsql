@@ -1,9 +1,8 @@
 //! ICMP protocol parser.
 
-use smallvec::SmallVec;
-
 use super::{
-    Cond, Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult, Protocol,
+    Cond, Dispatch, DispatchRule, FieldSink, FieldValue, HintKey, Hints, ParseContext, Parsed,
+    Protocol,
 };
 use crate::schema::{DataKind, FieldDescriptor};
 
@@ -102,16 +101,19 @@ impl Protocol for IcmpProtocol {
         }
     }
 
-    fn parse<'a>(&self, data: &'a [u8], _context: &ParseContext) -> ParseResult<'a> {
+    fn parse_into<'a>(
+        &self,
+        data: &'a [u8],
+        _context: &ParseContext,
+        fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
         // ICMP header is at least 8 bytes
         if data.len() < 8 {
-            return ParseResult::error(
-                format!("ICMP header too short: {} bytes", data.len()),
+            return Parsed::error(
+                fields.text_fmt(format_args!("ICMP header too short: {} bytes", data.len())),
                 data,
             );
         }
-
-        let mut fields = SmallVec::new();
 
         let icmp_type = data[0];
         let icmp_code = data[1];
@@ -170,7 +172,7 @@ impl Protocol for IcmpProtocol {
         fields.push(("type_name", FieldValue::Str(type_name)));
 
         // ICMP doesn't have child protocols typically
-        ParseResult::success(fields, &data[8..], Hints::new())
+        Parsed::ok(&data[8..], Hints::new())
     }
 
     fn schema_fields(&self) -> Vec<FieldDescriptor> {

@@ -575,11 +575,11 @@ mod tests {
         assert_eq!(result.get("dead_interval"), Some(&FieldValue::UInt32(40)));
         assert_eq!(
             result.get("designated_router"),
-            Some(&FieldValue::OwnedString(CompactString::new("192.168.1.1")))
+            Some(&FieldValue::Str("192.168.1.1"))
         );
         assert_eq!(
             result.get("backup_dr"),
-            Some(&FieldValue::OwnedString(CompactString::new("192.168.1.2")))
+            Some(&FieldValue::Str("192.168.1.2"))
         );
     }
 
@@ -595,10 +595,7 @@ mod tests {
         let result = parser.parse_layer(&pkt, &context);
 
         assert!(result.is_ok());
-        assert_eq!(
-            result.get("router_id"),
-            Some(&FieldValue::OwnedString(CompactString::new("10.0.0.1")))
-        );
+        assert_eq!(result.get("router_id"), Some(&FieldValue::Str("10.0.0.1")));
     }
 
     // Test 6: Area ID extraction
@@ -612,19 +609,13 @@ mod tests {
         let pkt1 = create_ospf_header(2, packet_type::HELLO, 24, [1, 1, 1, 1], [0, 0, 0, 0]);
         let result1 = parser.parse_layer(&pkt1, &context);
         assert!(result1.is_ok());
-        assert_eq!(
-            result1.get("area_id"),
-            Some(&FieldValue::OwnedString(CompactString::new("0.0.0.0")))
-        );
+        assert_eq!(result1.get("area_id"), Some(&FieldValue::Str("0.0.0.0")));
 
         // Non-backbone area
         let pkt2 = create_ospf_header(2, packet_type::HELLO, 24, [1, 1, 1, 1], [0, 0, 0, 1]);
         let result2 = parser.parse_layer(&pkt2, &context);
         assert!(result2.is_ok());
-        assert_eq!(
-            result2.get("area_id"),
-            Some(&FieldValue::OwnedString(CompactString::new("0.0.0.1")))
-        );
+        assert_eq!(result2.get("area_id"), Some(&FieldValue::Str("0.0.0.1")));
     }
 
     // Test 7: Message type name mapping
@@ -837,13 +828,10 @@ mod tests {
             result.get("lsa_type_name"),
             Some(&FieldValue::Str("Network-LSA"))
         );
-        assert_eq!(
-            result.get("lsa_id"),
-            Some(&FieldValue::OwnedString(CompactString::new("192.168.1.0")))
-        );
+        assert_eq!(result.get("lsa_id"), Some(&FieldValue::Str("192.168.1.0")));
         assert_eq!(
             result.get("lsa_advertising_router"),
-            Some(&FieldValue::OwnedString(CompactString::new("192.168.1.1")))
+            Some(&FieldValue::Str("192.168.1.1"))
         );
     }
 

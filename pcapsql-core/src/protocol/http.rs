@@ -616,10 +616,7 @@ mod tests {
         // Invalid UTF-8 is kept lossily instead of dropped.
         assert_eq!(
             header_field("Server", b"nginx\xff"),
-            Some((
-                "server",
-                FieldValue::OwnedString(CompactString::new("nginx\u{FFFD}"))
-            ))
+            Some(("server", FieldValue::Str("nginx\u{FFFD}")))
         );
     }
 

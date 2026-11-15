@@ -807,7 +807,7 @@ mod tests {
         );
         assert_eq!(
             result.get("query_name"),
-            Some(&FieldValue::OwnedString(CompactString::new("example.com")))
+            Some(&FieldValue::Str("example.com"))
         );
         assert_eq!(result.get("query_type"), Some(&FieldValue::UInt16(1))); // A record
         assert_eq!(result.get("query_class"), Some(&FieldValue::UInt16(1))); // IN class
@@ -1035,9 +1035,7 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(
             result.get("query_name"),
-            Some(&FieldValue::OwnedString(CompactString::new(
-                "ipv6.google.com"
-            )))
+            Some(&FieldValue::Str("ipv6.google.com"))
         );
         assert_eq!(
             result.get("query_type"),

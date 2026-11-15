@@ -393,10 +393,7 @@ mod tests {
         assert_eq!(result.get("version"), Some(&FieldValue::UInt8(4)));
         assert_eq!(result.get("mode"), Some(&FieldValue::UInt8(4))); // Server
         assert_eq!(result.get("stratum"), Some(&FieldValue::UInt8(1))); // Primary
-        assert_eq!(
-            result.get("reference_id"),
-            Some(&FieldValue::OwnedString(CompactString::new("GPS")))
-        );
+        assert_eq!(result.get("reference_id"), Some(&FieldValue::Str("GPS")));
     }
 
     #[test]

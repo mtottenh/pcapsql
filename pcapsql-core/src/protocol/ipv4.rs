@@ -1,13 +1,11 @@
 //! IPv4 protocol parser.
 
-use smallvec::SmallVec;
-
 use etherparse::Ipv4HeaderSlice;
 
 use super::ethernet::ethertype;
 use super::{
-    Cond, Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult, Protocol,
-    TunnelType,
+    Cond, Dispatch, DispatchRule, FieldSink, FieldValue, HintKey, Hints, ParseContext, Parsed,
+    Protocol, TunnelType,
 };
 use crate::schema::{DataKind, FieldDescriptor};
 
@@ -172,11 +170,14 @@ impl Protocol for Ipv4Protocol {
         }
     }
 
-    fn parse<'a>(&self, data: &'a [u8], _context: &ParseContext) -> ParseResult<'a> {
+    fn parse_into<'a>(
+        &self,
+        data: &'a [u8],
+        _context: &ParseContext,
+        fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
         match Ipv4HeaderSlice::from_slice(data) {
             Ok(ipv4) => {
-                let mut fields = SmallVec::new();
-
                 fields.push(("version", FieldValue::UInt8(4)));
                 fields.push(("ihl", FieldValue::UInt8(ipv4.ihl())));
                 fields.push(("dscp", FieldValue::UInt8(ipv4.dcp().value())));
@@ -225,9 +226,9 @@ impl Protocol for Ipv4Protocol {
                 } else {
                     data.len()
                 };
-                ParseResult::success(fields, &data[header_len..end], child_hints)
+                Parsed::ok(&data[header_len..end], child_hints)
             }
-            Err(e) => ParseResult::error(format!("IPv4 parse error: {e}"), data),
+            Err(e) => Parsed::error(fields.text_fmt(format_args!("IPv4 parse error: {e}")), data),
         }
     }
 

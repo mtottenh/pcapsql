@@ -962,10 +962,7 @@ mod tests {
         assert_eq!(result.get("version"), Some(&FieldValue::UInt8(4)));
         assert_eq!(result.get("my_as"), Some(&FieldValue::UInt16(65001)));
         assert_eq!(result.get("hold_time"), Some(&FieldValue::UInt16(180)));
-        assert_eq!(
-            result.get("bgp_id"),
-            Some(&FieldValue::OwnedString(CompactString::new("192.168.1.1")))
-        );
+        assert_eq!(result.get("bgp_id"), Some(&FieldValue::Str("192.168.1.1")));
     }
 
     // Test 5: KEEPALIVE message (no payload)
@@ -1258,7 +1255,7 @@ mod tests {
         assert_eq!(result.get("origin_name"), Some(&FieldValue::Str("IGP")));
         assert_eq!(
             result.get("next_hop"),
-            Some(&FieldValue::OwnedString(CompactString::new("192.168.1.1")))
+            Some(&FieldValue::Str("192.168.1.1"))
         );
         assert_eq!(result.get("med"), Some(&FieldValue::UInt32(100)));
         assert_eq!(result.get("local_pref"), Some(&FieldValue::UInt32(200)));
@@ -1570,7 +1567,7 @@ mod tests {
         );
         assert_eq!(
             result.get("aggregator_ip"),
-            Some(&FieldValue::OwnedString(CompactString::new("192.168.1.1")))
+            Some(&FieldValue::Str("192.168.1.1"))
         );
     }
 

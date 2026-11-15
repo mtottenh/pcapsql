@@ -575,19 +575,15 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(
             result.get("protocol_version"),
-            Some(&FieldValue::OwnedString(CompactString::new("2.0")))
+            Some(&FieldValue::Str("2.0"))
         );
         assert_eq!(
             result.get("software_version"),
-            Some(&FieldValue::OwnedString(CompactString::new(
-                "OpenSSH_8.9p1"
-            )))
+            Some(&FieldValue::Str("OpenSSH_8.9p1"))
         );
         assert_eq!(
             result.get("comments"),
-            Some(&FieldValue::OwnedString(CompactString::new(
-                "Ubuntu-3ubuntu0.1"
-            )))
+            Some(&FieldValue::Str("Ubuntu-3ubuntu0.1"))
         );
     }
 
@@ -604,13 +600,11 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(
             result.get("protocol_version"),
-            Some(&FieldValue::OwnedString(CompactString::new("2.0")))
+            Some(&FieldValue::Str("2.0"))
         );
         assert_eq!(
             result.get("software_version"),
-            Some(&FieldValue::OwnedString(CompactString::new(
-                "libssh2_1.10.0"
-            )))
+            Some(&FieldValue::Str("libssh2_1.10.0"))
         );
         assert!(result.get("comments").is_none());
     }
@@ -628,13 +622,11 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(
             result.get("protocol_version"),
-            Some(&FieldValue::OwnedString(CompactString::new("2.0")))
+            Some(&FieldValue::Str("2.0"))
         );
         assert_eq!(
             result.get("software_version"),
-            Some(&FieldValue::OwnedString(CompactString::new(
-                "dropbear_2022.83"
-            )))
+            Some(&FieldValue::Str("dropbear_2022.83"))
         );
     }
 
@@ -650,7 +642,7 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(
             result.get("protocol_version"),
-            Some(&FieldValue::OwnedString(CompactString::new("1.99")))
+            Some(&FieldValue::Str("1.99"))
         );
     }
 
@@ -666,9 +658,7 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(
             result.get("software_version"),
-            Some(&FieldValue::OwnedString(CompactString::new(
-                "PuTTY_Release_0.78"
-            )))
+            Some(&FieldValue::Str("PuTTY_Release_0.78"))
         );
     }
 
@@ -708,9 +698,9 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(
             result.get("kex_algorithms"),
-            Some(&FieldValue::OwnedString(CompactString::new(
+            Some(&FieldValue::Str(
                 "curve25519-sha256,diffie-hellman-group14-sha256"
-            )))
+            ))
         );
     }
 
@@ -728,9 +718,9 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(
             result.get("encryption_algorithms"),
-            Some(&FieldValue::OwnedString(CompactString::new(
+            Some(&FieldValue::Str(
                 "aes256-gcm@openssh.com,chacha20-poly1305@openssh.com"
-            )))
+            ))
         );
     }
 
@@ -827,17 +817,15 @@ mod tests {
         );
         assert_eq!(
             result.get("auth_username"),
-            Some(&FieldValue::OwnedString(CompactString::new("testuser")))
+            Some(&FieldValue::Str("testuser"))
         );
         assert_eq!(
             result.get("auth_service"),
-            Some(&FieldValue::OwnedString(CompactString::new(
-                "ssh-connection"
-            )))
+            Some(&FieldValue::Str("ssh-connection"))
         );
         assert_eq!(
             result.get("auth_method"),
-            Some(&FieldValue::OwnedString(CompactString::new("publickey")))
+            Some(&FieldValue::Str("publickey"))
         );
     }
 
@@ -863,7 +851,7 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(
             result.get("channel_type"),
-            Some(&FieldValue::OwnedString(CompactString::new("session")))
+            Some(&FieldValue::Str("session"))
         );
         assert_eq!(result.get("channel_id"), Some(&FieldValue::UInt32(0)));
     }

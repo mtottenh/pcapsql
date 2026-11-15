@@ -1,11 +1,10 @@
 //! Ethernet II protocol parser.
 
-use smallvec::SmallVec;
-
 use etherparse::Ethernet2HeaderSlice;
 
 use super::{
-    Cond, Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult, Protocol,
+    Cond, Dispatch, DispatchRule, FieldSink, FieldValue, HintKey, Hints, ParseContext, Parsed,
+    Protocol,
 };
 use crate::schema::{DataKind, FieldDescriptor};
 
@@ -145,11 +144,14 @@ impl Protocol for EthernetProtocol {
         None
     }
 
-    fn parse<'a>(&self, data: &'a [u8], _context: &ParseContext) -> ParseResult<'a> {
+    fn parse_into<'a>(
+        &self,
+        data: &'a [u8],
+        _context: &ParseContext,
+        fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
         match Ethernet2HeaderSlice::from_slice(data) {
             Ok(eth) => {
-                let mut fields = SmallVec::new();
-
                 fields.push(("src_mac", FieldValue::mac(&eth.source())));
                 fields.push(("dst_mac", FieldValue::mac(&eth.destination())));
                 fields.push(("ethertype", FieldValue::UInt16(eth.ether_type().0)));
@@ -158,9 +160,12 @@ impl Protocol for EthernetProtocol {
                 child_hints.insert(HintKey::EtherType, eth.ether_type().0 as u64);
 
                 let header_len = eth.slice().len();
-                ParseResult::success(fields, &data[header_len..], child_hints)
+                Parsed::ok(&data[header_len..], child_hints)
             }
-            Err(e) => ParseResult::error(format!("Ethernet parse error: {e}"), data),
+            Err(e) => Parsed::error(
+                fields.text_fmt(format_args!("Ethernet parse error: {e}")),
+                data,
+            ),
         }
     }
 

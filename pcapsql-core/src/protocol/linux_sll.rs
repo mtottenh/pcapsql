@@ -4,10 +4,8 @@
 //! This format is used when capturing on the "any" interface or for
 //! protocols that don't have a native link-layer header.
 
-use smallvec::SmallVec;
-
 use super::{
-    Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult, Protocol,
+    Dispatch, DispatchRule, FieldSink, FieldValue, HintKey, Hints, ParseContext, Parsed, Protocol,
 };
 use crate::schema::{DataKind, FieldDescriptor};
 
@@ -105,16 +103,22 @@ impl Protocol for LinuxSllProtocol {
         None
     }
 
-    fn parse<'a>(&self, data: &'a [u8], _context: &ParseContext) -> ParseResult<'a> {
+    fn parse_into<'a>(
+        &self,
+        data: &'a [u8],
+        _context: &ParseContext,
+        fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
         // Linux SLL header is 16 bytes minimum
         if data.len() < LINUX_SLL_HEADER_LEN {
-            return ParseResult::error(
-                format!("Linux SLL header too short: {} bytes", data.len()),
+            return Parsed::error(
+                fields.text_fmt(format_args!(
+                    "Linux SLL header too short: {} bytes",
+                    data.len()
+                )),
                 data,
             );
         }
-
-        let mut fields = SmallVec::new();
 
         // Parse header fields (all big-endian)
         let pkt_type = u16::from_be_bytes([data[0], data[1]]);
@@ -164,7 +168,7 @@ impl Protocol for LinuxSllProtocol {
             }
         }
 
-        ParseResult::success(fields, remaining, child_hints)
+        Parsed::ok(remaining, child_hints)
     }
 
     fn schema_fields(&self) -> Vec<FieldDescriptor> {
