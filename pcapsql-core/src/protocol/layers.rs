@@ -112,8 +112,7 @@ impl<'a> FieldSink<'_, 'a> {
         I: IntoIterator<Item = FieldValue<'a>>,
         I::IntoIter: ExactSizeIterator,
     {
-        // MIGRATION: in the arena once `FieldValue::List` is a slice.
-        FieldValue::List(items.into_iter().collect())
+        FieldValue::List(self.bump.alloc_slice_fill_iter(items))
     }
 
     /// A list value that grows in the arena, for items whose number is not
@@ -121,8 +120,7 @@ impl<'a> FieldSink<'_, 'a> {
     #[inline]
     pub fn list_builder(&self) -> ListBuilder<'a> {
         ListBuilder {
-            items: Vec::new(),
-            _arena: std::marker::PhantomData,
+            items: bumpalo::collections::Vec::new_in(self.bump),
         }
     }
 }
@@ -130,9 +128,7 @@ impl<'a> FieldSink<'_, 'a> {
 /// A list value under construction in a packet's arena
 /// ([`FieldSink::list_builder`]).
 pub struct ListBuilder<'a> {
-    // MIGRATION: an arena vector once `FieldValue::List` is a slice.
-    items: Vec<FieldValue<'a>>,
-    _arena: std::marker::PhantomData<&'a Bump>,
+    items: bumpalo::collections::Vec<'a, FieldValue<'a>>,
 }
 
 impl<'a> ListBuilder<'a> {
@@ -157,7 +153,7 @@ impl<'a> ListBuilder<'a> {
     /// The list.
     #[inline]
     pub fn finish(self) -> FieldValue<'a> {
-        FieldValue::List(self.items)
+        FieldValue::List(self.items.into_bump_slice())
     }
 }
 

@@ -35,6 +35,7 @@ mod parser;
 pub mod parsers;
 mod reassembly;
 mod registry;
+mod value;
 
 pub use connection::{Connection, ConnectionKey, ConnectionState, ConnectionTracker, TcpFlags};
 pub use context::{Direction, ParsedMessage, StreamContext, StreamParseResult};
@@ -46,6 +47,7 @@ pub use parsers::{
 };
 pub use reassembly::{Segment, SequenceGap, StreamBuffer, StreamKey, StreamStats, TcpReassembler};
 pub use registry::StreamRegistry;
+pub use value::OwnedFieldValue;
 
 #[cfg(test)]
 mod tests {

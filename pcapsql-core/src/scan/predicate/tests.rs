@@ -162,10 +162,7 @@ fn values_of_another_type_keep_the_row() {
     assert!(!compiled(tcp, "dst_port", CmpOp::Eq, 0)
         .unwrap()
         .keeps(of(&row)));
-    let row = layer(vec![(
-        "dst_port",
-        FieldValue::OwnedString(compact_str::CompactString::new("x")),
-    )]);
+    let row = layer(vec![("dst_port", FieldValue::Str("x"))]);
     assert!(!compiled(tcp, "dst_port", CmpOp::Eq, "y")
         .unwrap()
         .keeps(of(&row)));

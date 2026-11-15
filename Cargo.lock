@@ -3202,7 +3202,6 @@ dependencies = [
  "clap_complete",
  "clap_mangen",
  "comfy-table",
- "compact_str",
  "criterion",
  "datafusion",
  "dirs",

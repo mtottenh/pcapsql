@@ -36,9 +36,9 @@ use crate::{FieldHint, FieldValue, LayerRef};
 /// | `I64` | `Int64`, `Int8`, `UInt8/16/32`; `UInt64` if it fits | NULL |
 /// | `F64` | `Float64`; any integer | NULL |
 /// | `Bool` | `Bool` | NULL |
-/// | `Str` | `Str`, `OwnedString`; addresses, numbers and booleans as text | NULL |
-/// | `Bin` | `Bytes`, `OwnedBytes` | NULL |
-/// | `Fixed(n)` | `Bytes`/`OwnedBytes` of length `n`; a MAC address (`n` = 6); an IPv6 address (`n` = 16) | NULL, a wrong length included |
+/// | `Str` | `Str`; addresses, numbers and booleans as text | NULL |
+/// | `Bin` | `Bytes` | NULL |
+/// | `Fixed(n)` | `Bytes` of length `n`; a MAC address (`n` = 6); an IPv6 address (`n` = 16) | NULL, a wrong length included |
 /// | `TsMicros`, `TsNanos` | `Int64`; `UInt64` if it fits | NULL |
 /// | `ListU16` | a list; items `UInt16`, `UInt8` | a non-list is a NULL cell, any other item a NULL item |
 /// | `ListU32` | a list; items `UInt32`, `UInt8/16`, an IPv4 address | same |
@@ -163,7 +163,6 @@ fn coerce<S: RowSink>(sink: &mut S, col: OutCol, kind: ColKind, value: &FieldVal
         },
         ColKind::Str => match value {
             FieldValue::Str(v) => sink.str(col, v),
-            FieldValue::OwnedString(v) => sink.str(col, v.as_str()),
             other => {
                 if !with_text(other, |text| sink.str(col, text)) {
                     sink.null(col);
@@ -172,7 +171,6 @@ fn coerce<S: RowSink>(sink: &mut S, col: OutCol, kind: ColKind, value: &FieldVal
         },
         ColKind::Bin => match value {
             FieldValue::Bytes(v) => sink.bytes(col, v),
-            FieldValue::OwnedBytes(v) => sink.bytes(col, v.as_slice()),
             _ => sink.null(col),
         },
         ColKind::Fixed(n) => {
@@ -196,7 +194,7 @@ fn coerce<S: RowSink>(sink: &mut S, col: OutCol, kind: ColKind, value: &FieldVal
         ColKind::ListU16 => match value {
             FieldValue::List(items) => {
                 let mut list = sink.list(col);
-                for item in items {
+                for item in items.iter() {
                     match item {
                         FieldValue::UInt16(v) => list.u16(*v),
                         FieldValue::UInt8(v) => list.u16(u16::from(*v)),
@@ -210,7 +208,7 @@ fn coerce<S: RowSink>(sink: &mut S, col: OutCol, kind: ColKind, value: &FieldVal
         ColKind::ListU32 => match value {
             FieldValue::List(items) => {
                 let mut list = sink.list(col);
-                for item in items {
+                for item in items.iter() {
                     match item {
                         FieldValue::UInt32(v) => list.u32(*v),
                         FieldValue::UInt16(v) => list.u32(u32::from(*v)),
@@ -226,10 +224,9 @@ fn coerce<S: RowSink>(sink: &mut S, col: OutCol, kind: ColKind, value: &FieldVal
         ColKind::ListStr => match value {
             FieldValue::List(items) => {
                 let mut list = sink.list(col);
-                for item in items {
+                for item in items.iter() {
                     match item {
                         FieldValue::Str(v) => list.str(v),
-                        FieldValue::OwnedString(v) => list.str(v.as_str()),
                         other => {
                             if !with_text(other, |text| list.str(text)) {
                                 list.null();
@@ -244,7 +241,7 @@ fn coerce<S: RowSink>(sink: &mut S, col: OutCol, kind: ColKind, value: &FieldVal
         ColKind::ListFixed(n) => match value {
             FieldValue::List(items) => {
                 let mut list = sink.list(col);
-                for item in items {
+                for item in items.iter() {
                     let mut octets = [0u8; 16];
                     match fixed_bytes(item, usize::from(n), &mut octets) {
                         Some(v) => list.bytes(v),
@@ -271,7 +268,6 @@ fn fixed_bytes<'v>(
     let bytes: &[u8] = match value {
         FieldValue::MacAddr(mac) => mac.as_slice(),
         FieldValue::Bytes(v) => v,
-        FieldValue::OwnedBytes(v) => v.as_slice(),
         FieldValue::IpAddr(IpAddr::V6(v6)) => {
             *octets = v6.octets();
             octets.as_slice()
@@ -324,7 +320,6 @@ fn with_display(text: impl fmt::Display, store: impl FnOnce(&str)) {
 fn with_text(value: &FieldValue<'_>, store: impl FnOnce(&str)) -> bool {
     match value {
         FieldValue::Str(v) => store(v),
-        FieldValue::OwnedString(v) => store(v.as_str()),
         FieldValue::IpAddr(IpAddr::V4(v4)) => {
             store(ipv4_text(u32::from(*v4), &mut [0; IPV4_TEXT_LEN]));
         }
@@ -338,10 +333,7 @@ fn with_text(value: &FieldValue<'_>, store: impl FnOnce(&str)) -> bool {
         FieldValue::Int64(v) => with_display(v, store),
         FieldValue::Float64(v) => with_display(v, store),
         FieldValue::Bool(v) => store(if *v { "true" } else { "false" }),
-        FieldValue::Null
-        | FieldValue::Bytes(_)
-        | FieldValue::OwnedBytes(_)
-        | FieldValue::List(_) => return false,
+        FieldValue::Null | FieldValue::Bytes(_) | FieldValue::List(_) => return false,
     }
     true
 }
@@ -675,7 +667,6 @@ mod tests {
         let s = |text: &str| C::Str(text.to_string());
         assert_eq!(cell(ColKind::Str, &V::Str("abc")), s("abc"));
         assert_eq!(cell(ColKind::Str, &V::Str("")), s(""));
-        assert_eq!(cell(ColKind::Str, &V::OwnedString("xyz".into())), s("xyz"));
         assert_eq!(cell(ColKind::Str, &v4()), s("192.0.2.1"));
         assert_eq!(cell(ColKind::Str, &v6()), s("2001:db8::1"));
         assert_eq!(cell(ColKind::Str, &MAC), s("02:00:00:00:00:01"));
@@ -687,7 +678,7 @@ mod tests {
         assert_eq!(cell(ColKind::Str, &V::Float64(1.5)), s("1.5"));
         assert_eq!(cell(ColKind::Str, &V::Bool(false)), s("false"));
         assert_eq!(cell(ColKind::Str, &V::Bytes(b"ab")), C::Null);
-        assert_eq!(cell(ColKind::Str, &V::List(vec![])), C::Null);
+        assert_eq!(cell(ColKind::Str, &V::List(&[])), C::Null);
         assert_eq!(cell(ColKind::Str, &V::Null), C::Null);
     }
 
@@ -724,7 +715,7 @@ mod tests {
             let expected = value.as_string().unwrap();
             assert_eq!(cell(ColKind::Str, value), C::Str(expected.clone()));
             assert_eq!(
-                cell(ColKind::ListStr, &V::List(vec![value.clone()])),
+                cell(ColKind::ListStr, &V::List(&[*value])),
                 C::List(vec![C::Str(expected)])
             );
         }
@@ -735,10 +726,6 @@ mod tests {
         use FieldValue as V;
         assert_eq!(cell(ColKind::Bin, &V::Bytes(&[1, 2])), C::Bytes(vec![1, 2]));
         assert_eq!(cell(ColKind::Bin, &V::Bytes(&[])), C::Bytes(vec![]));
-        assert_eq!(
-            cell(ColKind::Bin, &V::OwnedBytes(vec![3])),
-            C::Bytes(vec![3])
-        );
         assert_eq!(cell(ColKind::Bin, &MAC), C::Null);
         assert_eq!(cell(ColKind::Bin, &V::Str("ab")), C::Null);
     }
@@ -753,10 +740,6 @@ mod tests {
             cell(ColKind::Fixed(6), &V::Bytes(&[1, 2, 3, 4, 5, 6])),
             C::Bytes(vec![1, 2, 3, 4, 5, 6])
         );
-        assert_eq!(
-            cell(ColKind::Fixed(6), &V::OwnedBytes(vec![9; 6])),
-            C::Bytes(vec![9; 6])
-        );
         assert_eq!(cell(ColKind::Fixed(6), &V::Bytes(&[1, 2, 3])), C::Null);
         assert_eq!(cell(ColKind::Fixed(6), &V::Bytes(&[0; 16])), C::Null);
         assert_eq!(cell(ColKind::Fixed(6), &v6()), C::Null);
@@ -767,10 +750,7 @@ mod tests {
         octets[15] = 1;
         assert_eq!(cell(ColKind::Fixed(16), &v6()), C::Bytes(octets));
         assert_eq!(cell(ColKind::Fixed(16), &MAC), C::Null);
-        assert_eq!(
-            cell(ColKind::Fixed(16), &V::OwnedBytes(vec![1; 6])),
-            C::Null
-        );
+        assert_eq!(cell(ColKind::Fixed(16), &V::Bytes(&[1; 6])), C::Null);
         assert_eq!(cell(ColKind::Fixed(16), &V::Bytes(&[])), C::Null);
     }
 
@@ -795,20 +775,21 @@ mod tests {
     #[test]
     fn list_columns_keep_items_and_nulls() {
         use FieldValue as V;
-        let items = V::List(vec![
+        let items = [
             V::UInt16(7),
             V::UInt8(3),
             V::UInt32(9),
             V::Str("a.example"),
-            V::OwnedString("b".into()),
+            V::Str("b"),
             V::Bytes(&[0xAA; 16]),
-            V::OwnedBytes(vec![1, 2]),
+            V::Bytes(&[1, 2]),
             v4(),
             v6(),
             MAC,
             V::Bool(true),
             V::Null,
-        ]);
+        ];
+        let items = V::List(&items);
         let s = |text: &str| C::Str(text.to_string());
         let n = C::Null;
         assert_eq!(
@@ -878,7 +859,7 @@ mod tests {
             ColKind::ListStr,
             ColKind::ListFixed(16),
         ] {
-            assert_eq!(cell(kind, &V::List(vec![])), C::List(vec![]));
+            assert_eq!(cell(kind, &V::List(&[])), C::List(vec![]));
             assert_eq!(cell(kind, &V::Null), C::Null);
             assert_eq!(cell(kind, &V::UInt16(1)), C::Null);
         }
