@@ -8,18 +8,20 @@
 //! ```
 //!
 //! All of them are one implementation, [`PcapScan`], which holds no scan logic: which columns a
-//! table has, what a cell holds, which rows a frame adds and where a chunk ends are decided by
-//! `pcapsql_core::scan`, the layer the DataFusion frontend runs too. What is here is the DuckDB
-//! side of that layer:
+//! table has, what a cell holds, which rows a frame adds, where a chunk ends and where a capture
+//! can be split are decided by `pcapsql_core::scan`, the layer the DataFusion frontend runs too.
+//! What is here is the DuckDB side of that layer:
 //!
 //! | Callback | Work | State |
 //! |---|---|---|
 //! | `bind` | Resolve the table, declare its columns, open the file through DuckDB's file system and probe it, estimate the row count | [`Bound`]: path, table, file size, `strict` |
-//! | `init_global_state` | Map the projected columns to a `ScanPlan` and compile it | [`Shared`]: the compiled plan, the progress counter, the claim on the file |
-//! | `max_threads` | 1 | |
-//! | `init_local_state` | Claim the file, open it, build the reader and the `PartitionScan` | [`Worker`]: the scan, which owns the reader and through it the open file |
-//! | `exec` | `PartitionScan::step` into a [`ChunkWriter`] over the output chunk until the chunk must be returned | |
-//! | `progress` | Bytes read from the file over its size | |
+//! | `init_global_state` | Map the projected columns to a `ScanPlan` and compile it; decide the partitions, which for a capture worth splitting takes one pass over it | [`Shared`]: the compiled plan, the partition queue and the index it was cut from, the progress counter |
+//! | `max_threads` | The number of partitions | |
+//! | `init_local_state` | Number the worker; no file yet | [`Worker`] |
+//! | `claim_batch` | Claim the next partition, open the file at its offset, build the reader and the `PartitionScan` | [`Scanning`], in the worker: the scan, which owns the reader and through it the open file |
+//! | `exec` | `PartitionScan::step` into a [`ChunkWriter`] over the output chunk until the chunk must be returned; no rows at the end of the partition | |
+//! | `partition_data` | The ordinal of the worker's partition, as the batch index | |
+//! | `progress` | Bytes read from the file by all workers over its size | |
 //!
 //! # Arguments
 //!
@@ -28,26 +30,68 @@
 //! refused. Everything else is a named parameter: `strict` on every function, and `protocol` on
 //! `read_pcap`.
 //!
-//! # One thread
+//! # Partitions
 //!
-//! A scan runs on one thread, so its rows come back in capture order. The file is claimed
-//! through [`Shared::claimed`] by the worker that scans it, so that even if DuckDB created a
-//! second worker the capture would be read once.
+//! A scan reads a capture as one or more partitions: byte ranges that start at a record and
+//! together cover every record once, in capture order. [`PcapScan::layout`] decides them when
+//! the scan starts:
+//!
+//! - One partition, the whole capture read from its first byte, when the capture is compressed
+//!   (a compressed stream has no place to start reading but its beginning), when DuckDB's file
+//!   system reads it over a network (the pass that finds the record boundaries would read all
+//!   of it first), when it is smaller than `pcapsql_parallel_min_file_size`, when DuckDB has one
+//!   thread, or when `pcapsql_parallel_scan` is off. This is the scan as it was before there
+//!   were partitions.
+//! - Otherwise as many partitions as DuckDB has threads (`partition_target`), cut at the
+//!   checkpoints of a `BoundaryIndex` that one pass over the record headers of the capture
+//!   builds (`build_boundary_index`). If that pass fails (a damaged record), the capture is read
+//!   as one partition and the scan reports the damage where it reads it, after the rows before
+//!   it, as it always did.
+//!
+//! The partitions are in a `PartitionQueue`. A worker claims the next one in `claim_batch`,
+//! scans it to its end and claims again; DuckDB runs up to as many workers as there are
+//! partitions.
+//!
+//! # Row order
+//!
+//! A scan returns its rows in capture order without an `ORDER BY`, on any number of threads.
+//! The rows of one partition are produced in order by the one worker that scans it, and
+//! `partition_data` tells DuckDB which partition the rows of a chunk are from: the partition's
+//! ordinal is the chunk's batch index, and DuckDB puts the chunks of several workers in
+//! batch-index order wherever the order of the rows matters (a plain `SELECT`, `LIMIT`,
+//! `CREATE TABLE AS`, `INSERT`).
+//!
+//! DuckDB wants batch indices that never decrease on one worker and that no two workers share
+//! (it scrambles the result or fails with an INTERNAL error otherwise). Both hold by
+//! construction: the queue hands out every ordinal once, in ascending order, so no two workers
+//! hold the same one and each worker's next ordinal is larger than its last; and a worker
+//! reports the ordinal of the partition it holds, which is the partition every row of the chunk
+//! it just returned is from, because a chunk is never continued across a claim.
 //!
 //! # Errors and truncation
 //!
 //! A read error or a malformed record fails the query; `exec` never takes an error for the end
 //! of the data. A read error is also remembered by the file reader ([`Tracked`]) and reported
-//! again at the end of the scan, in case a layer in between took it for the end of the file.
+//! again at the end of the partition, in case a layer in between took it for the end of the
+//! file. The first worker that fails sets [`Shared::failed`]; the others stop at their next
+//! call instead of reading on for a query that has failed.
 //!
 //! A capture that ends inside a record (a capture cut short, or one still being written) is
-//! detected at the end of the scan: the reader was handed more bytes than the complete records
-//! it consumed. The rows of the complete records are returned and a warning goes to DuckDB's
-//! log; with `strict := true` the query fails instead.
+//! reported by the packet reader that reads to the end of the file (`PacketReader::truncated`),
+//! which under a partitioned scan is the reader of the last partition. The rows of the complete
+//! records are returned and a warning goes to DuckDB's log, once; with `strict := true` the
+//! query fails instead.
+//!
+//! A scan that is not run to the end of the capture (a `LIMIT`) may not get to the broken tail.
+//! A scan of one partition then reports nothing, strict or not. With several partitions the
+//! worker at the end of the capture gets there whenever it does, before or after the others
+//! have filled the `LIMIT`: the warning may or may not be logged, and so that a strict scan
+//! does not fail by chance, a strict scan of several partitions reads the tail of the capture
+//! when it starts and fails there, whatever the query goes on to read.
 
 use std::io::{self, Read};
 use std::num::NonZeroUsize;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use duckdb_neo::{
@@ -58,20 +102,30 @@ use duckdb_neo::{
     extension::Extension,
     log::{Log, LogLevel},
     signature::{FunctionParameter, FunctionParameterKind, SignatureBuilder},
-    table_function::{BindFunctionHandle, ExecColumnInfo, InitColumnData, TableFunctionCallbacks},
+    table_function::{
+        BindFunctionHandle, ExecColumnInfo, InitColumnData, OrderPreservation, PartitionData,
+        TableClaimBatchCallbacks, TableFunctionCallbacks, TablePartitioningCallbacks,
+    },
     types::Any,
     Error, Result,
 };
 use pcapsql_core::io::{
-    Compression, DecompressReader, PacketReader, ReadPacketReader, StreamHeader,
+    build_boundary_index, BoundaryIndex, Compression, DecompressReader, PacketPosition,
+    PacketRange, PacketReader, ReadPacketReader, SeekCost, StreamHeader,
 };
 use pcapsql_core::scan::{
-    Catalog, ColId, CompiledScan, OutColumn, PartitionScan, ScanPlan, Step, TableDef, TableId,
-    TableScan,
+    partition_target, plan_ranges, Catalog, ColId, CompiledScan, FramePredicate, OutColumn,
+    PartitionPolicy, PartitionQueue, PartitionScan, ScanPlan, Step, TableDef, TableId, TableScan,
 };
 use pcapsql_core::{default_registry, ProtocolRegistry};
 
-use super::{fs::DuckFile, guard, registry, types, writer::ChunkWriter};
+use super::{
+    fs::{self, DuckFile},
+    guard, registry,
+    settings::{self, ScanSettings},
+    types,
+    writer::ChunkWriter,
+};
 
 /// The table `read_pcap` reads when `protocol` is not given.
 const DEFAULT_PROTOCOL: &str = "frames";
@@ -85,9 +139,9 @@ const PACKETS_PER_STEP: usize = 1024;
 /// Packets after which `exec` returns a chunk that holds rows but is not full.
 ///
 /// A table with few rows per packet (`read_dns` over a capture that is mostly something else)
-/// would otherwise read to the end of the capture before the first row reaches DuckDB, and a
-/// `LIMIT` could not stop the scan early. A chunk without rows cannot be returned: DuckDB takes
-/// it for the end of the scan.
+/// would otherwise read to the end of its partition before the first row reaches DuckDB, and a
+/// `LIMIT` could not stop the scan early. A chunk without rows cannot be returned for that: it
+/// ends the partition.
 const PACKETS_PER_CHUNK: usize = 8 * PACKETS_PER_STEP;
 
 /// Bytes of capture file per frame, for the row estimate DuckDB's optimizer is given at bind:
@@ -122,6 +176,8 @@ fn builder(name: &str, table: Option<TableId>) -> Builder {
     guard::table_function(name, scan.signature(), scan)
         .with_projection_pushdown(true)
         .with_progress()
+        .with_claim_batch()
+        .with_partitioning()
 }
 
 /// A scan function: `read_<table>` when the table is fixed, `read_pcap` when the `protocol`
@@ -254,6 +310,29 @@ struct Bound {
     strict: bool,
 }
 
+/// The partitions of one scan: what [`PcapScan::layout`] decided.
+#[derive(Debug)]
+struct Layout {
+    /// The byte ranges to scan, in capture order.
+    ranges: Vec<PacketRange>,
+    /// The index `ranges` were cut from. `None`: `ranges` is the whole capture, read from its
+    /// first byte.
+    index: Option<BoundaryIndex>,
+    /// The decision in words, for the log.
+    note: String,
+}
+
+impl Layout {
+    /// The whole capture as one partition, because of `why`.
+    fn sequential(why: impl std::fmt::Display) -> Self {
+        Self {
+            ranges: vec![PacketRange::whole()],
+            index: None,
+            note: format!("1 ({why})"),
+        }
+    }
+}
+
 /// What the workers of one scan share.
 #[derive(Debug)]
 struct Shared {
@@ -261,23 +340,48 @@ struct Shared {
     /// The columns of the output chunk, in its order; empty when the query needs only the
     /// number of rows.
     columns: Box<[OutColumn]>,
-    /// Set by the worker that scans the file.
-    claimed: AtomicBool,
-    /// Bytes read from the file so far, for `progress`.
+    /// The partitions. Each is claimed by one worker.
+    queue: PartitionQueue,
+    /// The index the partitions were cut from; `None` when the one partition is the whole
+    /// capture (see [`Layout::index`]).
+    index: Option<BoundaryIndex>,
+    /// Bytes read from the file so far by all workers, for `progress`.
     file_bytes: Arc<AtomicU64>,
+    /// Workers created so far: the next worker's number.
+    workers: AtomicUsize,
+    /// Set by the first worker whose scan fails. The others stop.
+    failed: AtomicBool,
+    /// Set by the worker that reports a truncated capture, so that it is reported once.
+    truncation_reported: AtomicBool,
 }
 
-/// The state of the worker that scans the file.
+impl Shared {
+    /// Note that the scan has failed, and pass the error on.
+    fn fail(&self, error: Error) -> Error {
+        self.failed.store(true, Ordering::Release);
+        error
+    }
+}
+
+/// A partition being scanned by a worker.
 struct Scanning {
     scan: PartitionScan<ReadPacketReader<Tracked>>,
-    tally: Arc<Tally>,
+    /// The first read error of the reader stack under `scan`.
+    fault: Fault,
+    /// The number of the partition's first frame.
+    first_frame: u64,
 }
 
 /// One worker of a scan.
 struct Worker {
-    /// `None` for a worker that has nothing to read: another one claimed the file, or the scan
-    /// has reached its end.
+    /// The worker's number in its scan, for the log.
+    id: usize,
+    /// `None` between partitions: before the first claim, and once a partition is scanned to
+    /// its end.
     scanning: Option<Scanning>,
+    /// The ordinal of the partition last claimed: the batch index of the rows this worker
+    /// returns until it claims again.
+    ordinal: Option<usize>,
 }
 
 impl TableFunctionCallbacks for PcapScan {
@@ -308,6 +412,11 @@ impl TableFunctionCallbacks for PcapScan {
         let file_size = file.size()?;
         let header = self.probe(&mut file, &path)?;
 
+        // The rows come back in capture order, which `partition_data` lets DuckDB keep on
+        // several threads.
+        bind_handle.set_order(OrderPreservation::Insertion)?;
+        // An estimate: the frames are only counted when the scan starts, and then only for a
+        // capture that is split (see `layout`).
         bind_handle.set_cardinality(estimated_rows(file_size, &header), false)?;
         Ok(Bound {
             path,
@@ -339,19 +448,24 @@ impl TableFunctionCallbacks for PcapScan {
             message: format!("{}: {error}", self.name),
         })?;
         let columns = plan.outputs()[0].columns.clone();
+        let layout = self.layout(context, bound)?;
         // What the scan will do, for whoever asks DuckDB's log (`enable_logging`) why a query
         // is slow. As for the truncation warning, the log is not worth failing a query for.
         let _ = Log::log_on_context(
             context,
             LogLevel::Debug,
-            &self.describe(bound, &plan),
+            &self.describe(bound, &plan, &layout),
             LOG_TYPE,
         );
         Ok(Some(Shared {
             plan: Arc::new(plan),
             columns,
-            claimed: AtomicBool::new(false),
+            queue: PartitionQueue::new(layout.ranges),
+            index: layout.index,
             file_bytes: Arc::new(AtomicU64::new(0)),
+            workers: AtomicUsize::new(0),
+            failed: AtomicBool::new(false),
+            truncation_reported: AtomicBool::new(false),
         }))
     }
 
@@ -359,51 +473,26 @@ impl TableFunctionCallbacks for PcapScan {
         &self,
         _context: &Context,
         _bound: &Bound,
-        _shared: Option<&Shared>,
+        shared: Option<&Shared>,
         _column_data: InitColumnData<'_>,
     ) -> Result<Option<NonZeroUsize>> {
-        Ok(NonZeroUsize::new(1))
+        // A worker per partition at most; DuckDB runs no more of them than it has threads.
+        let partitions = shared.map_or(1, |shared| shared.queue.len());
+        Ok(NonZeroUsize::new(partitions.max(1)))
     }
 
     fn init_local_state(
         &self,
-        context: &Context,
-        bound: &Bound,
+        _context: &Context,
+        _bound: &Bound,
         shared: Option<&Shared>,
         _column_data: InitColumnData<'_>,
     ) -> Result<Option<Worker>> {
         let shared = shared.expect("init_global_state always returns a state");
-        if shared.claimed.swap(true, Ordering::AcqRel) {
-            return Ok(Some(Worker { scanning: None }));
-        }
-
-        let mut file = DuckFile::open(context, &bound.path)?;
-        // Probed again: the header that counts is that of the file as it is read.
-        let header = self.probe(&mut file, &bound.path)?;
-        file.seek(0)?;
-
-        let tally = Arc::new(Tally::default());
-        let counted = Counted {
-            file,
-            bytes: shared.file_bytes.clone(),
-        };
-        // The decompressor is ours rather than the reader's, so that the bytes the capture
-        // parser is handed can be counted (`Tracked`).
-        let decoded = DecompressReader::new(counted, header.compression)
-            .map_err(|error| self.read_error(bound, 0, &error))?;
-        let tracked = Tracked {
-            inner: decoded,
-            tally: tally.clone(),
-        };
-        let plain = StreamHeader {
-            compression: Compression::None,
-            ..header
-        };
-        let reader = ReadPacketReader::sequential(tracked, &plain, Vec::new())
-            .map_err(|error| self.read_error(bound, 0, &error))?;
-        let scan = PartitionScan::new(reader, shared.plan.clone(), protocols().clone());
         Ok(Some(Worker {
-            scanning: Some(Scanning { scan, tally }),
+            id: shared.workers.fetch_add(1, Ordering::Relaxed),
+            scanning: None,
+            ordinal: None,
         }))
     }
 
@@ -420,6 +509,10 @@ impl TableFunctionCallbacks for PcapScan {
         let worker = worker.expect("init_local_state always returns a state");
         let mut writer = ChunkWriter::new(output, &shared.columns)?;
 
+        if shared.failed.load(Ordering::Acquire) {
+            // Another worker's scan failed, and with it the query: nothing more is wanted.
+            worker.scanning = None;
+        }
         let mut packets_before = None;
         while let Some(scanning) = worker.scanning.as_mut() {
             let scan = &mut scanning.scan;
@@ -428,7 +521,7 @@ impl TableFunctionCallbacks for PcapScan {
                 .step(std::slice::from_mut(&mut writer), PACKETS_PER_STEP)
                 .map_err(|error| {
                     let frame = scan.reader().position().frame_number;
-                    self.read_error(bound, frame, &error)
+                    shared.fail(self.read_error(bound, frame, &error))
                 })?;
             match step {
                 // The chunk is full: it goes back to DuckDB before the scan is stepped again.
@@ -441,15 +534,18 @@ impl TableFunctionCallbacks for PcapScan {
                 }
                 Step::End => {
                     let finished = worker.scanning.take().expect("the scan was just stepped");
-                    self.end_of_capture(context, bound, &finished)?;
+                    self.end_of_partition(context, bound, shared, worker, &finished)
+                        .map_err(|error| shared.fail(error))?;
                 }
                 // Nothing more is wanted (no plan built here has a row cap, so this does not
-                // happen): the rest of the capture was not read, and nothing is known about it.
+                // happen): the rest of the partition was not read, and nothing is known about
+                // it.
                 Step::Done => worker.scanning = None,
             }
         }
-        // A chunk without rows ends the scan, which is the case exactly when nothing is left
-        // to read: a step only returns without rows at the end of the capture.
+        // A chunk without rows ends the partition, which is the case exactly when nothing is
+        // left of it to read: a step only returns without rows at the end of its partition.
+        // DuckDB then has the worker claim the next one.
         writer.finish()?;
         Ok(())
     }
@@ -466,8 +562,65 @@ impl TableFunctionCallbacks for PcapScan {
         if bound.file_size == 0 {
             return Ok(None);
         }
+        // Every worker reads ahead of the packets it has parsed, so the sum can pass the size.
         let read = shared.file_bytes.load(Ordering::Relaxed);
         Ok(Some((read as f64 / bound.file_size as f64).min(1.0)))
+    }
+}
+
+impl TableClaimBatchCallbacks for PcapScan {
+    /// Claim the next partition for this worker and open it. DuckDB calls this before the
+    /// worker's first `exec` and after every `exec` that returned no rows.
+    fn claim_batch(
+        &self,
+        context: &Context,
+        bound: &Bound,
+        worker: Option<&mut Worker>,
+        shared: Option<&Shared>,
+    ) -> Result<bool> {
+        let shared = shared.expect("init_global_state always returns a state");
+        let worker = worker.expect("init_local_state always returns a state");
+        // Whatever the worker held is finished: `exec` returns no rows only then.
+        worker.scanning = None;
+        if shared.failed.load(Ordering::Acquire) {
+            return Ok(false);
+        }
+        let Some((ordinal, range)) = shared.queue.claim() else {
+            return Ok(false);
+        };
+        let scanning = self
+            .open(context, bound, shared, range)
+            .map_err(|error| shared.fail(error))?;
+        worker.scanning = Some(scanning);
+        // Larger than the worker's last ordinal, and no other worker's: see `PartitionQueue`.
+        worker.ordinal = Some(ordinal);
+        Ok(true)
+    }
+}
+
+impl TablePartitioningCallbacks for PcapScan {
+    /// The batch index of the chunk `exec` just returned on this worker: the ordinal of the
+    /// partition its rows are from (see the module documentation on row order).
+    fn partition_data(
+        &self,
+        _context: &Context,
+        _bound: &Bound,
+        worker: Option<&mut Worker>,
+        _shared: Option<&Shared>,
+        _partition_data: PartitionData<'_>,
+    ) -> Result<usize> {
+        // DuckDB asks after a chunk that has rows, and rows only come out of a claimed
+        // partition. Should it ever ask earlier, an error is the answer: an index made up here
+        // could be another worker's.
+        worker
+            .and_then(|worker| worker.ordinal)
+            .ok_or_else(|| Error {
+                code: DuckDBError::QueryExecutor,
+                message: format!(
+                    "{}: DuckDB asked where rows belong before the worker claimed a partition",
+                    self.name
+                ),
+            })
     }
 }
 
@@ -498,8 +651,158 @@ impl PcapScan {
         })
     }
 
+    /// Decide the partitions of a scan (see the module documentation).
+    fn layout(&self, context: &Context, bound: &Bound) -> Result<Layout> {
+        let settings = ScanSettings::read(context)?;
+        if !settings.parallel {
+            return Ok(Layout::sequential(format_args!(
+                "{} is off",
+                settings::PARALLEL_SCAN
+            )));
+        }
+        if settings.threads == 1 {
+            return Ok(Layout::sequential("DuckDB has one thread"));
+        }
+        if fs::is_remote(context, &bound.path)? {
+            return Ok(Layout::sequential("a remote file is not indexed"));
+        }
+        // The file as it is now, which is not that of `bind` when a prepared statement is run
+        // again.
+        let mut file = DuckFile::open(context, &bound.path)?;
+        let header = self.probe(&mut file, &bound.path)?;
+        if header.compression.is_compressed() {
+            return Ok(Layout::sequential("a compressed capture cannot be split"));
+        }
+        let size = file.size()?;
+        let policy = PartitionPolicy {
+            cheap_min_bytes: settings.min_file_size,
+            ..PartitionPolicy::default()
+        };
+        let want = partition_target(SeekCost::Cheap, size, None, settings.threads, &policy);
+        if want <= 1 {
+            return Ok(Layout::sequential(format_args!(
+                "{size} bytes is less than {} = {}",
+                settings::PARALLEL_MIN_FILE_SIZE,
+                settings.min_file_size
+            )));
+        }
+
+        // One pass over the record headers. Nothing is kept of the index beyond this scan, so
+        // what would tell a later reader that the file has changed is left out.
+        file.seek(0)?;
+        let built = build_boundary_index(
+            &mut file,
+            header.format,
+            settings.index_stride,
+            size,
+            None,
+            0,
+        );
+        let index = match built {
+            Ok(index) => index,
+            // A record the pass cannot get past. The scan cannot either, but it returns the
+            // rows before it first and then says where it is.
+            Err(error) => {
+                return Ok(Layout::sequential(format_args!(
+                    "the index pass failed: {error}"
+                )))
+            }
+        };
+        let ranges = plan_ranges(Some(&index), want, &FramePredicate::all());
+        if ranges.len() <= 1 {
+            return Ok(Layout::sequential(format_args!(
+                "{} frames give no place to split at, with a checkpoint every {} frames",
+                index.packet_count, index.stride
+            )));
+        }
+        if bound.strict {
+            // Workers do not wait for each other, so the one at the end of the capture could
+            // find a broken tail before or after a `LIMIT` is filled by the others. Whether a
+            // strict scan fails must not depend on that: the tail is looked at now.
+            if let Some(last_frame) = self.truncated_tail(&mut file, &index) {
+                return Err(self.truncation_error(bound, last_frame));
+            }
+        }
+        Ok(Layout {
+            note: format!(
+                "{} (of {} frames, cut at checkpoints {} frames apart)",
+                ranges.len(),
+                index.packet_count,
+                index.stride
+            ),
+            ranges,
+            index: Some(index),
+        })
+    }
+
+    /// Whether the capture ends inside a record: the number of its last complete frame if so.
+    /// Reads the capture from the last checkpoint of `index` to its end.
+    fn truncated_tail(&self, file: &mut DuckFile, index: &BoundaryIndex) -> Option<u64> {
+        let last = index.checkpoints.last()?;
+        let tail = PacketRange {
+            start: PacketPosition {
+                byte_offset: last.byte_offset,
+                frame_number: last.frame_number,
+            },
+            end: None,
+        };
+        // A tail that cannot be read is the scan's to report, where it gets to it.
+        file.seek(tail.start.byte_offset).ok()?;
+        let mut reader = ReadPacketReader::at(file, index.format, index, &tail).ok()?;
+        while reader.process_packets(PACKETS_PER_STEP, |_| Ok(())).ok()? > 0 {}
+        reader.truncated().then(|| reader.position().frame_number)
+    }
+
+    /// Open the capture for the partition `range` and build its scan.
+    fn open(
+        &self,
+        context: &Context,
+        bound: &Bound,
+        shared: &Shared,
+        range: &PacketRange,
+    ) -> Result<Scanning> {
+        let fault = Fault::default();
+        let first_frame = range.start.frame_number;
+        let failed = |error: &dyn std::fmt::Display| {
+            self.read_error(bound, first_frame.saturating_sub(1), error)
+        };
+        let reader = match &shared.index {
+            // The whole capture, from its first byte.
+            None => {
+                let mut file = DuckFile::open(context, &bound.path)?;
+                // Probed again: the header that counts is that of the file as it is read.
+                let header = self.probe(&mut file, &bound.path)?;
+                file.seek(0)?;
+                // The decompressor is ours rather than the reader's, so that a read error
+                // can be remembered between the two (`Tracked`).
+                let tracked = Tracked::new(file, header.compression, shared, &fault)
+                    .map_err(|error| failed(&error))?;
+                let plain = StreamHeader {
+                    compression: Compression::None,
+                    ..header
+                };
+                ReadPacketReader::sequential(tracked, &plain, Vec::new())
+            }
+            // A range of an uncompressed capture: the file is read from the range's first
+            // record, and the reader is told by the index what the capture's header said.
+            Some(index) => {
+                let file = DuckFile::open_at(context, &bound.path, range.start.byte_offset)?;
+                let tracked = Tracked::new(file, Compression::None, shared, &fault)
+                    .map_err(|error| failed(&error))?;
+                ReadPacketReader::at(tracked, index.format, index, range)
+            }
+        }
+        .map_err(|error| failed(&error))?;
+        let scan = PartitionScan::new(reader, shared.plan.clone(), protocols().clone());
+        Ok(Scanning {
+            scan,
+            fault,
+            first_frame,
+        })
+    }
+
     /// One line on what a scan reads and parses.
-    fn describe(&self, bound: &Bound, plan: &CompiledScan) -> String {
+    fn describe(&self, bound: &Bound, plan: &CompiledScan, layout: &Layout) -> String {
         let columns: Vec<&str> = plan.outputs()[0].columns.iter().map(|c| c.name).collect();
         let columns = if columns.is_empty() {
             "none (row count)".to_owned()
@@ -507,9 +810,10 @@ impl PcapScan {
             columns.join(", ")
         };
         format!(
-            "{}: scanning '{}': columns: {columns}; protocols parsed: {}",
+            "{}: scanning '{}': partitions: {}; columns: {columns}; protocols parsed: {}",
             self.name,
             bound.path,
+            layout.note,
             parsed_protocols(plan)
         )
     }
@@ -540,28 +844,67 @@ impl PcapScan {
         }
     }
 
-    /// Check how the scan ended: with an error the reader swallowed, inside a record, or well.
-    fn end_of_capture(&self, context: &Context, bound: &Bound, finished: &Scanning) -> Result<()> {
-        let position = finished.scan.reader().position();
-        if let Some(error) = finished.tally.error() {
-            return Err(self.read_error(bound, position.frame_number, &error));
+    /// What is wrong with a capture that ends inside the record after `last_frame`.
+    fn truncation(&self, bound: &Bound, last_frame: u64) -> String {
+        format!(
+            "{}: '{}' is truncated: the capture ends inside the record that follows frame \
+             {last_frame}, the last complete one",
+            self.name, bound.path
+        )
+    }
+
+    /// The error of a strict scan of such a capture.
+    fn truncation_error(&self, bound: &Bound, last_frame: u64) -> Error {
+        Error {
+            code: DuckDBError::IoEof,
+            message: format!(
+                "{}; without strict := true the complete frames are returned",
+                self.truncation(bound, last_frame)
+            ),
         }
-        let handed = finished.tally.bytes.load(Ordering::Relaxed);
-        let Some(left_over) = handed.checked_sub(position.byte_offset).filter(|n| *n > 0) else {
-            return Ok(());
-        };
-        let message = format!(
-            "{}: '{}' is truncated: the capture ends inside a record ({left_over} bytes follow \
-             frame {}, the last complete one, which ends at byte {} of the capture)",
-            self.name, bound.path, position.frame_number, position.byte_offset
+    }
+
+    /// Check how the scan of a partition ended: with an error the reader swallowed, inside a
+    /// record, or well.
+    fn end_of_partition(
+        &self,
+        context: &Context,
+        bound: &Bound,
+        shared: &Shared,
+        worker: &Worker,
+        finished: &Scanning,
+    ) -> Result<()> {
+        let reader = finished.scan.reader();
+        let last_frame = reader.position().frame_number;
+        if let Some(error) = finished.fault.get() {
+            return Err(self.read_error(bound, last_frame, &error));
+        }
+        // Which worker read what, for whoever asks the log how a scan was spread.
+        let _ = Log::log_on_context(
+            context,
+            LogLevel::Debug,
+            &format!(
+                "{}: worker {} finished partition {} of {} of '{}': {} packets from frame {}",
+                self.name,
+                worker.id,
+                worker.ordinal.map_or(0, |ordinal| ordinal + 1),
+                shared.queue.len(),
+                bound.path,
+                finished.scan.stats().packets,
+                finished.first_frame,
+            ),
+            LOG_TYPE,
         );
+        if !reader.truncated() {
+            return Ok(());
+        }
         if bound.strict {
-            return Err(Error {
-                code: DuckDBError::IoEof,
-                message: format!(
-                    "{message}; without strict := true the complete frames are returned"
-                ),
-            });
+            return Err(self.truncation_error(bound, last_frame));
+        }
+        // Only a reader that gets to the end of the file sees this, which is one reader unless
+        // the file shrank under the scan.
+        if shared.truncation_reported.swap(true, Ordering::AcqRel) {
+            return Ok(());
         }
         // The rows are what the query asked for; a log that cannot take the record is no
         // reason to fail it.
@@ -569,7 +912,8 @@ impl PcapScan {
             context,
             LogLevel::Warn,
             &format!(
-                "{message}; the complete frames were returned (strict := true makes this an error)"
+                "{}; the complete frames were returned (strict := true makes this an error)",
+                self.truncation(bound, last_frame)
             ),
             LOG_TYPE,
         );
@@ -621,22 +965,25 @@ fn estimated_rows(file_size: u64, header: &StreamHeader) -> usize {
     usize::try_from((capture_bytes / ESTIMATED_BYTES_PER_FRAME).max(1)).unwrap_or(usize::MAX)
 }
 
-/// What a worker's reader stack reports to the worker, which cannot reach into the stack once
+/// The first read error of a worker's reader stack, which the worker cannot reach into once
 /// the packet reader owns it.
-#[derive(Debug, Default)]
-struct Tally {
-    /// Bytes of (decompressed) capture handed to the capture parser.
-    bytes: AtomicU64,
-    /// The first read error.
-    error: Mutex<Option<String>>,
-}
+#[derive(Debug, Default, Clone)]
+struct Fault(Arc<Mutex<Option<String>>>);
 
-impl Tally {
-    fn error(&self) -> Option<String> {
-        self.error
+impl Fault {
+    fn get(&self) -> Option<String> {
+        self.0
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
+    }
+
+    /// Keep `error` if it is the first.
+    fn set(&self, error: &io::Error) {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get_or_insert_with(|| error.to_string());
     }
 }
 
@@ -654,37 +1001,46 @@ impl Read for Counted {
     }
 }
 
-/// The decompressed capture as the capture parser reads it: counts the bytes it hands out and
-/// keeps failing once a read has failed.
+/// The decompressed capture as the capture parser reads it, which keeps failing once a read
+/// has failed.
 ///
-/// The count is how a truncated capture is told from a complete one (see the module
-/// documentation). The sticky error is a guard: a reader that answers a retried read after an
-/// error with "end of file" would turn a failed read into a short result.
+/// The sticky error is a guard: a reader that answers a retried read after an error with "end
+/// of file" would turn a failed read into a short result.
 struct Tracked {
     inner: DecompressReader<Counted>,
-    tally: Arc<Tally>,
+    fault: Fault,
+}
+
+impl Tracked {
+    /// `file` from its position on, decompressed, counted against the scan's progress.
+    fn new(
+        file: DuckFile,
+        compression: Compression,
+        shared: &Shared,
+        fault: &Fault,
+    ) -> io::Result<Self> {
+        let counted = Counted {
+            file,
+            bytes: shared.file_bytes.clone(),
+        };
+        Ok(Self {
+            inner: DecompressReader::new(counted, compression)?,
+            fault: fault.clone(),
+        })
+    }
 }
 
 impl Read for Tracked {
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
-        if let Some(error) = self.tally.error() {
+        if let Some(error) = self.fault.get() {
             return Err(io::Error::other(error));
         }
         match self.inner.read(out) {
-            Ok(read) => {
-                self.tally.bytes.fetch_add(read as u64, Ordering::Relaxed);
-                Ok(read)
-            }
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => Err(error),
-            Err(error) => {
-                let mut first = self
-                    .tally
-                    .error
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                first.get_or_insert_with(|| error.to_string());
+            Err(error) if error.kind() != io::ErrorKind::Interrupted => {
+                self.fault.set(&error);
                 Err(error)
             }
+            result => result,
         }
     }
 }

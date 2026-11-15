@@ -117,7 +117,8 @@ occurrence of the protocol in a packet, so a tunnelled packet (VXLAN, GRE,
 GTP, IP-in-IP) has several rows in `ethernet`, `ipv4` or `udp`: `encap_depth`
 is 0 for the outermost and counts up, and `tunnel_type` and `tunnel_id` name
 the enclosing tunnel. `WHERE encap_depth = 0` selects the outermost headers.
-Rows come back in capture order.
+Rows come back in capture order, without an `ORDER BY` and on any number of
+threads.
 
 **Columns.** Every table starts with `frame_number` and `timestamp`
 (`TIMESTAMP_NS`, as exact as the capture records it), so a protocol table
@@ -133,16 +134,47 @@ result. With `strict := true` it is an error instead:
 ```sql
 SELECT count(*) FROM read_frames('still-being-written.pcap', strict := true);
 -- Invalid Input Error: read_frames: 'still-being-written.pcap' is truncated: the capture ends
--- inside a record (54 bytes follow frame 17, the last complete one, ...)
+-- inside the record that follows frame 17, the last complete one; ...
 ```
+
+A query that stops early (a `LIMIT`) may never get to the end of the capture.
+A scan on one thread then reports nothing, with or without `strict`. A scan in
+partitions (below) has a worker at the end of the capture from the start: the
+warning may or may not be logged, and with `strict := true` the end of the
+capture is checked when the scan starts, so the query fails whatever it goes
+on to read.
 
 Any other problem with the file (it cannot be read, a record or a compressed
 stream is damaged) fails the query in either mode: a scan does not end early
 without saying so.
 
+**Parallel scans.** A local, uncompressed capture of 4 MiB or more is split
+into as many partitions as DuckDB has threads, and each partition is scanned
+by one thread. The rows are the same and in the same order as on one thread:
+the scan tells DuckDB which partition a chunk of rows is from, and DuckDB
+keeps the partitions in order wherever order matters (a plain `SELECT`,
+`LIMIT`, `CREATE TABLE AS`, `INSERT`). To find where a capture can be cut, the
+scan first reads the header of every record, once, when the query starts; that
+pass reads the whole file, so the first row of a large capture that is not in
+the page cache takes as long as reading it. Compressed captures and captures
+on a remote file system (`s3://`, `https://`) are read on one thread, and so
+is a capture with a damaged record, which is reported where the scan gets to
+it.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `pcapsql_parallel_scan` | `true` | `false` reads every capture on one thread, as `SET threads = 1` does for the whole query |
+| `pcapsql_parallel_min_file_size` | 4194304 | The size in bytes from which a capture is split |
+| `pcapsql_index_stride` | 65536 | Frames between two places a capture can be cut at. A capture of no more frames than this is not split, and none is split into more parts than it has such places |
+
+The last two are for experiments and tests; the defaults are those of the
+DataFusion engine.
+
 **Diagnostics.** With `CALL enable_logging(level = 'debug')`, each scan writes
-one record of type `pcapsql` to `duckdb_logs` that names the columns it
-produces and the protocols and fields it parses.
+a record of type `pcapsql` to `duckdb_logs` that names the columns it
+produces, the protocols and fields it parses, and how many partitions it reads
+and why; and one record per partition, with the worker that scanned it and the
+number of packets it read.
 
 ## What is registered
 
@@ -154,8 +186,12 @@ The scan functions, one implementation registered under 29 names:
 | `read_<table>(file, strict := false)` for each of the 28 tables of `pcap_protocols()` | The rows of that table: `read_frames`, `read_ethernet`, `read_ipv4`, `read_tcp`, `read_dns`, ... |
 
 `file` is the only positional argument and must be a `VARCHAR` path;
-`protocol` and `strict` are named parameters. A scan runs on one thread.
-`src/engine/table.rs` describes which callback does what.
+`protocol` and `strict` are named parameters. `src/engine/table.rs` describes
+which callback does what, how a capture is split into partitions and why the
+rows keep their order.
+
+Three settings, described under "Parallel scans" above: `pcapsql_parallel_scan`,
+`pcapsql_parallel_min_file_size` and `pcapsql_index_stride`.
 
 Two table functions, which list what the shared catalogue
 (`pcapsql_core::scan::Catalog`) says the extension reads:
@@ -238,7 +274,8 @@ the DuckDB side of it.
 
 | Module | What it does |
 |---|---|
-| `table.rs` | `PcapScan`, the table function behind every scan function: binds the table and the file, maps DuckDB's projection to a `ScanPlan`, and in each `exec` steps core's `PartitionScan` into a `ChunkWriter` until the chunk is full |
+| `table.rs` | `PcapScan`, the table function behind every scan function: binds the table and the file, maps DuckDB's projection to a `ScanPlan`, cuts the capture into partitions (core's `BoundaryIndex`, `partition_target` and `PartitionQueue`), has each worker claim a partition, and in each `exec` steps core's `PartitionScan` into a `ChunkWriter` until the chunk is full; reports the partition's ordinal as DuckDB's batch index |
+| `settings.rs` | The three settings, and what a scan reads of DuckDB's (`threads`) |
 | `types.rs` | The DuckDB logical type of each column kind of the catalogue (the table above), and the name DuckDB prints for it |
 | `writer.rs` | `ChunkWriter`: stores the rows the shared scan layer produces (`pcapsql_core::scan::RowSink`) in the output chunk of one `exec` call |
 | `fs.rs` | `DuckFile`: a buffered `std::io::Read` over a file opened through DuckDB's file system, for core's `ReadPacketReader` |
@@ -272,6 +309,13 @@ Tests, in `itest/`:
   covers the columns of every function against `pcap_schema()`, the arguments
   and their errors, projection, what a scan parses, and the progress it
   reports.
+- `tests/scan_parallel.rs` runs the same queries on one partition and on
+  several, at 1, 2, 4 and 8 threads, and compares rows and their order: every
+  table of the corpus captures, generated captures of many chunks, tunnelled
+  packets where a capture is cut, truncated and damaged captures, compressed
+  ones, a capture that is damaged while it is being scanned, and plans that
+  are run again. It reads back from DuckDB's log how each scan was split and
+  which worker scanned which partition.
 - `tests/golden_differential.rs` runs the queries of the DataFusion golden
   corpus over the same captures and compares with the snapshots committed in
   `pcapsql-datafusion/tests/golden/`. `build.rs` takes the captures and the

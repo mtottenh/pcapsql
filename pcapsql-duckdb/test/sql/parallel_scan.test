@@ -1,0 +1,79 @@
+# name: test/sql/parallel_scan.test
+# description: a capture scanned in partitions returns the rows of a scan on one thread, in order
+# group: [pcapsql]
+
+# The in-process tests (itest/tests/scan_parallel.rs) cover partitioned scans in depth; this
+# file checks that the built artifact has the settings and splits a capture. The capture is a
+# small real one (38 frames), so the minimum size and the stride are lowered.
+
+require pcapsql
+
+query TTT
+SELECT current_setting('pcapsql_parallel_scan'), current_setting('pcapsql_parallel_min_file_size'),
+       current_setting('pcapsql_index_stride');
+----
+true	4194304	65536
+
+statement error
+SET pcapsql_index_stride = 0;
+----
+pcapsql_index_stride must be at least 1
+
+statement ok
+CALL enable_logging(level = 'debug');
+
+statement ok
+SET threads = 4;
+
+statement ok
+SET pcapsql_parallel_min_file_size = 0;
+
+statement ok
+SET pcapsql_index_stride = 5;
+
+query IIII
+SELECT count(*), min(frame_number), max(frame_number), sum(length)
+FROM read_pcap('../fuzz/corpus/fuzz_pcap_reader/dns.cap');
+----
+38	1	38	3706
+
+# Four partitions, each scanned to its end
+query I
+SELECT count(*) FROM duckdb_logs
+WHERE type = 'pcapsql' AND message LIKE '%partitions: 4 (of 38 frames, cut at checkpoints 5 frames apart)%';
+----
+1
+
+query I
+SELECT count(*) FROM duckdb_logs
+WHERE type = 'pcapsql' AND message LIKE '%finished partition % of 4 of %';
+----
+4
+
+# Capture order, without an ORDER BY
+query I
+SELECT frame_number FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dns.cap') LIMIT 5 OFFSET 20;
+----
+21
+22
+23
+24
+25
+
+statement ok
+CREATE TABLE partitioned AS SELECT * FROM read_udp('../fuzz/corpus/fuzz_pcap_reader/dns.cap');
+
+statement ok
+SET pcapsql_parallel_scan = false;
+
+statement ok
+CREATE TABLE sequential AS SELECT * FROM read_udp('../fuzz/corpus/fuzz_pcap_reader/dns.cap');
+
+# The same rows at the same positions
+query II
+SELECT (SELECT count(*) FROM sequential) > 0, count(*)
+FROM (SELECT rowid AS position, * FROM partitioned) p
+FULL JOIN (SELECT rowid AS position, * FROM sequential) s USING (position)
+WHERE p::VARCHAR IS DISTINCT FROM s::VARCHAR;
+----
+true	0
