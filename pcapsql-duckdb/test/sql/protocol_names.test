@@ -1,0 +1,113 @@
+# name: test/sql/protocol_names.test
+# description: tcp_flags_str(), has_tcp_flag() and the functions that name protocol numbers
+# group: [pcapsql]
+
+require pcapsql
+
+query TTTTTT
+SELECT typeof(tcp_flags_str(0)), typeof(has_tcp_flag(0, 'SYN')), typeof(dns_type_name(1)),
+       typeof(dns_rcode_name(0)), typeof(ip_proto_name(6)), typeof(ethertype_name(2048));
+----
+VARCHAR	BOOLEAN	VARCHAR	VARCHAR	VARCHAR	VARCHAR
+
+query TTTTT
+SELECT tcp_flags_str(2), tcp_flags_str(18), tcp_flags_str(17), tcp_flags_str(511), tcp_flags_str(1026);
+----
+SYN	SYN,ACK	FIN,ACK	FIN,SYN,RST,PSH,ACK,URG,ECE,CWR,NS	SYN
+
+# No flag is the empty string, not NULL and not 'NONE'
+query TT
+SELECT tcp_flags_str(0) = '', tcp_flags_str(512) = '';
+----
+true	true
+
+# The flag name is not case sensitive; a name that is not a flag is never set
+query TTTTTT
+SELECT has_tcp_flag(18, 'SYN'), has_tcp_flag(18, 'ack'), has_tcp_flag(18, 'RST'), has_tcp_flag(256, 'ns'),
+       has_tcp_flag(511, 'BOGUS'), has_tcp_flag(511, '');
+----
+true	true	false	true	false	false
+
+query I
+SELECT count(*) FROM range(512) t(i) WHERE has_tcp_flag(i::USMALLINT, 'SYN') AND NOT has_tcp_flag(i::USMALLINT, 'ACK');
+----
+128
+
+# A flag name per row
+query T
+SELECT has_tcp_flag(f, n) FROM (VALUES (18::USMALLINT, 'SYN'), (18, 'RST'), (4, 'rst'), (4, NULL), (NULL, 'RST'), (4, 'bogus')) t(f, n);
+----
+true
+false
+true
+NULL
+NULL
+false
+
+query TTTTTTT
+SELECT dns_type_name(1), dns_type_name(28), dns_type_name(65), dns_type_name(99), dns_type_name(255), dns_type_name(32769), dns_type_name(12345);
+----
+A	AAAA	HTTPS	SPF	ANY	DLV	TYPE12345
+
+# Response codes have no names above 255
+query TTTTTT
+SELECT dns_rcode_name(0), dns_rcode_name(3), dns_rcode_name(23), dns_rcode_name(24), dns_rcode_name(259), dns_rcode_name(4095);
+----
+NOERROR	NXDOMAIN	BADCOOKIE	RCODE24	RCODE259	RCODE4095
+
+query TTTTTTT
+SELECT ip_proto_name(1), ip_proto_name(6), ip_proto_name(17), ip_proto_name(4), ip_proto_name(58), ip_proto_name(136), ip_proto_name(200);
+----
+ICMP	TCP	UDP	IPv4	ICMPv6	UDPLite	Proto 200
+
+# 0x0800, 0x0806, 0x86DD, 0x8863, 0x888E, 0x1234
+query TTTTTT
+SELECT ethertype_name(2048), ethertype_name(2054), ethertype_name(34525), ethertype_name(34915), ethertype_name(34958), ethertype_name(4660);
+----
+IPv4	ARP	IPv6	PPPoE Discovery	EAP over LAN	0x1234
+
+query TTTTTTT
+SELECT tcp_flags_str(NULL), has_tcp_flag(NULL, 'SYN'), has_tcp_flag(18, NULL), dns_type_name(NULL), dns_rcode_name(NULL), ip_proto_name(NULL), ethertype_name(NULL);
+----
+NULL	NULL	NULL	NULL	NULL	NULL	NULL
+
+# ip_proto_name takes UTINYINT, the others USMALLINT
+statement error
+SELECT ip_proto_name(256);
+----
+ip_proto_name
+
+statement error
+SELECT dns_type_name(65536);
+----
+dns_type_name
+
+# NULLs are kept row by row
+query TTTT
+SELECT tcp_flags_str(x), dns_type_name(x), dns_rcode_name(x), ethertype_name(x) FROM (VALUES (2::USMALLINT), (NULL), (2048), (16)) t(x);
+----
+SYN	NS	SERVFAIL	0x0002
+NULL	NULL	NULL	NULL
+(empty)	TYPE2048	RCODE2048	IPv4
+ACK	TXT	BADVERS	0x0010
+
+# Every value of the argument, in more rows than one vector holds: 51 record types and 20 response
+# codes have a name
+query III
+SELECT count(DISTINCT tcp_flags_str(i::USMALLINT)),
+       count(*) FILTER (dns_type_name(i::USMALLINT) = 'TYPE' || i),
+       count(*) FILTER (dns_rcode_name(i::USMALLINT) = 'RCODE' || i)
+FROM range(65536) t(i);
+----
+512	65485	65516
+
+# A constant argument next to a column
+statement ok
+CREATE TABLE one AS SELECT 18::USMALLINT AS flags, 'syn' AS flag, 6::UTINYINT AS proto;
+
+query ITTII
+SELECT count(*), min(tcp_flags_str(flags)), max(ip_proto_name(proto)),
+       count(*) FILTER (has_tcp_flag(flags, flag)), count(*) FILTER (has_tcp_flag(i::USMALLINT, flag))
+FROM one, range(3000) t(i);
+----
+3000	SYN,ACK	TCP	3000	1500

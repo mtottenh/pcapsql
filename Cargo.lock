@@ -3255,7 +3255,6 @@ name = "pcapsql-duckdb"
 version = "0.4.2"
 dependencies = [
  "duckdb-neo",
- "hex",
  "pcapsql-core",
 ]
 

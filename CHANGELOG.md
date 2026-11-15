@@ -48,6 +48,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   registration stay with the engine. Also new: `write_ipv4`, `write_ipv6`
   and `write_mac` (the `format_*` functions without the `String`), and
   `dns_opcode_name`, which no SQL function uses yet.
+- **DuckDB extension (C API v2): the scalar functions and the `format_*`
+  macros.** The sixteen scalar functions of the extension for DuckDB 1.x are
+  back, with the same names and signatures: `ip4`, `ip4_to_string`, `ip6`,
+  `ip6_to_string`, `mac`, `mac_to_string`, `ip_in_cidr`, `ip6_in_cidr`,
+  `tcp_flags_str`, `has_tcp_flag`, `dns_type_name`, `dns_rcode_name`,
+  `ip_proto_name`, `ethertype_name`, `pcap_hex` and `pcap_unhex`. Each is a
+  vector loop over a `pcapsql_core::format` kernel, so the extension has no
+  copy of the logic and answers as the DataFusion engine does. Constant,
+  dictionary and NULL inputs are handled; a NULL or unusable argument (text
+  that is not an address, a BLOB of the wrong length, text that is not CIDR
+  notation) gives NULL, never an error. A literal CIDR network or flag name
+  is parsed once per chunk. `format_ip4`, `format_ip6`, `format_mac` and
+  their `_list` forms are registered as macros of the extension rather than
+  created with `CREATE MACRO` on the loading connection, and the list forms
+  use `lambda x: ...`, since DuckDB 2.0 rejects the `x -> ...` form by
+  default.
 - **`pcapsql-core`: the scan plan and its predicates.** `scan::ScanPlan`
   says what one pass over a capture must produce: table scans (output
   columns as `ColId`s in output order, an optional row predicate, an
@@ -101,6 +117,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SELECT *` are unchanged. The per-table `*_table_schema()` functions,
   `encap_fields`, `frame_number_field` and the `STREAM_TABLES` constant
   (now `stream_table_names()`) are gone from the library.
+- **DuckDB extension: the scalar functions answer as DataFusion does.**
+  Compared with the extension for DuckDB 1.x: `tcp_flags_str(0)` is the empty
+  string, not `NONE`; `ip_proto_name` knows the IANA table instead of 11
+  protocols and gives `Proto 200`, not `PROTO200`, for an unassigned number;
+  `dns_type_name` knows 51 record types instead of 20; `dns_rcode_name` gives
+  `RCODE<n>` above 255 instead of naming the low byte; `ethertype_name` uses
+  the DataFusion spellings (`PPPoE Discovery`, `EAP over LAN`,
+  `MPLS Multicast`, ...); `mac()` accepts the bare 12-digit form and
+  surrounding whitespace; `pcap_unhex()` accepts surrounding whitespace and a
+  `0x` prefix.
 - **The scalar SQL functions call the core kernels.** `ip_proto_name()`,
   `tcp_flags_str()`, `ip_in_cidr()`, `mac()`, `hex()` and the rest of the
   network, protocol and utility functions are now Arrow wrappers over

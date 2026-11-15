@@ -1,0 +1,104 @@
+# name: test/sql/cidr.test
+# description: ip_in_cidr() and ip6_in_cidr() test an address against a network in CIDR notation
+# group: [pcapsql]
+
+require pcapsql
+
+query TT
+SELECT typeof(ip_in_cidr(1, '0.0.0.0/0')), typeof(ip6_in_cidr(NULL, NULL));
+----
+BOOLEAN	BOOLEAN
+
+query TTTTT
+SELECT ip_in_cidr(ip4('192.168.1.100'), '192.168.0.0/16'),
+       ip_in_cidr(ip4('192.169.0.1'), '192.168.0.0/16'),
+       ip_in_cidr(ip4('10.0.0.1'), '10.0.0.1/32'),
+       ip_in_cidr(ip4('8.8.8.8'), '0.0.0.0/0'),
+       ip_in_cidr(ip4('192.168.200.1'), '192.168.1.1/16');
+----
+true	false	true	true	true
+
+query TTTTT
+SELECT ip6_in_cidr(ip6('fe80::1'), 'fe80::/10'),
+       ip6_in_cidr(ip6('2001:db8::1'), 'fe80::/10'),
+       ip6_in_cidr(ip6('::1'), '::1/128'),
+       ip6_in_cidr(ip6('2001:db8:7fff::'), '2001:db8::/33'),
+       ip6_in_cidr(ip6('2001:db8:8000::'), '2001:db8::/33');
+----
+true	false	true	true	false
+
+# Text that is not CIDR notation is NULL, not an error
+query TTTTTT
+SELECT ip_in_cidr(1, '10.0.0.0'), ip_in_cidr(1, '10.0.0.0/33'), ip_in_cidr(1, '::/0'),
+       ip6_in_cidr(ip6('::1'), '::1'), ip6_in_cidr(ip6('::1'), '::/129'), ip6_in_cidr(ip6('::1'), '10.0.0.0/8');
+----
+NULL	NULL	NULL	NULL	NULL	NULL
+
+# A BLOB that is not 16 bytes is not an IPv6 address
+query TT
+SELECT ip6_in_cidr('\x01'::BLOB, '::/0'), ip6_in_cidr(mac('aa:bb:cc:dd:ee:ff'), '::/0');
+----
+NULL	NULL
+
+query TTTT
+SELECT ip_in_cidr(NULL, '10.0.0.0/8'), ip_in_cidr(1, NULL), ip6_in_cidr(NULL, '::/0'), ip6_in_cidr(ip6('::1'), NULL);
+----
+NULL	NULL	NULL	NULL
+
+# The address is UINTEGER, not text
+statement error
+SELECT ip_in_cidr('10.0.0.1', '10.0.0.0/8');
+----
+ip_in_cidr
+
+# A column of addresses against a literal network
+query I
+SELECT count(*) FROM range(1024) t(i) WHERE ip_in_cidr(i::UINTEGER, '0.0.1.0/24');
+----
+256
+
+query T
+SELECT ip6_in_cidr(ip6(a), '2001:db8::/32') FROM (VALUES ('2001:db8::5'), (NULL), ('::1'), ('2001:db8:1::')) t(a);
+----
+true
+NULL
+false
+true
+
+# A network per row: repeated, changing, invalid and NULL
+query T
+SELECT ip_in_cidr(ip4(a), c) FROM (VALUES
+    ('10.1.2.3', '10.0.0.0/8'),
+    ('11.1.2.3', '10.0.0.0/8'),
+    ('11.1.2.3', '11.0.0.0/8'),
+    ('11.1.2.3', 'bogus'),
+    ('11.1.2.3', NULL),
+    (NULL, '11.0.0.0/8'),
+    ('11.1.2.3', '11.0.0.0/8')) t(a, c);
+----
+true
+false
+true
+NULL
+NULL
+NULL
+true
+
+# Over several vectors: a third of the rows have a network, a third text that is not one, a third NULL
+query III
+SELECT count(*), count(hit), count(*) FILTER (hit)
+FROM (SELECT ip_in_cidr(i::UINTEGER, CASE i % 3 WHEN 0 THEN '0.0.0.0/22' WHEN 1 THEN 'x' END) AS hit FROM range(6000) t(i));
+----
+6000	2000	342
+
+# A constant address against a column of networks: 192.168.1.100 is in 192.168.1.0/n up to n = 25,
+# 2001:db8::1 is in 2001:db8::/n up to n = 127, and n above 128 is not a prefix length
+statement ok
+CREATE TABLE one AS SELECT ip4('192.168.1.100') AS a4, ip6('2001:db8::1') AS a6;
+
+query II
+SELECT count(*) FILTER (ip_in_cidr(a4, '192.168.1.0/' || (i % 33))),
+       count(*) FILTER (ip6_in_cidr(a6, '2001:db8::/' || (i % 200)))
+FROM one, range(3000) t(i);
+----
+2366	1920

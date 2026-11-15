@@ -5,6 +5,7 @@
 //! that in CI.
 
 pub mod guard;
+mod macros;
 mod registry;
 mod scalar;
 
@@ -13,5 +14,7 @@ use duckdb_neo::{extension::Extension, Result};
 /// Register every pcapsql function with the extension that is being loaded.
 pub fn register(extension: &Extension) -> Result<()> {
     registry::register(extension)?;
-    scalar::register(extension)
+    scalar::register(extension)?;
+    // After the scalars: the macro bodies call them.
+    macros::register(extension)
 }
