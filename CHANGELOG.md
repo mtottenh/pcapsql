@@ -280,6 +280,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   then. `pcapsql_filter_pushdown = false` leaves every filter to DuckDB. The
   scan's debug log records name the predicate and count the packets it
   rejected.
+- **DuckDB extension: distribution.** The extension is built for
+  `linux_amd64`, `linux_arm64` and `osx_arm64` by DuckDB's
+  `extension-ci-tools` (`.github/workflows/duckdb-dist.yml`, the build
+  DuckDB's community-extensions repository runs), and each artifact is then
+  loaded in DuckDB 2.0.0 on a runner of its platform. A release tag attaches
+  one archive per platform to the GitHub release
+  (`pcapsql-duckdb-extension-<tag>-duckdb-<DuckDB version>-<platform>.tar.gz`)
+  with a checksum file. `pcapsql-duckdb/community/description.yml` is the
+  descriptor for `INSTALL pcapsql FROM community`; it has not been
+  submitted. Windows is not built: `pcapsql-core` does not compile there.
+  WebAssembly is not built either.
+- **DuckDB extension: documentation.** A function reference,
+  `docs/duckdb-extension-reference.md`, which `make check_reference_release`
+  compares with what the built artifact registers in DuckDB; a section in the
+  README; and `docs/duckdb-upgrade-runbook.md`, the procedure for moving the
+  extension to a new DuckDB release, with `make check_pins` (every place that
+  names the DuckDB release agrees) and `make canary` (build against the
+  newest `duckdb-neo`, also a weekly workflow).
 
 ### Changed
 

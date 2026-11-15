@@ -6,8 +6,14 @@ The pcapsql extension for DuckDB, on the DuckDB C API v2 through
 
 Every function of the C API v2 is still unstable, so a build loads in exactly
 one DuckDB release: **2.0.0** today. `TARGET_DUCKDB_VERSION` in the `Makefile`,
-the `duckdb-neo` pin in the `Cargo.toml` files and
-`scripts/duckdb-release.sha256` name that release and change together.
+the `duckdb-neo` pin in the `Cargo.toml` files,
+`scripts/duckdb-release.sha256` and a few more places name that release and
+change together: `make check_pins` fails when they disagree, and
+[`docs/duckdb-upgrade-runbook.md`](../docs/duckdb-upgrade-runbook.md) is the
+procedure for moving them.
+
+Every function, parameter and setting is listed in
+[`docs/duckdb-extension-reference.md`](../docs/duckdb-extension-reference.md).
 
 ## Layout
 
@@ -17,7 +23,9 @@ the `duckdb-neo` pin in the `Cargo.toml` files and
 | `ext/` | The loadable extension, a `cdylib` named `pcapsql` that holds only the entrypoint |
 | `itest/` | In-process tests: links libduckdb, registers the same entrypoint statically, runs SQL from `cargo test` |
 | `test/sql/` | sqllogictest files, run against the built `pcapsql.duckdb_extension` |
-| `extension-ci-tools/` | Git submodule with DuckDB's makefiles and the script that stamps the extension metadata |
+| `extension-ci-tools/` | Git submodule with DuckDB's makefiles and the script that stamps the extension metadata, on the branch DuckDB's community-extensions repository builds this DuckDB release with |
+| `community/` | The descriptor for DuckDB's community-extensions repository, and how to submit it |
+| `scripts/` | What the make targets run: fetching the DuckDB release, the load test, and the checks |
 
 `itest/` is a cargo workspace of its own. It needs `duckdb-neo`'s
 `build-extension-static` feature, the loadable extension needs
@@ -35,8 +43,11 @@ make configure          # once: Python venv with DuckDB 2.0.0 and its SQL test r
 make release            # build/release/pcapsql.duckdb_extension
 make test_release       # test/sql against the artifact, in DuckDB's Python package
 make load_test_release  # LOAD the artifact in the DuckDB command-line shell
+make check_reference_release  # the function reference lists what the artifact registers
 make itest              # in-process tests against libduckdb
-make check              # duckdb_neo containment; no std::fs in the extension; fmt and clippy for itest/
+make check              # duckdb_neo containment; no std::fs in the extension; the DuckDB pins agree;
+                        # fmt and clippy for itest/
+make canary             # build against the newest duckdb-neo on crates.io (CANARY=main: duckdb-rs main)
 ```
 
 `make debug`, `make test_debug` and `make load_test_debug` do the same for an
@@ -65,6 +76,29 @@ The artifact is unsigned, so DuckDB has to be started with `-unsigned`, and
 ```sh
 duckdb -unsigned -c "LOAD '$PWD/build/release/pcapsql.duckdb_extension'; SELECT * FROM pcap_protocols();"
 ```
+
+## Distribution
+
+| Workflow | When | What |
+|---|---|---|
+| `duckdb.yml` | Every push and pull request | Builds for `linux_amd64` on the runner; SQL tests, load test, reference check, `itest`, the containment and pin checks |
+| `duckdb-dist.yml` | Pushes to `main` that touch the extension; called by `release.yml` | Builds `linux_amd64`, `linux_arm64` and `osx_arm64` with the reusable workflow of `extension-ci-tools` (Linux in its manylinux containers), then runs the SQL tests and the load test against each uploaded artifact on a runner of its platform |
+| `release.yml` | A `v*` tag | Calls `duckdb-dist.yml` and attaches `pcapsql-duckdb-extension-<tag>-duckdb-<DuckDB version>-<platform>.tar.gz` for each platform, and a `SHA256SUMS` file, to the GitHub release |
+| `duckdb-canary.yml` | Weekly, and by hand | `scripts/canary.sh` against the newest `duckdb-neo` on crates.io and against `duckdb-rs` main |
+
+`duckdb-dist.yml` is the build DuckDB's community-extensions repository runs
+for [`community/description.yml`](community/description.yml): the same
+reusable workflow, at the commit the submodule is at, with
+`build_directory: pcapsql-duckdb`.
+
+Platforms that are not built:
+
+- **Windows.** `pcapsql-core` does not compile for Windows: its netlink
+  parser uses `netlink-packet-route`, which is Unix-only, and its manifest
+  lists most dependencies under `[target.'cfg(unix)'.dependencies]`.
+- **WebAssembly.** Not shown to build; see U10 in the roadmap.
+- `osx_amd64` and the musl and MinGW variants are opt-in platforms of
+  `extension-ci-tools` and are not opted into.
 
 ## Usage
 
@@ -303,6 +337,11 @@ packets it read and, under a filter, how many of them the filter rejected
 unparsed.
 
 ## What is registered
+
+[`docs/duckdb-extension-reference.md`](../docs/duckdb-extension-reference.md)
+is the reference, checked against the built artifact by
+`make check_reference_release`. This section adds where each part is
+implemented and how it relates to the DataFusion engine.
 
 The scan functions, one implementation registered under 29 names:
 
