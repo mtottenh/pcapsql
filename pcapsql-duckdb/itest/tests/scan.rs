@@ -212,7 +212,8 @@ fn bad_arguments_are_bind_errors_that_say_what_is_wrong() -> Result<()> {
     let short = fixture.write("short.pcap", &golden::capture("eth")[..10]);
     let missing = fixture.path("missing.pcap");
 
-    let cases: Vec<(String, &[&str])> = vec![
+    let cases: Vec<(String, &[&str])> =
+        vec![
         // The protocol.
         (
             format!("read_pcap('{path}', protocol := 'nope')"),
@@ -255,15 +256,12 @@ fn bad_arguments_are_bind_errors_that_say_what_is_wrong() -> Result<()> {
         ),
         (
             "read_frames(42)".to_owned(),
-            &["read_frames: the capture file must be a VARCHAR path, not INTEGER"],
+            &["read_frames: the capture files must be a VARCHAR path or pattern, or a list of \
+               them, not INTEGER"],
         ),
         (
             "read_frames('')".to_owned(),
             &["read_frames: the capture file must not be an empty path"],
-        ),
-        (
-            format!("read_frames(['{path}'])"),
-            &["read_frames: a list of capture files is not supported yet"],
         ),
         ("read_frames()".to_owned(), &["read_frames"]),
         // The file itself.

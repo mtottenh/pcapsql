@@ -1,0 +1,176 @@
+# name: test/sql/multi_file.test
+# description: several captures in one call (a list, a pattern), the filename column, FROM 'x.pcap'
+# group: [pcapsql]
+
+# The in-process tests (itest/tests/multi_file.rs) cover this in depth; this file checks that
+# the built artifact expands its files argument, adds the filename column and answers a quoted
+# capture path. The captures are the seeds of the reader fuzzer, relative to pcapsql-duckdb/.
+
+require pcapsql
+
+# A list: the files in its order, frame_number from 1 in each
+query ITI
+SELECT frame_number, parse_filename(filename), length
+FROM read_frames(['../fuzz/corpus/fuzz_pcap_reader/vxlan_simple.pcap', '../fuzz/corpus/fuzz_pcap_reader/dns.cap'],
+                 filename := true)
+WHERE frame_number <= 2;
+----
+1	vxlan_simple.pcap	119
+2	vxlan_simple.pcap	119
+1	dns.cap	70
+2	dns.cap	98
+
+# A pattern: the files in the order of their paths
+query TII
+SELECT parse_filename(filename), count(*), max(frame_number)
+FROM read_pcap('../fuzz/corpus/fuzz_pcap_reader/v6*', filename := true)
+GROUP BY ALL ORDER BY min(filename);
+----
+v6-http.cap	55	55
+v6.pcap	161	161
+
+query T
+SELECT DISTINCT parse_filename(filename)
+FROM read_pcap('../fuzz/corpus/fuzz_pcap_reader/v6*', filename := true);
+----
+v6-http.cap
+v6.pcap
+
+# A list of patterns and paths, legacy and pcapng; a file named twice is read twice
+query TI
+SELECT parse_filename(filename), count(*)
+FROM read_frames(['../fuzz/corpus/fuzz_pcap_reader/v6*', '../fuzz/corpus/fuzz_pcap_reader/dns.cap',
+                  '../fuzz/corpus/fuzz_pcap_reader/ldap-ssl.pcapng', '../fuzz/corpus/fuzz_pcap_reader/dns.ca?'],
+                 filename := true)
+GROUP BY ALL ORDER BY ALL;
+----
+dns.cap	76
+ldap-ssl.pcapng	36
+v6-http.cap	55
+v6.pcap	161
+
+query I
+SELECT count(*) FROM read_dns(['../fuzz/corpus/fuzz_pcap_reader/dns.cap', '../fuzz/corpus/fuzz_pcap_reader/dns.cap']);
+----
+76
+
+# The same on several threads, each file in partitions: the rows keep their order
+statement ok
+SET threads = 4;
+
+statement ok
+SET pcapsql_parallel_min_file_size = 0;
+
+statement ok
+SET pcapsql_index_stride = 5;
+
+query I
+SELECT frame_number
+FROM read_frames(['../fuzz/corpus/fuzz_pcap_reader/dns.cap', '../fuzz/corpus/fuzz_pcap_reader/v6*'])
+WHERE frame_number IN (1, 38, 55, 161);
+----
+1
+38
+1
+38
+55
+1
+38
+55
+161
+
+statement ok
+RESET threads;
+
+statement ok
+RESET pcapsql_parallel_min_file_size;
+
+statement ok
+RESET pcapsql_index_stride;
+
+# filename is the last column, and only there when asked for
+query TT
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dns.cap', filename := true))
+WHERE column_name NOT IN (SELECT column_name FROM pcap_schema('frames'));
+----
+filename	VARCHAR
+
+query I
+SELECT count(*) FROM (DESCRIBE SELECT * FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dns.cap'))
+WHERE column_name = 'filename';
+----
+0
+
+query TT
+SELECT function_name, parameters FROM duckdb_functions() WHERE function_name = 'read_dns';
+----
+read_dns	[files, strict, filename]
+
+# What cannot be read is named
+statement error
+SELECT count(*) FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/nothing*.pcap');
+----
+read_frames: no file matches the pattern '../fuzz/corpus/fuzz_pcap_reader/nothing*.pcap'
+
+statement error
+SELECT count(*) FROM read_frames(['../fuzz/corpus/fuzz_pcap_reader/dns.cap', 'Makefile']);
+----
+read_frames: 'Makefile' is not a capture file pcapsql can read
+
+statement error
+SELECT count(*) FROM read_frames(['../fuzz/corpus/fuzz_pcap_reader/dns.cap', 'no-such.pcap']);
+----
+no-such.pcap
+
+# A quoted capture path is read_pcap of it
+query II
+SELECT count(*), sum(length) FROM '../fuzz/corpus/fuzz_pcap_reader/dns.cap';
+----
+38	3706
+
+query I
+SELECT count(*) FROM '../fuzz/corpus/fuzz_pcap_reader/v6*.cap' f WHERE f.frame_number > 50;
+----
+5
+
+query I
+SELECT count(*) FROM '../fuzz/corpus/fuzz_pcap_reader/ldap-ssl.pcapng';
+----
+36
+
+# A name that is not a capture path is not answered
+statement error
+SELECT count(*) FROM 'Makefile';
+----
+Table with name Makefile does not exist
+
+# A table of that name comes first
+statement ok
+CREATE TABLE "../fuzz/corpus/fuzz_pcap_reader/dns.cap" AS SELECT 1 AS one;
+
+query I
+SELECT count(*) FROM '../fuzz/corpus/fuzz_pcap_reader/dns.cap';
+----
+1
+
+statement ok
+DROP TABLE "../fuzz/corpus/fuzz_pcap_reader/dns.cap";
+
+query I
+SELECT count(*) FROM '../fuzz/corpus/fuzz_pcap_reader/dns.cap';
+----
+38
+
+# Nothing is listed or opened that the session may not access
+statement ok
+SET enable_external_access = false;
+
+statement error
+SELECT count(*) FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/*.cap');
+----
+disabled by configuration
+
+statement error
+SELECT count(*) FROM '../fuzz/corpus/fuzz_pcap_reader/dns.cap';
+----
+disabled by configuration

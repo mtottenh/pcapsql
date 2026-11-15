@@ -41,6 +41,14 @@ pub fn is_remote(context: &Context, path: &str) -> Result<bool> {
     FileSystem::new(context)?.is_remote(path)
 }
 
+/// The files `pattern` matches in DuckDB's file system, in no particular order: the caller
+/// sorts them. A path without wildcards matches itself if the file exists, and nothing if not.
+///
+/// DuckDB refuses to list what the session may not access.
+pub fn glob(context: &Context, pattern: &str) -> Result<Vec<String>> {
+    FileSystem::new(context)?.glob(pattern)
+}
+
 /// A file opened for reading through DuckDB's file system, as a buffered [`Read`].
 ///
 /// It reads forward from its position; [`seek`](Self::seek) moves the position. It is `Send`
