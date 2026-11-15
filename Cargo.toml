@@ -4,9 +4,12 @@ members = [
     "pcapsql-core",
     "pcapsql-datafusion",
     "pcapsql-duckdb",
+    "pcapsql-duckdb/ext",
     "pcapsql-testgen",
 ]
-exclude = ["fuzz"]
+# pcapsql-duckdb/itest links libduckdb and needs the `duckdb-neo` feature that excludes the one
+# the loadable extension needs, so it cannot share a cargo invocation with the workspace.
+exclude = ["fuzz", "pcapsql-duckdb/itest"]
 
 # Default to building the CLI
 default-members = ["pcapsql-datafusion"]
