@@ -4,14 +4,14 @@
 
 use std::sync::Arc;
 
-use arrow::array::{Array, BooleanArray, FixedSizeBinaryArray, StringArray};
+use arrow::array::{Array, BooleanArray, FixedSizeBinaryArray};
 use arrow::datatypes::DataType;
 use datafusion::common::Result as DFResult;
 use datafusion::logical_expr::{
     ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
 };
 use pcapsql_core::format::{
-    format_ipv6, ipv6_in_prefix, is_link_local_ipv6, is_multicast_ipv6, parse_cidr_v6, parse_ipv6,
+    ipv6_in_prefix, is_link_local_ipv6, is_multicast_ipv6, parse_cidr_v6, parse_ipv6, write_ipv6,
 };
 
 /// Create the `ip6()` UDF that converts an IPv6 string to FixedSizeBinary(16).
@@ -160,15 +160,12 @@ impl ScalarUDFImpl for Ip6ToStringUdf {
             .downcast_ref::<FixedSizeBinaryArray>()
             .expect("ip6_to_string: expected FixedSizeBinary(16) array");
 
-        let result: StringArray = (0..ip_values.len())
-            .map(|i| {
-                if ip_values.is_null(i) {
-                    None
-                } else {
-                    Some(format_ipv6(ip_values.value(i)).expect("Expected 16 bytes"))
-                }
-            })
-            .collect();
+        // An address without a run of zeros to shorten is 39 bytes; most
+        // are shorter.
+        let result = super::text_column(ip_values, 32, |ip, text| {
+            let ip: &[u8; 16] = ip.try_into().expect("Expected 16 bytes");
+            write_ipv6(ip, text).expect("writing to a StringBuilder does not fail")
+        });
 
         Ok(ColumnarValue::Array(Arc::new(result)))
     }
@@ -212,6 +209,23 @@ impl ScalarUDFImpl for Ip6InCidrUdf {
     }
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        // A constant prefix (a literal, the usual call) is parsed once and
+        // the column tested as a whole. NULL or invalid notation gives NULL
+        // for every row, as below.
+        if let Some((ips, cidr)) = super::column_and_constant(&args.args) {
+            let ip_values = ips
+                .as_any()
+                .downcast_ref::<FixedSizeBinaryArray>()
+                .expect("ip6_in_cidr: expected FixedSizeBinary(16) array for IP");
+            let result = match cidr.and_then(parse_cidr_v6) {
+                Some((network, prefix_len)) => BooleanArray::from_unary(ip_values, |ip| {
+                    ipv6_in_prefix(ip, &network, prefix_len)
+                }),
+                None => BooleanArray::new_null(ip_values.len()),
+            };
+            return Ok(ColumnarValue::Array(Arc::new(result)));
+        }
+
         let args = ColumnarValue::values_to_arrays(&args.args)?;
         let ip_values = args[0]
             .as_any()

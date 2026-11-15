@@ -519,6 +519,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   batch after the first regrew from empty: 0.257 reallocations per packet at
   1,024 rows a batch (`frames`+`ipv4`+`udp`), now 0. The `scan` benchmark's
   parse pass is 0 to 8% faster.
+- **`pcapsql-datafusion`: UDFs parse a literal argument once.** At 8,192
+  rows, `ip_in_cidr(col, '10.0.0.0/8')` 30 → 0.6 ns/row, `ip6_in_cidr` 64 →
+  2.0, `has_tcp_flag` 8.1 → 0.7; `ip4_to_string`, `ip6_to_string` and
+  `mac_to_string` write into the result without a `String` per row (11%, 24%
+  and 33% faster). New `udf` benchmark.
 
 ### Fixed
 

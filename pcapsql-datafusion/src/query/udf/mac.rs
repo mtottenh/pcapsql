@@ -4,14 +4,14 @@
 
 use std::sync::Arc;
 
-use arrow::array::{Array, BooleanArray, FixedSizeBinaryArray, StringArray};
+use arrow::array::{Array, BooleanArray, FixedSizeBinaryArray};
 use arrow::datatypes::DataType;
 use datafusion::common::Result as DFResult;
 use datafusion::logical_expr::{
     ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
 };
 use pcapsql_core::format::{
-    format_mac, is_broadcast_mac, is_local_mac, is_multicast_mac, parse_mac,
+    is_broadcast_mac, is_local_mac, is_multicast_mac, parse_mac, write_mac,
 };
 
 /// Create the `mac()` UDF that converts a MAC address string to FixedSizeBinary(6).
@@ -166,17 +166,14 @@ impl ScalarUDFImpl for MacToStringUdf {
             .downcast_ref::<FixedSizeBinaryArray>()
             .expect("mac_to_string: expected FixedSizeBinary(6) array");
 
-        let result: StringArray = (0..mac_values.len())
-            .map(|i| {
-                if mac_values.is_null(i) {
-                    None
-                } else {
-                    // A value that is not 6 bytes (the argument type rules
-                    // it out) formats as the empty string.
-                    Some(format_mac(mac_values.value(i)).unwrap_or_default())
-                }
-            })
-            .collect();
+        // "aa:bb:cc:dd:ee:ff" is 17 bytes.
+        let result = super::text_column(mac_values, 17, |mac, text| {
+            // A value that is not 6 bytes (the argument type rules it out)
+            // formats as the empty string.
+            if let Ok(mac) = <&[u8; 6]>::try_from(mac) {
+                write_mac(mac, text).expect("writing to a StringBuilder does not fail");
+            }
+        });
 
         Ok(ColumnarValue::Array(Arc::new(result)))
     }
