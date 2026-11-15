@@ -11,7 +11,10 @@ use compact_str::CompactString;
 use smallvec::SmallVec;
 
 use super::ethernet::ethertype;
-use super::{FieldValue, ParseContext, ParseGate, ParseResult, Protocol, TunnelType};
+use super::{
+    Cond, Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult, Protocol,
+    TunnelType,
+};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// GTP-U (User Plane) UDP port.
@@ -116,17 +119,24 @@ impl Protocol for GtpProtocol {
         "GTP"
     }
 
-    fn parse_gates(&self) -> &'static [ParseGate] {
-        &[ParseGate::Hint("transport")]
+    fn dispatch(&self) -> Dispatch {
+        const RULES: &[DispatchRule] = &[DispatchRule::hints(
+            &[
+                Cond::Hint(HintKey::DstPort, &[GTP_U_PORT as u64, GTP_C_PORT as u64]),
+                Cond::OVER_UDP,
+            ],
+            100,
+        )];
+        Dispatch::Exact(RULES)
     }
 
-    fn child_hint_keys(&self) -> Option<&'static [&'static str]> {
+    fn child_hint_keys(&self) -> Option<&'static [HintKey]> {
         Some(&[
-            "ethertype",
-            "gtp_plane",
-            "ip_version",
-            "tunnel_id",
-            "tunnel_type",
+            HintKey::EtherType,
+            HintKey::GtpPlane,
+            HintKey::IpVersion,
+            HintKey::TunnelId,
+            HintKey::TunnelType,
         ])
     }
 
@@ -136,7 +146,7 @@ impl Protocol for GtpProtocol {
             return None;
         }
         // Match when UDP dst_port hint equals GTP-U or GTP-C port
-        match context.hint("dst_port") {
+        match context.hint(HintKey::DstPort) {
             Some(port) if port == GTP_U_PORT as u64 => Some(100),
             Some(port) if port == GTP_C_PORT as u64 => Some(100),
             _ => None,
@@ -258,7 +268,7 @@ impl Protocol for GtpProtocol {
         }
 
         // Set up child hints
-        let mut child_hints = SmallVec::new();
+        let mut child_hints = Hints::new();
 
         // For G-PDU (type 255), the payload is user data (usually IP)
         if message_type == message_type::G_PDU && offset < data.len() {
@@ -267,29 +277,29 @@ impl Protocol for GtpProtocol {
 
             match ip_version {
                 4 => {
-                    child_hints.push(("ethertype", ethertype::IPV4 as u64));
-                    child_hints.push(("ip_version", 4u64));
+                    child_hints.insert(HintKey::EtherType, ethertype::IPV4 as u64);
+                    child_hints.insert(HintKey::IpVersion, 4u64);
                 }
                 6 => {
-                    child_hints.push(("ethertype", ethertype::IPV6 as u64));
-                    child_hints.push(("ip_version", 6u64));
+                    child_hints.insert(HintKey::EtherType, ethertype::IPV6 as u64);
+                    child_hints.insert(HintKey::IpVersion, 6u64);
                 }
                 _ => {}
             }
         }
 
         // Also check if this is GTP-U or GTP-C for context
-        if let Some(port) = context.hint("dst_port") {
+        if let Some(port) = context.hint(HintKey::DstPort) {
             if port == GTP_U_PORT as u64 {
-                child_hints.push(("gtp_plane", 1u64)); // User plane
+                child_hints.insert(HintKey::GtpPlane, 1u64); // User plane
             } else if port == GTP_C_PORT as u64 {
-                child_hints.push(("gtp_plane", 0u64)); // Control plane
+                child_hints.insert(HintKey::GtpPlane, 0u64); // Control plane
             }
         }
 
         // Signal tunnel boundary for encapsulation tracking
-        child_hints.push(("tunnel_type", TunnelType::Gtp as u64));
-        child_hints.push(("tunnel_id", teid as u64)); // TEID is the tunnel identifier
+        child_hints.insert(HintKey::TunnelType, TunnelType::Gtp as u64);
+        child_hints.insert(HintKey::TunnelId, teid as u64); // TEID is the tunnel identifier
 
         ParseResult::success(fields, &data[offset..], child_hints)
     }
@@ -392,10 +402,10 @@ impl GtpProtocol {
         offset += 4;
 
         // Set up child hints for GTP-C
-        let mut child_hints = SmallVec::new();
-        if let Some(port) = context.hint("dst_port") {
+        let mut child_hints = Hints::new();
+        if let Some(port) = context.hint(HintKey::DstPort) {
             if port == GTP_C_PORT as u64 {
-                child_hints.push(("gtp_plane", 0u64)); // Control plane
+                child_hints.insert(HintKey::GtpPlane, 0u64); // Control plane
             }
         }
 
@@ -458,21 +468,21 @@ mod tests {
 
         // With wrong port
         let mut ctx2 = ParseContext::new(1);
-        ctx2.insert_hint("dst_port", 80);
-        ctx2.insert_hint("transport", 17);
+        ctx2.insert_hint(HintKey::DstPort, 80);
+        ctx2.insert_hint(HintKey::Transport, 17);
         assert!(parser.can_parse(&ctx2).is_none());
 
         // With GTP-U port over UDP
         let mut ctx3 = ParseContext::new(1);
-        ctx3.insert_hint("dst_port", 2152);
-        ctx3.insert_hint("transport", 17);
+        ctx3.insert_hint(HintKey::DstPort, 2152);
+        ctx3.insert_hint(HintKey::Transport, 17);
         assert!(parser.can_parse(&ctx3).is_some());
         assert_eq!(parser.can_parse(&ctx3), Some(100));
 
         // GTP-U port over TCP is not GTP
         let mut ctx4 = ParseContext::new(1);
-        ctx4.insert_hint("dst_port", 2152);
-        ctx4.insert_hint("transport", 6);
+        ctx4.insert_hint(HintKey::DstPort, 2152);
+        ctx4.insert_hint(HintKey::Transport, 6);
         assert!(parser.can_parse(&ctx4).is_none());
     }
 
@@ -482,8 +492,8 @@ mod tests {
         let parser = GtpProtocol;
 
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 2123);
-        context.insert_hint("transport", 17);
+        context.insert_hint(HintKey::DstPort, 2123);
+        context.insert_hint(HintKey::Transport, 17);
 
         assert!(parser.can_parse(&context).is_some());
         assert_eq!(parser.can_parse(&context), Some(100));
@@ -496,7 +506,7 @@ mod tests {
 
         let parser = GtpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 2152);
+        context.insert_hint(HintKey::DstPort, 2152);
 
         let result = parser.parse(&header, &context);
 
@@ -511,7 +521,7 @@ mod tests {
     fn test_teid_extraction() {
         let parser = GtpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 2152);
+        context.insert_hint(HintKey::DstPort, 2152);
 
         // Test various TEID values
         let test_teids = [0u32, 1, 0x12345678, 0xFFFFFFFF];
@@ -530,7 +540,7 @@ mod tests {
     fn test_message_type_parsing() {
         let parser = GtpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 2152);
+        context.insert_hint(HintKey::DstPort, 2152);
 
         let test_types = [
             message_type::ECHO_REQUEST,
@@ -556,7 +566,7 @@ mod tests {
     fn test_optional_sequence_number() {
         let parser = GtpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 2152);
+        context.insert_hint(HintKey::DstPort, 2152);
 
         // With sequence number
         let header = create_gtp_header(message_type::G_PDU, 0x1234, 0, Some(0xABCD));
@@ -571,7 +581,7 @@ mod tests {
     fn test_gpdu_child_protocol_detection() {
         let parser = GtpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 2152);
+        context.insert_hint(HintKey::DstPort, 2152);
 
         // G-PDU with IPv4 payload
         let mut data_ipv4 = create_gtp_header(message_type::G_PDU, 0x1234, 20, None);
@@ -579,8 +589,8 @@ mod tests {
 
         let result_ipv4 = parser.parse(&data_ipv4, &context);
         assert!(result_ipv4.is_ok());
-        assert_eq!(result_ipv4.hint("ethertype"), Some(0x0800u64));
-        assert_eq!(result_ipv4.hint("ip_version"), Some(4u64));
+        assert_eq!(result_ipv4.hint(HintKey::EtherType), Some(0x0800u64));
+        assert_eq!(result_ipv4.hint(HintKey::IpVersion), Some(4u64));
 
         // G-PDU with IPv6 payload
         let mut data_ipv6 = create_gtp_header(message_type::G_PDU, 0x1234, 40, None);
@@ -588,8 +598,8 @@ mod tests {
 
         let result_ipv6 = parser.parse(&data_ipv6, &context);
         assert!(result_ipv6.is_ok());
-        assert_eq!(result_ipv6.hint("ethertype"), Some(0x86DDu64));
-        assert_eq!(result_ipv6.hint("ip_version"), Some(6u64));
+        assert_eq!(result_ipv6.hint(HintKey::EtherType), Some(0x86DDu64));
+        assert_eq!(result_ipv6.hint(HintKey::IpVersion), Some(6u64));
     }
 
     // Test 8: Too short header
@@ -597,7 +607,7 @@ mod tests {
     fn test_gtp_too_short() {
         let parser = GtpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 2152);
+        context.insert_hint(HintKey::DstPort, 2152);
 
         let short_header = [0x30, 0xFF, 0x00, 0x00]; // Only 4 bytes
         let result = parser.parse(&short_header, &context);
@@ -611,7 +621,7 @@ mod tests {
     fn test_length_field() {
         let parser = GtpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 2152);
+        context.insert_hint(HintKey::DstPort, 2152);
 
         let mut header = create_gtp_header(message_type::G_PDU, 0x1234, 100, None);
         // Add 100 bytes of payload
@@ -645,7 +655,7 @@ mod tests {
     fn test_gtp_prime() {
         let parser = GtpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 2152);
+        context.insert_hint(HintKey::DstPort, 2152);
 
         // GTP' header (PT = 0)
         let header = vec![
@@ -666,7 +676,7 @@ mod tests {
     fn test_extension_header_single() {
         let parser = GtpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 2152);
+        context.insert_hint(HintKey::DstPort, 2152);
 
         // GTPv1 with E flag set and one extension header
         let header = vec![
@@ -710,7 +720,7 @@ mod tests {
     fn test_extension_header_chain() {
         let parser = GtpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 2152);
+        context.insert_hint(HintKey::DstPort, 2152);
 
         // GTPv1 with multiple chained extension headers
         let header = vec![
@@ -759,7 +769,7 @@ mod tests {
     fn test_extension_header_max_limit() {
         let parser = GtpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 2152);
+        context.insert_hint(HintKey::DstPort, 2152);
 
         // Build a header with 20 extension headers (exceeds limit of 16)
         let mut header = vec![
@@ -806,7 +816,7 @@ mod tests {
     fn test_gtpv2_basic_parsing() {
         let parser = GtpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 2123);
+        context.insert_hint(HintKey::DstPort, 2123);
 
         // GTPv2-C header with TEID present
         let header = vec![
@@ -832,7 +842,7 @@ mod tests {
     fn test_gtpv2_no_teid() {
         let parser = GtpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 2123);
+        context.insert_hint(HintKey::DstPort, 2123);
 
         // GTPv2-C header without TEID (T=0)
         let header = vec![
@@ -856,7 +866,7 @@ mod tests {
     fn test_gtpv2_piggyback() {
         let parser = GtpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 2123);
+        context.insert_hint(HintKey::DstPort, 2123);
 
         // GTPv2-C header with Piggyback flag
         let header = vec![
@@ -879,7 +889,7 @@ mod tests {
     fn test_gtpv2_sequence_number() {
         let parser = GtpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 2123);
+        context.insert_hint(HintKey::DstPort, 2123);
 
         // GTPv2-C with specific sequence number
         let header = vec![
@@ -903,7 +913,7 @@ mod tests {
     fn test_gtpv1_npdu_flag() {
         let parser = GtpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 2152);
+        context.insert_hint(HintKey::DstPort, 2152);
 
         // GTPv1 with PN flag set
         let header = vec![
@@ -933,7 +943,7 @@ mod tests {
         // Test the extension_header_type_name function via parsing
         let parser = GtpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 2152);
+        context.insert_hint(HintKey::DstPort, 2152);
 
         let test_cases = [
             (extension_header_type::RAN_CONTAINER, "RAN Container"),
@@ -985,7 +995,7 @@ mod tests {
     fn test_gtpv2_message_types() {
         let parser = GtpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 2123);
+        context.insert_hint(HintKey::DstPort, 2123);
 
         // Common GTPv2-C message types
         let test_types: [(u8, &str); 6] = [
@@ -1020,7 +1030,7 @@ mod tests {
     fn test_gtpv1_all_optional_flags() {
         let parser = GtpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 2152);
+        context.insert_hint(HintKey::DstPort, 2152);
 
         // GTPv1 with E, S, and PN flags all set
         let header = vec![

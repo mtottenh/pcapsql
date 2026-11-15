@@ -6,7 +6,9 @@
 
 use smallvec::SmallVec;
 
-use super::{FieldValue, ParseContext, ParseGate, ParseResult, Protocol};
+use super::{
+    Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult, Protocol,
+};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// PCAP link type for Linux SLL captures.
@@ -77,17 +79,21 @@ impl Protocol for LinuxSllProtocol {
         "Linux SLL"
     }
 
-    fn parse_gates(&self) -> &'static [ParseGate] {
-        &[ParseGate::Root]
+    fn dispatch(&self) -> Dispatch {
+        const RULES: &[DispatchRule] = &[DispatchRule::Root {
+            link_type: LINKTYPE_LINUX_SLL,
+            priority: 100,
+        }];
+        Dispatch::Exact(RULES)
     }
 
-    fn child_hint_keys(&self) -> Option<&'static [&'static str]> {
+    fn child_hint_keys(&self) -> Option<&'static [HintKey]> {
         Some(&[
-            "ethertype",
-            "is_netlink",
-            "netlink_family",
-            "sll_arphrd",
-            "sll_protocol",
+            HintKey::EtherType,
+            HintKey::IsNetlink,
+            HintKey::NetlinkFamily,
+            HintKey::SllArphrd,
+            HintKey::SllProtocol,
         ])
     }
 
@@ -142,19 +148,19 @@ impl Protocol for LinuxSllProtocol {
         // spec the protocol field is an ethertype for every ARPHRD type except
         // NETLINK (netlink family), IPGRE (GRE protocol type),
         // IEEE80211_RADIOTAP and FRAD, so tun/ppp/sit interfaces route to IP.
-        let mut child_hints = SmallVec::new();
-        child_hints.push(("sll_arphrd", arphrd_type as u64));
+        let mut child_hints = Hints::new();
+        child_hints.insert(HintKey::SllArphrd, arphrd_type as u64);
 
         match arphrd_type {
             arphrd::NETLINK => {
-                child_hints.push(("netlink_family", protocol as u64));
-                child_hints.push(("is_netlink", 1u64));
+                child_hints.insert(HintKey::NetlinkFamily, protocol as u64);
+                child_hints.insert(HintKey::IsNetlink, 1u64);
             }
             arphrd::IPGRE | arphrd::IEEE80211_RADIOTAP | arphrd::FRAD => {
-                child_hints.push(("sll_protocol", protocol as u64));
+                child_hints.insert(HintKey::SllProtocol, protocol as u64);
             }
             _ => {
-                child_hints.push(("ethertype", protocol as u64));
+                child_hints.insert(HintKey::EtherType, protocol as u64);
             }
         }
 
@@ -299,11 +305,11 @@ mod tests {
         assert!(result
             .child_hints
             .iter()
-            .any(|(k, v)| *k == "is_netlink" && *v == 1));
+            .any(|(k, v)| k == HintKey::IsNetlink && v == 1));
         assert!(result
             .child_hints
             .iter()
-            .any(|(k, v)| *k == "netlink_family" && *v == 0));
+            .any(|(k, v)| k == HintKey::NetlinkFamily && v == 0));
     }
 
     // ==========================================================================
@@ -385,10 +391,10 @@ mod tests {
         let header = create_sll_header(packet_type::OUTGOING, 0xFFFE, 0, [0; 8], 0x86DD);
         let result = LinuxSllProtocol.parse(&header, &ParseContext::new(LINKTYPE_LINUX_SLL));
         assert!(result.is_ok());
-        assert_eq!(result.hint("ethertype"), Some(0x86DD));
+        assert_eq!(result.hint(HintKey::EtherType), Some(0x86DD));
         let header = create_sll_header(packet_type::OUTGOING, arphrd::IPGRE, 0, [0; 8], 0x0800);
         let result = LinuxSllProtocol.parse(&header, &ParseContext::new(LINKTYPE_LINUX_SLL));
-        assert!(result.hint("ethertype").is_none());
+        assert!(result.hint(HintKey::EtherType).is_none());
     }
 
     // ==========================================================================

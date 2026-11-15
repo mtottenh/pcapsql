@@ -4,7 +4,10 @@ use smallvec::SmallVec;
 
 use etherparse::UdpHeaderSlice;
 
-use super::{FieldSet, FieldValue, ParseContext, ParseGate, ParseResult, Protocol};
+use super::{
+    Cond, Dispatch, DispatchRule, FieldSet, FieldValue, HintKey, Hints, ParseContext, ParseResult,
+    Protocol,
+};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// IP protocol number for UDP.
@@ -23,16 +26,20 @@ impl Protocol for UdpProtocol {
         "UDP"
     }
 
-    fn parse_gates(&self) -> &'static [ParseGate] {
-        &[ParseGate::Hint("ip_protocol")]
+    fn dispatch(&self) -> Dispatch {
+        const RULES: &[DispatchRule] = &[DispatchRule::hints(
+            &[Cond::Hint(HintKey::IpProtocol, &[IP_PROTO_UDP as u64])],
+            100,
+        )];
+        Dispatch::Exact(RULES)
     }
 
-    fn child_hint_keys(&self) -> Option<&'static [&'static str]> {
-        Some(&["src_port", "dst_port", "transport"])
+    fn child_hint_keys(&self) -> Option<&'static [HintKey]> {
+        Some(&[HintKey::SrcPort, HintKey::DstPort, HintKey::Transport])
     }
 
     fn can_parse(&self, context: &ParseContext) -> Option<u32> {
-        match context.hint("ip_protocol") {
+        match context.hint(HintKey::IpProtocol) {
             Some(proto) if proto == IP_PROTO_UDP as u64 => Some(100),
             _ => None,
         }
@@ -48,10 +55,10 @@ impl Protocol for UdpProtocol {
                 fields.push(("length", FieldValue::UInt16(udp.length())));
                 fields.push(("checksum", FieldValue::UInt16(udp.checksum())));
 
-                let mut child_hints = SmallVec::new();
-                child_hints.push(("src_port", udp.source_port() as u64));
-                child_hints.push(("dst_port", udp.destination_port() as u64));
-                child_hints.push(("transport", 17)); // UDP
+                let mut child_hints = Hints::new();
+                child_hints.insert(HintKey::SrcPort, udp.source_port() as u64);
+                child_hints.insert(HintKey::DstPort, udp.destination_port() as u64);
+                child_hints.insert(HintKey::Transport, 17); // UDP
 
                 // UDP header is always 8 bytes
                 ParseResult::success(fields, &data[8..], child_hints)
@@ -112,10 +119,10 @@ impl Protocol for UdpProtocol {
                     result_fields.push(("checksum", FieldValue::UInt16(udp.checksum())));
                 }
 
-                let mut child_hints = SmallVec::new();
-                child_hints.push(("src_port", src_port as u64));
-                child_hints.push(("dst_port", dst_port as u64));
-                child_hints.push(("transport", 17)); // UDP
+                let mut child_hints = Hints::new();
+                child_hints.insert(HintKey::SrcPort, src_port as u64);
+                child_hints.insert(HintKey::DstPort, dst_port as u64);
+                child_hints.insert(HintKey::Transport, 17); // UDP
 
                 // UDP header is always 8 bytes
                 ParseResult::success(result_fields, &data[8..], child_hints)
@@ -153,7 +160,7 @@ mod tests {
 
         let parser = UdpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 17);
+        context.insert_hint(HintKey::IpProtocol, 17);
 
         let result = parser.parse(&header, &context);
 
@@ -177,14 +184,14 @@ mod tests {
 
         let parser = UdpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 17);
+        context.insert_hint(HintKey::IpProtocol, 17);
 
         let result = parser.parse(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("src_port"), Some(&FieldValue::UInt16(50000)));
         assert_eq!(result.get("dst_port"), Some(&FieldValue::UInt16(53)));
-        assert_eq!(result.hint("dst_port"), Some(53u64));
+        assert_eq!(result.hint(HintKey::DstPort), Some(53u64));
     }
 
     #[test]
@@ -198,7 +205,7 @@ mod tests {
 
         let parser = UdpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 17);
+        context.insert_hint(HintKey::IpProtocol, 17);
 
         let result = parser.parse(&header, &context);
 
@@ -217,12 +224,12 @@ mod tests {
 
         // With TCP protocol
         let mut ctx2 = ParseContext::new(1);
-        ctx2.insert_hint("ip_protocol", 6);
+        ctx2.insert_hint(HintKey::IpProtocol, 6);
         assert!(parser.can_parse(&ctx2).is_none());
 
         // With UDP protocol
         let mut ctx3 = ParseContext::new(1);
-        ctx3.insert_hint("ip_protocol", 17);
+        ctx3.insert_hint(HintKey::IpProtocol, 17);
         assert!(parser.can_parse(&ctx3).is_some());
     }
 
@@ -232,7 +239,7 @@ mod tests {
 
         let parser = UdpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 17);
+        context.insert_hint(HintKey::IpProtocol, 17);
 
         let result = parser.parse(&short_header, &context);
 
@@ -251,14 +258,14 @@ mod tests {
 
         let parser = UdpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 17);
+        context.insert_hint(HintKey::IpProtocol, 17);
 
         let result = parser.parse(&header, &context);
 
         assert!(result.is_ok());
-        assert_eq!(result.hint("src_port"), Some(4660u64));
-        assert_eq!(result.hint("dst_port"), Some(22136u64));
-        assert_eq!(result.hint("transport"), Some(17u64));
+        assert_eq!(result.hint(HintKey::SrcPort), Some(4660u64));
+        assert_eq!(result.hint(HintKey::DstPort), Some(22136u64));
+        assert_eq!(result.hint(HintKey::Transport), Some(17u64));
     }
 
     #[test]
@@ -273,7 +280,7 @@ mod tests {
 
         let parser = UdpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 17);
+        context.insert_hint(HintKey::IpProtocol, 17);
 
         let result = parser.parse(&header, &context);
 
@@ -293,7 +300,7 @@ mod tests {
 
         let parser = UdpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 17);
+        context.insert_hint(HintKey::IpProtocol, 17);
 
         // Project to only ports
         let fields: FieldSet = ["src_port", "dst_port"]
@@ -310,7 +317,7 @@ mod tests {
         assert!(result.get("length").is_none());
         assert!(result.get("checksum").is_none());
         // Child hints are still populated
-        assert_eq!(result.hint("src_port"), Some(53u64));
-        assert_eq!(result.hint("dst_port"), Some(49152u64));
+        assert_eq!(result.hint(HintKey::SrcPort), Some(53u64));
+        assert_eq!(result.hint(HintKey::DstPort), Some(49152u64));
     }
 }

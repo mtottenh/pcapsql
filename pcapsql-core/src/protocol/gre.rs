@@ -9,7 +9,10 @@
 
 use smallvec::SmallVec;
 
-use super::{FieldValue, ParseContext, ParseGate, ParseResult, Protocol, TunnelType};
+use super::{
+    Cond, Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult, Protocol,
+    TunnelType,
+};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// IP protocol number for GRE.
@@ -64,23 +67,27 @@ impl Protocol for GreProtocol {
         "GRE"
     }
 
-    fn parse_gates(&self) -> &'static [ParseGate] {
-        &[ParseGate::Hint("ip_protocol")]
+    fn dispatch(&self) -> Dispatch {
+        const RULES: &[DispatchRule] = &[DispatchRule::hints(
+            &[Cond::Hint(HintKey::IpProtocol, &[IP_PROTOCOL_GRE as u64])],
+            100,
+        )];
+        Dispatch::Exact(RULES)
     }
 
-    fn child_hint_keys(&self) -> Option<&'static [&'static str]> {
+    fn child_hint_keys(&self) -> Option<&'static [HintKey]> {
         Some(&[
-            "ethertype",
-            "gre_key",
-            "link_type",
-            "tunnel_id",
-            "tunnel_type",
+            HintKey::EtherType,
+            HintKey::GreKey,
+            HintKey::LinkType,
+            HintKey::TunnelId,
+            HintKey::TunnelType,
         ])
     }
 
     fn can_parse(&self, context: &ParseContext) -> Option<u32> {
         // Match when IP protocol hint equals 47
-        match context.hint("ip_protocol") {
+        match context.hint(HintKey::IpProtocol) {
             Some(proto) if proto == IP_PROTOCOL_GRE as u64 => Some(100),
             _ => None,
         }
@@ -200,12 +207,12 @@ impl Protocol for GreProtocol {
         ));
 
         // Set up child hints for the encapsulated protocol
-        let mut child_hints = SmallVec::new();
-        child_hints.push(("ethertype", protocol_type as u64));
+        let mut child_hints = Hints::new();
+        child_hints.insert(HintKey::EtherType, protocol_type as u64);
 
         // If key is present, pass it as a hint for tunneling context
         if let Some(key) = key_value {
-            child_hints.push(("gre_key", key as u64));
+            child_hints.insert(HintKey::GreKey, key as u64);
         }
 
         // Common ethertypes in GRE:
@@ -218,14 +225,14 @@ impl Protocol for GreProtocol {
         // Ethernet parser only runs below the root when told the link type,
         // exactly as VXLAN does.
         if protocol_type == ETHERTYPE_TEB {
-            child_hints.push(("link_type", 1u64)); // DLT_EN10MB
+            child_hints.insert(HintKey::LinkType, 1u64); // DLT_EN10MB
         }
 
         // Signal tunnel boundary for encapsulation tracking
-        child_hints.push(("tunnel_type", TunnelType::Gre as u64));
+        child_hints.insert(HintKey::TunnelType, TunnelType::Gre as u64);
         // Use GRE key as tunnel ID if present
         if let Some(key) = key_value {
-            child_hints.push(("tunnel_id", key as u64));
+            child_hints.insert(HintKey::TunnelId, key as u64);
         }
 
         ParseResult::success(fields, &data[offset..], child_hints)
@@ -297,12 +304,12 @@ mod tests {
 
         // With wrong IP protocol
         let mut ctx2 = ParseContext::new(1);
-        ctx2.insert_hint("ip_protocol", 6); // TCP
+        ctx2.insert_hint(HintKey::IpProtocol, 6); // TCP
         assert!(parser.can_parse(&ctx2).is_none());
 
         // With GRE IP protocol
         let mut ctx3 = ParseContext::new(1);
-        ctx3.insert_hint("ip_protocol", 47);
+        ctx3.insert_hint(HintKey::IpProtocol, 47);
         assert!(parser.can_parse(&ctx3).is_some());
         assert_eq!(parser.can_parse(&ctx3), Some(100));
     }
@@ -316,7 +323,7 @@ mod tests {
 
         let parser = GreProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 47);
+        context.insert_hint(HintKey::IpProtocol, 47);
 
         let result = parser.parse(&header, &context);
 
@@ -356,7 +363,7 @@ mod tests {
 
         let parser = GreProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 47);
+        context.insert_hint(HintKey::IpProtocol, 47);
 
         let result = parser.parse(&header, &context);
 
@@ -380,14 +387,14 @@ mod tests {
 
         let parser = GreProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 47);
+        context.insert_hint(HintKey::IpProtocol, 47);
 
         let result = parser.parse(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("key_present"), Some(&FieldValue::Bool(true)));
         assert_eq!(result.get("key"), Some(&FieldValue::UInt32(0x00010203)));
-        assert_eq!(result.hint("gre_key"), Some(0x00010203u64));
+        assert_eq!(result.hint(HintKey::GreKey), Some(0x00010203u64));
         assert_eq!(result.remaining.len(), 2);
     }
 
@@ -402,7 +409,7 @@ mod tests {
 
         let parser = GreProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 47);
+        context.insert_hint(HintKey::IpProtocol, 47);
 
         let result = parser.parse(&header, &context);
 
@@ -433,7 +440,7 @@ mod tests {
 
         let parser = GreProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 47);
+        context.insert_hint(HintKey::IpProtocol, 47);
 
         let result = parser.parse(&header, &context);
 
@@ -464,23 +471,29 @@ mod tests {
         let header_ipv4 = create_gre_header(false, false, false, ethertype::IPV4);
         let parser = GreProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 47);
+        context.insert_hint(HintKey::IpProtocol, 47);
 
         let result = parser.parse(&header_ipv4, &context);
         assert!(result.is_ok());
-        assert_eq!(result.hint("ethertype"), Some(ethertype::IPV4 as u64));
+        assert_eq!(
+            result.hint(HintKey::EtherType),
+            Some(ethertype::IPV4 as u64)
+        );
 
         // Test IPv6 ethertype
         let header_ipv6 = create_gre_header(false, false, false, ethertype::IPV6);
         let result = parser.parse(&header_ipv6, &context);
         assert!(result.is_ok());
-        assert_eq!(result.hint("ethertype"), Some(ethertype::IPV6 as u64));
+        assert_eq!(
+            result.hint(HintKey::EtherType),
+            Some(ethertype::IPV6 as u64)
+        );
 
         // Test Transparent Ethernet Bridging
         let header_teb = create_gre_header(false, false, false, 0x6558);
         let result = parser.parse(&header_teb, &context);
         assert!(result.is_ok());
-        assert_eq!(result.hint("ethertype"), Some(0x6558u64));
+        assert_eq!(result.hint(HintKey::EtherType), Some(0x6558u64));
     }
 
     // Test 8: Too short header
@@ -535,7 +548,7 @@ mod tests {
 
         let parser = GreProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 47);
+        context.insert_hint(HintKey::IpProtocol, 47);
 
         let result = parser.parse(&short_header, &context);
         assert!(!result.is_ok());
@@ -549,7 +562,7 @@ mod tests {
 
         let parser = GreProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 47);
+        context.insert_hint(HintKey::IpProtocol, 47);
 
         let result = parser.parse(&header, &context);
         assert!(!result.is_ok());
@@ -579,7 +592,7 @@ mod tests {
     fn test_version_0_standard_gre() {
         let parser = GreProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 47);
+        context.insert_hint(HintKey::IpProtocol, 47);
 
         // Standard GRE with version 0
         let header = create_gre_header(false, false, false, ethertype::IPV4);
@@ -602,7 +615,7 @@ mod tests {
     fn test_version_1_pptp_enhanced() {
         let parser = GreProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 47);
+        context.insert_hint(HintKey::IpProtocol, 47);
 
         // Create PPTP Enhanced GRE (version 1) - manual construction
         let mut header = Vec::new();
@@ -629,7 +642,7 @@ mod tests {
     fn test_invalid_version() {
         let parser = GreProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 47);
+        context.insert_hint(HintKey::IpProtocol, 47);
 
         // Test versions 2-7 (all invalid)
         for version in 2..=7u16 {
@@ -658,7 +671,7 @@ mod tests {
     fn test_checksum_valid() {
         let parser = GreProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 47);
+        context.insert_hint(HintKey::IpProtocol, 47);
 
         // Create GRE header with checksum flag
         let mut packet = Vec::new();
@@ -694,7 +707,7 @@ mod tests {
     fn test_checksum_invalid() {
         let parser = GreProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 47);
+        context.insert_hint(HintKey::IpProtocol, 47);
 
         // Create GRE header with wrong checksum
         let mut packet = Vec::new();
@@ -723,7 +736,7 @@ mod tests {
     fn test_header_length() {
         let parser = GreProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 47);
+        context.insert_hint(HintKey::IpProtocol, 47);
 
         // Minimal header (4 bytes)
         let header_min = create_gre_header(false, false, false, ethertype::IPV4);
@@ -815,7 +828,7 @@ mod tests {
     fn test_gre_missing_checksum_field() {
         let parser = GreProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 47);
+        context.insert_hint(HintKey::IpProtocol, 47);
 
         // Checksum flag set but no checksum data
         let header = create_gre_header(true, false, false, ethertype::IPV4);
@@ -830,7 +843,7 @@ mod tests {
     fn test_gre_missing_sequence_field() {
         let parser = GreProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 47);
+        context.insert_hint(HintKey::IpProtocol, 47);
 
         // Sequence flag set but no sequence data
         let header = create_gre_header(false, false, true, ethertype::IPV4);

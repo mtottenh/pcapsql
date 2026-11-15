@@ -6,7 +6,9 @@
 use compact_str::CompactString;
 use smallvec::SmallVec;
 
-use super::{FieldValue, ParseContext, ParseGate, ParseResult, Protocol};
+use super::{
+    Cond, Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult, Protocol,
+};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// NTP port.
@@ -28,11 +30,15 @@ impl Protocol for NtpProtocol {
         "NTP"
     }
 
-    fn parse_gates(&self) -> &'static [ParseGate] {
-        &[ParseGate::Hint("transport")]
+    fn dispatch(&self) -> Dispatch {
+        const RULES: &[DispatchRule] = &[DispatchRule::hints(
+            &[Cond::Port(&[NTP_PORT as u64]), Cond::OVER_UDP],
+            100,
+        )];
+        Dispatch::Exact(RULES)
     }
 
-    fn child_hint_keys(&self) -> Option<&'static [&'static str]> {
+    fn child_hint_keys(&self) -> Option<&'static [HintKey]> {
         Some(&[])
     }
 
@@ -42,8 +48,8 @@ impl Protocol for NtpProtocol {
             return None;
         }
         // Check for NTP port
-        let src_port = context.hint("src_port");
-        let dst_port = context.hint("dst_port");
+        let src_port = context.hint(HintKey::SrcPort);
+        let dst_port = context.hint(HintKey::DstPort);
 
         match (src_port, dst_port) {
             (Some(p), _) | (_, Some(p)) if p == NTP_PORT as u64 => Some(100),
@@ -128,7 +134,7 @@ impl Protocol for NtpProtocol {
         // Any remaining data would be extension fields or authentication
         let remaining = &data[NTP_HEADER_SIZE..];
 
-        ParseResult::success(fields, remaining, SmallVec::new())
+        ParseResult::success(fields, remaining, Hints::new())
     }
 
     fn schema_fields(&self) -> Vec<FieldDescriptor> {
@@ -333,26 +339,26 @@ mod tests {
 
         // With dst_port 123 over UDP
         let mut ctx2 = ParseContext::new(1);
-        ctx2.insert_hint("dst_port", 123);
-        ctx2.insert_hint("transport", 17);
+        ctx2.insert_hint(HintKey::DstPort, 123);
+        ctx2.insert_hint(HintKey::Transport, 17);
         assert!(parser.can_parse(&ctx2).is_some());
 
         // With src_port 123 over UDP
         let mut ctx3 = ParseContext::new(1);
-        ctx3.insert_hint("src_port", 123);
-        ctx3.insert_hint("transport", 17);
+        ctx3.insert_hint(HintKey::SrcPort, 123);
+        ctx3.insert_hint(HintKey::Transport, 17);
         assert!(parser.can_parse(&ctx3).is_some());
 
         // With different port
         let mut ctx4 = ParseContext::new(1);
-        ctx4.insert_hint("dst_port", 80);
-        ctx4.insert_hint("transport", 17);
+        ctx4.insert_hint(HintKey::DstPort, 80);
+        ctx4.insert_hint(HintKey::Transport, 17);
         assert!(parser.can_parse(&ctx4).is_none());
 
         // Port 123 over TCP is not NTP
         let mut ctx5 = ParseContext::new(1);
-        ctx5.insert_hint("src_port", 123);
-        ctx5.insert_hint("transport", 6);
+        ctx5.insert_hint(HintKey::SrcPort, 123);
+        ctx5.insert_hint(HintKey::Transport, 6);
         assert!(parser.can_parse(&ctx5).is_none());
     }
 
@@ -362,7 +368,7 @@ mod tests {
 
         let parser = NtpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 123);
+        context.insert_hint(HintKey::DstPort, 123);
 
         let result = parser.parse(&packet, &context);
 
@@ -378,7 +384,7 @@ mod tests {
 
         let parser = NtpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("src_port", 123);
+        context.insert_hint(HintKey::SrcPort, 123);
 
         let result = parser.parse(&packet, &context);
 

@@ -4,7 +4,10 @@ use etherparse::Ipv6HeaderSlice;
 use smallvec::SmallVec;
 
 use super::ethernet::ethertype;
-use super::{FieldValue, ParseContext, ParseGate, ParseResult, Protocol, TunnelType};
+use super::{
+    Cond, Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult, Protocol,
+    TunnelType,
+};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// IPv6 Next Header values for extension headers and encapsulation.
@@ -52,16 +55,25 @@ impl Protocol for Ipv6Protocol {
         "IPv6"
     }
 
-    fn parse_gates(&self) -> &'static [ParseGate] {
-        &[ParseGate::Hint("ethertype")]
+    fn dispatch(&self) -> Dispatch {
+        const RULES: &[DispatchRule] = &[DispatchRule::hints(
+            &[Cond::Hint(HintKey::EtherType, &[ethertype::IPV6 as u64])],
+            100,
+        )];
+        Dispatch::Exact(RULES)
     }
 
-    fn child_hint_keys(&self) -> Option<&'static [&'static str]> {
-        Some(&["ethertype", "ip_protocol", "ip_version", "tunnel_type"])
+    fn child_hint_keys(&self) -> Option<&'static [HintKey]> {
+        Some(&[
+            HintKey::EtherType,
+            HintKey::IpProtocol,
+            HintKey::IpVersion,
+            HintKey::TunnelType,
+        ])
     }
 
     fn can_parse(&self, context: &ParseContext) -> Option<u32> {
-        match context.hint("ethertype") {
+        match context.hint(HintKey::EtherType) {
             Some(et) if et == ethertype::IPV6 as u64 => Some(100),
             _ => None,
         }
@@ -94,21 +106,21 @@ impl Protocol for Ipv6Protocol {
                     fields.push((k, v));
                 }
 
-                let mut child_hints = SmallVec::new();
-                child_hints.push(("ip_protocol", final_next_header as u64));
-                child_hints.push(("ip_version", 6));
+                let mut child_hints = Hints::new();
+                child_hints.insert(HintKey::IpProtocol, final_next_header as u64);
+                child_hints.insert(HintKey::IpVersion, 6);
 
                 // Check for IP-in-IP encapsulation
                 if final_next_header == next_header::IPIP {
                     // IPv4 encapsulated in IPv6 - signal tunnel boundary
-                    child_hints.push(("tunnel_type", TunnelType::Ip4InIp6 as u64));
+                    child_hints.insert(HintKey::TunnelType, TunnelType::Ip4InIp6 as u64);
                     // Set ethertype hint so inner IPv4 can be parsed
-                    child_hints.push(("ethertype", ethertype::IPV4 as u64));
+                    child_hints.insert(HintKey::EtherType, ethertype::IPV4 as u64);
                 } else if final_next_header == next_header::IPV6_IN_IP {
                     // IPv6 encapsulated in IPv6 - signal tunnel boundary
-                    child_hints.push(("tunnel_type", TunnelType::Ip6InIp6 as u64));
+                    child_hints.insert(HintKey::TunnelType, TunnelType::Ip6InIp6 as u64);
                     // Set ethertype hint so inner IPv6 can be parsed
-                    child_hints.push(("ethertype", ethertype::IPV6 as u64));
+                    child_hints.insert(HintKey::EtherType, ethertype::IPV6 as u64);
                 }
 
                 // Trim Ethernet trailer padding: the payload ends at the IPv6
@@ -373,7 +385,7 @@ mod tests {
 
     fn create_ipv6_context() -> ParseContext {
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", ethertype::IPV6 as u64);
+        context.insert_hint(HintKey::EtherType, ethertype::IPV6 as u64);
         context
     }
 
@@ -401,8 +413,8 @@ mod tests {
         assert_eq!(result.get("version"), Some(&FieldValue::UInt8(6)));
         assert_eq!(result.get("hop_limit"), Some(&FieldValue::UInt8(64)));
         assert_eq!(result.get("next_header"), Some(&FieldValue::UInt8(6)));
-        assert_eq!(result.hint("ip_protocol"), Some(6u64));
-        assert_eq!(result.hint("ip_version"), Some(6u64));
+        assert_eq!(result.hint(HintKey::IpProtocol), Some(6u64));
+        assert_eq!(result.hint(HintKey::IpVersion), Some(6u64));
     }
 
     #[test]
@@ -415,12 +427,12 @@ mod tests {
 
         // With IPv4 ethertype
         let mut context2 = ParseContext::new(1);
-        context2.insert_hint("ethertype", ethertype::IPV4 as u64);
+        context2.insert_hint(HintKey::EtherType, ethertype::IPV4 as u64);
         assert!(parser.can_parse(&context2).is_none());
 
         // With IPv6 ethertype
         let mut context3 = ParseContext::new(1);
-        context3.insert_hint("ethertype", ethertype::IPV6 as u64);
+        context3.insert_hint(HintKey::EtherType, ethertype::IPV6 as u64);
         assert!(parser.can_parse(&context3).is_some());
     }
 
@@ -447,7 +459,7 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.get("next_header"), Some(&FieldValue::UInt8(17)));
         assert_eq!(result.get("hop_limit"), Some(&FieldValue::UInt8(128)));
-        assert_eq!(result.hint("ip_protocol"), Some(17u64));
+        assert_eq!(result.hint(HintKey::IpProtocol), Some(17u64));
     }
 
     #[test]
@@ -493,7 +505,7 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.get("ext_hop_by_hop"), Some(&FieldValue::Bool(true)));
         assert_eq!(result.get("ext_routing"), Some(&FieldValue::Bool(false)));
-        assert_eq!(result.hint("ip_protocol"), Some(6u64)); // TCP
+        assert_eq!(result.hint(HintKey::IpProtocol), Some(6u64)); // TCP
     }
 
     #[test]
@@ -527,7 +539,7 @@ mod tests {
         assert_eq!(result.get("ext_routing"), Some(&FieldValue::Bool(true)));
         assert_eq!(result.get("routing_type"), Some(&FieldValue::UInt8(2)));
         assert_eq!(result.get("segments_left"), Some(&FieldValue::UInt8(1)));
-        assert_eq!(result.hint("ip_protocol"), Some(6u64));
+        assert_eq!(result.hint(HintKey::IpProtocol), Some(6u64));
     }
 
     #[test]
@@ -583,7 +595,7 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(result.get("ext_destination"), Some(&FieldValue::Bool(true)));
-        assert_eq!(result.hint("ip_protocol"), Some(6u64));
+        assert_eq!(result.hint(HintKey::IpProtocol), Some(6u64));
     }
 
     #[test]
@@ -613,7 +625,7 @@ mod tests {
         assert_eq!(result.get("ext_hop_by_hop"), Some(&FieldValue::Bool(true)));
         assert_eq!(result.get("ext_routing"), Some(&FieldValue::Bool(true)));
         assert_eq!(result.get("ext_fragment"), Some(&FieldValue::Bool(true)));
-        assert_eq!(result.hint("ip_protocol"), Some(6u64));
+        assert_eq!(result.hint(HintKey::IpProtocol), Some(6u64));
     }
 
     #[test]
@@ -669,7 +681,7 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.get("ext_hop_by_hop"), Some(&FieldValue::Bool(true)));
         // Final protocol should be 250 (unknown)
-        assert_eq!(result.hint("ip_protocol"), Some(250u64));
+        assert_eq!(result.hint(HintKey::IpProtocol), Some(250u64));
     }
 
     #[test]
@@ -702,12 +714,15 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.get("next_header"), Some(&FieldValue::UInt8(4)));
         // Should set ip_protocol hint for inner protocol
-        assert_eq!(result.hint("ip_protocol"), Some(4u64));
+        assert_eq!(result.hint(HintKey::IpProtocol), Some(4u64));
         // Should set ethertype hint for IPv4 so inner IPv4 parser can match
-        assert_eq!(result.hint("ethertype"), Some(ethertype::IPV4 as u64));
+        assert_eq!(
+            result.hint(HintKey::EtherType),
+            Some(ethertype::IPV4 as u64)
+        );
         // Should indicate tunnel type
         assert_eq!(
-            result.hint("tunnel_type"),
+            result.hint(HintKey::TunnelType),
             Some(TunnelType::Ip4InIp6 as u64)
         );
     }
@@ -742,12 +757,15 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.get("next_header"), Some(&FieldValue::UInt8(41)));
         // Should set ip_protocol hint for inner protocol
-        assert_eq!(result.hint("ip_protocol"), Some(41u64));
+        assert_eq!(result.hint(HintKey::IpProtocol), Some(41u64));
         // Should set ethertype hint for IPv6 so inner IPv6 parser can match
-        assert_eq!(result.hint("ethertype"), Some(ethertype::IPV6 as u64));
+        assert_eq!(
+            result.hint(HintKey::EtherType),
+            Some(ethertype::IPV6 as u64)
+        );
         // Should indicate tunnel type
         assert_eq!(
-            result.hint("tunnel_type"),
+            result.hint(HintKey::TunnelType),
             Some(TunnelType::Ip6InIp6 as u64)
         );
     }

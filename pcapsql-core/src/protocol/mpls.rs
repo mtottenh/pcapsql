@@ -17,7 +17,9 @@ use compact_str::CompactString;
 use smallvec::SmallVec;
 
 use super::ethernet::ethertype;
-use super::{FieldValue, ParseContext, ParseGate, ParseResult, Protocol};
+use super::{
+    Cond, Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult, Protocol,
+};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// EtherType for MPLS Unicast.
@@ -78,17 +80,27 @@ impl Protocol for MplsProtocol {
         "MPLS"
     }
 
-    fn parse_gates(&self) -> &'static [ParseGate] {
-        &[ParseGate::Hint("ethertype")]
+    fn dispatch(&self) -> Dispatch {
+        const RULES: &[DispatchRule] = &[DispatchRule::hints(
+            &[Cond::Hint(
+                HintKey::EtherType,
+                &[
+                    ETHERTYPE_MPLS_UNICAST as u64,
+                    ETHERTYPE_MPLS_MULTICAST as u64,
+                ],
+            )],
+            100,
+        )];
+        Dispatch::Exact(RULES)
     }
 
-    fn child_hint_keys(&self) -> Option<&'static [&'static str]> {
-        Some(&["ethertype", "ip_version"])
+    fn child_hint_keys(&self) -> Option<&'static [HintKey]> {
+        Some(&[HintKey::EtherType, HintKey::IpVersion])
     }
 
     fn can_parse(&self, context: &ParseContext) -> Option<u32> {
         // Match when ethertype hint equals MPLS unicast or multicast
-        match context.hint("ethertype") {
+        match context.hint(HintKey::EtherType) {
             Some(et) if et == ETHERTYPE_MPLS_UNICAST as u64 => Some(100),
             Some(et) if et == ETHERTYPE_MPLS_MULTICAST as u64 => Some(100),
             _ => None,
@@ -185,7 +197,7 @@ impl Protocol for MplsProtocol {
         }
 
         // Set up child hints
-        let mut child_hints = SmallVec::new();
+        let mut child_hints = Hints::new();
 
         // After the bottom of stack, we need to detect the inner protocol
         // by looking at the first nibble of the payload
@@ -195,12 +207,12 @@ impl Protocol for MplsProtocol {
 
             match version {
                 4 => {
-                    child_hints.push(("ethertype", ethertype::IPV4 as u64));
-                    child_hints.push(("ip_version", 4u64));
+                    child_hints.insert(HintKey::EtherType, ethertype::IPV4 as u64);
+                    child_hints.insert(HintKey::IpVersion, 4u64);
                 }
                 6 => {
-                    child_hints.push(("ethertype", ethertype::IPV6 as u64));
-                    child_hints.push(("ip_version", 6u64));
+                    child_hints.insert(HintKey::EtherType, ethertype::IPV6 as u64);
+                    child_hints.insert(HintKey::IpVersion, 6u64);
                 }
                 _ => {
                     // Unknown inner protocol, could be Ethernet or other
@@ -260,17 +272,17 @@ mod tests {
 
         // With IPv4 ethertype
         let mut ctx2 = ParseContext::new(1);
-        ctx2.insert_hint("ethertype", ethertype::IPV4 as u64);
+        ctx2.insert_hint(HintKey::EtherType, ethertype::IPV4 as u64);
         assert!(parser.can_parse(&ctx2).is_none());
 
         // With MPLS unicast ethertype
         let mut ctx3 = ParseContext::new(1);
-        ctx3.insert_hint("ethertype", 0x8847);
+        ctx3.insert_hint(HintKey::EtherType, 0x8847);
         assert!(parser.can_parse(&ctx3).is_some());
 
         // With MPLS multicast ethertype
         let mut ctx4 = ParseContext::new(1);
-        ctx4.insert_hint("ethertype", 0x8848);
+        ctx4.insert_hint(HintKey::EtherType, 0x8848);
         assert!(parser.can_parse(&ctx4).is_some());
     }
 
@@ -285,7 +297,7 @@ mod tests {
 
         let parser = MplsProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", 0x8847);
+        context.insert_hint(HintKey::EtherType, 0x8847);
 
         let result = parser.parse(&data, &context);
 
@@ -317,7 +329,7 @@ mod tests {
 
         let parser = MplsProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", 0x8847);
+        context.insert_hint(HintKey::EtherType, 0x8847);
 
         let result = parser.parse(&data, &context);
 
@@ -348,7 +360,7 @@ mod tests {
 
             let parser = MplsProtocol;
             let mut context = ParseContext::new(1);
-            context.insert_hint("ethertype", 0x8847);
+            context.insert_hint(HintKey::EtherType, 0x8847);
 
             let result = parser.parse(&data, &context);
 
@@ -364,7 +376,7 @@ mod tests {
         let data1 = create_mpls_label(100, 0, true, 64);
         let parser = MplsProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", 0x8847);
+        context.insert_hint(HintKey::EtherType, 0x8847);
 
         let result1 = parser.parse(&data1, &context);
         assert!(result1.is_ok());
@@ -390,7 +402,7 @@ mod tests {
 
             let parser = MplsProtocol;
             let mut context = ParseContext::new(1);
-            context.insert_hint("ethertype", 0x8847);
+            context.insert_hint(HintKey::EtherType, 0x8847);
 
             let result = parser.parse(&data, &context);
 
@@ -404,7 +416,7 @@ mod tests {
     fn test_child_protocol_detection() {
         let parser = MplsProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", 0x8847);
+        context.insert_hint(HintKey::EtherType, 0x8847);
 
         // IPv4 inner (version nibble = 4)
         let mut data_ipv4 = Vec::new();
@@ -413,8 +425,11 @@ mod tests {
 
         let result_ipv4 = parser.parse(&data_ipv4, &context);
         assert!(result_ipv4.is_ok());
-        assert_eq!(result_ipv4.hint("ethertype"), Some(ethertype::IPV4 as u64));
-        assert_eq!(result_ipv4.hint("ip_version"), Some(4u64));
+        assert_eq!(
+            result_ipv4.hint(HintKey::EtherType),
+            Some(ethertype::IPV4 as u64)
+        );
+        assert_eq!(result_ipv4.hint(HintKey::IpVersion), Some(4u64));
 
         // IPv6 inner (version nibble = 6)
         let mut data_ipv6 = Vec::new();
@@ -423,8 +438,11 @@ mod tests {
 
         let result_ipv6 = parser.parse(&data_ipv6, &context);
         assert!(result_ipv6.is_ok());
-        assert_eq!(result_ipv6.hint("ethertype"), Some(ethertype::IPV6 as u64));
-        assert_eq!(result_ipv6.hint("ip_version"), Some(6u64));
+        assert_eq!(
+            result_ipv6.hint(HintKey::EtherType),
+            Some(ethertype::IPV6 as u64)
+        );
+        assert_eq!(result_ipv6.hint(HintKey::IpVersion), Some(6u64));
     }
 
     /// MPLS is not a tunnel: the IP layer under a label stack is at
@@ -459,7 +477,7 @@ mod tests {
 
         let parser = MplsProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", 0x8847);
+        context.insert_hint(HintKey::EtherType, 0x8847);
 
         let result = parser.parse(&short_data, &context);
         assert!(!result.is_ok());
@@ -473,7 +491,7 @@ mod tests {
 
         let parser = MplsProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", 0x8847);
+        context.insert_hint(HintKey::EtherType, 0x8847);
 
         let result = parser.parse(&data, &context);
 
@@ -504,7 +522,7 @@ mod tests {
     fn test_special_label_ipv4_explicit_null() {
         let parser = MplsProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", 0x8847);
+        context.insert_hint(HintKey::EtherType, 0x8847);
 
         // Label 0 = IPv4 Explicit NULL
         let mut data = Vec::new();
@@ -535,7 +553,7 @@ mod tests {
     fn test_special_label_router_alert() {
         let parser = MplsProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", 0x8847);
+        context.insert_hint(HintKey::EtherType, 0x8847);
 
         // Label 1 = Router Alert
         let data = create_mpls_label(special_label::ROUTER_ALERT, 0, true, 64);
@@ -559,7 +577,7 @@ mod tests {
     fn test_special_label_ipv6_explicit_null() {
         let parser = MplsProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", 0x8847);
+        context.insert_hint(HintKey::EtherType, 0x8847);
 
         // Label 2 = IPv6 Explicit NULL
         let mut data = Vec::new();
@@ -590,7 +608,7 @@ mod tests {
     fn test_all_special_labels() {
         let parser = MplsProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", 0x8847);
+        context.insert_hint(HintKey::EtherType, 0x8847);
 
         let test_cases = [
             (special_label::IPV4_EXPLICIT_NULL, "IPv4-Explicit-NULL"),
@@ -624,7 +642,7 @@ mod tests {
     fn test_reserved_labels() {
         let parser = MplsProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", 0x8847);
+        context.insert_hint(HintKey::EtherType, 0x8847);
 
         // Labels 4-6 and 8-12 are reserved
         for label in [4u32, 5, 6, 8, 9, 10, 11, 12] {
@@ -648,7 +666,7 @@ mod tests {
     fn test_normal_label_not_reserved() {
         let parser = MplsProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", 0x8847);
+        context.insert_hint(HintKey::EtherType, 0x8847);
 
         // Labels >= 16 are normal labels
         let data = create_mpls_label(16, 0, true, 64);
@@ -678,7 +696,7 @@ mod tests {
     fn test_stack_depth_limit() {
         let parser = MplsProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", 0x8847);
+        context.insert_hint(HintKey::EtherType, 0x8847);
 
         // Create exactly 16 labels (should pass)
         let mut data_16 = Vec::new();
@@ -708,7 +726,7 @@ mod tests {
     fn test_special_label_in_stack() {
         let parser = MplsProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", 0x8847);
+        context.insert_hint(HintKey::EtherType, 0x8847);
 
         // Stack: [1000, Router Alert (1), 2000]
         let mut data = Vec::new();

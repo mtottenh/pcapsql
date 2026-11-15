@@ -110,8 +110,8 @@ pub use protocol::OwnedFieldValue;
 pub use protocol::{
     chain_fields_for_protocol, compute_required_protocols, default_registry,
     merge_with_chain_fields, parse_packet, should_run_parser, BuiltinProtocol, FieldHint, FieldSet,
-    FieldValue, ParseContext, ParseGate, ParseResult, ParseScope, PayloadMode, ProjectionConfig,
-    Protocol, ProtocolRegistry, TunnelLayer, TunnelType,
+    FieldValue, ParseContext, ParseResult, ParseScope, PayloadMode, ProjectionConfig, Protocol,
+    ProtocolRegistry, TunnelLayer, TunnelType,
 };
 pub use schema::{DataKind, FieldDescriptor, ProtocolSchema};
 pub use stream::{

@@ -24,7 +24,9 @@ use tls_parser::{
     TlsMessageHandshake, TlsVersion,
 };
 
-use super::{FieldValue, ParseContext, ParseGate, ParseResult, Protocol};
+use super::{
+    Cond, Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult, Protocol,
+};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// TLS/HTTPS port.
@@ -100,7 +102,7 @@ pub mod alert {
 }
 
 /// Common TLS ports for priority matching.
-const TLS_PORTS: &[u16] = &[
+const TLS_PORTS: &[u64] = &[
     443,   // HTTPS
     8443,  // HTTPS alternate
     993,   // IMAPS
@@ -125,11 +127,15 @@ impl Protocol for TlsProtocol {
         "TLS"
     }
 
-    fn parse_gates(&self) -> &'static [ParseGate] {
-        &[ParseGate::Hint("transport")]
+    fn dispatch(&self) -> Dispatch {
+        const RULES: &[DispatchRule] = &[DispatchRule::hints(
+            &[Cond::Port(TLS_PORTS), Cond::OVER_TCP],
+            50,
+        )];
+        Dispatch::Exact(RULES)
     }
 
-    fn child_hint_keys(&self) -> Option<&'static [&'static str]> {
+    fn child_hint_keys(&self) -> Option<&'static [HintKey]> {
         Some(&[])
     }
 
@@ -139,12 +145,12 @@ impl Protocol for TlsProtocol {
         if !context.over_tcp() {
             return None;
         }
-        let src_port = context.hint("src_port");
-        let dst_port = context.hint("dst_port");
+        let src_port = context.hint(HintKey::SrcPort);
+        let dst_port = context.hint(HintKey::DstPort);
 
         // Check for known TLS ports
         for &port in TLS_PORTS {
-            if src_port == Some(port as u64) || dst_port == Some(port as u64) {
+            if src_port == Some(port) || dst_port == Some(port) {
                 return Some(50);
             }
         }
@@ -207,7 +213,7 @@ impl Protocol for TlsProtocol {
                     }
                 }
 
-                ParseResult::success(fields, remaining, SmallVec::new())
+                ParseResult::success(fields, remaining, Hints::new())
             }
             Err(nom::Err::Incomplete(_)) => {
                 // Partial record - extract what we can from the header
@@ -1024,26 +1030,26 @@ mod tests {
 
         // With dst_port 443 over TCP
         let mut ctx2 = ParseContext::new(1);
-        ctx2.insert_hint("dst_port", 443);
-        ctx2.insert_hint("transport", 6);
+        ctx2.insert_hint(HintKey::DstPort, 443);
+        ctx2.insert_hint(HintKey::Transport, 6);
         assert!(parser.can_parse(&ctx2).is_some());
 
         // With src_port 443 over TCP
         let mut ctx3 = ParseContext::new(1);
-        ctx3.insert_hint("src_port", 443);
-        ctx3.insert_hint("transport", 6);
+        ctx3.insert_hint(HintKey::SrcPort, 443);
+        ctx3.insert_hint(HintKey::Transport, 6);
         assert!(parser.can_parse(&ctx3).is_some());
 
         // With other TLS ports
         let mut ctx4 = ParseContext::new(1);
-        ctx4.insert_hint("dst_port", 8443);
-        ctx4.insert_hint("transport", 6);
+        ctx4.insert_hint(HintKey::DstPort, 8443);
+        ctx4.insert_hint(HintKey::Transport, 6);
         assert!(parser.can_parse(&ctx4).is_some());
 
         // UDP 443 is QUIC's, not TLS's
         let mut ctx5 = ParseContext::new(1);
-        ctx5.insert_hint("dst_port", 443);
-        ctx5.insert_hint("transport", 17);
+        ctx5.insert_hint(HintKey::DstPort, 443);
+        ctx5.insert_hint(HintKey::Transport, 17);
         assert!(parser.can_parse(&ctx5).is_none());
     }
 
@@ -1053,7 +1059,7 @@ mod tests {
 
         let parser = TlsProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 443);
+        context.insert_hint(HintKey::DstPort, 443);
 
         let result = parser.parse(&packet, &context);
 
@@ -1080,7 +1086,7 @@ mod tests {
 
         let parser = TlsProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("src_port", 443);
+        context.insert_hint(HintKey::SrcPort, 443);
 
         let result = parser.parse(&packet, &context);
 
@@ -1112,7 +1118,7 @@ mod tests {
 
         let parser = TlsProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 443);
+        context.insert_hint(HintKey::DstPort, 443);
 
         let result = parser.parse(&packet, &context);
 
@@ -1189,7 +1195,7 @@ mod tests {
 
         let parser = TlsProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 443);
+        context.insert_hint(HintKey::DstPort, 443);
 
         let result = parser.parse(&packet, &context);
 

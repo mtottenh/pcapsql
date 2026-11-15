@@ -7,7 +7,10 @@
 
 use smallvec::SmallVec;
 
-use super::{FieldValue, ParseContext, ParseGate, ParseResult, Protocol, TunnelType};
+use super::{
+    Cond, Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult, Protocol,
+    TunnelType,
+};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// Standard VXLAN UDP destination port.
@@ -26,12 +29,19 @@ impl Protocol for VxlanProtocol {
         "VXLAN"
     }
 
-    fn parse_gates(&self) -> &'static [ParseGate] {
-        &[ParseGate::Hint("transport")]
+    fn dispatch(&self) -> Dispatch {
+        const RULES: &[DispatchRule] = &[DispatchRule::hints(
+            &[
+                Cond::Hint(HintKey::DstPort, &[VXLAN_PORT as u64]),
+                Cond::OVER_UDP,
+            ],
+            100,
+        )];
+        Dispatch::Exact(RULES)
     }
 
-    fn child_hint_keys(&self) -> Option<&'static [&'static str]> {
-        Some(&["link_type", "tunnel_id", "tunnel_type"])
+    fn child_hint_keys(&self) -> Option<&'static [HintKey]> {
+        Some(&[HintKey::LinkType, HintKey::TunnelId, HintKey::TunnelType])
     }
 
     fn can_parse(&self, context: &ParseContext) -> Option<u32> {
@@ -40,7 +50,7 @@ impl Protocol for VxlanProtocol {
             return None;
         }
         // Match when UDP dst_port hint equals 4789
-        match context.hint("dst_port") {
+        match context.hint(HintKey::DstPort) {
             Some(port) if port == VXLAN_PORT as u64 => Some(100),
             _ => None,
         }
@@ -92,14 +102,14 @@ impl Protocol for VxlanProtocol {
         }
 
         // Set up child hints for the inner Ethernet frame
-        let mut child_hints = SmallVec::new();
+        let mut child_hints = Hints::new();
 
         // VXLAN encapsulates Ethernet frames, so set link_type to Ethernet
-        child_hints.push(("link_type", 1u64)); // DLT_EN10MB = Ethernet
+        child_hints.insert(HintKey::LinkType, 1u64); // DLT_EN10MB = Ethernet
 
         // Signal tunnel boundary for encapsulation tracking
-        child_hints.push(("tunnel_type", TunnelType::Vxlan as u64));
-        child_hints.push(("tunnel_id", vni as u64));
+        child_hints.insert(HintKey::TunnelType, TunnelType::Vxlan as u64);
+        child_hints.insert(HintKey::TunnelId, vni as u64);
 
         ParseResult::success(fields, &data[8..], child_hints)
     }
@@ -156,21 +166,21 @@ mod tests {
 
         // With wrong port
         let mut ctx2 = ParseContext::new(1);
-        ctx2.insert_hint("dst_port", 80);
-        ctx2.insert_hint("transport", 17);
+        ctx2.insert_hint(HintKey::DstPort, 80);
+        ctx2.insert_hint(HintKey::Transport, 17);
         assert!(parser.can_parse(&ctx2).is_none());
 
         // With VXLAN port over UDP
         let mut ctx3 = ParseContext::new(1);
-        ctx3.insert_hint("dst_port", 4789);
-        ctx3.insert_hint("transport", 17);
+        ctx3.insert_hint(HintKey::DstPort, 4789);
+        ctx3.insert_hint(HintKey::Transport, 17);
         assert!(parser.can_parse(&ctx3).is_some());
         assert_eq!(parser.can_parse(&ctx3), Some(100));
 
         // VXLAN port over TCP is not VXLAN
         let mut ctx4 = ParseContext::new(1);
-        ctx4.insert_hint("dst_port", 4789);
-        ctx4.insert_hint("transport", 6);
+        ctx4.insert_hint(HintKey::DstPort, 4789);
+        ctx4.insert_hint(HintKey::Transport, 6);
         assert!(parser.can_parse(&ctx4).is_none());
     }
 
@@ -179,7 +189,7 @@ mod tests {
     fn test_vni_extraction() {
         let parser = VxlanProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 4789);
+        context.insert_hint(HintKey::DstPort, 4789);
 
         // Test various VNI values
         let test_vnis = [0u32, 1, 100, 1000, 0xFFFFFF]; // Max is 24-bit
@@ -198,7 +208,7 @@ mod tests {
     fn test_flags_parsing() {
         let parser = VxlanProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 4789);
+        context.insert_hint(HintKey::DstPort, 4789);
 
         // With I flag set
         let header_with_i = create_vxlan_header(100, true);
@@ -218,7 +228,7 @@ mod tests {
     fn test_i_flag_validation() {
         let parser = VxlanProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 4789);
+        context.insert_hint(HintKey::DstPort, 4789);
 
         // Valid VXLAN with I flag set
         let valid_header = create_vxlan_header(12345, true);
@@ -236,7 +246,7 @@ mod tests {
     fn test_inner_ethernet_frame_detection() {
         let parser = VxlanProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 4789);
+        context.insert_hint(HintKey::DstPort, 4789);
 
         let mut data = Vec::new();
         data.extend_from_slice(&create_vxlan_header(100, true));
@@ -251,7 +261,7 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(result.remaining.len(), 14); // Inner Ethernet header
-        assert_eq!(result.hint("link_type"), Some(1u64));
+        assert_eq!(result.hint(HintKey::LinkType), Some(1u64));
     }
 
     // Test 6: Child protocol hint
@@ -259,14 +269,14 @@ mod tests {
     fn test_child_protocol_hint() {
         let parser = VxlanProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 4789);
+        context.insert_hint(HintKey::DstPort, 4789);
 
         let header = create_vxlan_header(42, true);
         let result = parser.parse(&header, &context);
 
         assert!(result.is_ok());
         // Should set link_type hint for Ethernet
-        assert_eq!(result.hint("link_type"), Some(1u64));
+        assert_eq!(result.hint(HintKey::LinkType), Some(1u64));
     }
 
     // Test 7: Too short header
@@ -274,7 +284,7 @@ mod tests {
     fn test_vxlan_too_short() {
         let parser = VxlanProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 4789);
+        context.insert_hint(HintKey::DstPort, 4789);
 
         let short_header = [0x08, 0x00, 0x00, 0x00]; // Only 4 bytes
         let result = parser.parse(&short_header, &context);
@@ -288,7 +298,7 @@ mod tests {
     fn test_vni_with_payload() {
         let parser = VxlanProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 4789);
+        context.insert_hint(HintKey::DstPort, 4789);
 
         let mut data = Vec::new();
         data.extend_from_slice(&create_vxlan_header(999999, true));
@@ -319,7 +329,7 @@ mod tests {
     fn test_specific_vni_values() {
         let parser = VxlanProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 4789);
+        context.insert_hint(HintKey::DstPort, 4789);
 
         // Common VNI values
         let header1 = create_vxlan_header(1, true);
@@ -339,7 +349,7 @@ mod tests {
     fn test_i_flag_valid_field() {
         let parser = VxlanProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 4789);
+        context.insert_hint(HintKey::DstPort, 4789);
 
         // With I flag set (valid)
         let valid_header = create_vxlan_header(100, true);
@@ -359,7 +369,7 @@ mod tests {
     fn test_flags_valid_field() {
         let parser = VxlanProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 4789);
+        context.insert_hint(HintKey::DstPort, 4789);
 
         // Valid: I flag set, reserved bits zero
         let valid_header = create_vxlan_header(100, true); // flags = 0x08
@@ -379,7 +389,7 @@ mod tests {
     fn test_flags_valid_reserved_bits() {
         let parser = VxlanProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 4789);
+        context.insert_hint(HintKey::DstPort, 4789);
 
         // Header with reserved bits set (bit 0 set in addition to I flag)
         let mut header = [0u8; 8];
@@ -401,7 +411,7 @@ mod tests {
     fn test_inner_frame_length_field() {
         let parser = VxlanProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 4789);
+        context.insert_hint(HintKey::DstPort, 4789);
 
         // VXLAN header only (no inner frame)
         let header_only = create_vxlan_header(100, true);
@@ -438,7 +448,7 @@ mod tests {
     fn test_vni_range() {
         let parser = VxlanProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 4789);
+        context.insert_hint(HintKey::DstPort, 4789);
 
         let test_cases = [
             (0, "zero VNI"),

@@ -2,7 +2,9 @@
 
 use smallvec::SmallVec;
 
-use super::{FieldValue, ParseContext, ParseGate, ParseResult, Protocol};
+use super::{
+    Cond, Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult, Protocol,
+};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// IP protocol number for ICMP.
@@ -81,16 +83,20 @@ impl Protocol for IcmpProtocol {
         "ICMP"
     }
 
-    fn parse_gates(&self) -> &'static [ParseGate] {
-        &[ParseGate::Hint("ip_protocol")]
+    fn dispatch(&self) -> Dispatch {
+        const RULES: &[DispatchRule] = &[DispatchRule::hints(
+            &[Cond::Hint(HintKey::IpProtocol, &[IP_PROTO_ICMP as u64])],
+            100,
+        )];
+        Dispatch::Exact(RULES)
     }
 
-    fn child_hint_keys(&self) -> Option<&'static [&'static str]> {
+    fn child_hint_keys(&self) -> Option<&'static [HintKey]> {
         Some(&[])
     }
 
     fn can_parse(&self, context: &ParseContext) -> Option<u32> {
-        match context.hint("ip_protocol") {
+        match context.hint(HintKey::IpProtocol) {
             Some(proto) if proto == IP_PROTO_ICMP as u64 => Some(100),
             _ => None,
         }
@@ -164,7 +170,7 @@ impl Protocol for IcmpProtocol {
         fields.push(("type_name", FieldValue::Str(type_name)));
 
         // ICMP doesn't have child protocols typically
-        ParseResult::success(fields, &data[8..], SmallVec::new())
+        ParseResult::success(fields, &data[8..], Hints::new())
     }
 
     fn schema_fields(&self) -> Vec<FieldDescriptor> {
@@ -202,7 +208,7 @@ mod tests {
 
         let parser = IcmpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 1);
+        context.insert_hint(HintKey::IpProtocol, 1);
 
         let result = parser.parse(&header, &context);
 
@@ -228,7 +234,7 @@ mod tests {
 
         let parser = IcmpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 1);
+        context.insert_hint(HintKey::IpProtocol, 1);
 
         let result = parser.parse(&header, &context);
 
@@ -256,7 +262,7 @@ mod tests {
 
         let parser = IcmpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 1);
+        context.insert_hint(HintKey::IpProtocol, 1);
 
         let result = parser.parse(&header, &context);
 
@@ -283,7 +289,7 @@ mod tests {
 
         let parser = IcmpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 1);
+        context.insert_hint(HintKey::IpProtocol, 1);
 
         let result = parser.parse(&header, &context);
 
@@ -308,12 +314,12 @@ mod tests {
 
         // With TCP protocol
         let mut ctx2 = ParseContext::new(1);
-        ctx2.insert_hint("ip_protocol", 6);
+        ctx2.insert_hint(HintKey::IpProtocol, 6);
         assert!(parser.can_parse(&ctx2).is_none());
 
         // With ICMP protocol
         let mut ctx3 = ParseContext::new(1);
-        ctx3.insert_hint("ip_protocol", 1);
+        ctx3.insert_hint(HintKey::IpProtocol, 1);
         assert!(parser.can_parse(&ctx3).is_some());
     }
 
@@ -323,7 +329,7 @@ mod tests {
 
         let parser = IcmpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 1);
+        context.insert_hint(HintKey::IpProtocol, 1);
 
         let result = parser.parse(&short_header, &context);
 
@@ -345,7 +351,7 @@ mod tests {
 
         let parser = IcmpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 1);
+        context.insert_hint(HintKey::IpProtocol, 1);
 
         let result = parser.parse(&packet, &context);
 

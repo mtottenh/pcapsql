@@ -635,3 +635,33 @@ async fn packets_views_equal_the_shared_fused_scans() {
         "rows per view: {rows_per_view:?}; rows tying on (frame_number, encap_depth): {ties}"
     );
 }
+
+#[path = "../../pcapsql-core/tests/common/full_scan.rs"]
+mod full_scan;
+
+/// The parsers of every packet of the corpus captures are the ones a scan of
+/// every parser's `can_parse` chooses: the registry's dispatch tables, which
+/// `parse_packet` reads instead, make the same choice layer by layer. (The
+/// same holds over the fuzz corpus: `pcapsql-core/tests/dispatch_equivalence.rs`.)
+#[test]
+fn dispatch_matches_a_full_scan_over_the_corpus() {
+    use pcapsql_core::io::{ReadPacketReader, StreamHeader};
+
+    let registry = pcapsql_core::default_registry();
+    for (name, bytes) in [
+        ("eth", corpus_capture()),
+        ("sll", sll_capture()),
+        ("sll2", sll2_capture()),
+        ("http", http_capture()),
+        ("padded http", padded_http_capture()),
+        ("routing", routing_capture()),
+        ("tunnels", tunnels_capture()),
+        ("views", views_capture()),
+    ] {
+        let mut read = std::io::Cursor::new(bytes);
+        let (header, head) = StreamHeader::probe(&mut read).expect("a capture header");
+        let reader = ReadPacketReader::sequential(read, &header, head).expect("a reader");
+        let (packets, layers) = full_scan::assert_same_chains(&registry, reader, &name);
+        assert!(packets > 0 && layers > packets, "{name}: {packets} packets");
+    }
+}

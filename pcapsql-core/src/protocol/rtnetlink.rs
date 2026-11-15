@@ -7,7 +7,9 @@ use compact_str::CompactString;
 use smallvec::SmallVec;
 
 use super::netlink::family as netlink_family;
-use super::{FieldValue, ParseContext, ParseGate, ParseResult, Protocol};
+use super::{
+    Cond, Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult, Protocol,
+};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// RTNetlink message type constants.
@@ -62,18 +64,26 @@ impl Protocol for RtnetlinkProtocol {
         "RTNetlink"
     }
 
-    fn parse_gates(&self) -> &'static [ParseGate] {
-        &[ParseGate::Hint("netlink_family")]
+    fn dispatch(&self) -> Dispatch {
+        const RULES: &[DispatchRule] = &[DispatchRule::Hints {
+            after: &["netlink"],
+            all: &[Cond::Hint(
+                HintKey::NetlinkFamily,
+                &[netlink_family::ROUTE as u64],
+            )],
+            priority: 100,
+        }];
+        Dispatch::Exact(RULES)
     }
 
-    fn child_hint_keys(&self) -> Option<&'static [&'static str]> {
+    fn child_hint_keys(&self) -> Option<&'static [HintKey]> {
         Some(&[])
     }
 
     fn can_parse(&self, context: &ParseContext) -> Option<u32> {
         // Only parse when parent is netlink and family is ROUTE (0)
         if context.parent_protocol == Some("netlink") {
-            if let Some(family) = context.hint("netlink_family") {
+            if let Some(family) = context.hint(HintKey::NetlinkFamily) {
                 if family == netlink_family::ROUTE as u64 {
                     return Some(100);
                 }
@@ -87,7 +97,7 @@ impl Protocol for RtnetlinkProtocol {
 
         // Get the message type from parent netlink hints
         let nl_msg_type = context
-            .hint("netlink_msg_type")
+            .hint(HintKey::NetlinkMsgType)
             .map(|t| t as u16)
             .unwrap_or(0);
 
@@ -114,7 +124,7 @@ impl Protocol for RtnetlinkProtocol {
         }
 
         // RTNetlink is a terminal protocol (no child protocols)
-        ParseResult::success(fields, &[], SmallVec::new())
+        ParseResult::success(fields, &[], Hints::new())
     }
 
     fn schema_fields(&self) -> Vec<FieldDescriptor> {
@@ -457,8 +467,8 @@ mod tests {
     fn make_rtnetlink_context(msg_type: u16) -> ParseContext {
         let mut ctx = ParseContext::new(LINKTYPE_NETLINK);
         ctx.parent_protocol = Some("netlink");
-        ctx.insert_hint("netlink_family", netlink_family::ROUTE as u64);
-        ctx.insert_hint("netlink_msg_type", msg_type as u64);
+        ctx.insert_hint(HintKey::NetlinkFamily, netlink_family::ROUTE as u64);
+        ctx.insert_hint(HintKey::NetlinkMsgType, msg_type as u64);
         ctx
     }
 
@@ -493,7 +503,7 @@ mod tests {
         let parser = RtnetlinkProtocol;
         let mut ctx = ParseContext::new(LINKTYPE_NETLINK);
         ctx.parent_protocol = Some("netlink");
-        ctx.insert_hint("netlink_family", netlink_family::NETFILTER as u64);
+        ctx.insert_hint(HintKey::NetlinkFamily, netlink_family::NETFILTER as u64);
 
         assert!(parser.can_parse(&ctx).is_none());
     }

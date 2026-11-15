@@ -11,7 +11,9 @@
 use compact_str::CompactString;
 use smallvec::SmallVec;
 
-use super::{FieldValue, ParseContext, ParseGate, ParseResult, Protocol};
+use super::{
+    Cond, Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult, Protocol,
+};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// BGP TCP port.
@@ -132,11 +134,15 @@ impl Protocol for BgpProtocol {
         "BGP"
     }
 
-    fn parse_gates(&self) -> &'static [ParseGate] {
-        &[ParseGate::Hint("transport")]
+    fn dispatch(&self) -> Dispatch {
+        const RULES: &[DispatchRule] = &[DispatchRule::hints(
+            &[Cond::Port(&[BGP_PORT as u64]), Cond::OVER_TCP],
+            100,
+        )];
+        Dispatch::Exact(RULES)
     }
 
-    fn child_hint_keys(&self) -> Option<&'static [&'static str]> {
+    fn child_hint_keys(&self) -> Option<&'static [HintKey]> {
         Some(&[])
     }
 
@@ -146,12 +152,12 @@ impl Protocol for BgpProtocol {
             return None;
         }
         // Match when TCP dst_port or src_port hint equals 179
-        if let Some(dst_port) = context.hint("dst_port") {
+        if let Some(dst_port) = context.hint(HintKey::DstPort) {
             if dst_port == BGP_PORT as u64 {
                 return Some(100);
             }
         }
-        if let Some(src_port) = context.hint("src_port") {
+        if let Some(src_port) = context.hint(HintKey::SrcPort) {
             if src_port == BGP_PORT as u64 {
                 return Some(100);
             }
@@ -218,7 +224,7 @@ impl Protocol for BgpProtocol {
 
         // Calculate remaining data
         let consumed = std::cmp::min(length as usize, data.len());
-        ParseResult::success(fields, &data[consumed..], SmallVec::new())
+        ParseResult::success(fields, &data[consumed..], Hints::new())
     }
 
     fn schema_fields(&self) -> Vec<FieldDescriptor> {
@@ -857,26 +863,26 @@ mod tests {
 
         // With wrong port
         let mut ctx2 = ParseContext::new(1);
-        ctx2.insert_hint("dst_port", 80);
-        ctx2.insert_hint("transport", 6);
+        ctx2.insert_hint(HintKey::DstPort, 80);
+        ctx2.insert_hint(HintKey::Transport, 6);
         assert!(parser.can_parse(&ctx2).is_none());
 
         // With BGP dst_port over TCP
         let mut ctx3 = ParseContext::new(1);
-        ctx3.insert_hint("dst_port", 179);
-        ctx3.insert_hint("transport", 6);
+        ctx3.insert_hint(HintKey::DstPort, 179);
+        ctx3.insert_hint(HintKey::Transport, 6);
         assert!(parser.can_parse(&ctx3).is_some());
 
         // With BGP src_port over TCP
         let mut ctx4 = ParseContext::new(1);
-        ctx4.insert_hint("src_port", 179);
-        ctx4.insert_hint("transport", 6);
+        ctx4.insert_hint(HintKey::SrcPort, 179);
+        ctx4.insert_hint(HintKey::Transport, 6);
         assert!(parser.can_parse(&ctx4).is_some());
 
         // Port 179 over UDP is not BGP
         let mut ctx5 = ParseContext::new(1);
-        ctx5.insert_hint("dst_port", 179);
-        ctx5.insert_hint("transport", 17);
+        ctx5.insert_hint(HintKey::DstPort, 179);
+        ctx5.insert_hint(HintKey::Transport, 17);
         assert!(parser.can_parse(&ctx5).is_none());
     }
 
@@ -885,7 +891,7 @@ mod tests {
     fn test_marker_validation() {
         let parser = BgpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 179);
+        context.insert_hint(HintKey::DstPort, 179);
 
         // Valid marker
         let valid_msg = create_bgp_header(message_type::KEEPALIVE, 19);
@@ -905,7 +911,7 @@ mod tests {
     fn test_message_type_parsing() {
         let parser = BgpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 179);
+        context.insert_hint(HintKey::DstPort, 179);
 
         let test_types = [
             (message_type::OPEN, "OPEN"),
@@ -946,7 +952,7 @@ mod tests {
     fn test_open_message_parsing() {
         let parser = BgpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 179);
+        context.insert_hint(HintKey::DstPort, 179);
 
         let msg = create_bgp_open(4, 65001, 180, [192, 168, 1, 1]);
         let result = parser.parse(&msg, &context);
@@ -966,7 +972,7 @@ mod tests {
     fn test_keepalive_message() {
         let parser = BgpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 179);
+        context.insert_hint(HintKey::DstPort, 179);
 
         let msg = create_bgp_header(message_type::KEEPALIVE, 19);
         let result = parser.parse(&msg, &context);
@@ -984,7 +990,7 @@ mod tests {
     fn test_update_message_basic_parsing() {
         let parser = BgpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 179);
+        context.insert_hint(HintKey::DstPort, 179);
 
         let msg = create_bgp_update(5, 10);
         let result = parser.parse(&msg, &context);
@@ -1006,7 +1012,7 @@ mod tests {
     fn test_notification_message() {
         let parser = BgpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 179);
+        context.insert_hint(HintKey::DstPort, 179);
 
         let mut msg = create_bgp_header(message_type::NOTIFICATION, 21);
         msg.push(6); // Error code: Cease
@@ -1030,7 +1036,7 @@ mod tests {
     fn test_invalid_marker_rejection() {
         let parser = BgpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 179);
+        context.insert_hint(HintKey::DstPort, 179);
 
         // All zeros marker (invalid)
         let mut msg = vec![0u8; 16];
@@ -1047,7 +1053,7 @@ mod tests {
     fn test_bgp_too_short() {
         let parser = BgpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 179);
+        context.insert_hint(HintKey::DstPort, 179);
 
         let short_msg = [0xFF; 18]; // Only 18 bytes
         let result = parser.parse(&short_msg, &context);
@@ -1080,7 +1086,7 @@ mod tests {
     fn test_multiple_messages() {
         let parser = BgpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 179);
+        context.insert_hint(HintKey::DstPort, 179);
 
         // Two KEEPALIVE messages back-to-back
         let mut data = create_bgp_header(message_type::KEEPALIVE, 19);
@@ -1097,7 +1103,7 @@ mod tests {
     fn test_open_with_4byte_asn_capability() {
         let parser = BgpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 179);
+        context.insert_hint(HintKey::DstPort, 179);
 
         // Build OPEN with optional parameters containing 4-byte AS capability
         let mut msg = Vec::new();
@@ -1150,7 +1156,7 @@ mod tests {
     fn test_update_with_withdrawn_routes() {
         let parser = BgpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 179);
+        context.insert_hint(HintKey::DstPort, 179);
 
         // Build UPDATE with withdrawn routes: 10.0.0.0/8, 192.168.0.0/16
         let mut msg = Vec::new();
@@ -1196,7 +1202,7 @@ mod tests {
     fn test_update_with_path_attributes() {
         let parser = BgpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 179);
+        context.insert_hint(HintKey::DstPort, 179);
 
         // Build path attributes
         let mut path_attrs = Vec::new();
@@ -1270,7 +1276,7 @@ mod tests {
     fn test_update_with_nlri() {
         let parser = BgpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 179);
+        context.insert_hint(HintKey::DstPort, 179);
 
         // Minimal path attributes (ORIGIN + AS_PATH + NEXT_HOP required)
         let path_attrs = [
@@ -1322,7 +1328,7 @@ mod tests {
     fn test_route_refresh_message() {
         let parser = BgpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 179);
+        context.insert_hint(HintKey::DstPort, 179);
 
         let mut msg = create_bgp_header(message_type::ROUTE_REFRESH, 23); // 19 + 4
 
@@ -1351,7 +1357,7 @@ mod tests {
     fn test_route_refresh_ipv6_multicast() {
         let parser = BgpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 179);
+        context.insert_hint(HintKey::DstPort, 179);
 
         let mut msg = create_bgp_header(message_type::ROUTE_REFRESH, 23);
 
@@ -1372,7 +1378,7 @@ mod tests {
     fn test_as_path_with_as_set() {
         let parser = BgpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 179);
+        context.insert_hint(HintKey::DstPort, 179);
 
         // AS_PATH with AS_SET {65001, 65002, 65003}
         let path_attrs = [
@@ -1431,7 +1437,7 @@ mod tests {
     fn test_notification_error_codes() {
         let parser = BgpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 179);
+        context.insert_hint(HintKey::DstPort, 179);
 
         let test_cases = [
             (error_code::MESSAGE_HEADER_ERROR, 1, "Message Header Error"),
@@ -1467,7 +1473,7 @@ mod tests {
     fn test_atomic_aggregate_attribute() {
         let parser = BgpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 179);
+        context.insert_hint(HintKey::DstPort, 179);
 
         let path_attrs = [
             0x40,
@@ -1514,7 +1520,7 @@ mod tests {
     fn test_aggregator_attribute() {
         let parser = BgpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 179);
+        context.insert_hint(HintKey::DstPort, 179);
 
         // AGGREGATOR with 2-byte AS
         let path_attrs = [
@@ -1572,7 +1578,7 @@ mod tests {
     fn test_extended_length_attribute() {
         let parser = BgpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 179);
+        context.insert_hint(HintKey::DstPort, 179);
 
         // Build a path with extended length flag
         let mut path_attrs = Vec::new();
@@ -1621,7 +1627,7 @@ mod tests {
     fn test_multiple_nlri_prefixes() {
         let parser = BgpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 179);
+        context.insert_hint(HintKey::DstPort, 179);
 
         let path_attrs = [
             0x40,

@@ -425,7 +425,7 @@ mod tests {
         ParseResult {
             fields,
             remaining: &[],
-            child_hints: SmallVec::new(),
+            child_hints: crate::protocol::Hints::new(),
             error: None,
             encap_depth: depth,
             tunnel_type: TunnelType::None,

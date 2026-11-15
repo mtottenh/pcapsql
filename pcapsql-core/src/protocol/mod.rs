@@ -80,7 +80,7 @@ mod vxlan;
 pub mod test_utils;
 
 pub use context::{
-    FieldEntry, FieldHint, HintEntry, ParseContext, ParseResult, TunnelLayer, TunnelType,
+    FieldEntry, FieldHint, HintKey, Hints, ParseContext, ParseResult, TunnelLayer, TunnelType,
 };
 pub use field::{FieldValue, OwnedFieldValue};
 pub use projection::{
@@ -88,8 +88,8 @@ pub use projection::{
 };
 pub use pruning::{compute_required_protocols, should_run_parser};
 pub use registry::{
-    BuiltinProtocol, ParseGate, PayloadMode, Protocol, ProtocolRegistry, CONTENT_PRIORITY,
-    PORT_PRIORITY_MAX,
+    BuiltinProtocol, Cond, Dispatch, DispatchRule, PayloadMode, Protocol, ProtocolRegistry,
+    CONTENT_PRIORITY, PORT_PRIORITY_MAX,
 };
 
 // Re-export protocol implementations
@@ -337,8 +337,8 @@ impl ParseScope {
 /// those fields and ends the walk as well. The outer layers that were parsed
 /// successfully are always returned.
 ///
-/// A returned layer's `child_hints` are empty: the walk moves them into the
-/// context of the layer that follows rather than copying them.
+/// A returned layer's `child_hints` are empty: they are the context of the
+/// layer that follows, not part of the layer.
 ///
 /// The layers come in a `Vec` of their own: one heap allocation for every
 /// packet that is parsed. A caller that parses packet after packet uses
@@ -413,9 +413,10 @@ pub fn parse_packet_into<'a>(
             }
         };
         debug_assert!(
-            parser
-                .child_hint_keys()
-                .is_none_or(|keys| result.child_hints.iter().all(|(key, _)| keys.contains(key))),
+            parser.child_hint_keys().is_none_or(|keys| result
+                .child_hints
+                .iter()
+                .all(|(key, _)| keys.contains(&key))),
             "{name} emitted a hint missing from its child_hint_keys: {:?}",
             result.child_hints
         );
@@ -425,15 +426,16 @@ pub fn parse_packet_into<'a>(
         result.set_encap_context(&context);
 
         // A tunnel boundary updates context for the inner layers.
-        if let Some(tunnel_type_val) = result.hint("tunnel_type") {
-            let tunnel_id = result.hint("tunnel_id");
+        if let Some(tunnel_type_val) = result.hint(HintKey::TunnelType) {
+            let tunnel_id = result.hint(HintKey::TunnelId);
             context.push_tunnel(TunnelType::from_u64(tunnel_type_val), tunnel_id);
         }
 
         // Update context for the next layer.
         context.parent_protocol = Some(name);
         parent = Some(index);
-        context.hints = std::mem::take(&mut result.child_hints);
+        context.hints = result.child_hints;
+        result.child_hints.clear();
         context.offset += remaining.len() - result.remaining.len();
 
         let should_stop = result.error.is_some();
@@ -542,8 +544,13 @@ impl Drop for PacketLayers<'_, '_> {
 /// its type. A standard library that did not collect in place would leave
 /// this correct and make it allocate once per packet, which
 /// `tests/parse_alloc.rs` counts and would fail on.
-#[inline]
+#[inline(always)]
 fn recycle<'a, 'b>(mut layers: Layers<'a>) -> Layers<'b> {
+    // Nothing to keep: a scan that parses nothing (`frames` alone) never
+    // gives the buffer storage, and does not pay for the conversion below.
+    if layers.capacity() == 0 {
+        return Vec::new();
+    }
     layers.clear();
     layers
         .into_iter()

@@ -4,7 +4,9 @@ use smallvec::SmallVec;
 
 use etherparse::Ethernet2HeaderSlice;
 
-use super::{FieldValue, ParseContext, ParseGate, ParseResult, Protocol};
+use super::{
+    Cond, Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult, Protocol,
+};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// Link type constant for Ethernet.
@@ -108,12 +110,22 @@ impl Protocol for EthernetProtocol {
         "Ethernet II"
     }
 
-    fn parse_gates(&self) -> &'static [ParseGate] {
-        &[ParseGate::Root, ParseGate::Hint("link_type")]
+    fn dispatch(&self) -> Dispatch {
+        const RULES: &[DispatchRule] = &[
+            DispatchRule::Root {
+                link_type: LINKTYPE_ETHERNET,
+                priority: 100,
+            },
+            DispatchRule::hints(
+                &[Cond::Hint(HintKey::LinkType, &[LINKTYPE_ETHERNET as u64])],
+                100,
+            ),
+        ];
+        Dispatch::Exact(RULES)
     }
 
-    fn child_hint_keys(&self) -> Option<&'static [&'static str]> {
-        Some(&["ethertype"])
+    fn child_hint_keys(&self) -> Option<&'static [HintKey]> {
+        Some(&[HintKey::EtherType])
     }
 
     fn can_parse(&self, context: &ParseContext) -> Option<u32> {
@@ -124,7 +136,7 @@ impl Protocol for EthernetProtocol {
 
         // Also parse inside tunnels when link_type hint is set to Ethernet
         // This allows parsing inner Ethernet frames inside VXLAN, etc.
-        if let Some(link_type) = context.hint("link_type") {
+        if let Some(link_type) = context.hint(HintKey::LinkType) {
             if link_type == LINKTYPE_ETHERNET as u64 {
                 return Some(100);
             }
@@ -142,8 +154,8 @@ impl Protocol for EthernetProtocol {
                 fields.push(("dst_mac", FieldValue::mac(&eth.destination())));
                 fields.push(("ethertype", FieldValue::UInt16(eth.ether_type().0)));
 
-                let mut child_hints = SmallVec::new();
-                child_hints.push(("ethertype", eth.ether_type().0 as u64));
+                let mut child_hints = Hints::new();
+                child_hints.insert(HintKey::EtherType, eth.ether_type().0 as u64);
 
                 let header_len = eth.slice().len();
                 ParseResult::success(fields, &data[header_len..], child_hints)
@@ -197,7 +209,10 @@ mod tests {
             Some(&FieldValue::UInt16(ethertype::IPV4))
         );
         assert_eq!(result.remaining.len(), 2); // IPv4 header bytes
-        assert_eq!(result.hint("ethertype"), Some(ethertype::IPV4 as u64));
+        assert_eq!(
+            result.hint(HintKey::EtherType),
+            Some(ethertype::IPV4 as u64)
+        );
     }
 
     #[test]
@@ -217,7 +232,10 @@ mod tests {
             result.get("ethertype"),
             Some(&FieldValue::UInt16(ethertype::IPV6))
         );
-        assert_eq!(result.hint("ethertype"), Some(ethertype::IPV6 as u64));
+        assert_eq!(
+            result.hint(HintKey::EtherType),
+            Some(ethertype::IPV6 as u64)
+        );
     }
 
     #[test]
