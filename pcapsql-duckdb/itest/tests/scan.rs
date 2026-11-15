@@ -577,7 +577,7 @@ fn logged_scans(connection: &Connection) -> Vec<String> {
     let scans = column(
         connection,
         "SELECT message FROM duckdb_logs WHERE type = 'pcapsql' AND log_level = 'DEBUG' \
-         ORDER BY timestamp, context_id",
+         AND message LIKE '%: scanning %' ORDER BY timestamp, context_id",
     )
     .unwrap();
     connection

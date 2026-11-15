@@ -200,8 +200,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   file that is not a capture, an unknown protocol and a NULL argument are
   errors at bind. One file per call: lists and globs are not accepted yet.
 
+- **`pcapsql-core`: a reader says when a capture ends inside a record.**
+  `PacketReader::truncated()` is true when the last read stopped because the
+  record after the last complete one declares more bytes than the input has
+  left: a capture cut short, or one still being written. Until now that end
+  could not be told from the clean end of a capture except by the warning
+  the reader logs, which it still does. `GenericPcapReader` records it, the
+  file, memory-map, object-store, stdin and `ReadPacketReader` readers
+  forward it, and a `PartitionScan` gives it through `reader()`. It is a
+  provided method that answers `false`, so other implementations are
+  unaffected; a reader of a range that has an end stops at that frame and
+  never sees the end of the input. Nothing in `pcapsql-datafusion` reads it.
+- **DuckDB extension (C API v2): parallel scans.** A local, uncompressed
+  capture of 4 MiB or more is split into as many partitions as DuckDB has
+  threads and scanned by that many workers. The partitions are cut at the
+  checkpoints of core's `BoundaryIndex`, which one pass over the record
+  headers builds when the query starts, with the thresholds of
+  `partition_target`, as in the DataFusion engine. Rows, and their order
+  without an `ORDER BY`, are those of a scan on one thread: each worker
+  claims the next partition from a `PartitionQueue` and reports its ordinal
+  to DuckDB as the batch index, which keeps `SELECT`, `LIMIT`,
+  `CREATE TABLE AS` and `INSERT` in capture order. Compressed captures,
+  captures on a remote file system and captures with a damaged record are
+  read on one thread as before. A truncated capture is reported once, by the
+  worker that reads its end; with `strict := true` a partitioned scan checks
+  the end of the capture when it starts, so that the error does not depend
+  on which worker gets where first. An error in one worker fails the query
+  once and stops the others. Three settings: `pcapsql_parallel_scan`
+  (`false` reads every capture on one thread), and for experiments
+  `pcapsql_parallel_min_file_size` and `pcapsql_index_stride`. With debug
+  logging, a scan logs how it was split and why, and each partition which
+  worker scanned it. The index is rebuilt by every scan: the cache of
+  `pcapsql_index_cache_dir` is not there yet.
+
 ### Changed
 
+- **DuckDB extension: the message of a truncated capture** names the last
+  complete frame and no longer counts the bytes after it: the scan now takes
+  the truncation from the packet reader (`PacketReader::truncated`) instead
+  of comparing byte counts.
 - **`pcapsql-core`: `PacketReader` implementations provide
   `process_packets_flow`.** `process_packets` is now a provided method on top
   of it, with its behaviour unchanged. `FilePacketReader` is an alias of

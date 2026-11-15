@@ -35,6 +35,12 @@ pub const REMOTE_BUFFER: usize = 4 << 20;
 /// The least buffer a [`DuckFile`] is given.
 const MIN_BUFFER: usize = 4096;
 
+/// Whether DuckDB's file system reads `path` over a network (`s3://`, `https://`, ...): a seek
+/// there is a request to a server, not a system call.
+pub fn is_remote(context: &Context, path: &str) -> Result<bool> {
+    FileSystem::new(context)?.is_remote(path)
+}
+
 /// A file opened for reading through DuckDB's file system, as a buffered [`Read`].
 ///
 /// It reads forward from its position; [`seek`](Self::seek) moves the position. It is `Send`
