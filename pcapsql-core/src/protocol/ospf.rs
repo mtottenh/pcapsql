@@ -9,7 +9,9 @@
 use compact_str::CompactString;
 use smallvec::SmallVec;
 
-use super::{FieldValue, ParseContext, ParseGate, ParseResult, Protocol};
+use super::{
+    Cond, Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult, Protocol,
+};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// IP protocol number for OSPF.
@@ -93,17 +95,21 @@ impl Protocol for OspfProtocol {
         "OSPF"
     }
 
-    fn parse_gates(&self) -> &'static [ParseGate] {
-        &[ParseGate::Hint("ip_protocol")]
+    fn dispatch(&self) -> Dispatch {
+        const RULES: &[DispatchRule] = &[DispatchRule::hints(
+            &[Cond::Hint(HintKey::IpProtocol, &[IP_PROTOCOL_OSPF as u64])],
+            100,
+        )];
+        Dispatch::Exact(RULES)
     }
 
-    fn child_hint_keys(&self) -> Option<&'static [&'static str]> {
+    fn child_hint_keys(&self) -> Option<&'static [HintKey]> {
         Some(&[])
     }
 
     fn can_parse(&self, context: &ParseContext) -> Option<u32> {
         // Match when IP protocol hint equals 89
-        match context.hint("ip_protocol") {
+        match context.hint(HintKey::IpProtocol) {
             Some(proto) if proto == IP_PROTOCOL_OSPF as u64 => Some(100),
             _ => None,
         }
@@ -189,7 +195,7 @@ impl Protocol for OspfProtocol {
 
         // Calculate remaining data
         let consumed = std::cmp::min(length as usize, data.len());
-        ParseResult::success(fields, &data[consumed..], SmallVec::new())
+        ParseResult::success(fields, &data[consumed..], Hints::new())
     }
 
     fn schema_fields(&self) -> Vec<FieldDescriptor> {
@@ -495,12 +501,12 @@ mod tests {
 
         // With wrong protocol
         let mut ctx2 = ParseContext::new(1);
-        ctx2.insert_hint("ip_protocol", 6); // TCP
+        ctx2.insert_hint(HintKey::IpProtocol, 6); // TCP
         assert!(parser.can_parse(&ctx2).is_none());
 
         // With OSPF protocol
         let mut ctx3 = ParseContext::new(1);
-        ctx3.insert_hint("ip_protocol", 89);
+        ctx3.insert_hint(HintKey::IpProtocol, 89);
         assert!(parser.can_parse(&ctx3).is_some());
         assert_eq!(parser.can_parse(&ctx3), Some(100));
     }
@@ -510,7 +516,7 @@ mod tests {
     fn test_ospf_header_parsing() {
         let parser = OspfProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 89);
+        context.insert_hint(HintKey::IpProtocol, 89);
 
         let pkt = create_ospf_header(2, packet_type::HELLO, 24, [192, 168, 1, 1], [0, 0, 0, 0]);
 
@@ -530,7 +536,7 @@ mod tests {
     fn test_version_detection() {
         let parser = OspfProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 89);
+        context.insert_hint(HintKey::IpProtocol, 89);
 
         // OSPFv2
         let pkt_v2 = create_ospf_header(2, packet_type::HELLO, 24, [1, 1, 1, 1], [0, 0, 0, 0]);
@@ -550,7 +556,7 @@ mod tests {
     fn test_hello_packet_parsing() {
         let parser = OspfProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 89);
+        context.insert_hint(HintKey::IpProtocol, 89);
 
         let pkt = create_ospf_hello(
             [192, 168, 1, 1],
@@ -581,7 +587,7 @@ mod tests {
     fn test_router_id_extraction() {
         let parser = OspfProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 89);
+        context.insert_hint(HintKey::IpProtocol, 89);
 
         let pkt = create_ospf_header(2, packet_type::HELLO, 24, [10, 0, 0, 1], [0, 0, 0, 0]);
 
@@ -599,7 +605,7 @@ mod tests {
     fn test_area_id_extraction() {
         let parser = OspfProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 89);
+        context.insert_hint(HintKey::IpProtocol, 89);
 
         // Backbone area (0.0.0.0)
         let pkt1 = create_ospf_header(2, packet_type::HELLO, 24, [1, 1, 1, 1], [0, 0, 0, 0]);
@@ -625,7 +631,7 @@ mod tests {
     fn test_message_type_name_mapping() {
         let parser = OspfProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 89);
+        context.insert_hint(HintKey::IpProtocol, 89);
 
         let test_types = [
             (packet_type::HELLO, "Hello"),
@@ -656,7 +662,7 @@ mod tests {
     fn test_ospf_too_short() {
         let parser = OspfProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 89);
+        context.insert_hint(HintKey::IpProtocol, 89);
 
         let short_pkt = [2u8, 1, 0, 24]; // Only 4 bytes
         let result = parser.parse(&short_pkt, &context);
@@ -670,7 +676,7 @@ mod tests {
     fn test_auth_type() {
         let parser = OspfProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 89);
+        context.insert_hint(HintKey::IpProtocol, 89);
 
         let mut pkt = create_ospf_header(2, packet_type::HELLO, 24, [1, 1, 1, 1], [0, 0, 0, 0]);
         // Set auth type to MD5 (2)
@@ -709,7 +715,7 @@ mod tests {
     fn test_database_description_parsing() {
         let parser = OspfProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 89);
+        context.insert_hint(HintKey::IpProtocol, 89);
 
         // Build DD packet
         let mut pkt = create_ospf_header(
@@ -746,7 +752,7 @@ mod tests {
     fn test_database_description_with_lsa() {
         let parser = OspfProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 89);
+        context.insert_hint(HintKey::IpProtocol, 89);
 
         // Build DD packet
         let mut pkt = create_ospf_header(
@@ -793,7 +799,7 @@ mod tests {
     fn test_ls_update_parsing() {
         let parser = OspfProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 89);
+        context.insert_hint(HintKey::IpProtocol, 89);
 
         // Build LS Update packet
         let mut pkt = create_ospf_header(
@@ -845,7 +851,7 @@ mod tests {
     fn test_ls_ack_parsing() {
         let parser = OspfProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 89);
+        context.insert_hint(HintKey::IpProtocol, 89);
 
         // Build LS Ack packet
         let mut pkt = create_ospf_header(
@@ -897,7 +903,7 @@ mod tests {
     fn test_lsa_type_names() {
         let parser = OspfProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 89);
+        context.insert_hint(HintKey::IpProtocol, 89);
 
         let test_cases = [
             (lsa_type::ROUTER, "Router-LSA"),
@@ -943,7 +949,7 @@ mod tests {
     fn test_lsa_sequence_number() {
         let parser = OspfProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 89);
+        context.insert_hint(HintKey::IpProtocol, 89);
 
         // Build LS Update with specific sequence number
         let mut pkt = create_ospf_header(
@@ -980,7 +986,7 @@ mod tests {
     fn test_hello_with_neighbors() {
         let parser = OspfProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 89);
+        context.insert_hint(HintKey::IpProtocol, 89);
 
         // Build Hello packet with 3 neighbors
         // Need to manually create header with correct length (44 base + 12 neighbors = 56)
@@ -1023,7 +1029,7 @@ mod tests {
     fn test_malformed_length_less_than_header() {
         let parser = OspfProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 89);
+        context.insert_hint(HintKey::IpProtocol, 89);
 
         // Crash input from fuzzer: length field is 0 which is less than header size (24)
         // This should not panic - it should handle gracefully
@@ -1046,7 +1052,7 @@ mod tests {
     fn test_lsa_age_field() {
         let parser = OspfProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 89);
+        context.insert_hint(HintKey::IpProtocol, 89);
 
         // Build LS Update with specific LS Age
         let mut pkt = create_ospf_header(

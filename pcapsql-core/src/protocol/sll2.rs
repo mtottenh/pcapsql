@@ -21,7 +21,9 @@
 use smallvec::SmallVec;
 
 use super::linux_sll::{arphrd, arphrd_name, packet_type_name};
-use super::{FieldValue, ParseContext, ParseGate, ParseResult, Protocol};
+use super::{
+    Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult, Protocol,
+};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// PCAP link type for Linux SLL2 captures.
@@ -47,17 +49,21 @@ impl Protocol for Sll2Protocol {
         "Linux SLL2"
     }
 
-    fn parse_gates(&self) -> &'static [ParseGate] {
-        &[ParseGate::Root]
+    fn dispatch(&self) -> Dispatch {
+        const RULES: &[DispatchRule] = &[DispatchRule::Root {
+            link_type: LINKTYPE_LINUX_SLL2,
+            priority: 100,
+        }];
+        Dispatch::Exact(RULES)
     }
 
-    fn child_hint_keys(&self) -> Option<&'static [&'static str]> {
+    fn child_hint_keys(&self) -> Option<&'static [HintKey]> {
         Some(&[
-            "ethertype",
-            "is_netlink",
-            "netlink_family",
-            "sll_arphrd",
-            "sll_protocol",
+            HintKey::EtherType,
+            HintKey::IsNetlink,
+            HintKey::NetlinkFamily,
+            HintKey::SllArphrd,
+            HintKey::SllProtocol,
         ])
     }
 
@@ -107,18 +113,18 @@ impl Protocol for Sll2Protocol {
         // `tcpdump -i any` hosts routinely carry tun/ppp/sit interfaces
         // (ARPHRD_NONE, PPP, SIT, RAWIP, ...), so the default arm must route
         // to IP.
-        let mut child_hints = SmallVec::new();
-        child_hints.push(("sll_arphrd", arphrd_type as u64));
+        let mut child_hints = Hints::new();
+        child_hints.insert(HintKey::SllArphrd, arphrd_type as u64);
         match arphrd_type {
             arphrd::NETLINK => {
-                child_hints.push(("netlink_family", protocol as u64));
-                child_hints.push(("is_netlink", 1u64));
+                child_hints.insert(HintKey::NetlinkFamily, protocol as u64);
+                child_hints.insert(HintKey::IsNetlink, 1u64);
             }
             arphrd::IPGRE | arphrd::IEEE80211_RADIOTAP | arphrd::FRAD => {
-                child_hints.push(("sll_protocol", protocol as u64));
+                child_hints.insert(HintKey::SllProtocol, protocol as u64);
             }
             _ => {
-                child_hints.push(("ethertype", protocol as u64));
+                child_hints.insert(HintKey::EtherType, protocol as u64);
             }
         }
 
@@ -220,7 +226,7 @@ mod tests {
             result.get("addr"),
             Some(&FieldValue::Bytes(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]))
         );
-        assert_eq!(result.hint("ethertype"), Some(0x0800));
+        assert_eq!(result.hint(HintKey::EtherType), Some(0x0800));
         assert_eq!(result.remaining, &[0xAA, 0xBB]);
     }
 
@@ -239,9 +245,9 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.get("arphrd_name"), Some(&FieldValue::Str("NETLINK")));
         assert!(result.get("addr").is_none());
-        assert_eq!(result.hint("is_netlink"), Some(1));
-        assert_eq!(result.hint("netlink_family"), Some(0));
-        assert!(result.hint("ethertype").is_none());
+        assert_eq!(result.hint(HintKey::IsNetlink), Some(1));
+        assert_eq!(result.hint(HintKey::NetlinkFamily), Some(0));
+        assert!(result.hint(HintKey::EtherType).is_none());
     }
 
     /// tun/ppp/sit interfaces report ARPHRD types the parser does not name;
@@ -258,18 +264,21 @@ mod tests {
             let result = Sll2Protocol.parse(&data, &ParseContext::new(LINKTYPE_LINUX_SLL2));
             assert!(result.is_ok());
             assert_eq!(
-                result.hint("ethertype"),
+                result.hint(HintKey::EtherType),
                 Some(0x0800),
                 "arphrd {arphrd_type}"
             );
-            assert_eq!(result.hint("sll_arphrd"), Some(arphrd_type as u64));
+            assert_eq!(result.hint(HintKey::SllArphrd), Some(arphrd_type as u64));
         }
         // GRE / radiotap / frame relay: the field is not an ethertype.
         for arphrd_type in [arphrd::IPGRE, arphrd::IEEE80211_RADIOTAP, arphrd::FRAD] {
             let data = sll2_header(0x0800, 5, arphrd_type, 0, 0, [0; 8], &[]);
             let result = Sll2Protocol.parse(&data, &ParseContext::new(LINKTYPE_LINUX_SLL2));
-            assert!(result.hint("ethertype").is_none(), "arphrd {arphrd_type}");
-            assert_eq!(result.hint("sll_protocol"), Some(0x0800));
+            assert!(
+                result.hint(HintKey::EtherType).is_none(),
+                "arphrd {arphrd_type}"
+            );
+            assert_eq!(result.hint(HintKey::SllProtocol), Some(0x0800));
         }
     }
 
@@ -305,7 +314,7 @@ mod tests {
         use super::super::{NetlinkProtocol, Protocol};
         let mut ctx = ParseContext::new(LINKTYPE_LINUX_SLL2);
         ctx.parent_protocol = Some("sll2");
-        ctx.insert_hint("is_netlink", 1);
+        ctx.insert_hint(HintKey::IsNetlink, 1);
         assert_eq!(NetlinkProtocol.can_parse(&ctx), Some(100));
     }
 

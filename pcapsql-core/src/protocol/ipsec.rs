@@ -94,7 +94,10 @@
 use smallvec::SmallVec;
 
 use super::ipv6::next_header;
-use super::{FieldValue, ParseContext, ParseGate, ParseResult, PayloadMode, Protocol};
+use super::{
+    Cond, Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult,
+    PayloadMode, Protocol,
+};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// IPsec protocol parser (handles both ESP and AH).
@@ -110,17 +113,24 @@ impl Protocol for IpsecProtocol {
         "IPsec"
     }
 
-    fn parse_gates(&self) -> &'static [ParseGate] {
-        &[ParseGate::Hint("ip_protocol")]
+    fn dispatch(&self) -> Dispatch {
+        const RULES: &[DispatchRule] = &[DispatchRule::hints(
+            &[Cond::Hint(
+                HintKey::IpProtocol,
+                &[next_header::ESP as u64, next_header::AH as u64],
+            )],
+            100,
+        )];
+        Dispatch::Exact(RULES)
     }
 
-    fn child_hint_keys(&self) -> Option<&'static [&'static str]> {
-        Some(&["ip_protocol"])
+    fn child_hint_keys(&self) -> Option<&'static [HintKey]> {
+        Some(&[HintKey::IpProtocol])
     }
 
     fn can_parse(&self, context: &ParseContext) -> Option<u32> {
         // Match when IP protocol hint equals ESP (50) or AH (51)
-        match context.hint("ip_protocol") {
+        match context.hint(HintKey::IpProtocol) {
             Some(proto) if proto == next_header::ESP as u64 => Some(100),
             Some(proto) if proto == next_header::AH as u64 => Some(100),
             _ => None,
@@ -129,7 +139,7 @@ impl Protocol for IpsecProtocol {
 
     fn parse<'a>(&self, data: &'a [u8], context: &ParseContext) -> ParseResult<'a> {
         // Determine if this is ESP or AH based on the context hint
-        let is_esp = match context.hint("ip_protocol") {
+        let is_esp = match context.hint(HintKey::IpProtocol) {
             Some(proto) => proto == next_header::ESP as u64,
             None => return ParseResult::error("IPsec: missing ip_protocol hint".to_string(), data),
         };
@@ -206,7 +216,7 @@ impl IpsecProtocol {
         // but we can't determine their location without decryption
 
         // Return with no child hints since ESP payload is encrypted
-        ParseResult::success(fields, &data[8..], SmallVec::new())
+        ParseResult::success(fields, &data[8..], Hints::new())
     }
 
     /// Parse AH (Authentication Header).
@@ -270,8 +280,8 @@ impl IpsecProtocol {
         }
 
         // Set up child hints for the next protocol (based on next_header)
-        let mut child_hints = SmallVec::new();
-        child_hints.push(("ip_protocol", next_header as u64));
+        let mut child_hints = Hints::new();
+        child_hints.insert(HintKey::IpProtocol, next_header as u64);
 
         ParseResult::success(fields, &data[ah_length..], child_hints)
     }
@@ -330,12 +340,12 @@ mod tests {
 
         // With wrong protocol
         let mut ctx2 = ParseContext::new(1);
-        ctx2.insert_hint("ip_protocol", 6); // TCP
+        ctx2.insert_hint(HintKey::IpProtocol, 6); // TCP
         assert!(parser.can_parse(&ctx2).is_none());
 
         // With ESP protocol
         let mut ctx3 = ParseContext::new(1);
-        ctx3.insert_hint("ip_protocol", 50);
+        ctx3.insert_hint(HintKey::IpProtocol, 50);
         assert!(parser.can_parse(&ctx3).is_some());
         assert_eq!(parser.can_parse(&ctx3), Some(100));
     }
@@ -346,7 +356,7 @@ mod tests {
         let parser = IpsecProtocol;
 
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 51);
+        context.insert_hint(HintKey::IpProtocol, 51);
 
         assert!(parser.can_parse(&context).is_some());
         assert_eq!(parser.can_parse(&context), Some(100));
@@ -357,7 +367,7 @@ mod tests {
     fn test_esp_spi_and_sequence_extraction() {
         let parser = IpsecProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 50); // ESP
+        context.insert_hint(HintKey::IpProtocol, 50); // ESP
 
         let header = create_esp_header(0x12345678, 0xABCDEF01);
         let result = parser.parse(&header, &context);
@@ -376,7 +386,7 @@ mod tests {
     fn test_ah_header_parsing() {
         let parser = IpsecProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 51); // AH
+        context.insert_hint(HintKey::IpProtocol, 51); // AH
 
         // AH with 12-byte ICV (HMAC-SHA-256-128)
         let header = create_ah_header(6, 0x87654321, 0x00000001, 12);
@@ -393,7 +403,7 @@ mod tests {
     fn test_ah_next_header_field() {
         let parser = IpsecProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 51); // AH
+        context.insert_hint(HintKey::IpProtocol, 51); // AH
 
         // Test different next headers
         let test_cases = [
@@ -412,7 +422,7 @@ mod tests {
                 result.get("ah_next_header"),
                 Some(&FieldValue::UInt8(next_header))
             );
-            assert_eq!(result.hint("ip_protocol"), Some(next_header as u64));
+            assert_eq!(result.hint(HintKey::IpProtocol), Some(next_header as u64));
         }
     }
 
@@ -423,7 +433,7 @@ mod tests {
 
         // ESP
         let mut ctx_esp = ParseContext::new(1);
-        ctx_esp.insert_hint("ip_protocol", 50);
+        ctx_esp.insert_hint(HintKey::IpProtocol, 50);
         let esp_header = create_esp_header(0x1234, 0x5678);
         let result_esp = parser.parse(&esp_header, &ctx_esp);
         assert!(result_esp.is_ok());
@@ -431,7 +441,7 @@ mod tests {
 
         // AH
         let mut ctx_ah = ParseContext::new(1);
-        ctx_ah.insert_hint("ip_protocol", 51);
+        ctx_ah.insert_hint(HintKey::IpProtocol, 51);
         let ah_header = create_ah_header(6, 0x1234, 0x5678, 12);
         let result_ah = parser.parse(&ah_header, &ctx_ah);
         assert!(result_ah.is_ok());
@@ -443,7 +453,7 @@ mod tests {
     fn test_esp_too_short() {
         let parser = IpsecProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 50);
+        context.insert_hint(HintKey::IpProtocol, 50);
 
         let short_header = [0x00, 0x00, 0x00, 0x01]; // Only 4 bytes
         let result = parser.parse(&short_header, &context);
@@ -457,7 +467,7 @@ mod tests {
     fn test_ah_too_short() {
         let parser = IpsecProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 51);
+        context.insert_hint(HintKey::IpProtocol, 51);
 
         let short_header = [0x06, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01]; // Only 8 bytes
         let result = parser.parse(&short_header, &context);
@@ -471,7 +481,7 @@ mod tests {
     fn test_ah_icv_length_derivation() {
         let parser = IpsecProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 51);
+        context.insert_hint(HintKey::IpProtocol, 51);
 
         // Test different ICV lengths
         let test_icv_lengths = [12usize, 16, 20, 32];
@@ -508,7 +518,7 @@ mod tests {
     fn test_esp_with_payload() {
         let parser = IpsecProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 50);
+        context.insert_hint(HintKey::IpProtocol, 50);
 
         let mut data = create_esp_header(0x1234, 0x5678);
         // Add encrypted payload
@@ -525,7 +535,7 @@ mod tests {
     fn test_ah_with_following_payload() {
         let parser = IpsecProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 51);
+        context.insert_hint(HintKey::IpProtocol, 51);
 
         let mut data = create_ah_header(6, 0x1234, 0x5678, 12);
         // Add payload (e.g., TCP header start)
@@ -535,6 +545,6 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(result.remaining.len(), 8); // TCP header
-        assert_eq!(result.hint("ip_protocol"), Some(6u64)); // TCP
+        assert_eq!(result.hint(HintKey::IpProtocol), Some(6u64)); // TCP
     }
 }

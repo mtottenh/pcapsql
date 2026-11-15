@@ -4,7 +4,10 @@ use compact_str::CompactString;
 use simple_dns::{rdata::RData, Packet, PacketFlag, OPCODE, RCODE};
 use smallvec::SmallVec;
 
-use super::{FieldSet, FieldValue, ParseContext, ParseGate, ParseResult, Protocol};
+use super::{
+    Cond, Dispatch, DispatchRule, FieldSet, FieldValue, HintKey, Hints, ParseContext, ParseResult,
+    Protocol,
+};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// DNS well-known port.
@@ -45,11 +48,15 @@ impl Protocol for DnsProtocol {
         "DNS"
     }
 
-    fn parse_gates(&self) -> &'static [ParseGate] {
-        &[ParseGate::Hint("transport")]
+    fn dispatch(&self) -> Dispatch {
+        const RULES: &[DispatchRule] = &[DispatchRule::hints(
+            &[Cond::Port(&[DNS_PORT as u64]), Cond::OVER_TCP_OR_UDP],
+            100,
+        )];
+        Dispatch::Exact(RULES)
     }
 
-    fn child_hint_keys(&self) -> Option<&'static [&'static str]> {
+    fn child_hint_keys(&self) -> Option<&'static [HintKey]> {
         Some(&[])
     }
 
@@ -59,8 +66,8 @@ impl Protocol for DnsProtocol {
         if !context.over_udp() && !context.over_tcp() {
             return None;
         }
-        let src_port = context.hint("src_port");
-        let dst_port = context.hint("dst_port");
+        let src_port = context.hint(HintKey::SrcPort);
+        let dst_port = context.hint(HintKey::DstPort);
 
         match (src_port, dst_port) {
             (Some(p), _) | (_, Some(p)) if p == DNS_PORT as u64 => Some(100),
@@ -93,7 +100,7 @@ impl Protocol for DnsProtocol {
         // Extract EDNS fields
         extract_edns_fields(&packet, &mut fields);
 
-        ParseResult::success(fields, &[], SmallVec::new())
+        ParseResult::success(fields, &[], Hints::new())
     }
 
     fn schema_fields(&self) -> Vec<FieldDescriptor> {
@@ -202,7 +209,7 @@ impl Protocol for DnsProtocol {
             extract_edns_fields_projected(&packet, &mut fields, requested);
         }
 
-        ParseResult::success(fields, &[], SmallVec::new())
+        ParseResult::success(fields, &[], Hints::new())
     }
 
     fn cheap_fields(&self) -> &'static [&'static str] {
@@ -769,7 +776,7 @@ mod tests {
 
         let parser = DnsProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 53);
+        context.insert_hint(HintKey::DstPort, 53);
         context.parent_protocol = Some("udp");
 
         let result = parser.parse(&packet, &context);
@@ -800,7 +807,7 @@ mod tests {
 
         let parser = DnsProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("src_port", 53);
+        context.insert_hint(HintKey::SrcPort, 53);
         context.parent_protocol = Some("udp");
 
         let result = parser.parse(&packet, &context);
@@ -851,25 +858,25 @@ mod tests {
 
         // With dst_port 53 over UDP
         let mut ctx2 = ParseContext::new(1);
-        ctx2.insert_hint("dst_port", 53);
-        ctx2.insert_hint("transport", 17);
+        ctx2.insert_hint(HintKey::DstPort, 53);
+        ctx2.insert_hint(HintKey::Transport, 17);
         assert!(parser.can_parse(&ctx2).is_some());
 
         // With src_port 53 over TCP
         let mut ctx3 = ParseContext::new(1);
-        ctx3.insert_hint("src_port", 53);
-        ctx3.insert_hint("transport", 6);
+        ctx3.insert_hint(HintKey::SrcPort, 53);
+        ctx3.insert_hint(HintKey::Transport, 6);
         assert!(parser.can_parse(&ctx3).is_some());
 
         // With different port
         let mut ctx4 = ParseContext::new(1);
-        ctx4.insert_hint("dst_port", 80);
-        ctx4.insert_hint("transport", 17);
+        ctx4.insert_hint(HintKey::DstPort, 80);
+        ctx4.insert_hint(HintKey::Transport, 17);
         assert!(parser.can_parse(&ctx4).is_none());
 
         // Port 53 without a transport (not reached from TCP or UDP)
         let mut ctx5 = ParseContext::new(1);
-        ctx5.insert_hint("dst_port", 53);
+        ctx5.insert_hint(HintKey::DstPort, 53);
         assert!(parser.can_parse(&ctx5).is_none());
     }
 
@@ -881,8 +888,8 @@ mod tests {
         segment.extend_from_slice(&query);
 
         let mut tcp = ParseContext::new(1);
-        tcp.insert_hint("dst_port", 53);
-        tcp.insert_hint("transport", 6);
+        tcp.insert_hint(HintKey::DstPort, 53);
+        tcp.insert_hint(HintKey::Transport, 6);
         let result = parser.parse(&segment, &tcp);
         assert!(result.is_ok(), "{:?}", result.error);
         assert_eq!(
@@ -905,8 +912,8 @@ mod tests {
 
         // Over UDP the same bytes are not a message (no prefix expected).
         let mut udp = ParseContext::new(1);
-        udp.insert_hint("dst_port", 53);
-        udp.insert_hint("transport", 17);
+        udp.insert_hint(HintKey::DstPort, 53);
+        udp.insert_hint(HintKey::Transport, 17);
         let result = parser.parse(&query, &udp);
         assert!(result.is_ok(), "{:?}", result.error);
         assert_eq!(
@@ -924,7 +931,7 @@ mod tests {
 
         let parser = DnsProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 53);
+        context.insert_hint(HintKey::DstPort, 53);
 
         let result = parser.parse(&short_packet, &context);
 
@@ -958,7 +965,7 @@ mod tests {
 
         let parser = DnsProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 53);
+        context.insert_hint(HintKey::DstPort, 53);
 
         // Only request header fields - skip expensive parsing
         let fields: FieldSet = ["transaction_id", "is_query", "response_code"]
@@ -1009,7 +1016,7 @@ mod tests {
 
         let parser = DnsProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 53);
+        context.insert_hint(HintKey::DstPort, 53);
 
         let result = parser.parse(&packet, &context);
 

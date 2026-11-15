@@ -3,7 +3,9 @@
 use smallvec::SmallVec;
 
 use super::ethernet::ethertype;
-use super::{FieldValue, ParseContext, ParseGate, ParseResult, Protocol};
+use super::{
+    Cond, Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult, Protocol,
+};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// 802.1Q VLAN tag parser.
@@ -19,17 +21,24 @@ impl Protocol for VlanProtocol {
         "802.1Q VLAN"
     }
 
-    fn parse_gates(&self) -> &'static [ParseGate] {
-        &[ParseGate::Hint("ethertype")]
+    fn dispatch(&self) -> Dispatch {
+        const RULES: &[DispatchRule] = &[DispatchRule::hints(
+            &[Cond::Hint(
+                HintKey::EtherType,
+                &[ethertype::VLAN as u64, ethertype::QINQ as u64],
+            )],
+            100,
+        )];
+        Dispatch::Exact(RULES)
     }
 
-    fn child_hint_keys(&self) -> Option<&'static [&'static str]> {
-        Some(&["ethertype", "vlan_id"])
+    fn child_hint_keys(&self) -> Option<&'static [HintKey]> {
+        Some(&[HintKey::EtherType, HintKey::VlanId])
     }
 
     fn can_parse(&self, context: &ParseContext) -> Option<u32> {
         // Check for VLAN ethertype (0x8100) or QinQ (0x88A8)
-        match context.hint("ethertype") {
+        match context.hint(HintKey::EtherType) {
             Some(etype) if etype == ethertype::VLAN as u64 => Some(100),
             Some(etype) if etype == ethertype::QINQ as u64 => Some(100),
             _ => None,
@@ -66,9 +75,9 @@ impl Protocol for VlanProtocol {
         fields.push(("inner_ethertype", FieldValue::UInt16(inner_ethertype)));
 
         // Set up child hints for the next layer
-        let mut child_hints = SmallVec::new();
-        child_hints.push(("ethertype", inner_ethertype as u64));
-        child_hints.push(("vlan_id", vlan_id as u64));
+        let mut child_hints = Hints::new();
+        child_hints.insert(HintKey::EtherType, inner_ethertype as u64);
+        child_hints.insert(HintKey::VlanId, vlan_id as u64);
 
         // VLAN tag is 4 bytes
         ParseResult::success(fields, &data[4..], child_hints)
@@ -116,7 +125,7 @@ mod tests {
 
         let parser = VlanProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", ethertype::VLAN as u64);
+        context.insert_hint(HintKey::EtherType, ethertype::VLAN as u64);
         context.parent_protocol = Some("ethernet");
 
         let result = parser.parse(&tag, &context);
@@ -138,7 +147,7 @@ mod tests {
 
         let parser = VlanProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", ethertype::VLAN as u64);
+        context.insert_hint(HintKey::EtherType, ethertype::VLAN as u64);
         context.parent_protocol = Some("ethernet");
 
         let result = parser.parse(&tag, &context);
@@ -160,7 +169,7 @@ mod tests {
 
         let parser = VlanProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", ethertype::VLAN as u64);
+        context.insert_hint(HintKey::EtherType, ethertype::VLAN as u64);
 
         let result = parser.parse(&tag, &context);
 
@@ -179,17 +188,17 @@ mod tests {
 
         // With VLAN ethertype
         let mut ctx2 = ParseContext::new(1);
-        ctx2.insert_hint("ethertype", ethertype::VLAN as u64);
+        ctx2.insert_hint(HintKey::EtherType, ethertype::VLAN as u64);
         assert!(parser.can_parse(&ctx2).is_some());
 
         // With QinQ ethertype
         let mut ctx3 = ParseContext::new(1);
-        ctx3.insert_hint("ethertype", ethertype::QINQ as u64);
+        ctx3.insert_hint(HintKey::EtherType, ethertype::QINQ as u64);
         assert!(parser.can_parse(&ctx3).is_some());
 
         // With different ethertype
         let mut ctx4 = ParseContext::new(1);
-        ctx4.insert_hint("ethertype", ethertype::IPV4 as u64);
+        ctx4.insert_hint(HintKey::EtherType, ethertype::IPV4 as u64);
         assert!(parser.can_parse(&ctx4).is_none());
     }
 
@@ -199,7 +208,7 @@ mod tests {
 
         let parser = VlanProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", ethertype::VLAN as u64);
+        context.insert_hint(HintKey::EtherType, ethertype::VLAN as u64);
 
         let result = parser.parse(&short_tag, &context);
 
@@ -214,13 +223,16 @@ mod tests {
 
         let parser = VlanProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", ethertype::VLAN as u64);
+        context.insert_hint(HintKey::EtherType, ethertype::VLAN as u64);
 
         let result = parser.parse(&tag, &context);
 
         assert!(result.is_ok());
-        assert_eq!(result.hint("ethertype"), Some(ethertype::IPV4 as u64));
-        assert_eq!(result.hint("vlan_id"), Some(42u64));
+        assert_eq!(
+            result.hint(HintKey::EtherType),
+            Some(ethertype::IPV4 as u64)
+        );
+        assert_eq!(result.hint(HintKey::VlanId), Some(42u64));
     }
 
     #[test]
@@ -231,7 +243,7 @@ mod tests {
 
         let parser = VlanProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", ethertype::VLAN as u64);
+        context.insert_hint(HintKey::EtherType, ethertype::VLAN as u64);
 
         let result = parser.parse(&data, &context);
 

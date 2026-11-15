@@ -6,7 +6,9 @@
 use compact_str::CompactString;
 use smallvec::SmallVec;
 
-use super::{FieldValue, ParseContext, ParseGate, ParseResult, Protocol};
+use super::{
+    Cond, Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult, Protocol,
+};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// SSH default port.
@@ -54,11 +56,15 @@ impl Protocol for SshProtocol {
         "SSH"
     }
 
-    fn parse_gates(&self) -> &'static [ParseGate] {
-        &[ParseGate::Hint("transport")]
+    fn dispatch(&self) -> Dispatch {
+        const RULES: &[DispatchRule] = &[DispatchRule::hints(
+            &[Cond::Port(&[SSH_PORT as u64]), Cond::OVER_TCP],
+            50,
+        )];
+        Dispatch::Exact(RULES)
     }
 
-    fn child_hint_keys(&self) -> Option<&'static [&'static str]> {
+    fn child_hint_keys(&self) -> Option<&'static [HintKey]> {
         Some(&[])
     }
 
@@ -67,8 +73,8 @@ impl Protocol for SshProtocol {
         if !context.over_tcp() {
             return None;
         }
-        let src_port = context.hint("src_port");
-        let dst_port = context.hint("dst_port");
+        let src_port = context.hint(HintKey::SrcPort);
+        let dst_port = context.hint(HintKey::DstPort);
 
         // Check for SSH port
         match (src_port, dst_port) {
@@ -97,7 +103,7 @@ impl Protocol for SshProtocol {
             // This might be encrypted traffic or not an SSH packet
             fields.push(("encrypted", FieldValue::Bool(true)));
             let remaining_start = data.len().min(4 + packet_length);
-            return ParseResult::success(fields, &data[remaining_start..], SmallVec::new());
+            return ParseResult::success(fields, &data[remaining_start..], Hints::new());
         }
 
         let padding_length = data[4] as usize;
@@ -112,7 +118,7 @@ impl Protocol for SshProtocol {
         // Payload starts at offset 5
         let payload_length = packet_length.saturating_sub(padding_length + 1);
         if payload_length == 0 || data.len() < 6 {
-            return ParseResult::success(fields, &data[4 + packet_length..], SmallVec::new());
+            return ParseResult::success(fields, &data[4 + packet_length..], Hints::new());
         }
 
         let msg_type = data[5];
@@ -135,7 +141,7 @@ impl Protocol for SshProtocol {
         }
 
         let remaining = &data[4 + packet_length..];
-        ParseResult::success(fields, remaining, SmallVec::new())
+        ParseResult::success(fields, remaining, Hints::new())
     }
 
     fn schema_fields(&self) -> Vec<FieldDescriptor> {
@@ -230,7 +236,7 @@ fn parse_protocol_identification<'a>(
 
     // Remaining data after the identification string
     let remaining_start = (line_end + 1).min(data.len());
-    ParseResult::success(fields.clone(), &data[remaining_start..], SmallVec::new())
+    ParseResult::success(fields.clone(), &data[remaining_start..], Hints::new())
 }
 
 /// Parse KEXINIT message to extract algorithm lists.
@@ -539,19 +545,19 @@ mod tests {
         assert!(parser.can_parse(&ctx1).is_none());
 
         let mut ctx2 = ParseContext::new(1);
-        ctx2.insert_hint("dst_port", 22);
-        ctx2.insert_hint("transport", 6);
+        ctx2.insert_hint(HintKey::DstPort, 22);
+        ctx2.insert_hint(HintKey::Transport, 6);
         assert!(parser.can_parse(&ctx2).is_some());
 
         let mut ctx3 = ParseContext::new(1);
-        ctx3.insert_hint("src_port", 22);
-        ctx3.insert_hint("transport", 6);
+        ctx3.insert_hint(HintKey::SrcPort, 22);
+        ctx3.insert_hint(HintKey::Transport, 6);
         assert!(parser.can_parse(&ctx3).is_some());
 
         // Port 22 over UDP is not SSH
         let mut ctx4 = ParseContext::new(1);
-        ctx4.insert_hint("dst_port", 22);
-        ctx4.insert_hint("transport", 17);
+        ctx4.insert_hint(HintKey::DstPort, 22);
+        ctx4.insert_hint(HintKey::Transport, 17);
         assert!(parser.can_parse(&ctx4).is_none());
     }
 
@@ -561,7 +567,7 @@ mod tests {
 
         let parser = SshProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 22);
+        context.insert_hint(HintKey::DstPort, 22);
 
         let result = parser.parse(&packet, &context);
 
@@ -590,7 +596,7 @@ mod tests {
 
         let parser = SshProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 22);
+        context.insert_hint(HintKey::DstPort, 22);
 
         let result = parser.parse(&packet, &context);
 
@@ -614,7 +620,7 @@ mod tests {
 
         let parser = SshProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("src_port", 22);
+        context.insert_hint(HintKey::SrcPort, 22);
 
         let result = parser.parse(&packet, &context);
 
@@ -672,7 +678,7 @@ mod tests {
 
         let parser = SshProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 22);
+        context.insert_hint(HintKey::DstPort, 22);
 
         let result = parser.parse(&packet, &context);
 
@@ -694,7 +700,7 @@ mod tests {
 
         let parser = SshProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 22);
+        context.insert_hint(HintKey::DstPort, 22);
 
         let result = parser.parse(&packet, &context);
 
@@ -714,7 +720,7 @@ mod tests {
 
         let parser = SshProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 22);
+        context.insert_hint(HintKey::DstPort, 22);
 
         let result = parser.parse(&packet, &context);
 
@@ -733,7 +739,7 @@ mod tests {
 
         let parser = SshProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 22);
+        context.insert_hint(HintKey::DstPort, 22);
 
         let result = parser.parse(&packet, &context);
 
@@ -758,7 +764,7 @@ mod tests {
 
         let parser = SshProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 22);
+        context.insert_hint(HintKey::DstPort, 22);
 
         let result = parser.parse(&packet, &context);
 
@@ -809,7 +815,7 @@ mod tests {
 
         let parser = SshProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 22);
+        context.insert_hint(HintKey::DstPort, 22);
 
         let result = parser.parse(&packet, &context);
 
@@ -849,7 +855,7 @@ mod tests {
 
         let parser = SshProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 22);
+        context.insert_hint(HintKey::DstPort, 22);
 
         let result = parser.parse(&packet, &context);
 

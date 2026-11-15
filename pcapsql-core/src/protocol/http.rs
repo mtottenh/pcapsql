@@ -19,7 +19,8 @@ use httparse::{Request, Response, Status, EMPTY_HEADER};
 use smallvec::SmallVec;
 
 use super::{
-    FieldEntry, FieldValue, ParseContext, ParseGate, ParseResult, Protocol, CONTENT_PRIORITY,
+    Cond, Dispatch, DispatchRule, FieldEntry, FieldValue, HintKey, Hints, ParseContext,
+    ParseResult, Protocol, CONTENT_PRIORITY,
 };
 use crate::schema::{DataKind, FieldDescriptor};
 
@@ -30,7 +31,7 @@ pub const HTTP_PORTS: &[u16] = &[80, 8080, 8000, 8888, 3000, 5000];
 
 /// Child hint the TCP layer sets to 1 when its payload starts an HTTP/1.x
 /// message (see [`starts_http_message`]). Absent otherwise.
-pub const PAYLOAD_HINT: &str = "http_payload";
+pub const PAYLOAD_HINT: HintKey = HintKey::HttpPayload;
 
 /// Maximum number of headers extracted from one segment.
 const MAX_HEADERS: usize = 100;
@@ -191,7 +192,7 @@ fn finish<'a>(
         ));
     }
     // Terminal layer: the body is not parsed further.
-    ParseResult::success(fields, &data[data.len()..], SmallVec::new())
+    ParseResult::success(fields, &data[data.len()..], Hints::new())
 }
 
 fn parse_request(data: &[u8]) -> ParseResult<'_> {
@@ -251,11 +252,15 @@ impl Protocol for HttpProtocol {
     /// parser that claims the segment from a well-known port alone (TLS on
     /// 8443, DNS from source port 53, ...). Without the hint HTTP never
     /// matches, so a port's own protocol keeps non-HTTP segments.
-    fn parse_gates(&self) -> &'static [ParseGate] {
-        &[ParseGate::Hint("transport")]
+    fn dispatch(&self) -> Dispatch {
+        const RULES: &[DispatchRule] = &[DispatchRule::hints(
+            &[Cond::Hint(HintKey::HttpPayload, &[1]), Cond::OVER_TCP],
+            CONTENT_PRIORITY,
+        )];
+        Dispatch::Exact(RULES)
     }
 
-    fn child_hint_keys(&self) -> Option<&'static [&'static str]> {
+    fn child_hint_keys(&self) -> Option<&'static [HintKey]> {
         Some(&[])
     }
 
@@ -346,9 +351,9 @@ mod tests {
 
     fn ctx(src_port: u64, dst_port: u64, sniffed: bool) -> ParseContext {
         let mut ctx = ParseContext::new(1);
-        ctx.insert_hint("src_port", src_port);
-        ctx.insert_hint("dst_port", dst_port);
-        ctx.insert_hint("transport", 6);
+        ctx.insert_hint(HintKey::SrcPort, src_port);
+        ctx.insert_hint(HintKey::DstPort, dst_port);
+        ctx.insert_hint(HintKey::Transport, 6);
         if sniffed {
             ctx.insert_hint(PAYLOAD_HINT, 1);
         }
@@ -404,7 +409,7 @@ mod tests {
         assert_eq!(parser.can_parse(&ctx(40000, 80, false)), None);
         // UDP never carries HTTP/1.x.
         let mut udp = ctx(40000, 80, true);
-        udp.set_hint("transport", 17);
+        udp.set_hint(HintKey::Transport, 17);
         assert_eq!(parser.can_parse(&udp), None);
         assert_eq!(parser.can_parse(&ParseContext::new(1)), None);
     }

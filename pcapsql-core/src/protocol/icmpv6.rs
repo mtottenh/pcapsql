@@ -5,7 +5,9 @@ use std::net::Ipv6Addr;
 use compact_str::CompactString;
 use smallvec::SmallVec;
 
-use super::{FieldValue, ParseContext, ParseGate, ParseResult, Protocol};
+use super::{
+    Cond, Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult, Protocol,
+};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// IP protocol number for ICMPv6.
@@ -84,20 +86,27 @@ impl Protocol for Icmpv6Protocol {
         "ICMPv6"
     }
 
-    fn parse_gates(&self) -> &'static [ParseGate] {
-        &[ParseGate::Hint("ip_protocol")]
+    fn dispatch(&self) -> Dispatch {
+        const RULES: &[DispatchRule] = &[DispatchRule::hints(
+            &[
+                Cond::Hint(HintKey::IpProtocol, &[IP_PROTO_ICMPV6 as u64]),
+                Cond::Hint(HintKey::IpVersion, &[6]),
+            ],
+            100,
+        )];
+        Dispatch::Exact(RULES)
     }
 
-    fn child_hint_keys(&self) -> Option<&'static [&'static str]> {
+    fn child_hint_keys(&self) -> Option<&'static [HintKey]> {
         Some(&[])
     }
 
     fn can_parse(&self, context: &ParseContext) -> Option<u32> {
         // Match when IPv6 next_header equals 58 (ICMPv6)
-        match context.hint("ip_protocol") {
+        match context.hint(HintKey::IpProtocol) {
             Some(proto) if proto == IP_PROTO_ICMPV6 as u64 => {
                 // Only parse for IPv6
-                match context.hint("ip_version") {
+                match context.hint(HintKey::IpVersion) {
                     Some(6) => Some(100),
                     _ => None,
                 }
@@ -164,7 +173,7 @@ impl Protocol for Icmpv6Protocol {
             _ => 4, // Just consume the header
         };
 
-        ParseResult::success(fields, &data[consumed..], SmallVec::new())
+        ParseResult::success(fields, &data[consumed..], Hints::new())
     }
 
     fn schema_fields(&self) -> Vec<FieldDescriptor> {
@@ -529,8 +538,8 @@ mod tests {
 
     fn create_context_icmpv6() -> ParseContext {
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", IP_PROTO_ICMPV6 as u64);
-        context.insert_hint("ip_version", 6);
+        context.insert_hint(HintKey::IpProtocol, IP_PROTO_ICMPV6 as u64);
+        context.insert_hint(HintKey::IpVersion, 6);
         context
     }
 
@@ -545,8 +554,8 @@ mod tests {
     fn test_cannot_parse_without_ipv6() {
         let parser = Icmpv6Protocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", IP_PROTO_ICMPV6 as u64);
-        context.insert_hint("ip_version", 4);
+        context.insert_hint(HintKey::IpProtocol, IP_PROTO_ICMPV6 as u64);
+        context.insert_hint(HintKey::IpVersion, 4);
         assert!(parser.can_parse(&context).is_none());
     }
 

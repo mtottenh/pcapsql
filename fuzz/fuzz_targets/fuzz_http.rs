@@ -21,7 +21,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use pcapsql_core::protocol::{HttpProtocol, ParseContext, Protocol};
+use pcapsql_core::protocol::{HintKey, HttpProtocol, ParseContext, Protocol};
 use pcapsql_core::stream::{
     Direction, Http2StreamParser, HttpStreamParser, StreamContext, StreamParser,
 };
@@ -101,9 +101,9 @@ fuzz_target!(|data: &[u8]| {
             // Test the packet-level HTTP/1.x parser on one TCP segment
             // (request or response is decided from the payload).
             let mut ctx = ParseContext::new(1);
-            ctx.insert_hint("src_port", 12345);
-            ctx.insert_hint("dst_port", 80);
-            ctx.insert_hint("transport", 6);
+            ctx.insert_hint(HintKey::SrcPort, 12345);
+            ctx.insert_hint(HintKey::DstPort, 80);
+            ctx.insert_hint(HintKey::Transport, 6);
             let _ = HttpProtocol.parse(payload, &ctx);
         }
     }

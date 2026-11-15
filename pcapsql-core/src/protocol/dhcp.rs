@@ -6,7 +6,9 @@
 use compact_str::CompactString;
 use smallvec::SmallVec;
 
-use super::{FieldValue, ParseContext, ParseGate, ParseResult, Protocol};
+use super::{
+    Cond, Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult, Protocol,
+};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// DHCP server port.
@@ -34,11 +36,18 @@ impl Protocol for DhcpProtocol {
         "DHCP"
     }
 
-    fn parse_gates(&self) -> &'static [ParseGate] {
-        &[ParseGate::Hint("transport")]
+    fn dispatch(&self) -> Dispatch {
+        const RULES: &[DispatchRule] = &[DispatchRule::hints(
+            &[
+                Cond::Port(&[DHCP_SERVER_PORT as u64, DHCP_CLIENT_PORT as u64]),
+                Cond::OVER_UDP,
+            ],
+            100,
+        )];
+        Dispatch::Exact(RULES)
     }
 
-    fn child_hint_keys(&self) -> Option<&'static [&'static str]> {
+    fn child_hint_keys(&self) -> Option<&'static [HintKey]> {
         Some(&[])
     }
 
@@ -48,8 +57,8 @@ impl Protocol for DhcpProtocol {
             return None;
         }
         // Check for DHCP ports in either direction
-        let src_port = context.hint("src_port");
-        let dst_port = context.hint("dst_port");
+        let src_port = context.hint(HintKey::SrcPort);
+        let dst_port = context.hint(HintKey::DstPort);
 
         let is_dhcp_port = |p: u64| p == DHCP_SERVER_PORT as u64 || p == DHCP_CLIENT_PORT as u64;
 
@@ -150,7 +159,7 @@ impl Protocol for DhcpProtocol {
         }
 
         // No child protocols after DHCP
-        ParseResult::success(fields, &[], SmallVec::new())
+        ParseResult::success(fields, &[], Hints::new())
     }
 
     fn schema_fields(&self) -> Vec<FieldDescriptor> {
@@ -439,26 +448,26 @@ mod tests {
 
         // With dst_port 67 (server) over UDP
         let mut ctx2 = ParseContext::new(1);
-        ctx2.insert_hint("dst_port", 67);
-        ctx2.insert_hint("transport", 17);
+        ctx2.insert_hint(HintKey::DstPort, 67);
+        ctx2.insert_hint(HintKey::Transport, 17);
         assert!(parser.can_parse(&ctx2).is_some());
 
         // With src_port 68 (client) over UDP
         let mut ctx3 = ParseContext::new(1);
-        ctx3.insert_hint("src_port", 68);
-        ctx3.insert_hint("transport", 17);
+        ctx3.insert_hint(HintKey::SrcPort, 68);
+        ctx3.insert_hint(HintKey::Transport, 17);
         assert!(parser.can_parse(&ctx3).is_some());
 
         // With different port
         let mut ctx4 = ParseContext::new(1);
-        ctx4.insert_hint("dst_port", 80);
-        ctx4.insert_hint("transport", 17);
+        ctx4.insert_hint(HintKey::DstPort, 80);
+        ctx4.insert_hint(HintKey::Transport, 17);
         assert!(parser.can_parse(&ctx4).is_none());
 
         // Port 67 over TCP is not DHCP
         let mut ctx5 = ParseContext::new(1);
-        ctx5.insert_hint("dst_port", 67);
-        ctx5.insert_hint("transport", 6);
+        ctx5.insert_hint(HintKey::DstPort, 67);
+        ctx5.insert_hint(HintKey::Transport, 6);
         assert!(parser.can_parse(&ctx5).is_none());
     }
 
@@ -468,7 +477,7 @@ mod tests {
 
         let parser = DhcpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 67);
+        context.insert_hint(HintKey::DstPort, 67);
 
         let result = parser.parse(&packet, &context);
 
@@ -493,7 +502,7 @@ mod tests {
 
         let parser = DhcpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("src_port", 67);
+        context.insert_hint(HintKey::SrcPort, 67);
 
         let result = parser.parse(&packet, &context);
 
@@ -523,7 +532,7 @@ mod tests {
 
         let parser = DhcpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("src_port", 67);
+        context.insert_hint(HintKey::SrcPort, 67);
 
         let result = parser.parse(&packet, &context);
 
@@ -537,7 +546,7 @@ mod tests {
 
         let parser = DhcpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("src_port", 67);
+        context.insert_hint(HintKey::SrcPort, 67);
 
         let result = parser.parse(&packet, &context);
 
@@ -581,7 +590,7 @@ mod tests {
 
         let parser = DhcpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("dst_port", 67);
+        context.insert_hint(HintKey::DstPort, 67);
 
         let result = parser.parse(&short_packet, &context);
 

@@ -545,6 +545,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `VARCHAR` cast: 19) and 32 → 26 over 20M rows on one thread, down from 69
   before the kernels stopped using `fmt`. `ip6_to_string` is still `std`'s
   formatting, at 82.
+- **Performance: a layer's parser is looked up in a table.** The parse loop
+  asked the candidate parsers of each layer in turn (31 `can_parse` calls
+  for an Ethernet/IPv4/UDP packet), and each compared hint names as strings.
+  Hints are now keyed by an enum and stored in an array (`HintKey`, `Hints`),
+  and every parser states its match as rules (`Protocol::dispatch`) that the
+  registry files by hint key and value, per parent parser: a layer costs one
+  or two lookups and no `can_parse` call. The parsers chosen are the same:
+  debug builds check each choice against a scan of every `can_parse`, and
+  tests compare whole parser chains over the fuzz corpus (76,926 packets,
+  every parser) and the golden captures. Instructions per packet (callgrind,
+  `pcapsql-core/examples/parse_cost.rs`), before → after: `parse_packet`
+  at full scope, UDP 4,978 → 3,473, TCP 6,648 → 5,093, DNS 10,628 → 9,156;
+  a scan into a sink that stores nothing, `udp` 5,338 → 3,919, `tcp` 8,050 →
+  6,435, `dns` 12,030 → 10,639.
+  API (`pcapsql-core`, unstable): `ParseContext::hint`, `insert_hint`,
+  `set_hint` and `ParseResult::hint` take a `HintKey` instead of a `&str`;
+  `ParseContext::hints` and `ParseResult::child_hints` are `Hints` instead
+  of a `SmallVec` of `(&str, u64)` (`HintEntry` is gone), and a key holds
+  one value; `Protocol::child_hint_keys` returns `HintKey`s;
+  `Protocol::parse_gates` and `ParseGate` are replaced by
+  `Protocol::dispatch` with `Dispatch`, `DispatchRule` and `Cond`.
 
 ### Fixed
 

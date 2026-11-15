@@ -596,7 +596,6 @@ mod tests {
     use crate::scan::testing::{Cell as C, RecordingSink};
     use crate::scan::{Catalog, ScanPlan, TableScan, TimestampUnit};
     use crate::TunnelType;
-    use smallvec::SmallVec;
 
     const COL: OutCol = OutCol(0);
 
@@ -889,7 +888,7 @@ mod tests {
         ParseResult {
             fields: fields.iter().cloned().collect(),
             remaining: &[],
-            child_hints: SmallVec::new(),
+            child_hints: crate::protocol::Hints::new(),
             error: None,
             encap_depth: 0,
             tunnel_type: TunnelType::None,
