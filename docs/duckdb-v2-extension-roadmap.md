@@ -323,7 +323,7 @@ filters by all of them, so what is read is the same.
 | C2 | `PacketReader::process_packets_flow` with `Pause::{After, Before}`; `process_packets` becomes a provided method | S1 | A callback error could stop after a packet, never before one |
 | C3 | Index build and (de)serialisation without a `Path` | none | Already there: `build_boundary_index<R: Read>`, `to_bytes` / `from_bytes` |
 | C4 | Column-to-field lookup behind one shared `FieldResolver` | S4a | `get_hinted` exists; a fixed slot index is not possible because parsers push fields conditionally |
-| C5 | Encapsulation depth available to consumers | none | Already there: `ParseResult::encap_depth` |
+| C5 | Encapsulation depth available to consumers | none | Already there: `LayerRef::encap_depth` (`ParseResult::encap_depth` when this was written) |
 | C6 | `pcapsql_core::scan`: catalogue, plan, predicates, sink, coercion, routing, driver, partitioning | S2 to S5, S7 | Lives in `pcapsql-datafusion`, tied to Arrow and DataFusion types |
 | C7 | UDF kernels in `pcapsql_core::format` | S6 | Duplicated in both frontends and already diverged |
 
@@ -361,8 +361,9 @@ Done:
 | A race in the streaming exchange | A queued batch could be returned ahead of one in the channel, so an un-`ORDER`ed streaming query could come out of capture order. Found by a test that failed once in thirty runs |
 | Per-packet allocation | The list of a packet's layers is kept by the partition scan: 1 allocation of 7.8 kB per packet became 0 for `frames` and `udp` |
 | Parser dispatch | Typed hints and per-parent tables in place of string-keyed candidate scans: a `udp` scan went from 5,338 to 3,919 instructions per packet |
+| In-place field storage | The second half of the parser work. Every parser writes its fields through a `FieldSink` into a per-partition `ParseBuf` (one field vector, one layer vector, a `bumpalo` arena for constructed values) and returns a small `Parsed`; `FieldValue` is `Copy` (24 bytes, was 32) and owns nothing; consumers read a `LayerRef`. The 1,000-byte `ParseResult`, its moves, its drops and its `SmallVec` spills are gone. Instructions per packet through `PartitionScan` into a sink that stores nothing (callgrind, bench profile): `udp` 3,930 to 2,529, `tcp` 6,439 to 4,036, `dns` 10,643 to 7,135, `http` 11,436 to 7,959, `frames` 619 to 593. Allocations per packet: `tcp` 1 to 0, `http` 1 to 0, `dns` 9 to 4 (what `simple-dns` allocates for the message; `tests/parse_alloc.rs` holds the scan to exactly that). The scan benchmark (`cargo bench -p pcapsql-datafusion --bench scan`, thin LTO, three interleaved runs of each build on a shared machine, medians for 20,000 packets): the parse passes are 22 to 40 percent faster (`udp/mmap/1` 11.7 → 8.5 ms, `tcp_options/mmap/1` 20.4 → 12.3 ms, `vxlan/mmap/1` 26.6 → 20.1 ms) and the one-shot queries 29 to 39 percent (`count_udp` 8.7 → 5.3 ms), except `with_payload` (7.3 → 6.9 ms, inside the run-to-run spread). No `unsafe`. The standard `Allocator` trait (stable in Rust 1.100) is not used: the minimum Rust version is below it, and so is the extension's CI toolchain |
 | Arrow sink | Builders start each batch at the size of the last: no reallocation in steady state |
-| Text kernels | IPv4, IPv6 and MAC text without `fmt`; hex decoded into a buffer the caller keeps |
+| Text kernels | IPv4, IPv6 and MAC text without `fmt`; hex decoded into a buffer the caller keeps. The row writer's IPv6 text and the MAC formatters that were left in `FieldValue`, `dhcp` and `icmpv6` go through them too |
 | Scalars | DataFusion UDFs parse a constant argument once; DuckDB's scalar loops are generic over their kernel, and a constant-pattern match is a SIMD compare over the rows of a chunk that are not NULL, a 64-row word of the validity mask at a time (the second of two audited `unsafe` places) |
 | Reader | No `BufReader` under the parser's own buffer |
 | Benchmarks | A thin-LTO bench profile, so they link on a small machine; the `with_payload` case runs again |
@@ -374,25 +375,16 @@ Remaining, in the order intended:
    algebra in core, table descriptions in the catalogue, `scan::testing`
    behind a feature, a plan the driver cannot run refused, `engine/table.rs`
    split, type tests by id.
-2. In-place field storage for the parsers (the second half of the parser
-   work): fields written into a per-partition buffer and an arena, a `Copy`
-   field value, no move of a layer's result and no drop of its fields. It
-   touches every parser. Expected, not measured: a `udp` scan near 2,400
-   instructions per packet and no allocation for TCP. The standard
-   `Allocator` trait (stable in Rust 1.100) is not used: the minimum Rust
-   version is 1.88 and the extension's CI toolchain is older than 1.100.
-3. The DataFusion scan path after that: stream tables on the shared layer
-   (S4c) so that the legacy builders in `stream_tables.rs` go,
-   `providers/shared.rs` split and keyed by output id.
-4. Typed columns in the Arrow sink (fixed-width columns as vectors with a
+2. The DataFusion scan path: stream tables on the shared layer (S4c) so
+   that the legacy builders in `stream_tables.rs` go, `providers/shared.rs`
+   split and keyed by output id.
+3. Typed columns in the Arrow sink (fixed-width columns as vectors with a
    lazily built validity bitmap).
-5. Small items: IPv6 text in the row writer and the three MAC formatters
-   left in the parsers through the shared kernels; a benchmark run of the
-   whole (P3 projection, P4 scaling, a view against its join), recorded
-   here.
-6. P8: stream tables and TLS decryption in the extension, the remaining
+4. A benchmark run of the whole (P3 projection, P4 scaling, a view against
+   its join), recorded here.
+5. P8: stream tables and TLS decryption in the extension, the remaining
    UDFs as wrappers, `COPY ... TO 'x.pcap'`.
-7. The S3 half of the P5 remote test, once the HTTP half has run.
+6. The S3 half of the P5 remote test, once the HTTP half has run.
 
 Open decisions for the maintainer:
 
