@@ -2,7 +2,7 @@
 //! through DuckDB over the same captures, must return what its committed snapshots hold.
 //!
 //! The captures and the queries are those of `pcapsql-datafusion/tests/golden_corpus.rs` itself
-//! (`build.rs` takes them from that file), and the expected results are the snapshots in
+//! (both take them from `pcapsql_testgen::corpus`), and the expected results are the snapshots in
 //! `pcapsql-datafusion/tests/golden/`, which are Arrow's pretty-printed tables. For each corpus
 //! capture a DuckDB database gets one view per scan table (`CREATE VIEW tcp AS SELECT * FROM
 //! read_tcp('<capture>')`) and one per packets view (`CREATE VIEW tcp_packets AS SELECT * FROM

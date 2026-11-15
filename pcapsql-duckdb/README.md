@@ -593,8 +593,9 @@ Tests, in `itest/`:
 - `tests/golden_differential.rs` runs the queries of the DataFusion golden
   corpus over the same captures and compares with the snapshots committed in
   `pcapsql-datafusion/tests/golden/`, the queries over `*_packets` views
-  included (a view is `read_<proto>_packets` here). `build.rs` takes the captures and the
-  queries from `pcapsql-datafusion/tests/golden_corpus.rs` itself. The file
+  included (a view is `read_<proto>_packets` here). The captures and the
+  queries are `pcapsql_testgen::corpus`, which
+  `pcapsql-datafusion/tests/golden_corpus.rs` uses too. The file
   lists which queries are compared, which are not and why, and what is
   normalised (how NULL, BLOBs, lists and timestamps are printed, and the
   `timestamp` column DataFusion's protocol tables do not have).
