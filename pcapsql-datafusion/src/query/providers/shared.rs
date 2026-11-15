@@ -117,7 +117,7 @@ fn execution_error(message: impl Into<String>) -> Error {
 }
 
 fn plan_error(error: PlanError) -> Error {
-    execution_error(error.to_string())
+    Error::Query(error.into())
 }
 
 impl ParseSubscription {
