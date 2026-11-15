@@ -1,11 +1,10 @@
 //! ICMPv6 protocol parser with NDP and MLD support.
 
-use std::net::Ipv6Addr;
-
 use super::{
     Cond, Dispatch, DispatchRule, FieldSink, FieldValue, HintKey, Hints, ParseContext, Parsed,
     Protocol,
 };
+use crate::format::{ipv6_text, mac_text, IPV6_TEXT_LEN, MAC_TEXT_LEN};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// IP protocol number for ICMPv6.
@@ -321,8 +320,7 @@ fn parse_neighbor_solicitation(data: &[u8], fields: &mut FieldSink<'_, '_>) -> u
     }
 
     // Skip 4 bytes reserved
-    let target = format_ipv6(&data[4..20]);
-    fields.push(("ndp_target_address", fields.str(&target)));
+    fields.push(("ndp_target_address", ipv6_value(&data[4..20], fields)));
 
     // Parse options
     if data.len() > 20 {
@@ -344,8 +342,7 @@ fn parse_neighbor_advertisement(data: &[u8], fields: &mut FieldSink<'_, '_>) -> 
     fields.push(("ndp_solicited_flag", FieldValue::Bool((flags & 0x40) != 0)));
     fields.push(("ndp_override_flag", FieldValue::Bool((flags & 0x20) != 0)));
 
-    let target = format_ipv6(&data[4..20]);
-    fields.push(("ndp_target_address", fields.str(&target)));
+    fields.push(("ndp_target_address", ipv6_value(&data[4..20], fields)));
 
     // Parse options
     if data.len() > 20 {
@@ -363,8 +360,7 @@ fn parse_redirect(data: &[u8], fields: &mut FieldSink<'_, '_>) -> usize {
     }
 
     // Skip 4 bytes reserved
-    let target = format_ipv6(&data[4..20]);
-    fields.push(("ndp_target_address", fields.str(&target)));
+    fields.push(("ndp_target_address", ipv6_value(&data[4..20], fields)));
 
     // Parse options
     if data.len() > 36 {
@@ -389,23 +385,27 @@ fn parse_ndp_options(data: &[u8], fields: &mut FieldSink<'_, '_>) {
         match opt_type {
             ndp_option::SOURCE_LINK_LAYER_ADDR => {
                 if opt_len >= 8 {
-                    let mac = format_mac(&data[offset + 2..offset + 8]);
-                    fields.push(("ndp_source_mac", fields.str(&mac)));
+                    fields.push((
+                        "ndp_source_mac",
+                        mac_value(&data[offset + 2..offset + 8], fields),
+                    ));
                 }
             }
             ndp_option::TARGET_LINK_LAYER_ADDR => {
                 if opt_len >= 8 {
-                    let mac = format_mac(&data[offset + 2..offset + 8]);
-                    fields.push(("ndp_target_mac", fields.str(&mac)));
+                    fields.push((
+                        "ndp_target_mac",
+                        mac_value(&data[offset + 2..offset + 8], fields),
+                    ));
                 }
             }
             ndp_option::PREFIX_INFO => {
                 // Prefix Information option is 32 bytes
                 if opt_len >= 32 {
                     let prefix_len = data[offset + 2];
-                    let prefix = format_ipv6(&data[offset + 16..offset + 32]);
+                    let prefix = ipv6_value(&data[offset + 16..offset + 32], fields);
                     fields.push(("ndp_prefix_length", FieldValue::UInt8(prefix_len)));
-                    fields.push(("ndp_prefix", fields.str(&prefix)));
+                    fields.push(("ndp_prefix", prefix));
                 }
             }
             ndp_option::MTU if opt_len >= 8 => {
@@ -440,8 +440,7 @@ fn parse_mldv1(data: &[u8], fields: &mut FieldSink<'_, '_>) -> usize {
     ));
 
     // Skip 2 bytes reserved
-    let multicast_addr = format_ipv6(&data[4..20]);
-    fields.push(("mld_multicast_address", fields.str(&multicast_addr)));
+    fields.push(("mld_multicast_address", ipv6_value(&data[4..20], fields)));
 
     4 + 20 // header + MLDv1 message body
 }
@@ -463,26 +462,21 @@ fn parse_mldv2_report(data: &[u8], fields: &mut FieldSink<'_, '_>) -> usize {
     4 + data.len() // Consume all remaining data
 }
 
-/// Format an IPv6 address from bytes.
-fn format_ipv6(bytes: &[u8]) -> String {
-    if bytes.len() >= 16 {
-        let mut arr = [0u8; 16];
-        arr.copy_from_slice(&bytes[..16]);
-        Ipv6Addr::from(arr).to_string()
-    } else {
-        "::".to_string()
+/// The text of the IPv6 address `bytes` starts with, in the packet's arena
+/// (`::` when there are fewer than sixteen bytes).
+fn ipv6_value<'a>(bytes: &[u8], fields: &FieldSink<'_, 'a>) -> FieldValue<'a> {
+    match bytes.first_chunk::<16>() {
+        Some(address) => fields.str(ipv6_text(address, &mut [0; IPV6_TEXT_LEN])),
+        None => FieldValue::Str("::"),
     }
 }
 
-/// Format a MAC address from bytes.
-fn format_mac(bytes: &[u8]) -> String {
-    if bytes.len() >= 6 {
-        format!(
-            "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5]
-        )
-    } else {
-        String::new()
+/// The text of the MAC address `bytes` starts with, in the packet's arena
+/// (empty when there are fewer than six bytes).
+fn mac_value<'a>(bytes: &[u8], fields: &FieldSink<'_, 'a>) -> FieldValue<'a> {
+    match bytes.first_chunk::<6>() {
+        Some(mac) => fields.str(mac_text(mac, &mut [0; MAC_TEXT_LEN])),
+        None => FieldValue::Str(""),
     }
 }
 

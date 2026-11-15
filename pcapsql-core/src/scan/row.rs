@@ -16,7 +16,9 @@ use std::ops::ControlFlow;
 use super::catalog::{ColKind, ColumnSource};
 use super::plan::{OutCol, OutColumn};
 use super::sink::{Full, ListSink, RowSink};
-use crate::format::address::{ipv4_text, mac_text, IPV4_TEXT_LEN, MAC_TEXT_LEN};
+use crate::format::address::{
+    ipv4_text, ipv6_text, mac_text, IPV4_TEXT_LEN, IPV6_TEXT_LEN, MAC_TEXT_LEN,
+};
 use crate::io::PacketRef;
 use crate::{FieldHint, FieldValue, LayerRef};
 
@@ -277,7 +279,7 @@ fn fixed_bytes<'v>(
     (bytes.len() == n).then_some(bytes)
 }
 
-/// A string assembled on the stack. Long enough for every address and
+/// A string assembled on the stack. Long enough for every
 /// integer; a longer text (a float with hundreds of digits) does not fit and
 /// the write fails.
 struct StackText {
@@ -323,7 +325,9 @@ fn with_text(value: &FieldValue<'_>, store: impl FnOnce(&str)) -> bool {
         FieldValue::IpAddr(IpAddr::V4(v4)) => {
             store(ipv4_text(u32::from(*v4), &mut [0; IPV4_TEXT_LEN]));
         }
-        FieldValue::IpAddr(v6 @ IpAddr::V6(_)) => with_display(v6, store),
+        FieldValue::IpAddr(IpAddr::V6(v6)) => {
+            store(ipv6_text(&v6.octets(), &mut [0; IPV6_TEXT_LEN]));
+        }
         FieldValue::MacAddr(mac) => store(mac_text(mac, &mut [0; MAC_TEXT_LEN])),
         FieldValue::UInt8(v) => with_display(v, store),
         FieldValue::UInt16(v) => with_display(v, store),
