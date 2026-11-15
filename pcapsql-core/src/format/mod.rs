@@ -37,8 +37,8 @@ pub mod mac;
 pub mod names;
 
 pub use address::{
-    detect_address_column, format_ipv4, format_ipv6, format_mac, ipv4_text, mac_text, write_ipv4,
-    write_ipv6, write_mac, AddressKind, IPV4_TEXT_LEN, MAC_TEXT_LEN,
+    detect_address_column, format_ipv4, format_ipv6, format_mac, ipv4_text, ipv6_text, mac_text,
+    write_ipv4, write_ipv6, write_mac, AddressKind, IPV4_TEXT_LEN, IPV6_TEXT_LEN, MAC_TEXT_LEN,
 };
 pub use cidr::{
     ipv4_in_cidr, ipv4_prefix_mask, ipv6_in_prefix, is_link_local_ipv6, is_loopback_ipv4,

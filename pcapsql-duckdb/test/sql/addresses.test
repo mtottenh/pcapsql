@@ -19,6 +19,21 @@ SELECT ip6_to_string(ip6('2001:0db8:0000:0000:0000:0000:0000:0001')), ip6_to_str
 ----
 2001:db8::1	::	fe80::abcd
 
+# RFC 5952: the longest run of zero groups is `::`, the first of two as long; one zero group
+# alone is written out; no leading zeros
+query TTTTT
+SELECT ip6_to_string(ip6('1:0:0:2:0:0:3:4')), ip6_to_string(ip6('1:0:0:2:0:0:0:4')), ip6_to_string(ip6('1:0:2:0:3:0:4:0')),
+       ip6_to_string(ip6('0abc:00de:000f:1000:0100:0010:0001:000a')), ip6_to_string(ip6('ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff'));
+----
+1::2:0:0:3:4	1:0:0:2::4	1:0:2:0:3:0:4:0	abc:de:f:1000:100:10:1:a	ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+
+# An IPv4-mapped address has a dotted tail; an IPv4-compatible one and the NAT64 prefix do not
+query TTTTTT
+SELECT ip6_to_string(ip6('::ffff:192.0.2.1')), ip6_to_string(ip6('::ffff:0:0')), ip6_to_string(ip6('::ffff:ffff:ffff')),
+       ip6_to_string(ip6('::192.0.2.1')), ip6_to_string(ip6('64:ff9b::192.0.2.1')), ip6_to_string(ip6('::ffff:0:192.0.2.1'));
+----
+::ffff:192.0.2.1	::ffff:0.0.0.0	::ffff:255.255.255.255	::c000:201	64:ff9b::c000:201	::ffff:0:c000:201
+
 # Colons, hyphens or no separator; any case
 query TTTT
 SELECT hex(mac('aa:bb:cc:dd:ee:ff')), hex(mac('AA-BB-CC-DD-EE-FF')), hex(mac('aabbccddeeff')), hex(mac(' a:b:c:d:e:f '));
