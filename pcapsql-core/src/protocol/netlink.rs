@@ -4,10 +4,9 @@
 //! This is the base parser that handles the common netlink header and
 //! sets hints for family-specific child parsers (rtnetlink, nfnetlink, etc.).
 
-use smallvec::SmallVec;
-
 use super::{
-    Cond, Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult, Protocol,
+    Cond, Dispatch, DispatchRule, FieldSink, FieldValue, HintKey, Hints, ParseContext, Parsed,
+    Protocol,
 };
 use crate::schema::{DataKind, FieldDescriptor};
 
@@ -138,16 +137,22 @@ impl Protocol for NetlinkProtocol {
         None
     }
 
-    fn parse<'a>(&self, data: &'a [u8], context: &ParseContext) -> ParseResult<'a> {
+    fn parse_into<'a>(
+        &self,
+        data: &'a [u8],
+        context: &ParseContext,
+        fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
         // Netlink header is 16 bytes minimum
         if data.len() < NETLINK_HEADER_LEN {
-            return ParseResult::error(
-                format!("Netlink message too short: {} bytes", data.len()),
+            return Parsed::error(
+                fields.text_fmt(format_args!(
+                    "Netlink message too short: {} bytes",
+                    data.len()
+                )),
                 data,
             );
         }
-
-        let mut fields = SmallVec::new();
 
         // Parse netlink header (little-endian!)
         let msg_len = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
@@ -200,7 +205,7 @@ impl Protocol for NetlinkProtocol {
         child_hints.insert(HintKey::NetlinkFamily, nl_family as u64);
         child_hints.insert(HintKey::NetlinkMsgType, msg_type as u64);
 
-        ParseResult::success(fields, remaining, child_hints)
+        Parsed::ok(remaining, child_hints)
     }
 
     fn schema_fields(&self) -> Vec<FieldDescriptor> {

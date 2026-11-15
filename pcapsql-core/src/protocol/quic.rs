@@ -4,11 +4,9 @@
 //! so this parser focuses on what's visible in cleartext: connection IDs,
 //! version, and packet type information.
 
-use compact_str::CompactString;
-use smallvec::SmallVec;
-
 use super::{
-    Cond, Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult, Protocol,
+    Cond, Dispatch, DispatchRule, FieldSink, FieldValue, HintKey, Hints, ParseContext, Parsed,
+    Protocol,
 };
 use crate::schema::{DataKind, FieldDescriptor};
 
@@ -74,11 +72,14 @@ impl Protocol for QuicProtocol {
         }
     }
 
-    fn parse<'a>(&self, data: &'a [u8], _context: &ParseContext) -> ParseResult<'a> {
-        let mut fields = SmallVec::new();
-
+    fn parse_into<'a>(
+        &self,
+        data: &'a [u8],
+        _context: &ParseContext,
+        fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
         if data.is_empty() {
-            return ParseResult::error("QUIC packet empty".to_string(), data);
+            return Parsed::error("QUIC packet empty", data);
         }
 
         let first_byte = data[0];
@@ -88,10 +89,10 @@ impl Protocol for QuicProtocol {
 
         if is_long_header {
             fields.push(("header_form", FieldValue::Str("long")));
-            parse_long_header(data, &mut fields)
+            parse_long_header(data, fields)
         } else {
             fields.push(("header_form", FieldValue::Str("short")));
-            parse_short_header(data, &mut fields)
+            parse_short_header(data, fields)
         }
     }
 
@@ -123,10 +124,7 @@ impl Protocol for QuicProtocol {
 }
 
 /// Parse QUIC long header.
-fn parse_long_header<'a>(
-    data: &'a [u8],
-    fields: &mut SmallVec<[(&'static str, FieldValue<'a>); 16]>,
-) -> ParseResult<'a> {
+fn parse_long_header<'a>(data: &'a [u8], fields: &mut FieldSink<'_, 'a>) -> Parsed<'a> {
     // Long Header format:
     // 0                   1                   2                   3
     // 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
@@ -141,7 +139,7 @@ fn parse_long_header<'a>(
     // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 
     if data.len() < 6 {
-        return ParseResult::error("QUIC long header too short".to_string(), data);
+        return Parsed::error("QUIC long header too short", data);
     }
 
     let first_byte = data[0];
@@ -149,7 +147,7 @@ fn parse_long_header<'a>(
     // Fixed bit should be 1 (bit 6)
     let fixed_bit = (first_byte & 0x40) != 0;
     if !fixed_bit {
-        return ParseResult::error("QUIC fixed bit not set".to_string(), data);
+        return Parsed::error("QUIC fixed bit not set", data);
     }
 
     // Packet type (bits 4-5)
@@ -166,10 +164,7 @@ fn parse_long_header<'a>(
     // Version (4 bytes)
     let quic_version = u32::from_be_bytes([data[1], data[2], data[3], data[4]]);
     fields.push(("version", FieldValue::UInt32(quic_version)));
-    fields.push((
-        "version_name",
-        FieldValue::OwnedString(CompactString::new(format_version(quic_version))),
-    ));
+    fields.push(("version_name", fields.str(&format_version(quic_version))));
 
     // DCID Length
     let dcid_len = data[5] as usize;
@@ -179,28 +174,17 @@ fn parse_long_header<'a>(
 
     // Destination Connection ID
     if offset + dcid_len > data.len() {
-        return ParseResult::partial(
-            fields.clone(),
-            &data[offset..],
-            "QUIC DCID truncated".to_string(),
-        );
+        return Parsed::partial(&data[offset..], "QUIC DCID truncated");
     }
     if dcid_len > 0 {
         let dcid = &data[offset..offset + dcid_len];
-        fields.push((
-            "dcid",
-            FieldValue::OwnedString(CompactString::new(hex_encode(dcid))),
-        ));
+        fields.push(("dcid", fields.str(&hex_encode(dcid))));
     }
     offset += dcid_len;
 
     // SCID Length
     if offset >= data.len() {
-        return ParseResult::partial(
-            fields.clone(),
-            &data[offset..],
-            "QUIC SCID length missing".to_string(),
-        );
+        return Parsed::partial(&data[offset..], "QUIC SCID length missing");
     }
     let scid_len = data[offset] as usize;
     fields.push(("scid_length", FieldValue::UInt8(scid_len as u8)));
@@ -208,18 +192,11 @@ fn parse_long_header<'a>(
 
     // Source Connection ID
     if offset + scid_len > data.len() {
-        return ParseResult::partial(
-            fields.clone(),
-            &data[offset..],
-            "QUIC SCID truncated".to_string(),
-        );
+        return Parsed::partial(&data[offset..], "QUIC SCID truncated");
     }
     if scid_len > 0 {
         let scid = &data[offset..offset + scid_len];
-        fields.push((
-            "scid",
-            FieldValue::OwnedString(CompactString::new(hex_encode(scid))),
-        ));
+        fields.push(("scid", fields.str(&hex_encode(scid))));
     }
     offset += scid_len;
 
@@ -228,14 +205,11 @@ fn parse_long_header<'a>(
         parse_initial_packet(&data[offset..], fields);
     }
 
-    ParseResult::success(fields.clone(), &[], Hints::new())
+    Parsed::ok(&[], Hints::new())
 }
 
 /// Parse QUIC short header.
-fn parse_short_header<'a>(
-    data: &'a [u8],
-    fields: &mut SmallVec<[(&'static str, FieldValue<'a>); 16]>,
-) -> ParseResult<'a> {
+fn parse_short_header<'a>(data: &'a [u8], fields: &mut FieldSink<'_, 'a>) -> Parsed<'a> {
     // Short Header format:
     // 0                   1                   2                   3
     // 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
@@ -246,7 +220,7 @@ fn parse_short_header<'a>(
     // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 
     if data.is_empty() {
-        return ParseResult::error("QUIC short header empty".to_string(), data);
+        return Parsed::error("QUIC short header empty", data);
     }
 
     let first_byte = data[0];
@@ -254,7 +228,7 @@ fn parse_short_header<'a>(
     // Fixed bit should be 1 (bit 6)
     let fixed_bit = (first_byte & 0x40) != 0;
     if !fixed_bit {
-        return ParseResult::error("QUIC fixed bit not set".to_string(), data);
+        return Parsed::error("QUIC fixed bit not set", data);
     }
 
     // Spin bit (bit 5)
@@ -268,14 +242,11 @@ fn parse_short_header<'a>(
     // Note: DCID length is not in the short header - it must be known from context
     // For now, we can only note that this is a short header packet
 
-    ParseResult::success(fields.clone(), &[], Hints::new())
+    Parsed::ok(&[], Hints::new())
 }
 
 /// Parse Initial packet payload to extract token and potentially SNI.
-fn parse_initial_packet<'a>(
-    data: &[u8],
-    fields: &mut SmallVec<[(&'static str, FieldValue<'a>); 16]>,
-) {
+fn parse_initial_packet<'a>(data: &[u8], fields: &mut FieldSink<'_, 'a>) {
     // Initial packet has:
     // - Token Length (variable-length integer)
     // - Token
@@ -328,7 +299,7 @@ fn parse_initial_packet<'a>(
 
 /// Try to extract SNI from potentially unencrypted Initial packet payload.
 /// This is a heuristic that looks for patterns typical of TLS ClientHello.
-fn try_extract_sni<'a>(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue<'a>); 16]>) {
+fn try_extract_sni<'a>(data: &[u8], fields: &mut FieldSink<'_, 'a>) {
     // Look for SNI extension pattern in the data
     // SNI extension has type 0x0000, followed by length, then name type, name length, and name
 
@@ -376,7 +347,7 @@ fn try_extract_sni<'a>(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldV
                     .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
                     && hostname.contains('.')
                 {
-                    fields.push(("sni", FieldValue::OwnedString(CompactString::new(hostname))));
+                    fields.push(("sni", fields.str(hostname)));
                     return;
                 }
             }

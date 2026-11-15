@@ -3,12 +3,10 @@
 //! Parses NETLINK_ROUTE (family 0) messages from Linux Netlink captures.
 //! Handles link, address, and route messages using netlink-packet-route.
 
-use compact_str::CompactString;
-use smallvec::SmallVec;
-
 use super::netlink::family as netlink_family;
 use super::{
-    Cond, Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult, Protocol,
+    Cond, Dispatch, DispatchRule, FieldSink, FieldValue, HintKey, Hints, ParseContext, Parsed,
+    Protocol,
 };
 use crate::schema::{DataKind, FieldDescriptor};
 
@@ -92,9 +90,12 @@ impl Protocol for RtnetlinkProtocol {
         None
     }
 
-    fn parse<'a>(&self, data: &'a [u8], context: &ParseContext) -> ParseResult<'a> {
-        let mut fields = SmallVec::new();
-
+    fn parse_into<'a>(
+        &self,
+        data: &'a [u8],
+        context: &ParseContext,
+        fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
         // Get the message type from parent netlink hints
         let nl_msg_type = context
             .hint(HintKey::NetlinkMsgType)
@@ -108,15 +109,15 @@ impl Protocol for RtnetlinkProtocol {
         match nl_msg_type {
             // Link messages (RTM_NEWLINK, RTM_DELLINK, RTM_GETLINK, RTM_SETLINK)
             16..=19 => {
-                parse_link_header(data, &mut fields);
+                parse_link_header(data, fields);
             }
             // Address messages (RTM_NEWADDR, RTM_DELADDR, RTM_GETADDR)
             20..=22 => {
-                parse_addr_header(data, &mut fields);
+                parse_addr_header(data, fields);
             }
             // Route messages (RTM_NEWROUTE, RTM_DELROUTE, RTM_GETROUTE)
             24..=26 => {
-                parse_route_header(data, &mut fields);
+                parse_route_header(data, fields);
             }
             _ => {
                 // Unknown message type - just record the type
@@ -124,7 +125,7 @@ impl Protocol for RtnetlinkProtocol {
         }
 
         // RTNetlink is a terminal protocol (no child protocols)
-        ParseResult::success(fields, &[], Hints::new())
+        Parsed::ok(&[], Hints::new())
     }
 
     fn schema_fields(&self) -> Vec<FieldDescriptor> {
@@ -202,7 +203,7 @@ mod route_header {
 }
 
 /// Parse link message header fields.
-fn parse_link_header(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) {
+fn parse_link_header(data: &[u8], fields: &mut FieldSink<'_, '_>) {
     if data.len() < link_header::MIN_LEN {
         return;
     }
@@ -233,7 +234,7 @@ fn parse_link_header(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldVal
 }
 
 /// Parse link attributes in TLV format.
-fn parse_link_attributes(mut data: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) {
+fn parse_link_attributes(mut data: &[u8], fields: &mut FieldSink<'_, '_>) {
     // Netlink TLV: 2 bytes len, 2 bytes type, then value (padded to 4 bytes)
     while data.len() >= 4 {
         let attr_len = u16::from_le_bytes([data[0], data[1]]) as usize;
@@ -249,7 +250,7 @@ fn parse_link_attributes(mut data: &[u8], fields: &mut SmallVec<[(&'static str, 
             // IFLA_IFNAME = 3
             3 => {
                 if let Ok(name) = std::str::from_utf8(value.strip_suffix(&[0]).unwrap_or(value)) {
-                    fields.push(("if_name", FieldValue::OwnedString(CompactString::new(name))));
+                    fields.push(("if_name", fields.str(name)));
                 }
             }
             // IFLA_MTU = 4
@@ -276,7 +277,7 @@ fn parse_link_attributes(mut data: &[u8], fields: &mut SmallVec<[(&'static str, 
 }
 
 /// Parse address message header fields.
-fn parse_addr_header(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) {
+fn parse_addr_header(data: &[u8], fields: &mut FieldSink<'_, '_>) {
     if data.len() < addr_header::MIN_LEN {
         return;
     }
@@ -307,11 +308,7 @@ fn parse_addr_header(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldVal
 }
 
 /// Parse address attributes in TLV format.
-fn parse_addr_attributes(
-    mut data: &[u8],
-    family: u8,
-    fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
-) {
+fn parse_addr_attributes(mut data: &[u8], family: u8, fields: &mut FieldSink<'_, '_>) {
     while data.len() >= 4 {
         let attr_len = u16::from_le_bytes([data[0], data[1]]) as usize;
         let attr_type = u16::from_le_bytes([data[2], data[3]]);
@@ -326,19 +323,13 @@ fn parse_addr_attributes(
             // IFA_ADDRESS = 1
             1 => {
                 if let Some(addr_str) = format_ip_address(value, family) {
-                    fields.push((
-                        "address",
-                        FieldValue::OwnedString(CompactString::new(&addr_str)),
-                    ));
+                    fields.push(("address", fields.str(&addr_str)));
                 }
             }
             // IFA_LOCAL = 2
             2 => {
                 if let Some(addr_str) = format_ip_address(value, family) {
-                    fields.push((
-                        "local_addr",
-                        FieldValue::OwnedString(CompactString::new(&addr_str)),
-                    ));
+                    fields.push(("local_addr", fields.str(&addr_str)));
                 }
             }
             _ => {}
@@ -382,7 +373,7 @@ fn format_ip_address(value: &[u8], family: u8) -> Option<String> {
 }
 
 /// Parse route message header fields.
-fn parse_route_header(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) {
+fn parse_route_header(data: &[u8], fields: &mut FieldSink<'_, '_>) {
     if data.len() < route_header::MIN_LEN {
         return;
     }
@@ -408,11 +399,7 @@ fn parse_route_header(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldVa
 }
 
 /// Parse route attributes in TLV format.
-fn parse_route_attributes(
-    mut data: &[u8],
-    family: u8,
-    fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
-) {
+fn parse_route_attributes(mut data: &[u8], family: u8, fields: &mut FieldSink<'_, '_>) {
     while data.len() >= 4 {
         let attr_len = u16::from_le_bytes([data[0], data[1]]) as usize;
         let attr_type = u16::from_le_bytes([data[2], data[3]]);
@@ -427,19 +414,13 @@ fn parse_route_attributes(
             // RTA_DST = 1
             1 => {
                 if let Some(addr_str) = format_ip_address(value, family) {
-                    fields.push((
-                        "destination",
-                        FieldValue::OwnedString(CompactString::new(&addr_str)),
-                    ));
+                    fields.push(("destination", fields.str(&addr_str)));
                 }
             }
             // RTA_GATEWAY = 5
             5 => {
                 if let Some(addr_str) = format_ip_address(value, family) {
-                    fields.push((
-                        "gateway",
-                        FieldValue::OwnedString(CompactString::new(&addr_str)),
-                    ));
+                    fields.push(("gateway", fields.str(&addr_str)));
                 }
             }
             // RTA_OIF = 4

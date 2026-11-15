@@ -3,11 +3,9 @@
 //! Parses DHCP (Dynamic Host Configuration Protocol) messages used for
 //! network configuration. Matches on UDP ports 67/68 and the DHCP magic cookie.
 
-use compact_str::CompactString;
-use smallvec::SmallVec;
-
 use super::{
-    Cond, Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult, Protocol,
+    Cond, Dispatch, DispatchRule, FieldSink, FieldValue, HintKey, Hints, ParseContext, Parsed,
+    Protocol,
 };
 use crate::schema::{DataKind, FieldDescriptor};
 
@@ -69,21 +67,21 @@ impl Protocol for DhcpProtocol {
         }
     }
 
-    fn parse<'a>(&self, data: &'a [u8], _context: &ParseContext) -> ParseResult<'a> {
+    fn parse_into<'a>(
+        &self,
+        data: &'a [u8],
+        _context: &ParseContext,
+        fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
         // DHCP header is at least 236 bytes
         if data.len() < DHCP_MIN_HEADER_SIZE {
-            return ParseResult::error("DHCP header too short".to_string(), data);
+            return Parsed::error("DHCP header too short", data);
         }
 
         // Check for DHCP magic cookie at offset 236
         if data.len() >= 240 && data[236..240] != DHCP_MAGIC_COOKIE {
-            return ParseResult::error(
-                "DHCP magic cookie not found (might be BOOTP)".to_string(),
-                data,
-            );
+            return Parsed::error("DHCP magic cookie not found (might be BOOTP)", data);
         }
-
-        let mut fields = SmallVec::new();
 
         // Parse fixed header fields
         // Op (1 byte): 1 = BOOTREQUEST, 2 = BOOTREPLY
@@ -116,50 +114,35 @@ impl Protocol for DhcpProtocol {
 
         // Client IP address (4 bytes)
         let ciaddr = format_ip(&data[12..16]);
-        fields.push((
-            "ciaddr",
-            FieldValue::OwnedString(CompactString::new(ciaddr)),
-        ));
+        fields.push(("ciaddr", fields.str(&ciaddr)));
 
         // Your (client) IP address (4 bytes)
         let yiaddr = format_ip(&data[16..20]);
-        fields.push((
-            "yiaddr",
-            FieldValue::OwnedString(CompactString::new(yiaddr)),
-        ));
+        fields.push(("yiaddr", fields.str(&yiaddr)));
 
         // Server IP address (4 bytes)
         let siaddr = format_ip(&data[20..24]);
-        fields.push((
-            "siaddr",
-            FieldValue::OwnedString(CompactString::new(siaddr)),
-        ));
+        fields.push(("siaddr", fields.str(&siaddr)));
 
         // Gateway/relay IP address (4 bytes)
         let giaddr = format_ip(&data[24..28]);
-        fields.push((
-            "giaddr",
-            FieldValue::OwnedString(CompactString::new(giaddr)),
-        ));
+        fields.push(("giaddr", fields.str(&giaddr)));
 
         // Client hardware address (16 bytes, but only first hlen are valid)
         let chaddr_len = (hlen as usize).min(16);
         let chaddr = format_mac(&data[28..28 + chaddr_len]);
-        fields.push((
-            "chaddr",
-            FieldValue::OwnedString(CompactString::new(chaddr)),
-        ));
+        fields.push(("chaddr", fields.str(&chaddr)));
 
         // Skip server host name (64 bytes) and boot file name (128 bytes)
         // These are at offsets 44 and 108 respectively
 
         // Parse options (starting at offset 240, after magic cookie)
         if data.len() > 240 {
-            parse_dhcp_options(&data[240..], &mut fields);
+            parse_dhcp_options(&data[240..], fields);
         }
 
         // No child protocols after DHCP
-        ParseResult::success(fields, &[], Hints::new())
+        Parsed::ok(&[], Hints::new())
     }
 
     fn schema_fields(&self) -> Vec<FieldDescriptor> {
@@ -213,7 +196,7 @@ fn format_mac(bytes: &[u8]) -> String {
 }
 
 /// Parse DHCP options and add relevant fields.
-fn parse_dhcp_options(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) {
+fn parse_dhcp_options(data: &[u8], fields: &mut FieldSink<'_, '_>) {
     let mut offset = 0;
 
     while offset < data.len() {
@@ -245,18 +228,12 @@ fn parse_dhcp_options(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldVa
         match option_code {
             // Option 1: Subnet Mask
             1 if option_len == 4 => {
-                fields.push((
-                    "subnet_mask",
-                    FieldValue::OwnedString(CompactString::new(format_ip(option_data))),
-                ));
+                fields.push(("subnet_mask", fields.str(&format_ip(option_data))));
             }
             // Option 3: Router
             3 if option_len >= 4 => {
                 // Can have multiple routers, just use first one
-                fields.push((
-                    "router",
-                    FieldValue::OwnedString(CompactString::new(format_ip(&option_data[..4]))),
-                ));
+                fields.push(("router", fields.str(&format_ip(&option_data[..4]))));
             }
             // Option 6: DNS Servers
             6 if option_len >= 4 => {
@@ -265,10 +242,7 @@ fn parse_dhcp_options(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldVa
                     .filter(|chunk| chunk.len() == 4)
                     .map(format_ip)
                     .collect();
-                fields.push((
-                    "dns_servers",
-                    FieldValue::OwnedString(CompactString::new(dns_servers.join(","))),
-                ));
+                fields.push(("dns_servers", fields.str(&dns_servers.join(","))));
             }
             // Option 51: IP Address Lease Time
             51 if option_len == 4 => {
@@ -286,10 +260,7 @@ fn parse_dhcp_options(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldVa
             }
             // Option 54: Server Identifier
             54 if option_len == 4 => {
-                fields.push((
-                    "server_id",
-                    FieldValue::OwnedString(CompactString::new(format_ip(option_data))),
-                ));
+                fields.push(("server_id", fields.str(&format_ip(option_data))));
             }
             _ => {}
         }
