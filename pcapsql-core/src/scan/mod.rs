@@ -14,13 +14,27 @@
 //! - the [`predicate`]s a scan applies itself: the conservative
 //!   [`RowPredicate`] and the exact [`FramePredicate`].
 //!
-//! Nothing in core runs a [`CompiledScan`] yet: the frontends drive their
-//! own packet loops from it.
+//! - the [`sink`] a frontend implements to store rows in its own format
+//!   ([`RowSink`]);
+//! - the [`row`]s: what every cell holds. [`write_value`] is the one place
+//!   a parsed value is turned into a column's kind, so every frontend
+//!   stores the same cells;
+//! - the [`route`]: which rows a frame adds to which output, with row
+//!   predicates, row caps and sinks of bounded size ([`Router`]);
+//! - [`testing`]: a recording sink and the conformance suite a sink
+//!   implementation runs in its tests.
+//!
+//! Nothing in core reads a capture for a [`CompiledScan`] yet: the
+//! frontends run their own packet loops and call the [`Router`] per frame.
 
 pub mod catalog;
 pub mod plan;
 pub mod predicate;
+pub mod route;
+pub mod row;
+pub mod sink;
 mod tables;
+pub mod testing;
 
 pub use catalog::{
     Catalog, ColId, ColKind, ColumnDef, ColumnSource, StreamTable, TableDef, TableId, TableKind,
@@ -31,3 +45,6 @@ pub use plan::{
     OutputPlan, PlanError, ScanPlan, TableScan,
 };
 pub use predicate::{CmpOp, CompiledPredicate, FramePredicate, Literal, RowPredicate};
+pub use route::{Routed, Router};
+pub use row::{write_frame_row, write_layer_row, write_value, FieldResolver};
+pub use sink::{Full, ListSink, RowSink};
