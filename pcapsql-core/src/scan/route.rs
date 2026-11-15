@@ -102,8 +102,8 @@ impl Cursor {
 }
 
 /// Routes frames to the sinks of a compiled scan's per-packet outputs:
-/// `frames`, the protocol tables and the fused joins. See the
-/// [module](self) documentation.
+/// `frames`, the protocol tables and the fused joins. How it deals with
+/// sinks of bounded size is written at the top of `scan/route.rs`.
 #[derive(Debug)]
 pub struct Router {
     /// One per output of the plan, in the plan's order.

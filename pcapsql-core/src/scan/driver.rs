@@ -207,8 +207,8 @@ impl FrameObserver for NoObserver {
     }
 }
 
-/// One partition of a compiled scan, read step by step. See the
-/// [module](self) documentation.
+/// One partition of a compiled scan, read step by step. What a step
+/// guarantees is written at the top of `scan/driver.rs`.
 ///
 /// The outputs it writes are the plan's per-packet outputs (what a
 /// [`Router`] routes): `frames`, the protocol tables and the fused joins.

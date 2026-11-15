@@ -87,8 +87,8 @@ impl From<&str> for Literal {
     }
 }
 
-/// A conservative predicate on the columns of one table (see the
-/// [module](self) documentation).
+/// A conservative predicate on the columns of one table (the top of
+/// `scan/predicate.rs` says what that means for a frontend).
 ///
 /// A column is compared through the value of its
 /// [source](ColumnSource) in the row's own layer:

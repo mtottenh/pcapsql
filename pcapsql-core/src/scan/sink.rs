@@ -4,8 +4,8 @@
 //!
 //! A [`RowSink`] stores the rows of one output of a scan in an engine's own
 //! format (Arrow builders, a DuckDB data chunk). The scan layer decides what
-//! every cell holds ([`write_value`](super::row::write_value) and the row
-//! writers of [`row`](super::row)); a sink only stores values that already
+//! every cell holds ([`write_value`](super::write_value) and the row
+//! writers of `row.rs`); a sink only stores values that already
 //! have the column's kind. Each engine therefore gets the same cells by
 //! construction.
 //!
@@ -44,7 +44,7 @@ pub struct Full;
 /// The methods cannot fail: anything that can (building a record batch)
 /// happens when the engine takes the rows, outside the packet loop. A sink
 /// may panic when a call does not fit the column's kind; the writers in
-/// [`row`](super::row) never make such a call.
+/// `row.rs` never make such a call.
 pub trait RowSink {
     /// NULL, for a column of any kind.
     fn null(&mut self, col: OutCol);
