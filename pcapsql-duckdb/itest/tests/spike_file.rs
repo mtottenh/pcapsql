@@ -16,7 +16,9 @@
 //!   is usable from later `exec` and `claim_batch` calls of the same local state. It is `Send`,
 //!   which local state requires.
 //! - The cursor of `read_into` persists between `exec` calls; `read_exact_at` reads by offset.
-//! - Opens go through DuckDB's file system: with `enable_external_access` off they are refused.
+//! - Opens go through DuckDB's file system: with `enable_external_access` off they are refused,
+//!   and an `https://` or `s3://` path is handed to the httpfs extension (not available where
+//!   this was written, so reading a remote file is not covered).
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -436,5 +438,32 @@ fn opens_go_through_the_file_system_of_the_database() -> Result<()> {
         error.message.contains("disabled by configuration"),
         "{error}"
     );
+    Ok(())
+}
+
+/// Remote paths are not read here (that needs the httpfs extension, see roadmap U7), but the
+/// open is dispatched by scheme: without httpfs, DuckDB names the extension that would serve it.
+#[test]
+fn remote_paths_are_left_to_the_file_system_that_serves_them() -> Result<()> {
+    let connection = connect()?;
+    register(&connection)?;
+    // Keep DuckDB from fetching httpfs, so that the outcome does not depend on the network.
+    connection.execute("SET autoinstall_known_extensions = false", Parameters::None)?;
+    connection.execute("SET autoload_known_extensions = false", Parameters::None)?;
+
+    for url in ["https://example.invalid/lines.txt", "s3://bucket/lines.txt"] {
+        let error = value(
+            &connection,
+            &format!("SELECT sum(bytes) FROM blocks_opened_in_init('{url}')"),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, DuckDBError::ResourceMissingExtension, "{error}");
+        assert!(
+            error
+                .message
+                .contains("requires the extension httpfs to be loaded"),
+            "{error}"
+        );
+    }
     Ok(())
 }

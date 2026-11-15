@@ -3,16 +3,19 @@
 use std::num::NonZeroUsize;
 
 use duckdb_neo::{
-    DuckDBType, Result,
+    DuckDBType, Parameters, Result,
     bind_arguments::BindArgument,
     connection::{Connection, Context},
     data_chunk::{DataChunkRef, VectorCollection},
     error::DuckDBError,
+    multi_file::MultiFileFunctionBuilder,
     scalar::{ScalarCallbacks, ScalarFunctionBuilder},
     signature::{FunctionParameter, SignatureBuilder},
     table_function::{
-        BindFunctionHandle, ExecColumnInfo, InitColumnData, TableClaimBatchCallbacks,
-        TableFunctionBuilder, TableFunctionCallbacks,
+        BindFunctionHandle, BindInfoApi, ExecColumnInfo, InitColumnData, PartitionData,
+        PartitioningData, PushdownData, TableClaimBatchCallbacks, TableFilterPushdownCallbacks,
+        TableFunctionBuilder, TableFunctionCallbacks, TableGetBindInfoCallbacks,
+        TablePartitionInfo, TablePartitioningCallbacks,
     },
     vector::{Unknown, Vector},
 };
@@ -27,6 +30,10 @@ enum Callback {
     InitLocalState,
     ClaimBatch,
     Exec,
+    PushdownFilter,
+    PartitionData,
+    Partitioning,
+    BindInfo,
     Never,
 }
 
@@ -142,6 +149,49 @@ impl TableClaimBatchCallbacks for PanicIn {
     }
 }
 
+impl TableFilterPushdownCallbacks for PanicIn {
+    fn pushdown_filter(
+        &self,
+        _context: &Context,
+        _bind_data: &(),
+        _pushdown_data: PushdownData<'_>,
+    ) -> Result<()> {
+        self.reached(Callback::PushdownFilter);
+        Ok(())
+    }
+}
+
+impl TablePartitioningCallbacks for PanicIn {
+    fn partition_data(
+        &self,
+        _context: &Context,
+        _bind_data: &(),
+        _done: Option<&mut bool>,
+        _global_state: Option<&()>,
+        _partition_data: PartitionData<'_>,
+    ) -> Result<usize> {
+        self.reached(Callback::PartitionData);
+        Ok(0)
+    }
+
+    fn partitioning(
+        &self,
+        _context: &Context,
+        _bind_data: &(),
+        _partitioning_data: PartitioningData<'_>,
+    ) -> Result<TablePartitionInfo> {
+        self.reached(Callback::Partitioning);
+        Ok(TablePartitionInfo::NotPartitioned)
+    }
+}
+
+impl TableGetBindInfoCallbacks for PanicIn {
+    fn bind_info(&self, _context: &Context, _bind_data: &(), _api: BindInfoApi<'_>) -> Result<()> {
+        self.reached(Callback::BindInfo);
+        Ok(())
+    }
+}
+
 /// A scalar function that panics on every call.
 struct PanickingScalar;
 
@@ -180,31 +230,56 @@ fn assert_usable(connection: &Connection) {
     );
 }
 
+/// The query that makes DuckDB call `callback` of the function `name`, and the callback's name
+/// in the guard's error message.
+fn query_reaching(callback: Callback, name: &str) -> (String, &'static str) {
+    match callback {
+        Callback::Bind => (format!("SELECT x FROM {name}()"), "bind"),
+        Callback::InitGlobalState => (format!("SELECT x FROM {name}()"), "init_global_state"),
+        Callback::MaxThreads => (format!("SELECT x FROM {name}()"), "max_threads"),
+        Callback::InitLocalState => (format!("SELECT x FROM {name}()"), "init_local_state"),
+        Callback::ClaimBatch => (format!("SELECT x FROM {name}()"), "claim_batch"),
+        Callback::Exec => (format!("SELECT x FROM {name}()"), "exec"),
+        // Filters are offered when the optimizer has some to push down.
+        Callback::PushdownFilter => (
+            format!("SELECT x FROM {name}() WHERE x > 0"),
+            "pushdown_filter",
+        ),
+        // An ordered result on more than one thread asks every chunk for its batch index.
+        Callback::PartitionData => (format!("SELECT x FROM {name}()"), "partition_data"),
+        // The optimizer asks how the scan is partitioned by the grouping columns.
+        Callback::Partitioning => (
+            format!("SELECT x, count(*) FROM {name}() GROUP BY x"),
+            "partitioning",
+        ),
+        Callback::BindInfo | Callback::Never => unreachable!(),
+    }
+}
+
 #[test]
 fn guarded_table_function_panic_is_an_ordinary_error() -> Result<()> {
     quiet_deliberate_panics();
     let connection = connect()?;
-    for (name, callback, label) in [
-        ("panic_in_bind", Callback::Bind, "bind"),
-        (
-            "panic_in_init_global_state",
-            Callback::InitGlobalState,
-            "init_global_state",
-        ),
-        ("panic_in_max_threads", Callback::MaxThreads, "max_threads"),
-        (
-            "panic_in_init_local_state",
-            Callback::InitLocalState,
-            "init_local_state",
-        ),
-        ("panic_in_claim_batch", Callback::ClaimBatch, "claim_batch"),
-        ("panic_in_exec", Callback::Exec, "exec"),
+    connection.execute("SET threads = 4", Parameters::None)?;
+    for (name, callback) in [
+        ("panic_in_bind", Callback::Bind),
+        ("panic_in_init_global_state", Callback::InitGlobalState),
+        ("panic_in_max_threads", Callback::MaxThreads),
+        ("panic_in_init_local_state", Callback::InitLocalState),
+        ("panic_in_claim_batch", Callback::ClaimBatch),
+        ("panic_in_exec", Callback::Exec),
+        ("panic_in_pushdown_filter", Callback::PushdownFilter),
+        ("panic_in_partition_data", Callback::PartitionData),
+        ("panic_in_partitioning", Callback::Partitioning),
     ] {
         guard::table_function(name, SignatureBuilder::new(), PanicIn(callback))
             .with_claim_batch()
+            .with_filter_pushdown()
+            .with_partitioning()
             .register(&connection)?;
+        let (query, label) = query_reaching(callback, name);
 
-        let error = value(&connection, &format!("SELECT x FROM {name}()")).unwrap_err();
+        let error = value(&connection, &query).unwrap_err();
         assert_eq!(error.code, DuckDBError::QueryExecutor, "{error}");
         assert!(
             error.message.contains(&format!(
@@ -216,9 +291,42 @@ fn guarded_table_function_panic_is_an_ordinary_error() -> Result<()> {
         // The same connection keeps working, and so does the function that panicked: here it
         // fails the same way again, which an invalidated database would not let it reach.
         assert_usable(&connection);
-        let again = value(&connection, &format!("SELECT x FROM {name}()")).unwrap_err();
+        let again = value(&connection, &query).unwrap_err();
         assert_eq!(again.code, DuckDBError::QueryExecutor, "{again}");
     }
+    assert_usable(&connection);
+    Ok(())
+}
+
+/// `bind_info` is called by the multi-file wrapper, for each file it binds.
+#[test]
+fn guarded_bind_info_panic_is_an_ordinary_error() -> Result<()> {
+    quiet_deliberate_panics();
+    let connection = connect()?;
+    guard::table_function(
+        "panic_in_bind_info_file",
+        SignatureBuilder::new().param(FunctionParameter::new::<String>("file")),
+        PanicIn(Callback::BindInfo),
+    )
+    .with_claim_batch()
+    .with_get_bind_info()
+    .register(&connection)?;
+    MultiFileFunctionBuilder::new("panic_in_bind_info", "panic_in_bind_info_file")
+        .register(&connection)?;
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let query = format!(
+        "SELECT x FROM panic_in_bind_info('{}')",
+        file.path().display()
+    );
+
+    let error = value(&connection, &query).unwrap_err();
+    assert_eq!(error.code, DuckDBError::QueryExecutor, "{error}");
+    assert!(
+        error.message.contains(
+            "pcapsql: panic in panic_in_bind_info_file (bind_info): deliberate panic in BindInfo"
+        ),
+        "{error}"
+    );
     assert_usable(&connection);
     Ok(())
 }
