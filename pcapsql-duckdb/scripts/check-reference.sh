@@ -13,6 +13,14 @@
 #   - not name a function (`name(` in backticks) or a setting (`pcapsql_...`) that the shell does
 #     not have after LOAD. DuckDB's own functions pass: they exist too.
 # The replacement scan (FROM 'x.pcap') is not listed by DuckDB anywhere and is not checked.
+#
+# DuckDB lists no copy functions either (duckdb_functions() has none), so the copy format is
+# probed instead, with a COPY ... TO that has an option no format has. The extension's format
+# refuses it with a message that lists its options; a format that is not registered is a catalog
+# error. The reference must
+#   - name the format: `FORMAT pcap`
+#   - name every option of that list, in backticks: `LINKTYPE`
+#   - not name another format (FORMAT name) that DuckDB does not have after LOAD.
 set -euo pipefail
 
 if [ $# -ne 2 ]; then
@@ -68,6 +76,36 @@ ORDER BY ALL;
 "
 
 result=$("$duckdb" -unsigned -list -noheader -c "$sql")
+
+# What the format $1 answers to a statement with an option no format has. Nothing is written:
+# the statement fails when it is bound.
+probe_format() {
+    "$duckdb" -unsigned -no-agent -list -noheader -c "LOAD '$extension';
+        COPY (SELECT ''::BLOB AS raw_data, TIMESTAMP '2000-01-01' AS timestamp)
+        TO 'check-reference-probe' (FORMAT $1, PCAPSQL_NO_SUCH_OPTION);" 2>&1 || true
+}
+probe=$(probe_format pcap)
+case $probe in
+*"the options of the format are "*)
+    # "... are LINKTYPE, SNAPLEN and PRECISION"
+    options=$(echo "${probe##*the options of the format are }" | head -n 1 | tr -c 'A-Z_\n' ' ')
+    result+=$'\n'"registered: copy format pcap, options: $(echo $options)"
+    grep -q -F '`FORMAT pcap`' "$reference" ||
+        result+=$'\n'"MISSING from the reference: the copy format, as \`FORMAT pcap\`"
+    for option in $options; do
+        grep -q -F "\`$option\`" "$reference" ||
+            result+=$'\n'"MISSING from the reference: option $option of the copy format pcap"
+    done
+    ;;
+*) result+=$'\n'"MISSING from the extension: the copy format pcap: $probe" ;;
+esac
+for format in $(grep -o -E 'FORMAT [a-z_]+' "$reference" | cut -d' ' -f2 | sort -u); do
+    case $(probe_format "$format") in
+    *"Copy Function with name $format does not exist"*)
+        result+=$'\n'"NOT REGISTERED, but in the reference: copy format $format"
+        ;;
+    esac
+done
 echo "$result" | sed 's/^/check-reference: /'
 case $result in
 *MISSING* | *"NOT REGISTERED"*)

@@ -102,7 +102,8 @@ pcapsql-duckdb/
         report.rs         # log lines, read and truncation errors
       types.rs            # ColKind -> DuckDB logical type
       writer.rs           # ChunkWriter: RowSink over a DataChunkRef
-      fs.rs               # DuckFile: Read adapter over duckdb_neo::file::File
+      fs.rs               # DuckFile: Read adapter over duckdb_neo::file::File; DuckSink: Write
+      copy.rs             # COPY ... TO (FORMAT pcap): the rows of a query to core's PcapWriter
       pushdown.rs         # Expression -> FramePredicate
       relation.rs         # the tables and views the engine reads, as scan plans
       listing.rs          # pcap_protocols(), pcap_views(), pcap_schema()
@@ -346,7 +347,7 @@ of P1. P3 to P6 are independent of each other after P2 and can be reordered.
 | P5 Multi-file, replacement scan, remote | done except the remote exit check: lists, globs, `filename`, and `FROM 'x.pcap'`, with the partition queue spanning the files. The HTTP test is written and has not run: `make remote_test_release` (`scripts/remote-test.sh`) reads captures through `httpfs` from a local HTTP server that answers Range requests and compares them with the files, and `duckdb.yml` and the `verify` job of `duckdb-dist.yml` run it, failing if `httpfs` cannot be installed. `httpfs` could not be installed where it was written, so there only the server was tested (with curl) and the test takes its skip path; until the first GitHub run no `http://` capture has been read. No `s3://` capture has been read, no secret tried (U7), and remote buffer sizes are untuned |
 | P6 Filter pushdown | done, with two limits found on the way. DuckDB 2.0.0 hands two bounds on one column to the scan as a single `BETWEEN` node whose inclusivity the C API does not expose, so a range is used to narrow the read but not accepted: `EXPLAIN` still shows the filter for a time window. And `plan_ranges` keeps the last checkpoint window of an indexed capture unless an upper frame bound excludes it, so a time window never rules out a whole file |
 | P7 Distribution and documentation | done as far as it can be without running on GitHub or submitting anything. Workflows for `linux_amd64`, `linux_arm64`, `osx_arm64` and `windows_amd64` (build through `extension-ci-tools`, then a load test of each artifact), release assets on a tag, the community descriptor, the function reference with a check against the artifact, the upgrade runbook with its dry run, and a canary. None of the new workflows has run on GitHub, and the descriptor has not been submitted, so the exit check is open. `windows_amd64` was added after P7, once `pcapsql-core` compiled for Windows (U13); it has not been built on a runner either, and no job loads its artifact. WebAssembly is not built (U10) |
-| P8 Backlog | first item done: `read_<proto>_packets(files)` for the 21 `*_packets` views that are a join within one encapsulation level, as fused scans of the shared layer (S4b), with `pcap_views()`. Each equals the DataFusion SQL view of its name (DataFusion test over 23 captures) and the DuckDB join of the `read_<table>` functions (itest over 24 captures, 1 and 4 threads, split and not, pushdown on and off); the 14 golden-corpus queries over these views now match the DataFusion snapshots too (59 compared in all). `packets`, `tunneled_packets`, `ip4_in_ip6` and `ip6_in_ip6` are not fusable shapes and are not offered. Not benchmarked. Second item done: the stream tables (`read_tcp_connections`, `read_tls_sessions`, `read_http_messages`, `read_http2`, and through `read_pcap`) and TLS decryption with a key log (`keylog := 'path'`, or the setting `pcapsql_keylog`). Each equals the shared scan layer cell by cell (itest over 8 captures, one of 5,000 connections) and the 6 golden-corpus queries over stream tables match the DataFusion snapshots (65 compared in all); decryption is tested on a generated TLS 1.3 + HTTP/2 capture only. The other items are not started |
+| P8 Backlog | first item done: `read_<proto>_packets(files)` for the 21 `*_packets` views that are a join within one encapsulation level, as fused scans of the shared layer (S4b), with `pcap_views()`. Each equals the DataFusion SQL view of its name (DataFusion test over 23 captures) and the DuckDB join of the `read_<table>` functions (itest over 24 captures, 1 and 4 threads, split and not, pushdown on and off); the 14 golden-corpus queries over these views now match the DataFusion snapshots too (59 compared in all). `packets`, `tunneled_packets`, `ip4_in_ip6` and `ip6_in_ip6` are not fusable shapes and are not offered. Not benchmarked. Second item done: the stream tables (`read_tcp_connections`, `read_tls_sessions`, `read_http_messages`, `read_http2`, and through `read_pcap`) and TLS decryption with a key log (`keylog := 'path'`, or the setting `pcapsql_keylog`). Each equals the shared scan layer cell by cell (itest over 8 captures, one of 5,000 connections) and the 6 golden-corpus queries over stream tables match the DataFusion snapshots (65 compared in all); decryption is tested on a generated TLS 1.3 + HTTP/2 capture only. `COPY ... TO 'x.pcap' (FORMAT pcap)` is done as well (section 8.1). The other items are not started |
 | P9 Follow V2 to stability | not started |
 
 ### 8.1 Review follow-ups and what remains
@@ -375,6 +376,7 @@ Done:
 | The DataFusion scan path (S4c) | The stream tables (`tcp_connections`, `tls_sessions`, `http_messages`, `http2`) are outputs of the shared scan layer: `PartitionScan` reassembles the TCP streams while it reads and writes the tables through `RowSink` when the capture ends (`scan/stream.rs`), decrypting TLS with the key log given to `PartitionScan::with_keylog`. DataFusion's Arrow builders (`stream_tables.rs`) and the scan's frame observer are gone; `providers/shared.rs` is six modules; a pass keeps its tables by `OutputId` and takes its parameters as a `PassOptions`. Rows unchanged: no snapshot changed. Instructions per packet through `PartitionScan` into a sink that stores nothing: `frames` 593 to 555, `udp` 2,529 to 2,415, `tcp` 4,036 to 3,922; one iteration of a scan benchmark within 0.3 percent in instructions, and the benchmark's wall-clock medians within its run-to-run spread (design, section 5.1.2) |
 | Stream tables and TLS decryption in the extension (P8) | `read_tcp_connections`, `read_tls_sessions`, `read_http_messages`, `read_http2` and `read_pcap(protocol := ...)` of them: a stream output of the shared layer, one partition per file whatever the settings, no filter taken over, `connection_id` per file. A key log (`keylog := 'path'`, else the setting `pcapsql_keylog`) is read through DuckDB's file system at bind and given to `PartitionScan::with_keylog`; no message or log record repeats its content. `http2.connection_id`, always NULL before, is the TCP connection's id in both engines, and `tls_sessions.version` of a TLS 1.3 session read with a key log is no longer `TLS 1.2`. Open: a scan cannot be cancelled while it reads a file (the C API has no way to ask, and an empty chunk does not make DuckDB look); the C API v2 has no secret types, so the key log is a path; TLS 1.2 decryption is untested |
 | Name and address-classification scalars in the extension (P8) | The sixteen `*_name` functions of the command-line tool that the extension lacked (`icmp_type_name`, `icmp_code_name(type, code)`, `dns_class_name`, `dscp_name`, `tls_version_name`, ...) and its eight tests of an address (`is_private_ip`, `is_multicast_ip6`, `mac_is_broadcast`, ...), as loops over the kernels that were already in `pcapsql_core::format`: 40 scalar functions. `engine/scalar.rs` became `engine/scalar/` (`map.rs`, `pattern.rs`, `plain.rs` with the audited `valid`); no `unsafe` added. A `BLOB` of the wrong length is NULL, as for the other functions. Open: the capture-relative time functions (`start_time`, `end_time`, `relative_time`), whose value depends on the capture a query reads, and the `hdr_*` histogram functions, which need an aggregate function |
+| `COPY ... TO 'x.pcap' (FORMAT pcap)` in the extension (P8) | The rows of a query as a classic pcap file. The writer is `pcapsql_core::io::PcapWriter` (new: any `io::Write`, little-endian, microsecond or nanosecond magic, one link type, cut at the snapshot length); `engine/copy.rs` is the contract and the DuckDB side, `engine/fs.rs` has the `Write` over DuckDB's file system (`DuckSink`), `guard::copy_function` the panic guard. Columns by name (`raw_data` and `timestamp` required, `original_length` and `link_type` optional, the rest ignored); options `LINKTYPE`, `SNAPLEN`, `PRECISION`, whose default is the unit of the `timestamp` column, so a copy of `read_frames` is a nanosecond file. A row of another link type, NULL bytes or timestamp and a timestamp outside 1970 to 2106 fail the statement and name the row. Round trip tested over the 25 captures of the fuzzing corpus and generated ones; a whole little-endian microsecond capture copies byte for byte with `PRECISION 'us'` and its own snapshot length. What DuckDB 2.0.0 does with it: the C API sets no execution mode, so the copy is a `PhysicalCopyToFile` whose sink is not parallel: one thread, chunks in the order of the query, a batch per chunk, no temporary file on a remote path; `duckdb_functions()` lists no copy functions, so `check-reference.sh` probes the format for its options. Open: pcapng output (several link types, comments), compressed output (a name ending in `.gz` is refused), `FILE_SIZE_BYTES` (DuckDB refuses it for a C API format), and no remote path has been written |
 
 Remaining, in the order intended:
 
@@ -388,8 +390,8 @@ Remaining, in the order intended:
    its join), recorded here.
 5. P8: the remaining UDFs, which are the capture-relative time functions
    (`start_time`, `end_time`, `relative_time`) and the `hdr_*` histogram
-   functions; `COPY ... TO 'x.pcap'`. (Stream tables and TLS decryption in
-   the extension, and the name and address-classification scalars: done, in
+   functions. (Stream tables and TLS decryption in the extension, the name
+   and address-classification scalars, and `COPY ... TO 'x.pcap'`: done, in
    the table above.)
 6. The S3 half of the P5 remote test, once the HTTP half has run.
 
@@ -623,7 +625,25 @@ Not scheduled.
   Remaining DataFusion UDFs: the capture-relative time functions
   (`start_time`, `end_time`, `relative_time`) and the `hdr_*` histogram
   functions.
-- `COPY ... TO 'x.pcap'`.
+- **Done.** `COPY ... TO 'x.pcap' (FORMAT pcap)` (section 8.1). Decisions
+  taken on the way:
+  - The input is matched by name, not position, with the names of `frames`,
+    and columns that are not a packet's are ignored, so `SELECT *` of
+    `read_frames` works; a missing required column is refused at bind.
+  - The unit of the file follows the type of the `timestamp` column unless
+    `PRECISION` is given, so no timestamp loses precision unasked. The price
+    is that a copy of a microsecond capture is a nanosecond file by default.
+  - The link type is the `LINKTYPE` option, else that of the first row, else
+    Ethernet, and the header is written with the first row. A row of
+    another link type is an error, not a second file: `PARTITION_BY
+    (link_type)` is DuckDB's way to several files.
+  - Nothing is prepared in the batch callback: the sink is not parallel in
+    DuckDB 2.0.0, and the first row and the row numbers of the messages
+    depend on the order of the flushes.
+  - `pcapsql-testgen` keeps its own capture writer (no dependencies, and it
+    writes big-endian and malformed files); the new writer is in core.
+  - `COPY ... FROM` is not offered: the table functions read.
+  - Open: pcapng and compressed output.
 
 ### P9: Follow V2 to stability
 

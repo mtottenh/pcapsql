@@ -1,0 +1,309 @@
+# name: test/sql/copy_pcap.test
+# description: COPY ... TO 'x.pcap' (FORMAT pcap) writes the rows of a query as a classic pcap file
+# group: [pcapsql]
+
+# The in-process tests (itest/tests/copy_pcap.rs) cover the format in depth, over every corpus
+# capture; this file checks that the built artifact registers it and writes files that read
+# back as the frames they were given. The files go to build/, beside the artifact under test.
+
+require pcapsql
+
+# A classic little-endian pcap with microsecond timestamps: frames in, frames out.
+
+statement ok
+COPY (SELECT * FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/http-chunked-gzip.pcap'))
+TO 'build/test_copy_http.pcap' (FORMAT pcap);
+
+query II
+SELECT count(*), sum(length) FROM read_frames('build/test_copy_http.pcap');
+----
+28	29045
+
+query I
+SELECT count(*)
+FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/http-chunked-gzip.pcap') a
+JOIN read_frames('build/test_copy_http.pcap') b USING (frame_number)
+WHERE a.timestamp = b.timestamp AND a.length = b.length AND a.original_length = b.original_length
+  AND a.link_type = b.link_type AND a.raw_data = b.raw_data;
+----
+28
+
+# read_frames returns TIMESTAMP_NS, so the file counts nanoseconds unless told otherwise:
+# magic a1b23c4d, little-endian. Its snapshot length is 262144 and its link type Ethernet.
+
+query I
+SELECT pcap_hex(content[:24]) FROM read_blob('build/test_copy_http.pcap');
+----
+4d3cb2a10200040000000000000000000000040001000000
+
+# With the unit of the input (its snapshot length is the default), the copy is the input.
+
+statement ok
+COPY (SELECT * FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/http-chunked-gzip.pcap'))
+TO 'build/test_copy_http_us.pcap' (FORMAT pcap, PRECISION 'us');
+
+query I
+SELECT (SELECT content FROM read_blob('build/test_copy_http_us.pcap'))
+     = (SELECT content FROM read_blob('../fuzz/corpus/fuzz_pcap_reader/http-chunked-gzip.pcap'));
+----
+true
+
+statement ok
+COPY (SELECT * FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dhcp.pcap'))
+TO 'build/test_copy_dhcp.pcap' (FORMAT pcap, PRECISION 'us', SNAPLEN 65535);
+
+query I
+SELECT (SELECT content FROM read_blob('build/test_copy_dhcp.pcap'))
+     = (SELECT content FROM read_blob('../fuzz/corpus/fuzz_pcap_reader/dhcp.pcap'));
+----
+true
+
+# The format is that of a file named .pcap, without the option.
+
+statement ok
+COPY (SELECT * FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dhcp.pcap')) TO 'build/test_copy_named.pcap';
+
+query I
+SELECT count(*) FROM read_dhcp('build/test_copy_named.pcap');
+----
+4
+
+# A pcapng input, and a Linux cooked capture: the file has the link type of its rows.
+
+statement ok
+COPY (SELECT * FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/ldap-ssl.pcapng'))
+TO 'build/test_copy_ldap.pcap' (FORMAT pcap);
+
+query I
+SELECT count(*)
+FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/ldap-ssl.pcapng') a
+JOIN read_frames('build/test_copy_ldap.pcap') b USING (frame_number)
+WHERE a.timestamp = b.timestamp AND a.length = b.length AND a.original_length = b.original_length
+  AND a.link_type = b.link_type AND a.raw_data = b.raw_data;
+----
+36
+
+statement ok
+COPY (SELECT * FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/netlink.pcap') WHERE frame_number % 2 = 0)
+TO 'build/test_copy_sll.pcap' (FORMAT pcap);
+
+query III
+SELECT count(*), min(link_type), max(link_type) FROM read_frames('build/test_copy_sll.pcap');
+----
+336	113	113
+
+query I
+SELECT count(*)
+FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/netlink.pcap') a
+JOIN read_frames('build/test_copy_sll.pcap') b ON a.frame_number = 2 * b.frame_number
+WHERE a.timestamp = b.timestamp AND a.original_length = b.original_length AND a.raw_data = b.raw_data;
+----
+336
+
+# The protocol tables read the copy as they read the original.
+
+query I
+SELECT count(*) FROM read_linux_sll('build/test_copy_sll.pcap');
+----
+336
+
+# The statement returns the number of rows. RETURN_STATS, which DuckDB refuses for a format that
+# cannot say what it wrote, is accepted (itest/tests/copy_pcap.rs checks the numbers).
+
+query I
+COPY (SELECT * FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/http.pcap'))
+TO 'build/test_copy_stats.pcap' (FORMAT pcap);
+----
+1
+
+statement ok
+COPY (SELECT * FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/http.pcap'))
+TO 'build/test_copy_stats.pcap' (FORMAT pcap, RETURN_STATS);
+
+# An empty result is a capture without packets: the 24 bytes of the header, with the link type
+# and the snapshot length of the options.
+
+statement ok
+COPY (SELECT * FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/http.pcap') WHERE false)
+TO 'build/test_copy_empty.pcap' (FORMAT pcap, LINKTYPE LINUX_SLL, SNAPLEN 96, PRECISION us);
+
+query I
+SELECT pcap_hex(content) FROM read_blob('build/test_copy_empty.pcap');
+----
+d4c3b2a10200040000000000000000006000000071000000
+
+query I
+SELECT count(*) FROM read_frames('build/test_copy_empty.pcap');
+----
+0
+
+# A packet longer than the snapshot length is cut and keeps its original length.
+
+statement ok
+COPY (SELECT * FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/http.pcap'))
+TO 'build/test_copy_cut.pcap' (FORMAT pcap, SNAPLEN 64);
+
+query III
+SELECT length, original_length, raw_data = (SELECT raw_data[:64] FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/http.pcap'))
+FROM read_frames('build/test_copy_cut.pcap');
+----
+64	207	true
+
+# Columns are found by name; a query that has no packets is refused, and so is a row that is
+# not one.
+
+statement ok
+COPY (SELECT 'a note' AS note, raw_data, 7 AS frame_number, timestamp
+      FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/http.pcap'))
+TO 'build/test_copy_columns.pcap' (FORMAT pcap);
+
+query III
+SELECT frame_number, length, link_type FROM read_frames('build/test_copy_columns.pcap');
+----
+1	207	1
+
+statement error
+COPY (SELECT frame_number, length FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/http.pcap'))
+TO 'build/test_copy_refused.pcap' (FORMAT pcap);
+----
+pcap COPY: the query must have a column raw_data (BLOB, the bytes of a packet) and a column timestamp
+
+statement error
+COPY (SELECT raw_data, timestamp::VARCHAR AS timestamp FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/http.pcap'))
+TO 'build/test_copy_refused.pcap' (FORMAT pcap);
+----
+pcap COPY: the column timestamp is VARCHAR: it must be TIMESTAMP_NS, TIMESTAMP, TIMESTAMP_MS, TIMESTAMP_S or TIMESTAMPTZ
+
+statement error
+COPY (SELECT raw_data, CASE WHEN frame_number <> 3 THEN timestamp END AS timestamp
+      FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dhcp.pcap') ORDER BY frame_number)
+TO 'build/test_copy_refused.pcap' (FORMAT pcap);
+----
+pcap COPY: row 3 has no timestamp (NULL)
+
+statement error
+COPY (SELECT CASE WHEN frame_number <> 2 THEN raw_data END AS raw_data, timestamp
+      FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dhcp.pcap') ORDER BY frame_number)
+TO 'build/test_copy_refused.pcap' (FORMAT pcap);
+----
+pcap COPY: row 2 has no raw_data (NULL)
+
+statement error
+COPY (SELECT raw_data, TIMESTAMP '1969-12-31 23:59:59' AS timestamp
+      FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dhcp.pcap'))
+TO 'build/test_copy_refused.pcap' (FORMAT pcap);
+----
+pcap COPY: row 1 has a timestamp a pcap file cannot store: its range is 1970-01-01 00:00:00 to 2106-02-07 06:28:15 UTC
+
+# A pcap file has one link type: Ethernet first, then the first Linux cooked frame fails.
+
+statement error
+COPY (SELECT * FROM read_frames(['../fuzz/corpus/fuzz_pcap_reader/dhcp.pcap', '../fuzz/corpus/fuzz_pcap_reader/netlink.pcap'])
+      ORDER BY link_type, frame_number)
+TO 'build/test_copy_refused.pcap' (FORMAT pcap);
+----
+pcap COPY: row 5 has the link type 113, and the link type of the file is 1 (that of the first row). A pcap file has one link type
+
+statement error
+COPY (SELECT * FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dhcp.pcap'))
+TO 'build/test_copy_refused.pcap' (FORMAT pcap, LINKTYPE 113);
+----
+pcap COPY: row 1 has the link type 1, and the link type of the file is 113 (the LINKTYPE option)
+
+statement error
+COPY (SELECT * FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dhcp.pcap'))
+TO 'build/test_copy_refused.pcap' (FORMAT pcap, COMPRESSION gzip);
+----
+pcap COPY: unknown option COMPRESSION: the options of the format are LINKTYPE, SNAPLEN and PRECISION
+
+statement error
+COPY (SELECT * FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dhcp.pcap'))
+TO 'build/test_copy_refused.pcap.gz';
+----
+pcap COPY: the output is not compressed
+
+statement error
+COPY (SELECT * FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dhcp.pcap'))
+TO 'build/test_copy_refused.pcap' (FORMAT pcap, PRECISION 'ms');
+----
+pcap COPY: PRECISION 'ms' is neither 'ns' (nanoseconds) nor 'us' (microseconds)
+
+# A failed statement leaves no file.
+
+query I
+SELECT count(*) FROM glob('build/test_copy_refused*');
+----
+0
+
+# Nanosecond timestamps: kept by default, cut to the microsecond when that is asked for.
+
+statement ok
+CREATE TABLE packets AS
+SELECT i AS n, raw_data, original_length, link_type,
+       (TIMESTAMP_NS '2024-03-01 12:00:00' + to_microseconds(i))::TIMESTAMP_NS AS base
+FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/tcp-ecn-sample.pcap') f, range(100) r(i)
+WHERE frame_number = 1 + i % 400;
+
+statement ok
+COPY (SELECT raw_data, make_timestamp_ns(epoch_ns(base) + 789) AS timestamp FROM packets ORDER BY n)
+TO 'build/test_copy_nanos.pcap' (FORMAT pcap);
+
+query III
+SELECT count(*), min(timestamp)::VARCHAR, max(timestamp)::VARCHAR FROM read_frames('build/test_copy_nanos.pcap');
+----
+100	2024-03-01 12:00:00.000000789	2024-03-01 12:00:00.000099789
+
+statement ok
+COPY (SELECT raw_data, make_timestamp_ns(epoch_ns(base) + 789) AS timestamp FROM packets ORDER BY n)
+TO 'build/test_copy_micros.pcap' (FORMAT pcap, PRECISION 'us');
+
+query III
+SELECT count(*), min(timestamp)::VARCHAR, max(timestamp)::VARCHAR FROM read_frames('build/test_copy_micros.pcap');
+----
+100	2024-03-01 12:00:00	2024-03-01 12:00:00.000099
+
+# Many chunks on four threads: the file has the rows in the order of the query.
+
+statement ok
+SET threads = 4;
+
+statement ok
+CREATE TABLE many AS
+SELECT i AS n, raw_data, original_length, link_type,
+       (TIMESTAMP_NS '2024-03-01 12:00:00' + to_microseconds(i))::TIMESTAMP_NS AS timestamp
+FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/tcp-ecn-sample.pcap') f, range(150) r(i);
+
+query I
+SELECT count(*) > 50000 FROM many;
+----
+true
+
+statement ok
+COPY (SELECT * FROM many ORDER BY n DESC, raw_data) TO 'build/test_copy_many.pcap' (FORMAT pcap);
+
+query I
+SELECT count(*) FROM (
+    SELECT row_number() OVER (ORDER BY n DESC, raw_data) AS frame_number, * FROM many
+) a FULL JOIN read_frames('build/test_copy_many.pcap') b USING (frame_number)
+WHERE a.raw_data IS DISTINCT FROM b.raw_data OR a.timestamp IS DISTINCT FROM b.timestamp
+   OR a.original_length IS DISTINCT FROM b.original_length OR a.link_type IS DISTINCT FROM b.link_type;
+----
+0
+
+# And read back in partitions on four threads, copied again in frame order: the same file.
+
+statement ok
+SET pcapsql_parallel_min_file_size = 0;
+
+statement ok
+SET pcapsql_index_stride = 1000;
+
+statement ok
+COPY (SELECT * FROM read_frames('build/test_copy_many.pcap') ORDER BY frame_number)
+TO 'build/test_copy_many_again.pcap' (FORMAT pcap);
+
+query I
+SELECT (SELECT md5(content) FROM read_blob('build/test_copy_many.pcap'))
+     = (SELECT md5(content) FROM read_blob('build/test_copy_many_again.pcap'));
+----
+true

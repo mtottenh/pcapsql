@@ -1,8 +1,8 @@
 //! File access through DuckDB's file system.
 //!
 //! The extension never opens a file itself: every open goes through the `FileSystem` of the
-//! callback's [`Context`], so a capture can be anywhere DuckDB can read (a local path, `s3://`,
-//! `https://`, any registered file system) and DuckDB's own access rules apply
+//! callback's [`Context`], so a capture can be anywhere DuckDB can read or write (a local path,
+//! `s3://`, `https://`, any registered file system) and DuckDB's own access rules apply
 //! (`enable_external_access`, `allowed_directories`). `std::fs` is not used anywhere in this
 //! crate; `clippy.toml` and `scripts/check-no-std-fs.sh` enforce that.
 //!
@@ -10,10 +10,14 @@
 //! (`ReadPacketReader<DuckFile>`): [`DuckFile::open`] for a whole capture,
 //! [`DuckFile::open_at`] for a partition that starts at a byte offset.
 //!
-//! A `Context` and its `FileSystem` only live for one callback. A [`DuckFile`] outlives both, so
-//! a worker opens its file in one callback and keeps reading it in later ones.
+//! [`DuckSink`] is the [`Write`] of a file the extension writes (`COPY ... TO`), which
+//! [`DuckSink::create`] opens behind a buffer.
+//!
+//! A `Context` and its `FileSystem` only live for one callback. A [`DuckFile`] and a
+//! [`DuckSink`] outlive both, so a worker opens its file in one callback and keeps reading or
+//! writing it in later ones.
 
-use std::io::{self, Read};
+use std::io::{self, BufWriter, Read, Write};
 
 use duckdb_neo::{
     connection::Context,
@@ -64,10 +68,12 @@ pub struct DuckFile {
     position: u64,
 }
 
-// Local state must be `Send`; fail here, not at the first table function that stores one.
+// Local state must be `Send`, and so must the state of an output file; fail here, not at the
+// first function that stores one.
 const _: fn() = || {
     fn assert_send<T: Send>() {}
     assert_send::<DuckFile>();
+    assert_send::<DuckSink>();
 };
 
 impl DuckFile {
@@ -163,5 +169,52 @@ impl Read for DuckFile {
         self.start += count;
         self.position += count as u64;
         Ok(count)
+    }
+}
+
+/// A file opened for writing through DuckDB's file system, as a [`Write`].
+///
+/// Every `write` is a call into DuckDB: [`create`](Self::create) puts a buffer in front. It is
+/// `Send` and, like the `File` it wraps, not `Sync`.
+#[derive(Debug)]
+pub struct DuckSink {
+    file: File,
+}
+
+impl DuckSink {
+    /// Create `path`, or empty it if it exists, and open it for writing behind a buffer of
+    /// [`LOCAL_BUFFER`] bytes ([`REMOTE_BUFFER`] for a remote path).
+    ///
+    /// DuckDB refuses the open when the path is outside what the session may access.
+    pub fn create(context: &Context, path: &str) -> Result<BufWriter<Self>> {
+        let file_system = FileSystem::new(context)?;
+        let capacity = if file_system.is_remote(path)? {
+            REMOTE_BUFFER
+        } else {
+            LOCAL_BUFFER
+        };
+        let file = FileBuilder::new(&file_system, path)?
+            .write()
+            .create_new()
+            .open()?;
+        Ok(BufWriter::with_capacity(capacity, Self { file }))
+    }
+
+    /// Close the file: what a remote file system still holds is sent now, and an error of
+    /// that is the caller's to report.
+    pub fn close(self) -> Result<()> {
+        self.file.close()
+    }
+}
+
+impl Write for DuckSink {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.file.write(bytes).map_err(io::Error::other)
+    }
+
+    /// Nothing is held back here, and the file is not forced to disk: DuckDB does not do that
+    /// for the files it writes either.
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
