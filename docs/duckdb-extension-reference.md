@@ -20,7 +20,7 @@ is described in
 |---|---|---|
 | Scan table functions | 54 | `read_pcap`, `read_<table>` for each of the 32 tables (28 of packets, 4 of TCP streams), and `read_<view>` for each of the 21 `*_packets` views |
 | Listing table functions | 3 | `pcap_protocols`, `pcap_views`, `pcap_schema` |
-| Scalar functions | 16 | `ip4`, `ip4_to_string`, `ip6`, `ip6_to_string`, `mac`, `mac_to_string`, `ip_in_cidr`, `ip6_in_cidr`, `tcp_flags_str`, `has_tcp_flag`, `dns_type_name`, `dns_rcode_name`, `ip_proto_name`, `ethertype_name`, `pcap_hex`, `pcap_unhex` |
+| Scalar functions | 40 | `ip4`, `ip4_to_string`, `ip6`, `ip6_to_string`, `mac`, `mac_to_string`, `is_private_ip`, `is_loopback_ip`, `is_multicast_ip`, `is_multicast_ip6`, `is_link_local_ip6`, `mac_is_broadcast`, `mac_is_multicast`, `mac_is_local`, `ip_in_cidr`, `ip6_in_cidr`, `tcp_flags_str`, `has_tcp_flag`, `ethertype_name`, `ip_proto_name`, `dscp_name`, `ecn_name`, `icmp_type_name`, `icmp_code_name`, `icmpv6_type_name`, `icmpv6_code_name`, `dns_type_name`, `dns_class_name`, `dns_rcode_name`, `bgp_message_type_name`, `bgp_origin_name`, `ospf_packet_type_name`, `ospf_lsa_type_name`, `gtp_message_type_name`, `ntp_mode_name`, `ntp_stratum_name`, `tls_record_type_name`, `tls_version_name`, `pcap_hex`, `pcap_unhex` |
 | Macros | 6 | `format_ip4`, `format_ip6`, `format_mac`, `format_ip4_list`, `format_ip6_list`, `format_mac_list` |
 | Settings | 5 | `pcapsql_parallel_scan`, `pcapsql_parallel_min_file_size`, `pcapsql_index_stride`, `pcapsql_filter_pushdown`, `pcapsql_keylog` |
 | Replacement scan | 1 | `FROM 'capture.pcap'` |
@@ -332,6 +332,18 @@ raises an error for its input. Integer arguments have exactly the type of the
 column they are meant for: a literal that fits is accepted, a column of
 another integer type needs a cast.
 
+An address is what the tables store: an IPv4 address is a `UINTEGER`, and an
+IPv6 or MAC address a `BLOB` of 16 or 6 bytes, so `is_private_ip(src_ip)`
+takes a column of `read_ipv4` as it is, and `mac_is_broadcast(dst_mac)` one
+of `read_ethernet`. Every function of an IPv6 or MAC address returns NULL for
+a `BLOB` of another length, the tests of an address (`is_multicast_ip6`,
+`mac_is_local`, ...) included.
+
+A function that names a number has text for every number: the name, or text
+made of the number, as the table says. The name columns of the tables
+(`type_name` of `read_icmp`, `message_type_name` of `read_bgp`, ...) hold
+the same text.
+
 | Function | Returns | Result |
 |---|---|---|
 | `ip4(address VARCHAR)` | `UINTEGER` | The value of a dotted-quad IPv4 address |
@@ -340,14 +352,38 @@ another integer type needs a cast.
 | `ip6_to_string(address BLOB)` | `VARCHAR` | RFC 5952 text of a 16-byte IPv6 address |
 | `mac(address VARCHAR)` | `BLOB` | The 6 bytes of a MAC address written `aa:bb:cc:dd:ee:ff`, `aa-bb-cc-dd-ee-ff` or `aabbccddeeff` |
 | `mac_to_string(address BLOB)` | `VARCHAR` | Colon-separated lowercase hex of a 6-byte MAC address |
+| `is_private_ip(address UINTEGER)` | `BOOLEAN` | Whether an IPv4 address is in an RFC 1918 network: `10.0.0.0/8`, `172.16.0.0/12` or `192.168.0.0/16` |
+| `is_loopback_ip(address UINTEGER)` | `BOOLEAN` | Whether an IPv4 address is in `127.0.0.0/8` |
+| `is_multicast_ip(address UINTEGER)` | `BOOLEAN` | Whether an IPv4 address is in `224.0.0.0/4` |
+| `is_multicast_ip6(address BLOB)` | `BOOLEAN` | Whether a 16-byte IPv6 address is in `ff00::/8` |
+| `is_link_local_ip6(address BLOB)` | `BOOLEAN` | Whether a 16-byte IPv6 address is in `fe80::/10` |
+| `mac_is_broadcast(address BLOB)` | `BOOLEAN` | Whether a 6-byte MAC address is `ff:ff:ff:ff:ff:ff` |
+| `mac_is_multicast(address BLOB)` | `BOOLEAN` | Whether a 6-byte MAC address is a group address (the lowest bit of its first byte), the broadcast address included |
+| `mac_is_local(address BLOB)` | `BOOLEAN` | Whether a 6-byte MAC address is locally administered (the second-lowest bit of its first byte) |
 | `ip_in_cidr(address UINTEGER, cidr VARCHAR)` | `BOOLEAN` | Whether an IPv4 address is in a network such as `'192.168.0.0/16'`. NULL if `cidr` is not CIDR notation |
 | `ip6_in_cidr(address BLOB, cidr VARCHAR)` | `BOOLEAN` | Whether an IPv6 address is in a network such as `'fe80::/10'`. NULL if `cidr` is not CIDR notation |
 | `tcp_flags_str(flags USMALLINT)` | `VARCHAR` | The set flags, lowest bit first, comma-separated: `SYN,ACK`. The empty string when none is set |
 | `has_tcp_flag(flags USMALLINT, flag VARCHAR)` | `BOOLEAN` | Whether the named flag (`'SYN'`, any case) is set. False for a name that is not a flag |
-| `dns_type_name(qtype USMALLINT)` | `VARCHAR` | `A`, `AAAA`, ...; `TYPE<n>` for an unassigned type |
-| `dns_rcode_name(rcode USMALLINT)` | `VARCHAR` | `NOERROR`, `NXDOMAIN`, ...; `RCODE<n>` for an unassigned code |
-| `ip_proto_name(protocol UTINYINT)` | `VARCHAR` | `TCP`, `UDP`, ... from the IANA table; `Proto <n>` for an unassigned number |
 | `ethertype_name(ethertype USMALLINT)` | `VARCHAR` | `IPv4`, `ARP`, ...; the value as `0x88B5` for an unknown EtherType |
+| `ip_proto_name(protocol UTINYINT)` | `VARCHAR` | `TCP`, `UDP`, ... from the IANA table; `Proto <n>` for an unassigned number |
+| `dscp_name(dscp UTINYINT)` | `VARCHAR` | `CS0/BE`, `AF11`, `EF`, ... for the low six bits; `DSCP<n>` for a code point without a name |
+| `ecn_name(ecn UTINYINT)` | `VARCHAR` | `Not-ECT`, `ECT(1)`, `ECT(0)` or `CE` for the low two bits |
+| `icmp_type_name(type UTINYINT)` | `VARCHAR` | `Echo Request`, `Destination Unreachable`, ...; `Type <n>` for an unassigned type |
+| `icmp_code_name(type UTINYINT, code UTINYINT)` | `VARCHAR` | The code of that type: `Port Unreachable`, `TTL Exceeded in Transit`, ...; `No Code` for code 0 of a type without codes; otherwise text of the number, `Destination Unreachable (code <n>)` or `Code <n>` |
+| `icmpv6_type_name(type UTINYINT)` | `VARCHAR` | `Neighbor Solicitation`, `Echo Request`, ...; `Type <n>` for an unassigned type |
+| `icmpv6_code_name(type UTINYINT, code UTINYINT)` | `VARCHAR` | The code of that type: `No Route to Destination`, `Hop Limit Exceeded in Transit`, ...; `No Code` and the text of the number as for `icmp_code_name` |
+| `dns_type_name(qtype USMALLINT)` | `VARCHAR` | `A`, `AAAA`, ...; `TYPE<n>` for an unassigned type |
+| `dns_class_name(class USMALLINT)` | `VARCHAR` | `IN`, `CH`, `HS`, `NONE`, `ANY`; `CLASS<n>` for another class |
+| `dns_rcode_name(rcode USMALLINT)` | `VARCHAR` | `NOERROR`, `NXDOMAIN`, ...; `RCODE<n>` for an unassigned code |
+| `bgp_message_type_name(message_type UTINYINT)` | `VARCHAR` | `OPEN`, `UPDATE`, `NOTIFICATION`, `KEEPALIVE`, `ROUTE-REFRESH`; `Unknown (<n>)` otherwise |
+| `bgp_origin_name(origin UTINYINT)` | `VARCHAR` | `IGP`, `EGP`, `INCOMPLETE`; `Unknown (<n>)` otherwise |
+| `ospf_packet_type_name(packet_type UTINYINT)` | `VARCHAR` | `Hello`, `Database Description`, `Link State Request`, `Link State Update`, `Link State Acknowledgment`; `Unknown (<n>)` otherwise |
+| `ospf_lsa_type_name(lsa_type UTINYINT)` | `VARCHAR` | `Router-LSA`, `Network-LSA`, `AS-External-LSA`, ...; `Unknown (<n>)` otherwise |
+| `gtp_message_type_name(message_type UTINYINT)` | `VARCHAR` | `Echo Request`, `Create PDP Context Request`, `G-PDU`, ...; `Unknown (<n>)` otherwise |
+| `ntp_mode_name(mode UTINYINT)` | `VARCHAR` | `Client`, `Server`, `Symmetric Active`, `Broadcast`, ...; `Unknown (<n>)` above 7 |
+| `ntp_stratum_name(stratum UTINYINT)` | `VARCHAR` | `Unspecified`, `Primary Reference`, `Secondary (stratum <n>)` for 2 to 15, `Unsynchronized` for 16, `Reserved (<n>)` above |
+| `tls_record_type_name(record_type UTINYINT)` | `VARCHAR` | `ChangeCipherSpec`, `Alert`, `Handshake`, `ApplicationData`, `Heartbeat`; `Unknown (<n>)` otherwise |
+| `tls_version_name(version USMALLINT)` | `VARCHAR` | `SSL 3.0`, `TLS 1.0` to `TLS 1.3`; `Unknown (0x<hex>)` otherwise |
 | `pcap_hex(bytes BLOB)` | `VARCHAR` | Lowercase hexadecimal text |
 | `pcap_unhex(hex VARCHAR)` | `BLOB` | The bytes hexadecimal text encodes. Any case; surrounding whitespace and a `0x` prefix are accepted |
 
@@ -355,6 +391,12 @@ another integer type needs a cast.
 SELECT ip4_to_string(src_ip), tcp_flags_str(flags)
 FROM read_tcp('capture.pcap') JOIN read_ipv4('capture.pcap') USING (frame_number)
 WHERE ip_in_cidr(src_ip, '10.0.0.0/8') AND has_tcp_flag(flags, 'SYN');
+```
+
+```sql
+SELECT ip4_to_string(src_ip), icmp_type_name(type), icmp_code_name(type, code)
+FROM read_icmp('capture.pcap') JOIN read_ipv4('capture.pcap') USING (frame_number)
+WHERE NOT is_private_ip(src_ip);
 ```
 
 ## Macros

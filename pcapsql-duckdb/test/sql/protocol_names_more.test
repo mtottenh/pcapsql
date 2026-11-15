@@ -1,0 +1,234 @@
+# name: test/sql/protocol_names_more.test
+# description: The functions that name the numbers of IP, ICMP, DNS, BGP, OSPF, GTP, NTP and TLS
+# group: [pcapsql]
+
+require pcapsql
+
+query TTTTTTTTT
+SELECT dscp_name(0), dscp_name(8), dscp_name(10), dscp_name(46), dscp_name(44), dscp_name(1), dscp_name(63), dscp_name(110), typeof(dscp_name(0));
+----
+CS0/BE	CS1	AF11	EF	VA	LE	DSCP63	EF	VARCHAR
+
+# Only the low two bits are the codepoint, so every value has a name
+query TTTTTT
+SELECT ecn_name(0), ecn_name(1), ecn_name(2), ecn_name(3), ecn_name(7), ecn_name(252);
+----
+Not-ECT	ECT(1)	ECT(0)	CE	CE	Not-ECT
+
+query TTTTT
+SELECT icmp_type_name(0), icmp_type_name(3), icmp_type_name(8), icmp_type_name(11), icmp_type_name(200);
+----
+Echo Reply	Destination Unreachable	Echo Request	Time Exceeded	Type 200
+
+# A code is named for its type
+query TTTTTTTT
+SELECT icmp_code_name(3, 3), icmp_code_name(3, 13), icmp_code_name(3, 99), icmp_code_name(11, 0), icmp_code_name(5, 1),
+       icmp_code_name(8, 0), icmp_code_name(8, 7), icmp_code_name(40, 2);
+----
+Port Unreachable	Communication Administratively Prohibited	Destination Unreachable (code 99)	TTL Exceeded in Transit	Redirect for Host	No Code	Code 7	Code 2
+
+query TTTTT
+SELECT icmpv6_type_name(1), icmpv6_type_name(128), icmpv6_type_name(135), icmpv6_type_name(143), icmpv6_type_name(250);
+----
+Destination Unreachable	Echo Request	Neighbor Solicitation	Version 2 Multicast Listener Report	Type 250
+
+query TTTTTTTT
+SELECT icmpv6_code_name(1, 0), icmpv6_code_name(1, 4), icmpv6_code_name(1, 77), icmpv6_code_name(3, 1), icmpv6_code_name(135, 0),
+       icmpv6_code_name(135, 5), icmpv6_code_name(138, 1), icmpv6_code_name(139, 9);
+----
+No Route to Destination	Port Unreachable	Destination Unreachable (code 77)	Fragment Reassembly Time Exceeded	No Code	Code 5	Router Renumbering Result	NI Query (code 9)
+
+query TTTTTTT
+SELECT dns_class_name(1), dns_class_name(3), dns_class_name(4), dns_class_name(254), dns_class_name(255), dns_class_name(2), dns_class_name(65535);
+----
+IN	CH	HS	NONE	ANY	CLASS2	CLASS65535
+
+query TTTTTTT
+SELECT bgp_message_type_name(1), bgp_message_type_name(2), bgp_message_type_name(3), bgp_message_type_name(4), bgp_message_type_name(5),
+       bgp_message_type_name(0), bgp_message_type_name(9);
+----
+OPEN	UPDATE	NOTIFICATION	KEEPALIVE	ROUTE-REFRESH	Unknown (0)	Unknown (9)
+
+query TTTT
+SELECT bgp_origin_name(0), bgp_origin_name(1), bgp_origin_name(2), bgp_origin_name(3);
+----
+IGP	EGP	INCOMPLETE	Unknown (3)
+
+query TTTTTT
+SELECT ospf_packet_type_name(1), ospf_packet_type_name(2), ospf_packet_type_name(3), ospf_packet_type_name(4), ospf_packet_type_name(5),
+       ospf_packet_type_name(6);
+----
+Hello	Database Description	Link State Request	Link State Update	Link State Acknowledgment	Unknown (6)
+
+query TTTTTTT
+SELECT ospf_lsa_type_name(1), ospf_lsa_type_name(2), ospf_lsa_type_name(3), ospf_lsa_type_name(5), ospf_lsa_type_name(7), ospf_lsa_type_name(11),
+       ospf_lsa_type_name(12);
+----
+Router-LSA	Network-LSA	Summary-LSA-Network	AS-External-LSA	NSSA-External-LSA	Opaque-AS-LSA	Unknown (12)
+
+query TTTTT
+SELECT gtp_message_type_name(1), gtp_message_type_name(16), gtp_message_type_name(26), gtp_message_type_name(255), gtp_message_type_name(0);
+----
+Echo Request	Create PDP Context Request	Error Indication	G-PDU	Unknown (0)
+
+query TTTTTTT
+SELECT ntp_mode_name(0), ntp_mode_name(1), ntp_mode_name(3), ntp_mode_name(4), ntp_mode_name(5), ntp_mode_name(7), ntp_mode_name(8);
+----
+Reserved	Symmetric Active	Client	Server	Broadcast	Private	Unknown (8)
+
+query TTTTTT
+SELECT ntp_stratum_name(0), ntp_stratum_name(1), ntp_stratum_name(2), ntp_stratum_name(15), ntp_stratum_name(16), ntp_stratum_name(17);
+----
+Unspecified	Primary Reference	Secondary (stratum 2)	Secondary (stratum 15)	Unsynchronized	Reserved (17)
+
+query TTTTTT
+SELECT tls_record_type_name(20), tls_record_type_name(21), tls_record_type_name(22), tls_record_type_name(23), tls_record_type_name(24),
+       tls_record_type_name(25);
+----
+ChangeCipherSpec	Alert	Handshake	ApplicationData	Heartbeat	Unknown (25)
+
+# 0x0300 to 0x0304; a version without a name is the value in hex
+query TTTTTTT
+SELECT tls_version_name(768), tls_version_name(769), tls_version_name(770), tls_version_name(771), tls_version_name(772), tls_version_name(773),
+       tls_version_name(65535);
+----
+SSL 3.0	TLS 1.0	TLS 1.1	TLS 1.2	TLS 1.3	Unknown (0x0305)	Unknown (0xffff)
+
+query TTTTTTTT
+SELECT dscp_name(NULL), ecn_name(NULL), icmp_type_name(NULL), icmpv6_type_name(NULL), dns_class_name(NULL), bgp_message_type_name(NULL),
+       bgp_origin_name(NULL), ospf_packet_type_name(NULL);
+----
+NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL
+
+query TTTTTT
+SELECT ospf_lsa_type_name(NULL), gtp_message_type_name(NULL), ntp_mode_name(NULL), ntp_stratum_name(NULL), tls_record_type_name(NULL),
+       tls_version_name(NULL);
+----
+NULL	NULL	NULL	NULL	NULL	NULL
+
+# NULL when either argument is
+query TTTT
+SELECT icmp_code_name(NULL, 3), icmp_code_name(3, NULL), icmpv6_code_name(NULL, 0), icmpv6_code_name(1, NULL);
+----
+NULL	NULL	NULL	NULL
+
+# The arguments are UTINYINT, and USMALLINT for a DNS class and a TLS version
+statement error
+SELECT icmp_type_name(256);
+----
+icmp_type_name
+
+statement error
+SELECT icmp_code_name(3, 256);
+----
+icmp_code_name
+
+statement error
+SELECT dscp_name(-1);
+----
+dscp_name
+
+statement error
+SELECT tls_version_name(65536);
+----
+tls_version_name
+
+# NULLs are kept row by row, in either argument
+query TTTT
+SELECT icmp_type_name(t), icmp_code_name(t, c), icmpv6_code_name(t, c), ecn_name(c)
+FROM (VALUES (3::UTINYINT, 1::UTINYINT), (NULL, 1), (3, NULL), (8, 0), (1, 200), (NULL, NULL)) v(t, c);
+----
+Destination Unreachable	Host Unreachable	Fragment Reassembly Time Exceeded	ECT(1)
+NULL	NULL	NULL	ECT(1)
+Destination Unreachable	NULL	NULL	NULL
+Echo Request	No Code	No Code	Not-ECT
+Type 1	Code 200	Destination Unreachable (code 200)	Not-ECT
+NULL	NULL	NULL	NULL
+
+# Every value of the argument: 64 code points and 4 ECN codepoints, and the numbers without a name
+query IIIIII
+SELECT count(DISTINCT dscp_name(i::UTINYINT)), count(DISTINCT ecn_name(i::UTINYINT)),
+       count(*) FILTER (icmp_type_name(i::UTINYINT) = 'Type ' || i),
+       count(*) FILTER (icmpv6_type_name(i::UTINYINT) = 'Type ' || i),
+       count(*) FILTER (gtp_message_type_name(i::UTINYINT) = 'Unknown (' || i || ')'),
+       count(*) FILTER (ntp_stratum_name(i::UTINYINT) LIKE 'Secondary%')
+FROM range(256) t(i);
+----
+64	4	226	212	220	14
+
+# Every type and code, in more rows than one vector holds
+query III
+SELECT count(*) FILTER (dns_class_name(i::USMALLINT) = 'CLASS' || i),
+       count(DISTINCT icmp_code_name((i // 256)::UTINYINT, (i % 256)::UTINYINT)),
+       count(DISTINCT icmpv6_code_name((i // 256)::UTINYINT, (i % 256)::UTINYINT))
+FROM range(65536) t(i);
+----
+65531	1280	1793
+
+# A constant argument next to a column, in either place
+statement ok
+CREATE TABLE one AS SELECT 3::UTINYINT AS t, 771::USMALLINT AS version;
+
+query ITTII
+SELECT count(*), min(icmp_type_name(t)), max(tls_version_name(version)),
+       count(*) FILTER (icmp_code_name(t, (i % 256)::UTINYINT) LIKE 'Destination Unreachable (code %'),
+       count(*) FILTER (icmp_code_name((i % 256)::UTINYINT, t) = 'Code 3')
+FROM one, range(2560) t(i);
+----
+2560	Destination Unreachable	TLS 1.2	2400	2520
+
+# The columns of the tables are of the types the functions take
+query TTI
+SELECT icmp_type_name(type), icmp_code_name(type, code), count(*)
+FROM read_icmp('../fuzz/corpus/fuzz_pcap_reader/ipv4frags.pcap') GROUP BY ALL ORDER BY ALL;
+----
+Echo Reply	No Code	1
+Echo Request	No Code	1
+Type 200	Code 201	1
+
+query TTI
+SELECT icmpv6_type_name(type), icmpv6_code_name(type, code), count(*)
+FROM read_icmpv6('../fuzz/corpus/fuzz_pcap_reader/v6.pcap') GROUP BY ALL ORDER BY ALL;
+----
+Destination Unreachable	Port Unreachable	4
+Echo Reply	No Code	8
+Echo Request	No Code	8
+Neighbor Advertisement	No Code	9
+Neighbor Solicitation	No Code	9
+Router Advertisement	No Code	1
+Router Solicitation	No Code	1
+Time Exceeded	Hop Limit Exceeded in Transit	9
+
+query TTI
+SELECT ecn_name(ecn), dscp_name(dscp), count(*)
+FROM read_ipv4('../fuzz/corpus/fuzz_pcap_reader/tcp-ecn-sample.pcap') GROUP BY ALL ORDER BY ALL;
+----
+CE	CS0/BE	52
+ECT(0)	CS0/BE	117
+Not-ECT	CS0/BE	310
+
+query TTI
+SELECT ntp_mode_name(mode), ntp_stratum_name(stratum), count(*)
+FROM read_ntp('../fuzz/corpus/fuzz_pcap_reader/NTP_sync.pcap') GROUP BY ALL ORDER BY ALL;
+----
+Symmetric Active	Unspecified	15
+Symmetric Passive	Primary Reference	2
+Symmetric Passive	Secondary (stratum 2)	11
+Symmetric Passive	Secondary (stratum 3)	2
+
+query TI
+SELECT dns_class_name(query_class), count(*) FROM read_dns('../fuzz/corpus/fuzz_pcap_reader/dns.cap') GROUP BY ALL;
+----
+IN	38
+
+query TI
+SELECT gtp_message_type_name(message_type), count(*) FROM read_gtp('../fuzz/corpus/fuzz_pcap_reader/gtp_user.pcap') GROUP BY ALL;
+----
+G-PDU	5
+
+# The name columns of the tables are the functions of their numbers
+query II
+SELECT count(*), count(*) FILTER (icmpv6_type_name(type) = type_name)
+FROM read_icmpv6('../fuzz/corpus/fuzz_pcap_reader/v6.pcap');
+----
+49	49

@@ -601,11 +601,15 @@ capture. The stream tables have exactly DataFusion's columns.
 | Packet timestamps | `TIMESTAMP_NS` |
 | Lists | `USMALLINT[]`, `UINTEGER[]`, `VARCHAR[]`, `BLOB[]` |
 
-Sixteen scalar functions. Each is a loop over a kernel of
+Forty scalar functions. Each is a loop over a kernel of
 `pcapsql_core::format`, the same kernels the DataFusion engine calls, so the
 two engines give the same answer. A NULL argument gives NULL, and so does an
 argument the function cannot use (text that is not an address, a BLOB of the
-wrong length): no function raises an error for its input.
+wrong length): no function raises an error for its input. An address is what
+the tables store, a `UINTEGER` for IPv4 and a `BLOB` of 16 or 6 bytes for
+IPv6 and MAC, so `is_private_ip(src_ip)` takes a column of `read_ipv4` as it
+is. A function that names a number has text for every number: the name, or
+text made of the number.
 
 | Function | Result |
 |---|---|
@@ -615,14 +619,38 @@ wrong length): no function raises an error for its input.
 | `ip6_to_string(BLOB) -> VARCHAR` | RFC 5952 text of a 16-byte IPv6 address |
 | `mac(VARCHAR) -> BLOB` | The 6 bytes of a MAC address written `aa:bb:cc:dd:ee:ff`, `aa-bb-cc-dd-ee-ff` or `aabbccddeeff` |
 | `mac_to_string(BLOB) -> VARCHAR` | Colon-separated lowercase hex of a 6-byte MAC address |
+| `is_private_ip(UINTEGER) -> BOOLEAN` | Whether an IPv4 address is in an RFC 1918 network: `10.0.0.0/8`, `172.16.0.0/12` or `192.168.0.0/16` |
+| `is_loopback_ip(UINTEGER) -> BOOLEAN` | Whether an IPv4 address is in `127.0.0.0/8` |
+| `is_multicast_ip(UINTEGER) -> BOOLEAN` | Whether an IPv4 address is in `224.0.0.0/4` |
+| `is_multicast_ip6(BLOB) -> BOOLEAN` | Whether a 16-byte IPv6 address is in `ff00::/8` |
+| `is_link_local_ip6(BLOB) -> BOOLEAN` | Whether a 16-byte IPv6 address is in `fe80::/10` |
+| `mac_is_broadcast(BLOB) -> BOOLEAN` | Whether a 6-byte MAC address is `ff:ff:ff:ff:ff:ff` |
+| `mac_is_multicast(BLOB) -> BOOLEAN` | Whether a 6-byte MAC address is a group address (the lowest bit of its first byte), the broadcast address included |
+| `mac_is_local(BLOB) -> BOOLEAN` | Whether a 6-byte MAC address is locally administered (the second-lowest bit of its first byte) |
 | `ip_in_cidr(UINTEGER, VARCHAR) -> BOOLEAN` | Whether an IPv4 address is in a network such as `'192.168.0.0/16'`; NULL if the text is not CIDR notation |
 | `ip6_in_cidr(BLOB, VARCHAR) -> BOOLEAN` | Whether an IPv6 address is in a network such as `'fe80::/10'`; NULL if the text is not CIDR notation |
 | `tcp_flags_str(USMALLINT) -> VARCHAR` | The set flags, lowest bit first: `SYN,ACK`. The empty string when none is set |
 | `has_tcp_flag(USMALLINT, VARCHAR) -> BOOLEAN` | Whether the named flag (`'SYN'`, any case) is set; false for a name that is not a flag |
-| `dns_type_name(USMALLINT) -> VARCHAR` | `A`, `AAAA`, ...; `TYPE<n>` for an unassigned type |
-| `dns_rcode_name(USMALLINT) -> VARCHAR` | `NOERROR`, `NXDOMAIN`, ...; `RCODE<n>` for an unassigned code |
-| `ip_proto_name(UTINYINT) -> VARCHAR` | `TCP`, `UDP`, ... from the IANA table; `Proto <n>` for an unassigned number |
 | `ethertype_name(USMALLINT) -> VARCHAR` | `IPv4`, `ARP`, ...; the value as `0x88B5` for an unknown EtherType |
+| `ip_proto_name(UTINYINT) -> VARCHAR` | `TCP`, `UDP`, ... from the IANA table; `Proto <n>` for an unassigned number |
+| `dscp_name(UTINYINT) -> VARCHAR` | `CS0/BE`, `AF11`, `EF`, ... for the low six bits; `DSCP<n>` for a code point without a name |
+| `ecn_name(UTINYINT) -> VARCHAR` | `Not-ECT`, `ECT(1)`, `ECT(0)` or `CE` for the low two bits |
+| `icmp_type_name(UTINYINT) -> VARCHAR` | `Echo Request`, `Destination Unreachable`, ...; `Type <n>` for an unassigned type |
+| `icmp_code_name(UTINYINT, UTINYINT) -> VARCHAR` | The code of that type: `Port Unreachable`, `TTL Exceeded in Transit`, ...; `No Code` for code 0 of a type without codes; otherwise text of the number, `Destination Unreachable (code <n>)` or `Code <n>` |
+| `icmpv6_type_name(UTINYINT) -> VARCHAR` | `Neighbor Solicitation`, `Echo Request`, ...; `Type <n>` for an unassigned type |
+| `icmpv6_code_name(UTINYINT, UTINYINT) -> VARCHAR` | The code of that type: `No Route to Destination`, `Hop Limit Exceeded in Transit`, ...; `No Code` and the text of the number as for `icmp_code_name` |
+| `dns_type_name(USMALLINT) -> VARCHAR` | `A`, `AAAA`, ...; `TYPE<n>` for an unassigned type |
+| `dns_class_name(USMALLINT) -> VARCHAR` | `IN`, `CH`, `HS`, `NONE`, `ANY`; `CLASS<n>` for another class |
+| `dns_rcode_name(USMALLINT) -> VARCHAR` | `NOERROR`, `NXDOMAIN`, ...; `RCODE<n>` for an unassigned code |
+| `bgp_message_type_name(UTINYINT) -> VARCHAR` | `OPEN`, `UPDATE`, `NOTIFICATION`, `KEEPALIVE`, `ROUTE-REFRESH`; `Unknown (<n>)` otherwise |
+| `bgp_origin_name(UTINYINT) -> VARCHAR` | `IGP`, `EGP`, `INCOMPLETE`; `Unknown (<n>)` otherwise |
+| `ospf_packet_type_name(UTINYINT) -> VARCHAR` | `Hello`, `Database Description`, `Link State Request`, `Link State Update`, `Link State Acknowledgment`; `Unknown (<n>)` otherwise |
+| `ospf_lsa_type_name(UTINYINT) -> VARCHAR` | `Router-LSA`, `Network-LSA`, `AS-External-LSA`, ...; `Unknown (<n>)` otherwise |
+| `gtp_message_type_name(UTINYINT) -> VARCHAR` | `Echo Request`, `Create PDP Context Request`, `G-PDU`, ...; `Unknown (<n>)` otherwise |
+| `ntp_mode_name(UTINYINT) -> VARCHAR` | `Client`, `Server`, `Symmetric Active`, `Broadcast`, ...; `Unknown (<n>)` above 7 |
+| `ntp_stratum_name(UTINYINT) -> VARCHAR` | `Unspecified`, `Primary Reference`, `Secondary (stratum <n>)` for 2 to 15, `Unsynchronized` for 16, `Reserved (<n>)` above |
+| `tls_record_type_name(UTINYINT) -> VARCHAR` | `ChangeCipherSpec`, `Alert`, `Handshake`, `ApplicationData`, `Heartbeat`; `Unknown (<n>)` otherwise |
+| `tls_version_name(USMALLINT) -> VARCHAR` | `SSL 3.0`, `TLS 1.0` to `TLS 1.3`; `Unknown (0x<hex>)` otherwise |
 | `pcap_hex(BLOB) -> VARCHAR` | Lowercase hexadecimal text |
 | `pcap_unhex(VARCHAR) -> BLOB` | The bytes hexadecimal text encodes; any case, surrounding whitespace and a `0x` prefix are accepted |
 
@@ -674,9 +702,10 @@ does not write: the `filename` column, which `finish` fills with the path of
 the one file the rows of the chunk are from. It is the one module with
 `unsafe` code, and its header states the invariants that make the pointer
 writes sound. The crate has one other place with `unsafe` code, the private
-module `valid` of `engine::scalar`: it borrows the values of rows of a flat
-vector as a slice when none of those rows is NULL, so that `ip_in_cidr` and
-`has_tcp_flag` with a literal pattern compile to a SIMD compare. The slice is
+module `valid` of `engine::scalar::plain`: it borrows the values of rows of
+a flat vector as a slice when none of those rows is NULL, so that `ip_in_cidr`
+and `has_tcp_flag` with a literal pattern, and the tests of an IPv4 address
+(`is_private_ip`, ...), compile to a SIMD compare. The slice is
 the whole chunk when it has no validity mask, and otherwise the 64 rows of
 each word of the mask without a NULL; the slot of a NULL row, which DuckDB
 does not promise to initialise, is in no slice and is never read: the rows
