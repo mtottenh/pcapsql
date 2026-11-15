@@ -8,11 +8,9 @@
 //! RFC 6793: BGP Support for Four-Octet Autonomous System (AS) Number Space
 //! RFC 2918: Route Refresh Capability for BGP-4
 
-use compact_str::CompactString;
-use smallvec::SmallVec;
-
 use super::{
-    Cond, Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult, Protocol,
+    Cond, Dispatch, DispatchRule, FieldSink, FieldValue, HintKey, Hints, ParseContext, Parsed,
+    Protocol,
 };
 use crate::schema::{DataKind, FieldDescriptor};
 
@@ -165,17 +163,20 @@ impl Protocol for BgpProtocol {
         None
     }
 
-    fn parse<'a>(&self, data: &'a [u8], _context: &ParseContext) -> ParseResult<'a> {
+    fn parse_into<'a>(
+        &self,
+        data: &'a [u8],
+        _context: &ParseContext,
+        fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
         // BGP header minimum is 19 bytes (16 marker + 2 length + 1 type)
         if data.len() < 19 {
-            return ParseResult::error("BGP header too short".to_string(), data);
+            return Parsed::error("BGP header too short", data);
         }
-
-        let mut fields = SmallVec::new();
 
         // Bytes 0-15: Marker (should be all 0xFF)
         if data[0..16] != BGP_MARKER {
-            return ParseResult::error("BGP: invalid marker".to_string(), data);
+            return Parsed::error("BGP: invalid marker", data);
         }
 
         // Bytes 16-17: Length (total message length including header)
@@ -183,7 +184,10 @@ impl Protocol for BgpProtocol {
         fields.push(("length", FieldValue::UInt16(length)));
 
         if !(19..=4096).contains(&length) {
-            return ParseResult::error(format!("BGP: invalid length {length}"), data);
+            return Parsed::error(
+                fields.text_fmt(format_args!("BGP: invalid length {length}")),
+                data,
+            );
         }
 
         // Byte 18: Type
@@ -203,19 +207,19 @@ impl Protocol for BgpProtocol {
 
         match msg_type {
             message_type::OPEN => {
-                self.parse_open_message(message_data, &mut fields);
+                self.parse_open_message(message_data, fields);
             }
             message_type::UPDATE => {
-                self.parse_update_message(message_data, &mut fields);
+                self.parse_update_message(message_data, fields);
             }
             message_type::NOTIFICATION => {
-                self.parse_notification_message(message_data, &mut fields);
+                self.parse_notification_message(message_data, fields);
             }
             message_type::KEEPALIVE => {
                 // KEEPALIVE has no additional data (header only)
             }
             message_type::ROUTE_REFRESH => {
-                self.parse_route_refresh_message(message_data, &mut fields);
+                self.parse_route_refresh_message(message_data, fields);
             }
             _ => {
                 // Unknown message type
@@ -224,7 +228,7 @@ impl Protocol for BgpProtocol {
 
         // Calculate remaining data
         let consumed = std::cmp::min(length as usize, data.len());
-        ParseResult::success(fields, &data[consumed..], Hints::new())
+        Parsed::ok(&data[consumed..], Hints::new())
     }
 
     fn schema_fields(&self) -> Vec<FieldDescriptor> {
@@ -297,11 +301,7 @@ impl BgpProtocol {
     /// |             Optional Parameters (variable)                    |
     /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
     /// ```
-    fn parse_open_message(
-        &self,
-        data: &[u8],
-        fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
-    ) {
+    fn parse_open_message(&self, data: &[u8], fields: &mut FieldSink<'_, '_>) {
         if data.len() < 10 {
             return;
         }
@@ -320,10 +320,7 @@ impl BgpProtocol {
 
         // Bytes 5-8: BGP Identifier (IPv4 address)
         let bgp_id = format!("{}.{}.{}.{}", data[5], data[6], data[7], data[8]);
-        fields.push((
-            "bgp_id",
-            FieldValue::OwnedString(CompactString::new(bgp_id)),
-        ));
+        fields.push(("bgp_id", fields.str(&bgp_id)));
 
         // Byte 9: Optional Parameters Length
         let opt_params_len = data[9] as usize;
@@ -340,7 +337,7 @@ impl BgpProtocol {
     fn parse_open_optional_params(
         &self,
         data: &[u8],
-        fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
+        fields: &mut FieldSink<'_, '_>,
         my_as_2byte: u16,
     ) {
         let mut offset = 0;
@@ -402,10 +399,7 @@ impl BgpProtocol {
         }
 
         if !capabilities.is_empty() {
-            fields.push((
-                "capabilities",
-                FieldValue::OwnedString(CompactString::new(capabilities.join(","))),
-            ));
+            fields.push(("capabilities", fields.str(&capabilities.join(","))));
         }
 
         // If 4-byte ASN capability was found, store it
@@ -436,11 +430,7 @@ impl BgpProtocol {
     /// |       Network Layer Reachability Information (variable)      |
     /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
     /// ```
-    fn parse_update_message(
-        &self,
-        data: &[u8],
-        fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
-    ) {
+    fn parse_update_message(&self, data: &[u8], fields: &mut FieldSink<'_, '_>) {
         if data.len() < 4 {
             return;
         }
@@ -464,7 +454,7 @@ impl BgpProtocol {
         if !withdrawn_prefixes.is_empty() {
             fields.push((
                 "withdrawn_routes",
-                FieldValue::OwnedString(CompactString::new(withdrawn_prefixes.join(","))),
+                fields.str(&withdrawn_prefixes.join(",")),
             ));
             fields.push((
                 "withdrawn_count",
@@ -496,10 +486,7 @@ impl BgpProtocol {
             let nlri_data = &data[offset..];
             let nlri_prefixes = self.parse_nlri_prefixes(nlri_data);
             if !nlri_prefixes.is_empty() {
-                fields.push((
-                    "nlri",
-                    FieldValue::OwnedString(CompactString::new(nlri_prefixes.join(","))),
-                ));
+                fields.push(("nlri", fields.str(&nlri_prefixes.join(","))));
                 fields.push(("nlri_count", FieldValue::UInt16(nlri_prefixes.len() as u16)));
             }
         }
@@ -540,11 +527,7 @@ impl BgpProtocol {
     }
 
     /// Parse path attributes from UPDATE message.
-    fn parse_path_attributes(
-        &self,
-        data: &[u8],
-        fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
-    ) {
+    fn parse_path_attributes(&self, data: &[u8], fields: &mut FieldSink<'_, '_>) {
         let mut offset = 0;
 
         while offset + 3 <= data.len() {
@@ -596,7 +579,7 @@ impl BgpProtocol {
                     let (as_path_str, path_length) = self.parse_as_path(attr_data);
                     fields.push((
                         "as_path",
-                        FieldValue::OwnedString(CompactString::new(as_path_str)),
+                        fields.str(&as_path_str),
                     ));
                     fields.push(("as_path_length", FieldValue::UInt16(path_length)));
                 }
@@ -608,7 +591,7 @@ impl BgpProtocol {
                         );
                         fields.push((
                             "next_hop",
-                            FieldValue::OwnedString(CompactString::new(next_hop)),
+                            fields.str(&next_hop),
                         ));
                     }
                 }
@@ -668,7 +651,7 @@ impl BgpProtocol {
                             );
                             fields.push((
                                 "aggregator_ip",
-                                FieldValue::OwnedString(CompactString::new(ip)),
+                                fields.str(&ip),
                             ));
                         }
                     }
@@ -745,11 +728,7 @@ impl BgpProtocol {
     }
 
     /// Parse NOTIFICATION message.
-    fn parse_notification_message(
-        &self,
-        data: &[u8],
-        fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
-    ) {
+    fn parse_notification_message(&self, data: &[u8], fields: &mut FieldSink<'_, '_>) {
         if data.len() < 2 {
             return;
         }
@@ -770,11 +749,7 @@ impl BgpProtocol {
     }
 
     /// Parse ROUTE-REFRESH message (RFC 2918).
-    fn parse_route_refresh_message(
-        &self,
-        data: &[u8],
-        fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
-    ) {
+    fn parse_route_refresh_message(&self, data: &[u8], fields: &mut FieldSink<'_, '_>) {
         if data.len() < 4 {
             return;
         }
@@ -1142,7 +1117,7 @@ mod tests {
         );
 
         // Check capabilities string contains 4-BYTE-AS
-        if let Some(FieldValue::OwnedString(caps)) = result.get("capabilities") {
+        if let Some(FieldValue::Str(caps)) = result.get("capabilities") {
             assert!(caps.contains("4-BYTE-AS"));
         } else {
             panic!("Expected capabilities field");
@@ -1187,7 +1162,7 @@ mod tests {
         );
         assert_eq!(result.get("withdrawn_count"), Some(&FieldValue::UInt16(2)));
 
-        if let Some(FieldValue::OwnedString(routes)) = result.get("withdrawn_routes") {
+        if let Some(FieldValue::Str(routes)) = result.get("withdrawn_routes") {
             assert!(routes.contains("10.0.0.0/8"));
             assert!(routes.contains("192.168.0.0/16"));
         } else {
@@ -1261,7 +1236,7 @@ mod tests {
         assert_eq!(result.get("local_pref"), Some(&FieldValue::UInt32(200)));
         assert_eq!(result.get("as_path_length"), Some(&FieldValue::UInt16(2)));
 
-        if let Some(FieldValue::OwnedString(as_path)) = result.get("as_path") {
+        if let Some(FieldValue::Str(as_path)) = result.get("as_path") {
             assert!(as_path.contains("65001"));
             assert!(as_path.contains("65002"));
         } else {
@@ -1314,7 +1289,7 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.get("nlri_count"), Some(&FieldValue::UInt16(1)));
 
-        if let Some(FieldValue::OwnedString(nlri_str)) = result.get("nlri") {
+        if let Some(FieldValue::Str(nlri_str)) = result.get("nlri") {
             assert!(nlri_str.contains("172.16.0.0/12"));
         } else {
             panic!("Expected nlri field");
@@ -1421,7 +1396,7 @@ mod tests {
         // AS_SET counts as 1 for path length
         assert_eq!(result.get("as_path_length"), Some(&FieldValue::UInt16(1)));
 
-        if let Some(FieldValue::OwnedString(as_path)) = result.get("as_path") {
+        if let Some(FieldValue::Str(as_path)) = result.get("as_path") {
             // AS_SET should be formatted with braces
             assert!(as_path.contains("{"));
             assert!(as_path.contains("}"));
@@ -1668,7 +1643,7 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.get("nlri_count"), Some(&FieldValue::UInt16(3)));
 
-        if let Some(FieldValue::OwnedString(nlri_str)) = result.get("nlri") {
+        if let Some(FieldValue::Str(nlri_str)) = result.get("nlri") {
             assert!(nlri_str.contains("10.0.0.0/8"));
             assert!(nlri_str.contains("172.16.0.0/16"));
             assert!(nlri_str.contains("192.168.1.0/24"));

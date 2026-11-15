@@ -91,11 +91,9 @@
 //! - Sequence numbers (can detect replay attacks or packet loss)
 //! - Packet timing and sizes
 
-use smallvec::SmallVec;
-
 use super::ipv6::next_header;
 use super::{
-    Cond, Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult,
+    Cond, Dispatch, DispatchRule, FieldSink, FieldValue, HintKey, Hints, ParseContext, Parsed,
     PayloadMode, Protocol,
 };
 use crate::schema::{DataKind, FieldDescriptor};
@@ -137,17 +135,22 @@ impl Protocol for IpsecProtocol {
         }
     }
 
-    fn parse<'a>(&self, data: &'a [u8], context: &ParseContext) -> ParseResult<'a> {
+    fn parse_into<'a>(
+        &self,
+        data: &'a [u8],
+        context: &ParseContext,
+        fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
         // Determine if this is ESP or AH based on the context hint
         let is_esp = match context.hint(HintKey::IpProtocol) {
             Some(proto) => proto == next_header::ESP as u64,
-            None => return ParseResult::error("IPsec: missing ip_protocol hint".to_string(), data),
+            None => return Parsed::error("IPsec: missing ip_protocol hint", data),
         };
 
         if is_esp {
-            self.parse_esp(data)
+            self.parse_esp(data, fields)
         } else {
-            self.parse_ah(data)
+            self.parse_ah(data, fields)
         }
     }
 
@@ -192,13 +195,11 @@ impl IpsecProtocol {
     /// |                    Payload Data (encrypted)                   |
     /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
     /// ```
-    fn parse_esp<'a>(&self, data: &'a [u8]) -> ParseResult<'a> {
+    fn parse_esp<'a>(&self, data: &'a [u8], fields: &mut FieldSink<'_, 'a>) -> Parsed<'a> {
         // ESP header minimum is 8 bytes (SPI + Sequence Number)
         if data.len() < 8 {
-            return ParseResult::error("ESP header too short".to_string(), data);
+            return Parsed::error("ESP header too short", data);
         }
-
-        let mut fields = SmallVec::new();
 
         fields.push(("protocol", FieldValue::Str("ESP")));
 
@@ -216,7 +217,7 @@ impl IpsecProtocol {
         // but we can't determine their location without decryption
 
         // Return with no child hints since ESP payload is encrypted
-        ParseResult::success(fields, &data[8..], Hints::new())
+        Parsed::ok(&data[8..], Hints::new())
     }
 
     /// Parse AH (Authentication Header).
@@ -235,13 +236,11 @@ impl IpsecProtocol {
     /// |                    ICV (variable length)                      |
     /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
     /// ```
-    fn parse_ah<'a>(&self, data: &'a [u8]) -> ParseResult<'a> {
+    fn parse_ah<'a>(&self, data: &'a [u8], fields: &mut FieldSink<'_, 'a>) -> Parsed<'a> {
         // AH header minimum is 12 bytes (without ICV)
         if data.len() < 12 {
-            return ParseResult::error("AH header too short".to_string(), data);
+            return Parsed::error("AH header too short", data);
         }
-
-        let mut fields = SmallVec::new();
 
         fields.push(("protocol", FieldValue::Str("AH")));
 
@@ -276,14 +275,14 @@ impl IpsecProtocol {
         // Payload starts after AH header
 
         if data.len() < ah_length {
-            return ParseResult::error("AH: data too short for declared length".to_string(), data);
+            return Parsed::error("AH: data too short for declared length", data);
         }
 
         // Set up child hints for the next protocol (based on next_header)
         let mut child_hints = Hints::new();
         child_hints.insert(HintKey::IpProtocol, next_header as u64);
 
-        ParseResult::success(fields, &data[ah_length..], child_hints)
+        Parsed::ok(&data[ah_length..], child_hints)
     }
 }
 

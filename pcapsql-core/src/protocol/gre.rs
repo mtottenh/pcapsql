@@ -7,11 +7,9 @@
 //! RFC 2890: Key and Sequence Number Extensions to GRE
 //! RFC 2637: Point-to-Point Tunneling Protocol (PPTP) - Enhanced GRE (Version 1)
 
-use smallvec::SmallVec;
-
 use super::{
-    Cond, Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult, Protocol,
-    TunnelType,
+    Cond, Dispatch, DispatchRule, FieldSink, FieldValue, HintKey, Hints, ParseContext, Parsed,
+    Protocol, TunnelType,
 };
 use crate::schema::{DataKind, FieldDescriptor};
 
@@ -93,13 +91,17 @@ impl Protocol for GreProtocol {
         }
     }
 
-    fn parse<'a>(&self, data: &'a [u8], _context: &ParseContext) -> ParseResult<'a> {
+    fn parse_into<'a>(
+        &self,
+        data: &'a [u8],
+        _context: &ParseContext,
+        fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
         // Minimum GRE header is 4 bytes (flags/version + protocol type)
         if data.len() < 4 {
-            return ParseResult::error("GRE header too short".to_string(), data);
+            return Parsed::error("GRE header too short", data);
         }
 
-        let mut fields = SmallVec::new();
         let mut offset = 0;
 
         // First 2 bytes: Flags and Version
@@ -151,7 +153,7 @@ impl Protocol for GreProtocol {
         // Checksum and Reserved (4 bytes if C bit set)
         if checksum_present {
             if data.len() < offset + 4 {
-                return ParseResult::error("GRE: missing checksum field".to_string(), data);
+                return Parsed::error("GRE: missing checksum field", data);
             }
             let checksum = u16::from_be_bytes([data[offset], data[offset + 1]]);
             fields.push(("checksum", FieldValue::UInt16(checksum)));
@@ -172,7 +174,7 @@ impl Protocol for GreProtocol {
         let mut key_value: Option<u32> = None;
         if key_present {
             if data.len() < offset + 4 {
-                return ParseResult::error("GRE: missing key field".to_string(), data);
+                return Parsed::error("GRE: missing key field", data);
             }
             let key = u32::from_be_bytes([
                 data[offset],
@@ -188,7 +190,7 @@ impl Protocol for GreProtocol {
         // Sequence Number (4 bytes if S bit set)
         if sequence_present {
             if data.len() < offset + 4 {
-                return ParseResult::error("GRE: missing sequence field".to_string(), data);
+                return Parsed::error("GRE: missing sequence field", data);
             }
             let sequence = u32::from_be_bytes([
                 data[offset],
@@ -235,7 +237,7 @@ impl Protocol for GreProtocol {
             child_hints.insert(HintKey::TunnelId, key as u64);
         }
 
-        ParseResult::success(fields, &data[offset..], child_hints)
+        Parsed::ok(&data[offset..], child_hints)
     }
 
     fn schema_fields(&self) -> Vec<FieldDescriptor> {

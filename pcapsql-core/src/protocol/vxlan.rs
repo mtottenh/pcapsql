@@ -5,11 +5,9 @@
 //!
 //! RFC 7348: Virtual eXtensible Local Area Network (VXLAN)
 
-use smallvec::SmallVec;
-
 use super::{
-    Cond, Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult, Protocol,
-    TunnelType,
+    Cond, Dispatch, DispatchRule, FieldSink, FieldValue, HintKey, Hints, ParseContext, Parsed,
+    Protocol, TunnelType,
 };
 use crate::schema::{DataKind, FieldDescriptor};
 
@@ -56,13 +54,16 @@ impl Protocol for VxlanProtocol {
         }
     }
 
-    fn parse<'a>(&self, data: &'a [u8], _context: &ParseContext) -> ParseResult<'a> {
+    fn parse_into<'a>(
+        &self,
+        data: &'a [u8],
+        _context: &ParseContext,
+        fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
         // VXLAN header is 8 bytes
         if data.len() < 8 {
-            return ParseResult::error("VXLAN header too short".to_string(), data);
+            return Parsed::error("VXLAN header too short", data);
         }
-
-        let mut fields = SmallVec::new();
 
         // Byte 0: Flags
         // Bit 3 (I flag): Must be 1 to indicate valid VNI per RFC 7348
@@ -111,7 +112,7 @@ impl Protocol for VxlanProtocol {
         child_hints.insert(HintKey::TunnelType, TunnelType::Vxlan as u64);
         child_hints.insert(HintKey::TunnelId, vni as u64);
 
-        ParseResult::success(fields, &data[8..], child_hints)
+        Parsed::ok(&data[8..], child_hints)
     }
 
     fn schema_fields(&self) -> Vec<FieldDescriptor> {
