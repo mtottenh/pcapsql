@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use compact_str::CompactString;
+use tls_parser::TlsCipherSuite;
 
 use crate::format::names::tls_version_name;
 use crate::schema::{DataKind, FieldDescriptor};
@@ -272,15 +273,12 @@ pub(crate) fn is_tls_port(port: u16) -> bool {
     TLS_PORTS.contains(&port)
 }
 
-/// IANA name of a TLS cipher suite id (hex for unknown suites).
+/// IANA name of a TLS cipher suite id (hex for unknown suites): the
+/// registry `tls-parser` carries, which the `tls` table names suites by too.
 pub fn cipher_suite_name(id: u16) -> String {
-    match id {
-        0x1301 => "TLS_AES_128_GCM_SHA256".to_string(),
-        0x1302 => "TLS_AES_256_GCM_SHA384".to_string(),
-        0x1303 => "TLS_CHACHA20_POLY1305_SHA256".to_string(),
-        0xc02f => "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256".to_string(),
-        0xc030 => "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384".to_string(),
-        _ => format!("0x{id:04x}"),
+    match TlsCipherSuite::from_id(id) {
+        Some(suite) => suite.name.to_string(),
+        None => format!("0x{id:04x}"),
     }
 }
 

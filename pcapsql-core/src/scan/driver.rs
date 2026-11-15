@@ -219,7 +219,8 @@ impl<R: PacketReader> PartitionScan<R> {
     }
 
     /// Decrypt TLS with `keylog` when building the plan's stream tables:
-    /// `tls_sessions.is_decrypted` and the rows of `http2` depend on it.
+    /// `tls_sessions.is_decrypted`, the rows of `http2` and the rows of
+    /// `http_messages` for HTTP/1 inside TLS depend on it.
     /// Nothing else does, and a scan without stream tables ignores it. To
     /// be called before the first [`step`](Self::step).
     pub fn with_keylog(mut self, keylog: &KeyLog) -> Self {

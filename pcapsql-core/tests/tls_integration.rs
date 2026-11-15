@@ -559,66 +559,8 @@ fn test_full_pipeline_with_synthetic_data() {
     // Verify we can decrypt
     assert!(session.can_decrypt());
 
-    // The decryption context is ready for actual encrypted records
-    // In a real test with captured data, we would:
-    // 1. Read encrypted TLS records from PCAP
-    // 2. Call session.decrypt_record() for each record
-    // 3. Verify the decrypted plaintext matches expected data
-}
-
-/// Test loading pre-captured TLS 1.2 data (if available)
-#[test]
-fn test_precaptured_tls12() {
-    let pcap_path = "testdata/tls/tls12_aes128gcm.pcap";
-    let keylog_path = "testdata/tls/tls12_aes128gcm.keys";
-
-    if !std::path::Path::new(pcap_path).exists() {
-        eprintln!(
-            "Skipping test_precaptured_tls12: test data not found at {}",
-            pcap_path
-        );
-        eprintln!("See testdata/tls/README.md for instructions on generating test data");
-        return;
-    }
-
-    let keylog = KeyLog::from_file(keylog_path).expect("Failed to load keylog");
-    assert!(keylog.session_count() > 0, "Keylog should have sessions");
-}
-
-/// Test loading pre-captured TLS 1.3 data (if available)
-#[test]
-fn test_precaptured_tls13() {
-    let pcap_path = "testdata/tls/tls13_aes256gcm.pcap";
-    let keylog_path = "testdata/tls/tls13_aes256gcm.keys";
-
-    if !std::path::Path::new(pcap_path).exists() {
-        eprintln!(
-            "Skipping test_precaptured_tls13: test data not found at {}",
-            pcap_path
-        );
-        return;
-    }
-
-    let keylog = KeyLog::from_file(keylog_path).expect("Failed to load keylog");
-    assert!(keylog.session_count() > 0, "Keylog should have sessions");
-}
-
-/// Test loading pre-captured HTTP/2 data (if available)
-#[test]
-fn test_precaptured_http2() {
-    let pcap_path = "testdata/tls/http2_multiplex.pcap";
-    let keylog_path = "testdata/tls/http2_multiplex.keys";
-
-    if !std::path::Path::new(pcap_path).exists() {
-        eprintln!(
-            "Skipping test_precaptured_http2: test data not found at {}",
-            pcap_path
-        );
-        return;
-    }
-
-    let keylog = KeyLog::from_file(keylog_path).expect("Failed to load keylog");
-    assert!(keylog.session_count() > 0, "Keylog should have sessions");
+    // The decryption context is ready for encrypted records: captures are
+    // decrypted, record by record, in `tls_fixtures.rs`.
 }
 
 // ============================================================================

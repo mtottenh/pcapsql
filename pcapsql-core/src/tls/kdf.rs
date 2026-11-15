@@ -81,6 +81,23 @@ impl AeadAlgorithm {
         }
     }
 
+    /// The length of the part of a TLS 1.2 record nonce that comes from the
+    /// key block (the "fixed IV"). AES-GCM takes 4 bytes from there and 8
+    /// from each record (RFC 5288); ChaCha20-Poly1305 takes all 12 from the
+    /// key block and nothing from the record (RFC 7905).
+    pub fn tls12_fixed_iv_len(&self) -> usize {
+        match self {
+            AeadAlgorithm::Aes128Gcm | AeadAlgorithm::Aes256Gcm => 4,
+            AeadAlgorithm::Chacha20Poly1305 => 12,
+        }
+    }
+
+    /// The length of the nonce part each TLS 1.2 record carries in front of
+    /// its ciphertext: see [`tls12_fixed_iv_len`](Self::tls12_fixed_iv_len).
+    pub fn tls12_explicit_nonce_len(&self) -> usize {
+        self.iv_len() - self.tls12_fixed_iv_len()
+    }
+
     /// Get the authentication tag size in bytes.
     pub fn tag_len(&self) -> usize {
         16 // All supported AEAD ciphers use 16-byte tags
@@ -254,7 +271,7 @@ pub fn derive_tls12_keys(
     // For AEAD ciphers, MAC key length is 0
     let mac_key_len = 0;
     let enc_key_len = aead.key_len();
-    let iv_len = 4; // Fixed IV length for TLS 1.2 AEAD
+    let iv_len = aead.tls12_fixed_iv_len();
 
     // Total key material needed
     let key_block_len = 2 * mac_key_len + 2 * enc_key_len + 2 * iv_len;

@@ -5,8 +5,8 @@
 //! `reference_rows` reads a capture with the shared scan layer alone, and
 //! `reference_rows_decrypted` does it with a key log. The tests compare that with what a query
 //! returns, cell by cell and in order: over the captures of the golden corpus, over the
-//! TLS 1.3 + HTTP/2 capture of `pcapsql_testgen::tls` with its key log, and over a generated
-//! capture whose tables are larger than a chunk. `golden_differential.rs` compares the same
+//! captures of `pcapsql_testgen::tls` (HTTP/2 over TLS 1.3, HTTP/2 and HTTP/1.1 over TLS 1.2)
+//! with their key logs, and over a generated capture whose tables are larger than a chunk. `golden_differential.rs` compares the same
 //! tables with the DataFusion frontend's snapshots.
 //!
 //! The rest is what is particular to these tables: one partition per file whatever the
@@ -26,7 +26,7 @@ use pcapsql_testgen::corpus::{
     eth, ipv4, tcp, to_capture, ETH_IP4, HTTP_REQUEST, HTTP_RESPONSE, LINKTYPE_ETHERNET, MAC_A,
     MAC_B,
 };
-use pcapsql_testgen::tls::{TLS13_HTTP2_CAPTURE, TLS13_HTTP2_KEYLOG};
+use pcapsql_testgen::tls::{FIXTURES, TLS13_HTTP2_CAPTURE, TLS13_HTTP2_KEYLOG};
 
 const STREAM_TABLES: [&str; 4] = ["http2", "http_messages", "tcp_connections", "tls_sessions"];
 
@@ -227,7 +227,9 @@ fn every_stream_table_of_every_capture_equals_the_shared_scan_layer() -> Result<
         .iter()
         .map(|name| ((*name).to_owned(), golden::capture(name)))
         .collect();
-    captures.push(("tls13_http2".to_owned(), TLS13_HTTP2_CAPTURE.to_vec()));
+    for (stem, _, capture, _) in FIXTURES {
+        captures.push(((*stem).to_owned(), capture.to_vec()));
+    }
     // Tables of more than one chunk: 5,000 connections, 10,000 messages.
     captures.push(("exchanges".to_owned(), http_exchange_capture(5000)));
 
@@ -690,6 +692,209 @@ fn files_that_cannot_be_read_fail_at_bind() -> Result<()> {
     Ok(())
 }
 
+/// TLS 1.2 as TLS 1.3, and HTTP/1.1 inside TLS as HTTP/2: every fixture of
+/// `pcapsql_testgen::tls` with its key log.
+#[test]
+fn a_key_log_decrypts_every_tls_fixture() -> Result<()> {
+    let connection = connect()?;
+    let fixture = Fixture::new();
+    // (the file stem, the session, the table of what it carries and its rows)
+    let expected = [
+        (
+            "tls13_http2",
+            ["TLS 1.3", "TLS_AES_128_GCM_SHA256", "h2"],
+            ("http2", "8"),
+        ),
+        (
+            "tls12_http2",
+            ["TLS 1.2", "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256", "h2"],
+            ("http2", "8"),
+        ),
+        (
+            "tls12_http1",
+            [
+                "TLS 1.2",
+                "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+                "http/1.1",
+            ],
+            ("http_messages", "2"),
+        ),
+    ];
+    assert_eq!(expected.len(), FIXTURES.len());
+    let mut paths = Vec::new();
+    for ((stem, _, bytes, keylog), (name, session, (carried, messages))) in
+        FIXTURES.iter().zip(expected)
+    {
+        assert_eq!(*stem, name);
+        let capture = fixture.write(&format!("{stem}.pcap"), bytes);
+        let keys = fixture.write(&format!("{stem}.keys"), keylog.as_bytes());
+        let session_sql = |arguments: &str| {
+            format!(
+                "SELECT version, cipher_suite, alpn, is_decrypted \
+                 FROM read_tls_sessions({arguments})"
+            )
+        };
+        let count = |table: &str, arguments: &str| {
+            value(
+                &connection,
+                &format!("SELECT count(*) FROM read_{table}({arguments})"),
+            )
+        };
+
+        // Without the key log: the session, and nothing of what it carries.
+        let without = format!("'{capture}'");
+        assert_eq!(
+            rows(&connection, &session_sql(&without))?,
+            [[session[0], session[1], session[2], "false"]],
+            "{stem}"
+        );
+        assert_eq!(count("http2", &without)?, "0", "{stem}");
+        assert_eq!(count("http_messages", &without)?, "0", "{stem}");
+
+        // With it: decrypted, and every stream table is what the scan layer builds with
+        // the same key log.
+        let with = format!("'{capture}', keylog := '{keys}'");
+        assert_eq!(
+            rows(&connection, &session_sql(&with))?,
+            [[session[0], session[1], session[2], "true"]],
+            "{stem}"
+        );
+        for table in STREAM_TABLES {
+            let (columns, rows) = reference_rows_decrypted(bytes, table, keylog);
+            for from in [
+                format!("read_{table}({with})"),
+                format!("read_pcap('{capture}', protocol := '{table}', keylog := '{keys}')"),
+            ] {
+                assert_cells(
+                    &connection,
+                    &format!("SELECT * FROM {from}"),
+                    &columns,
+                    &rows,
+                );
+            }
+            let expected = if table == carried { messages } else { "0" };
+            if table == "http2" || table == "http_messages" {
+                assert_eq!(count(table, &with)?, expected, "{stem}: {table}");
+            }
+        }
+        // Every row is of the connection and the session that carried it.
+        assert_eq!(
+            rows(
+                &connection,
+                &format!(
+                    "SELECT count(*), count(c.connection_id), count(s.connection_id), \
+                            any_value(c.server_port), bool_and(s.is_decrypted) \
+                     FROM read_{carried}({with}) h \
+                     LEFT JOIN read_tcp_connections({with}) c USING (connection_id) \
+                     LEFT JOIN read_tls_sessions({with}) s USING (connection_id)"
+                )
+            )?,
+            [[messages, messages, messages, "443", "true"]],
+            "{stem}"
+        );
+        paths.push(capture);
+    }
+
+    // HTTP/1.1 inside TLS, as the columns of `http_messages`.
+    let capture = &paths[2];
+    let keys = fixture.path("tls12_http1.keys");
+    assert_eq!(
+        rows(
+            &connection,
+            &format!(
+                "SELECT frame_number, direction, is_request, method, uri, host, status_code, \
+                        content_type, content_length \
+                 FROM read_http_messages('{capture}', keylog := '{keys}')"
+            )
+        )?,
+        [
+            [
+                "8",
+                "to_server",
+                "true",
+                "GET",
+                "/index.html",
+                "example.test",
+                "NULL",
+                "NULL",
+                "NULL"
+            ],
+            [
+                "10",
+                "to_client",
+                "false",
+                "NULL",
+                "NULL",
+                "NULL",
+                "200",
+                "text/plain",
+                "5"
+            ]
+        ]
+    );
+
+    // One key log with the secrets of every session, for a scan of every capture; and as
+    // the setting.
+    let all: String = FIXTURES.iter().map(|(.., keylog)| *keylog).collect();
+    let all = fixture.write("all.keys", all.as_bytes());
+    let files = format!("['{}']", paths.join("', '"));
+    let sessions = |arguments: &str| {
+        rows(
+            &connection,
+            &format!(
+                "SELECT parse_filename(filename), version, is_decrypted \
+                 FROM read_tls_sessions({files}, filename := true{arguments}) ORDER BY 1"
+            ),
+        )
+    };
+    let decrypted = |decrypted: &'static str| {
+        [
+            ["tls12_http1.pcap", "TLS 1.2", decrypted],
+            ["tls12_http2.pcap", "TLS 1.2", decrypted],
+            ["tls13_http2.pcap", "TLS 1.3", decrypted],
+        ]
+    };
+    assert_eq!(
+        sessions(&format!(", keylog := '{all}'"))?,
+        decrypted("true")
+    );
+    assert_eq!(sessions("")?, decrypted("false"));
+    set(&connection, "pcapsql_keylog", format!("'{all}'"));
+    assert_eq!(sessions("")?, decrypted("true"));
+    assert_eq!(
+        rows(
+            &connection,
+            &format!(
+                "SELECT parse_filename(filename), count(*) \
+                 FROM read_http2({files}, filename := true) GROUP BY ALL ORDER BY 1"
+            )
+        )?,
+        [["tls12_http2.pcap", "8"], ["tls13_http2.pcap", "8"]]
+    );
+    assert_eq!(
+        rows(
+            &connection,
+            &format!(
+                "SELECT parse_filename(filename), count(*) \
+                 FROM read_http_messages({files}, filename := true) GROUP BY ALL ORDER BY 1"
+            )
+        )?,
+        [["tls12_http1.pcap", "2"]]
+    );
+    // The key log of one session decrypts that one.
+    let one = fixture.path("tls12_http2.keys");
+    assert_eq!(
+        sessions(&format!(", keylog := '{one}'"))?,
+        [
+            ["tls12_http1.pcap", "TLS 1.2", "false"],
+            ["tls12_http2.pcap", "TLS 1.2", "true"],
+            ["tls13_http2.pcap", "TLS 1.3", "false"],
+        ]
+    );
+    execute(&connection, "RESET pcapsql_keylog");
+    Ok(())
+}
+
 /// The fixture capture and its key log, written to files.
 fn tls_fixture(fixture: &Fixture) -> (String, String) {
     (
@@ -955,7 +1160,7 @@ fn the_parameter_wins_over_the_setting() -> Result<()> {
             &connection,
             &format!("SELECT count(*) FROM read_tls_packets({quoted})")
         )?,
-        "2"
+        "10"
     );
 
     execute(&connection, "RESET pcapsql_keylog");

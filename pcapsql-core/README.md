@@ -17,7 +17,7 @@ This crate provides the core parsing functionality for pcapsql, without any SQL 
 - **Boundary Index**: Record-boundary checkpoints (persisted as a sidecar) so a capture can be read in parallel partitions, locally or over cloud byte ranges
 - **Scoped Parsing**: `ParseScope` prunes the protocol walk and projects fields to what a query needs
 - **TCP Stream Reassembly**: Connection tracking and application-layer parsing
-- **TLS Decryption**: Support for TLS 1.2/1.3 with SSLKEYLOGFILE
+- **TLS Decryption**: TLS 1.2 and 1.3 with SSLKEYLOGFILE, for the AES-GCM and ChaCha20-Poly1305 cipher suites; HTTP/2 and HTTP/1.x inside
 
 ## Quick Start
 
@@ -63,7 +63,7 @@ automatically.
 
 | Layer | Protocols |
 |-------|-----------|
-| Link | Ethernet, VLAN (802.1Q), Linux SLL, Linux SLL2, Netlink, rtnetlink |
+| Link | Ethernet, VLAN (802.1Q), Linux SLL, Linux SLL2, Netlink, rtnetlink; captures of raw IPv4 or IPv6 datagrams (`LINKTYPE_IPV4`, `LINKTYPE_IPV6`) |
 | Network | IPv4, IPv6, ARP, ICMP, ICMPv6 |
 | Transport | TCP, UDP |
 | Application | DNS, DHCP, NTP, HTTP, TLS, SSH, QUIC |

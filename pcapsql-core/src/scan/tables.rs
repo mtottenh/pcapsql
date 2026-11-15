@@ -1387,7 +1387,7 @@ fn tls_sessions() -> Vec<ColumnDef> {
         // `sni`, `alpn`: ClientHello extensions
         stream("sni", Str),
         stream("alpn", Str),
-        // A keylog decrypted this session (the Finished message was read)
+        // A keylog decrypted this session (a record was authenticated with its keys)
         stream("is_decrypted", Bool).required(),
         // Frame carrying the ServerHello, if seen
         stream("server_hello_frame", U64),

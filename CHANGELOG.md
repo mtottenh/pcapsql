@@ -102,16 +102,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cannot be opened or is not a key log is an error that names the file and
   the line and repeats no label, random or secret. `read_pcap` accepts and
   ignores `keylog` for a packet table or a view. Decryption is tested with
-  TLS 1.3 (`TLS_AES_128_GCM_SHA256`) carrying HTTP/2; TLS 1.2 is not. A
-  DuckDB secret type was not possible: the C API v2 has none.
+  TLS 1.3 and TLS 1.2, carrying HTTP/2 and HTTP/1.1 (the entries on TLS
+  below and under Fixed). A DuckDB secret type was not possible: the C API
+  v2 has none.
+- **TLS decryption: HTTP/1.x inside TLS is in `http_messages`.** What a
+  decrypted session carries was given to the HTTP/2 parser whatever it was.
+  It is now parsed by the protocol the server selected with ALPN (in the
+  ServerHello before TLS 1.3, in `EncryptedExtensions` in TLS 1.3): `h2` as
+  HTTP/2, `http/1.1` and `http/1.0` as HTTP/1.x, with the rows of HTTP in
+  the clear, in `http_messages`; anything else is decrypted and not parsed.
+  Without a selected protocol it is HTTP/2 when the client starts with the
+  HTTP/2 preface and HTTP/1.x otherwise. A message whose end is in a later
+  TLS record is kept until it is complete. Both engines. A response to
+  `HEAD` is still not a row, in the clear or inside TLS: the HTTP/1 stream
+  parser does not know what was asked and waits for the body the
+  `Content-Length` announces.
+- **Captures of raw IP datagrams.** A capture whose link type is
+  `LINKTYPE_IPV4` (228) or `LINKTYPE_IPV6` (229) has no link-layer header;
+  its frames were parsed as nothing, so every table but `frames` was empty
+  (`fuzz/corpus/fuzz_pcap_reader/tls12-dsb.pcapng` had 17 frames and no
+  connection). The IPv4 and IPv6 parsers are now the first layer of such a
+  capture. `LINKTYPE_RAW` (101), where each frame is one or the other, is
+  still not parsed.
+- **`pcapsql-testgen`: captures of HTTP over TLS 1.2, and a generator for
+  any suite.** `pcapsql_testgen::tls::Scenario` describes one connection by
+  version (TLS 1.2 or 1.3), cipher suite, what it carries (HTTP/2 or
+  HTTP/1.1), how its records are laid out (one per segment, or batched the
+  way stacks send them: several handshake messages in a record, several
+  records in a segment, a record cut by a segment boundary, a closing
+  alert) and whether ALPN is negotiated. Two more captures are kept with
+  their key logs: `fixtures/tls12_http2` and `fixtures/tls12_http1`, both
+  `TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256`. The sealing in
+  `pcapsql-core/tests/tls_fixtures.rs` (which replaces `tls13_http2.rs`) is
+  now an implementation of its own of the record protection of RFC 5246,
+  5288, 7905 and 8446 on `ring`'s HMAC and AEAD, with nothing of
+  `pcapsql_core::tls` in it; the three kept captures also decrypt with
+  Python's `cryptography` package. The test decrypts every suite the
+  decryption has, in both layouts (11 of TLS 1.2, 3 of TLS 1.3), and
+  Wireshark's `tls12-dsb.pcapng` with the secrets it carries. The tests
+  that skipped for lack of `testdata/tls/` are gone: those of
+  `e2e_tls_http2.rs` run on the kept captures.
 - **`pcapsql-testgen`: a capture of HTTP/2 over TLS 1.3 with its key log.**
   `pcapsql_testgen::tls` describes one connection (a TLS 1.3 handshake up to
   both `Finished` messages, one request and its response, a close) and holds
   the capture and the key log as `fixtures/tls13_http2.pcap` and `.keys`.
-  The crate has no dependencies and does not encrypt:
-  `pcapsql-core/tests/tls13_http2.rs` seals the records with the keys the
-  decryption derives and fails if the result is not the committed file
-  (`PCAPSQL_FIXTURE_UPDATE=1` writes it again). It is the first capture in
+  The crate has no dependencies and does not encrypt: a test of
+  `pcapsql-core` seals the records and fails if the result is not the
+  committed file (`PCAPSQL_FIXTURE_UPDATE=1` writes it again). It is the first capture in
   the repository that the key log path decrypts end to end; the tests of
   core, of the DataFusion engine (`e2e_tls_http2.rs`) and of the DuckDB
   extension read it.
@@ -465,6 +502,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`pcapsql-core`: `StreamParseResult::Transform` carries every message.**
+  Its `metadata: Option<ParsedMessage>` is `messages: Vec<ParsedMessage>`,
+  and the stream manager keeps what the child parser does not consume of
+  the transformed stream, per direction, and gives it again with what
+  follows (`StreamParser::parse_stream` sees a decrypted stream the way it
+  sees a reassembled one). `Http2StreamParser::parse_stream` consumes
+  complete frames only and no longer buffers.
+  `AeadAlgorithm::tls12_fixed_iv_len` and `tls12_explicit_nonce_len` are
+  new; `derive_tls12_keys` returns 12-byte IVs for ChaCha20-Poly1305.
 - **Behaviour change: one set of protocol name tables; the parsers' name
   columns follow it.** A parser used to carry its own table for each name
   column (`icmp.type_name`, `bgp.message_type_name`, ...), next to the tables
@@ -919,6 +965,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **TLS 1.2 was never decrypted.** With a key log, a TLS 1.2 session had
+  `is_decrypted = false` and gave no row, for every cipher suite. Before
+  TLS 1.3 a side protects everything it sends after its ChangeCipherSpec,
+  starting with its `Finished`, and each record counts in the sequence
+  number the next one is authenticated with. The decrypting parser only
+  decrypted application-data records, so the first of them was checked
+  with sequence number 0 instead of 1 and failed, and so did every one
+  after it. Handshake and alert records after ChangeCipherSpec are now
+  decrypted too. Found by the first TLS 1.2 capture that is decrypted in a
+  test; all AES-GCM and ChaCha20-Poly1305 suites of TLS 1.2 are tested now.
+- **TLS 1.2 with ChaCha20-Poly1305 used the AES-GCM nonce.** The key block
+  was cut for a 4-byte IV and the first 8 bytes of each record were taken
+  as an explicit nonce. RFC 7905 has a 12-byte IV, XORed with the sequence
+  number, and nothing in the record.
+- **`tls_sessions.is_decrypted` could only be true for TLS 1.3.** It was set
+  when the decrypting parser reported a TLS 1.3 `Finished`. It is now set
+  when a record of the session was decrypted, which for these ciphers means
+  it was authenticated with the key log's secrets.
+- **Decryption stopped at a TLS record that did not end with its TCP
+  segment.** The decrypting TLS parser and the HTTP/2 parser each kept a
+  buffer of their own for the bytes of an incomplete record or frame, while
+  the reassembler kept the same bytes and gave them again with the next
+  segment: the bytes were then there twice and nothing after them parsed.
+  Each parser also had one buffer per connection for both directions. A
+  record split over two segments, which every record longer than a segment
+  is, ended the decryption of the connection; so did an HTTP/2 frame split
+  over two records. The parsers keep no stream bytes any more: what is not
+  consumed is given again by the reassembler, or for decrypted bytes by
+  the stream manager, per direction.
+- **TLS 1.3: handshake messages that share a record, and data before the
+  client's `Finished`.** Only the first handshake message of a decrypted
+  record was looked at, so a server that sends `EncryptedExtensions`,
+  `Certificate`, `CertificateVerify` and `Finished` in one record (most
+  do) was never seen to finish, and its application data was then
+  decrypted with the handshake keys and failed. The messages of a record
+  are all read now, across records when one is split. And each side
+  changes to its application keys after its own `Finished`: what a server
+  sends before the client's is decrypted with the server's application
+  keys, not with its handshake keys.
+- **Several TLS records in one segment: only the first was reported.** When
+  a segment had decrypted data, the records after the first were dropped
+  from the parser's messages, so a `Finished` behind another record did not
+  count.
+- **The `tls` table had no row for an application-data record.** Every
+  complete application-data record was a parse error (`tls-parser` 0.12
+  reads the content as "one or more" messages and fails on the empty rest),
+  so `tls` listed the handshake and, of the data, only records cut by the
+  end of their segment. A record whose content is encrypted is now a row
+  with `record_type`, `record_version` and `version`: application data
+  (with `has_app_data` and `app_data_length`, the record's length), an
+  alert that is not two bytes long, and a handshake record that is not
+  handshake messages (before TLS 1.3, the `Finished` after
+  ChangeCipherSpec). An encrypted alert no longer has made-up
+  `alert_level` and `alert_description` values. `tls` therefore has more
+  rows for the same capture: 10 instead of 2 for
+  `fixtures/tls13_http2.pcap`. And a segment that does not start with a
+  record header (the middle of a record that began in an earlier segment)
+  is no longer a row: when its first bytes, read as a header, announced
+  more than the segment held, it was one, with a `record_type` and a
+  `version` that were ciphertext. Both engines.
+- **`tls_sessions.cipher_suite` was `0x....` for most suites.** The stream
+  tables named five suites and gave the number of any other. They use the
+  IANA registry the `tls` table uses now
+  (`TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256`, not `0xc02b`).
 - **`http2.connection_id` was always NULL.** The column was filled from a
   message field of that name, which the HTTP/2 stream parser never sets. It
   is now the id of the TCP connection that carried the frame, as in

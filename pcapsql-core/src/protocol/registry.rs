@@ -1014,7 +1014,7 @@ mod tests {
             }
         }
         assert!(matched > 2000, "the contexts should select children");
-        for link_type in [0u16, 1, 101, 113, 253, 276] {
+        for link_type in [0u16, 1, 101, 113, 228, 229, 253, 276] {
             let ctx = ParseContext::new(link_type);
             let indexed = registry.find_next(None, &ctx).map(|(i, _)| i);
             assert_eq!(indexed, registry.find_index(&ctx), "link type {link_type}");

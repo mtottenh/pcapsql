@@ -367,7 +367,11 @@ impl TlsSession {
     /// Decrypt a TLS record.
     ///
     /// Returns the decrypted plaintext. For TLS 1.3, this automatically uses
-    /// the correct keys based on the handshake phase.
+    /// the correct keys based on the handshake phase: each side protects
+    /// what it sends with its handshake keys up to and including its own
+    /// `Finished`, and with its application keys after it. The server's
+    /// comes first, so what the server sends between the two is already
+    /// under its application keys.
     pub fn decrypt_record(
         &mut self,
         direction: Direction,
@@ -381,19 +385,16 @@ impl TlsSession {
         let version = self.handshake.version.unwrap_or(TlsVersion::Tls12);
         let protocol_version = version.to_wire();
 
-        // For TLS 1.3, select the correct decryption context based on handshake phase
-        let ctx = if self.state == SessionState::Tls13HandshakeEncrypted {
-            // During handshake phase, use handshake keys
-            match direction {
-                Direction::ClientToServer => self.client_hs_decrypt.as_mut(),
-                Direction::ServerToClient => self.server_hs_decrypt.as_mut(),
+        let handshake_phase = self.state == SessionState::Tls13HandshakeEncrypted;
+        let ctx = match direction {
+            Direction::ClientToServer if handshake_phase => self.client_hs_decrypt.as_mut(),
+            Direction::ClientToServer => self.client_decrypt.as_mut(),
+            Direction::ServerToClient
+                if handshake_phase && self.tls13_hs_phase == Tls13HandshakePhase::Initial =>
+            {
+                self.server_hs_decrypt.as_mut()
             }
-        } else {
-            // Application data phase, use traffic keys
-            match direction {
-                Direction::ClientToServer => self.client_decrypt.as_mut(),
-                Direction::ServerToClient => self.server_decrypt.as_mut(),
-            }
+            Direction::ServerToClient => self.server_decrypt.as_mut(),
         };
 
         let ctx = ctx.ok_or(SessionError::NotInitialized)?;
@@ -675,5 +676,92 @@ SERVER_TRAFFIC_SECRET_0 0123456789abcdef0123456789abcdef0123456789abcdef01234567
             Some("TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256")
         );
         assert_eq!(cipher_suite_name(0x0000), None);
+    }
+
+    /// A TLS 1.3 record of `secret_hex` with sequence number `sequence`:
+    /// `content` and its content type, sealed with AES-128-GCM.
+    fn seal_tls13(secret_hex: &str, sequence: u64, content: &[u8], content_type: u8) -> Vec<u8> {
+        use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_128_GCM};
+        let secret = hex::decode(secret_hex).unwrap();
+        let keys = derive_tls13_keys(&secret, 0x1301).unwrap();
+        let mut nonce = [0u8; 12];
+        nonce.copy_from_slice(&keys.iv);
+        for (byte, sequence) in nonce[4..].iter_mut().zip(sequence.to_be_bytes()) {
+            *byte ^= sequence;
+        }
+        let mut body = content.to_vec();
+        body.push(content_type);
+        let length = (body.len() + 16) as u16;
+        let [high, low] = length.to_be_bytes();
+        LessSafeKey::new(UnboundKey::new(&AES_128_GCM, &keys.key).unwrap())
+            .seal_in_place_append_tag(
+                Nonce::assume_unique_for_key(nonce),
+                Aad::from([23, 0x03, 0x03, high, low]),
+                &mut body,
+            )
+            .unwrap();
+        body
+    }
+
+    /// Each side changes to its application keys after its own `Finished`:
+    /// what the server sends before the client's is already under them,
+    /// while the client is still on its handshake keys.
+    #[test]
+    fn tls13_keys_change_per_side() {
+        // The secrets of `create_test_keylog_tls13`.
+        const CLIENT_HANDSHAKE: &str =
+            "deadbeef00112233445566778899aabbccddeeff00112233445566778899aabb";
+        const SERVER_HANDSHAKE: &str =
+            "cafebabe556677889900aabbccddeeff00112233445566778899aabbccddeeff";
+        const CLIENT_APPLICATION: &str =
+            "aabbccdd00112233445566778899aabbccddeeff00112233445566778899aabb";
+        const SERVER_APPLICATION: &str =
+            "11223344556677889900aabbccddeeff00112233445566778899aabbccddeeff";
+        let client_random: [u8; 32] =
+            hex::decode("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+                .unwrap()
+                .try_into()
+                .unwrap();
+        let mut session = TlsSession::new(create_test_keylog_tls13());
+        session.process_client_hello(client_random);
+        session
+            .process_server_hello([0x22; 32], 0x1301, TlsVersion::Tls13)
+            .unwrap();
+        let mut open = |direction, record: Vec<u8>| session.decrypt_record(direction, 23, &record);
+
+        // The server's flight, under its handshake keys.
+        let finished = [20, 0, 0, 0];
+        let record = seal_tls13(SERVER_HANDSHAKE, 0, &finished, 22);
+        let plaintext = open(Direction::ServerToClient, record).unwrap();
+        assert_eq!(plaintext, [20, 0, 0, 0, 22]);
+        session.mark_server_finished();
+        let mut open = |direction, record: Vec<u8>| session.decrypt_record(direction, 23, &record);
+
+        // The server goes on with application data; the client has not
+        // finished yet.
+        let record = seal_tls13(SERVER_APPLICATION, 0, b"early", 23);
+        assert_eq!(
+            open(Direction::ServerToClient, record).unwrap(),
+            b"early\x17"
+        );
+        let record = seal_tls13(CLIENT_HANDSHAKE, 0, &finished, 22);
+        assert_eq!(
+            open(Direction::ClientToServer, record).unwrap(),
+            [20, 0, 0, 0, 22]
+        );
+        session.mark_client_finished();
+        let mut open = |direction, record: Vec<u8>| session.decrypt_record(direction, 23, &record);
+
+        // Both on application keys, the server's sequence going on.
+        let record = seal_tls13(CLIENT_APPLICATION, 0, b"request", 23);
+        assert_eq!(
+            open(Direction::ClientToServer, record).unwrap(),
+            b"request\x17"
+        );
+        let record = seal_tls13(SERVER_APPLICATION, 1, b"response", 23);
+        assert_eq!(
+            open(Direction::ServerToClient, record).unwrap(),
+            b"response\x17"
+        );
     }
 }

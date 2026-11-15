@@ -391,10 +391,17 @@ SELECT method, authority, path FROM http2 WHERE method IS NOT NULL;
   what was expected there. It never repeats a label, a client random or a
   secret: no key material goes into a message or DuckDB's log (the debug
   record of a scan says how many sessions the key log has secrets of).
-- What is tested is TLS 1.3 (`TLS_AES_128_GCM_SHA256`) carrying HTTP/2, on a
-  generated capture (`pcapsql-testgen/fixtures/tls13_http2.pcap` with its
-  `.keys`). Decrypted application data is parsed as HTTP/2 only. TLS 1.2
-  decryption is untested and should not be relied on.
+- TLS 1.3 and TLS 1.2 are decrypted, for the cipher suites with
+  AES-128-GCM, AES-256-GCM or ChaCha20-Poly1305 (the three TLS 1.3 suites
+  with them, and those of TLS 1.2). A session with another suite (CBC,
+  AES-CCM) is listed with `is_decrypted = false` and gives no rows. What a
+  session carries is parsed as HTTP/2 (`read_http2`) or as HTTP/1.x
+  (`read_http_messages`), by its ALPN protocol or, without one, by how the
+  client starts. The tests read generated captures
+  (`pcapsql-testgen/fixtures/`, each with its `.keys`): HTTP/2 over
+  TLS 1.3, HTTP/2 and HTTP/1.1 over TLS 1.2; the other suites are tested in
+  `pcapsql-core`. The reference lists what is not decrypted (0-RTT, records
+  after a `KeyUpdate`, a key log without the TLS 1.3 handshake secrets).
 - A DuckDB secret (`CREATE SECRET`) would be the natural home for a key log,
   but the C API v2 of DuckDB 2.0.0 has no function to register a secret type
   or to look a secret up, and `duckdb-neo` 0.20000.2 none either; hence a

@@ -13,7 +13,7 @@
 //! |---|---|
 //! | `tcp_connections` | connection the manager tracked, by first frame |
 //! | `tls_sessions` | connection that carried a TLS handshake, by ClientHello frame |
-//! | `http_messages` | HTTP/1.x message of a reassembled stream, in capture order |
+//! | `http_messages` | HTTP/1.x message of a reassembled stream, or of a decrypted TLS stream, in capture order |
 //! | `http2` | HTTP/2 frame of a decrypted TLS stream, in capture order |
 //!
 //! Three steps, each with its type:
@@ -244,7 +244,9 @@ impl StreamAnalysis {
         let registry = manager.registry_mut();
         registry.register(TlsStreamParser::new());
         registry.register(HttpStreamParser::new());
-        // HTTP/2 is found as the child of a decrypted TLS stream (ALPN h2).
+        // HTTP/2 is found as the child of a decrypted TLS stream (ALPN h2, or
+        // the client preface), as is the HTTP/1 the same parser reads in the
+        // clear.
         registry.register(Http2StreamParser::new());
         Self {
             manager,
@@ -460,8 +462,9 @@ fn tls_sessions(messages: &[ParsedMessage]) -> Vec<TlsSession> {
             }
             _ => {}
         }
-        // The decrypting parser reports the Finished message it could read.
-        if message.fields.contains_key("hs_finished") {
+        // The decrypting parser reports each record it could decrypt: for an
+        // AEAD cipher that means the keys of the key log are the session's.
+        if message.fields.contains_key("decrypted_length") {
             session.is_decrypted = true;
         }
         if session.frame_number == 0 {

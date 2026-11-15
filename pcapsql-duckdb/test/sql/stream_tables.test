@@ -4,8 +4,8 @@
 
 # The in-process tests (itest/tests/stream_tables.rs) compare every stream table with the
 # shared scan layer cell by cell; this file checks the built artifact: the functions, their
-# rows over real captures (the seeds of the reader fuzzer) and over the generated TLS 1.3 +
-# HTTP/2 capture with its key log (pcapsql-testgen/fixtures), the keylog parameter and the
+# rows over real captures (the seeds of the reader fuzzer) and over the generated TLS 1.3 and TLS 1.2
+# captures with their key logs (pcapsql-testgen/fixtures), the keylog parameter and the
 # pcapsql_keylog setting. Paths are relative to pcapsql-duckdb/.
 
 statement error
@@ -125,6 +125,7 @@ http.pcap	1	1
 http_gzip.cap	1	1
 ldap-ssl.pcapng	1	1
 tcp-ecn-sample.pcap	1	1
+tls12-dsb.pcapng	2	2
 v6-http.cap	1	1
 v6.pcap	1	1
 vxlan_simple.pcap	5	5
@@ -143,7 +144,7 @@ query III
 SELECT count(*), count(DISTINCT connection_id), count(DISTINCT (filename, connection_id))
 FROM read_tcp_connections('../fuzz/corpus/fuzz_pcap_reader/*', filename := true);
 ----
-17	5	17
+19	5	19
 
 # The settings that split a packet table's capture do not split a stream table's
 statement ok
@@ -163,7 +164,7 @@ SELECT count(*), min(frame_number), max(frame_number) FROM read_http_messages('.
 query II
 SELECT count(*), sum(connection_id) FROM read_tcp_connections('../fuzz/corpus/fuzz_pcap_reader/*');
 ----
-17	37
+19	40
 
 statement ok
 RESET threads;
@@ -243,6 +244,111 @@ LEFT JOIN read_tcp_connections('../pcapsql-testgen/fixtures/tls13_http2.pcap') c
 LEFT JOIN read_tls_sessions('../pcapsql-testgen/fixtures/tls13_http2.pcap', keylog := '../pcapsql-testgen/fixtures/tls13_http2.keys') s USING (connection_id);
 ----
 8	8	443	example.test	true
+
+# TLS 1.2 (TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256): the same without a key log
+query IITTITTTI
+SELECT frame_number, connection_id, version, cipher_suite, cipher_suite_id, sni, alpn, is_decrypted, server_hello_frame
+FROM read_tls_sessions('../pcapsql-testgen/fixtures/tls12_http2.pcap');
+----
+4	1	TLS 1.2	TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256	49199	example.test	h2	false	5
+
+query II
+SELECT (SELECT count(*) FROM read_http2('../pcapsql-testgen/fixtures/tls12_http2.pcap')), (SELECT count(*) FROM read_http_messages('../pcapsql-testgen/fixtures/tls12_http2.pcap'));
+----
+0	0
+
+# and with it: the records after each side's ChangeCipherSpec are decrypted, its Finished
+# first. The response is two records in the segments 11 and 12, with the DATA frame in both
+query ITT
+SELECT frame_number, version, is_decrypted
+FROM read_tls_sessions('../pcapsql-testgen/fixtures/tls12_http2.pcap', keylog := '../pcapsql-testgen/fixtures/tls12_http2.keys');
+----
+4	TLS 1.2	true
+
+query IITIIITTTTITITIT
+SELECT frame_number, connection_id, frame_type, stream_id, flags, length, method, path, authority, scheme, status,
+       content_type, content_length, user_agent, data_length, end_stream
+FROM read_http2('../pcapsql-testgen/fixtures/tls12_http2.pcap', keylog := '../pcapsql-testgen/fixtures/tls12_http2.keys');
+----
+8	1	SETTINGS	0	0	0	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL
+9	1	SETTINGS	0	0	0	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL
+10	1	SETTINGS	0	1	0	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL
+10	1	HEADERS	1	5	37	GET	/	example.test	https	NULL	NULL	NULL	pcapsql-corpus/1.0	NULL	true
+12	1	SETTINGS	0	1	0	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL
+12	1	HEADERS	1	4	16	NULL	NULL	NULL	NULL	200	text/plain	5	NULL	NULL	false
+12	1	DATA	1	1	5	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	5	true
+13	1	GOAWAY	0	0	8	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL
+
+query IIITT
+SELECT count(*), count(c.connection_id), any_value(c.server_port), any_value(s.cipher_suite), bool_and(s.is_decrypted)
+FROM read_http2('../pcapsql-testgen/fixtures/tls12_http2.pcap', keylog := '../pcapsql-testgen/fixtures/tls12_http2.keys') h
+LEFT JOIN read_tcp_connections('../pcapsql-testgen/fixtures/tls12_http2.pcap') c USING (connection_id)
+LEFT JOIN read_tls_sessions('../pcapsql-testgen/fixtures/tls12_http2.pcap', keylog := '../pcapsql-testgen/fixtures/tls12_http2.keys') s USING (connection_id);
+----
+8	8	443	TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256	true
+
+# HTTP/1.1 inside TLS is in http_messages, as HTTP/1.1 in the clear is
+query TTTT
+SELECT version, cipher_suite, alpn, is_decrypted
+FROM read_tls_sessions('../pcapsql-testgen/fixtures/tls12_http1.pcap', keylog := '../pcapsql-testgen/fixtures/tls12_http1.keys');
+----
+TLS 1.2	TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256	http/1.1	true
+
+query IIITTTTTTITIT
+SELECT frame_number, connection_id, message_id, direction, is_request, method, uri, http_version, host, status_code,
+       content_type, content_length, user_agent
+FROM read_http_messages('../pcapsql-testgen/fixtures/tls12_http1.pcap', keylog := '../pcapsql-testgen/fixtures/tls12_http1.keys');
+----
+8	1	0	to_server	true	GET	/index.html	HTTP/1.1	example.test	NULL	NULL	NULL	pcapsql-corpus/1.0
+10	1	0	to_client	false	NULL	NULL	HTTP/1.1	NULL	200	text/plain	5	NULL
+
+query II
+SELECT (SELECT count(*) FROM read_http_messages('../pcapsql-testgen/fixtures/tls12_http1.pcap')),
+       (SELECT count(*) FROM read_http2('../pcapsql-testgen/fixtures/tls12_http1.pcap', keylog := '../pcapsql-testgen/fixtures/tls12_http1.keys'));
+----
+0	0
+
+query III
+SELECT count(*), count(c.connection_id), bool_and(s.is_decrypted)
+FROM read_pcap('../pcapsql-testgen/fixtures/tls12_http1.pcap', protocol := 'http_messages', keylog := '../pcapsql-testgen/fixtures/tls12_http1.keys') h
+LEFT JOIN read_tcp_connections('../pcapsql-testgen/fixtures/tls12_http1.pcap') c USING (connection_id)
+LEFT JOIN read_tls_sessions('../pcapsql-testgen/fixtures/tls12_http1.pcap', keylog := '../pcapsql-testgen/fixtures/tls12_http1.keys') s USING (connection_id);
+----
+2	2	true
+
+# The key log of another session decrypts nothing
+query TI
+SELECT is_decrypted, (SELECT count(*) FROM read_http2('../pcapsql-testgen/fixtures/tls12_http2.pcap', keylog := '../pcapsql-testgen/fixtures/tls13_http2.keys'))
+FROM read_tls_sessions('../pcapsql-testgen/fixtures/tls12_http2.pcap', keylog := '../pcapsql-testgen/fixtures/tls13_http2.keys');
+----
+false	0
+
+# The packet table has a row for the records that are encrypted: the header, and for
+# application data its length. Frame 11 is the start of a record that ends in frame 12
+query IITIIII
+SELECT frame_number, record_type, version, handshake_type, has_app_data::INT, app_data_length, alert_level
+FROM read_tls('../pcapsql-testgen/fixtures/tls12_http2.pcap');
+----
+4	22	TLS 1.0	1	NULL	NULL	NULL
+5	22	TLS 1.2	2	NULL	NULL	NULL
+6	22	TLS 1.2	16	NULL	NULL	NULL
+7	20	TLS 1.2	NULL	NULL	NULL	NULL
+8	23	TLS 1.2	NULL	1	57	NULL
+9	23	TLS 1.2	NULL	1	33	NULL
+10	23	TLS 1.2	NULL	1	79	NULL
+11	23	TLS 1.2	NULL	NULL	NULL	NULL
+13	23	TLS 1.2	NULL	1	41	NULL
+14	21	TLS 1.2	NULL	NULL	NULL	NULL
+
+# A capture without a link layer (LINKTYPE_IPV4, with its secrets in Decryption Secrets
+# Blocks, which are not read): its connections and its sessions
+query IITITT
+SELECT c.connection_id, c.first_frame, c.server_ip, c.server_port, s.sni, s.cipher_suite
+FROM read_tcp_connections('../fuzz/corpus/fuzz_pcap_reader/tls12-dsb.pcapng') c
+JOIN read_tls_sessions('../fuzz/corpus/fuzz_pcap_reader/tls12-dsb.pcapng') s USING (connection_id) ORDER BY 1;
+----
+1	1	93.184.216.34	443	example.com	TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+2	10	93.184.216.34	443	example.net	TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
 
 # A capture the key log has no session of is read as without one
 query I
@@ -353,7 +459,7 @@ keylog
 query I
 SELECT count(*) FROM read_pcap('../pcapsql-testgen/fixtures/tls13_http2.pcap', protocol := 'tls', keylog := 'nope.keys');
 ----
-2
+10
 
 query I
 SELECT count(*) FROM read_pcap('../pcapsql-testgen/fixtures/tls13_http2.pcap', keylog := 'nope.keys');
