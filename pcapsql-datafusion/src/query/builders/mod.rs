@@ -28,6 +28,9 @@
 //! in an [`ArrowSink`] per table or fused join; where its batches go is
 //! `crate::query::providers::BatchDelivery`'s.
 
+mod fixed;
+#[cfg(test)]
+mod reference_tests;
 mod sink;
 
 pub use sink::{ArrowList, ArrowSink};

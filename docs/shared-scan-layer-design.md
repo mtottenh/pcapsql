@@ -503,7 +503,7 @@ How each sink stores without matching on type per value:
 
 | Sink | Construction (once) | Per value |
 |---|---|---|
-| `ArrowSink` (DataFusion) | From `&[OutColumn]`: one typed `Vec` per builder type (`u16s: Vec<UInt16Builder>`, `strs: Vec<StringBuilder>`, ...) and `slot: Box<[u16]>` mapping `OutCol` to the index in its type's vector | `self.u16s[self.slot[col]].append_value(v)`: one load, no `match`. Lists keep a small enum (items are few) |
+| `ArrowSink` (DataFusion) | From `&[OutColumn]`: one typed `Vec` per column type (`u16s: Vec<Values<u16>>`, `strs: Vec<StringBuilder>`, ...) and `slot: Box<[u16]>` mapping `OutCol` to the index in its type's vector. As built, a fixed-width column is a vector of values with a validity bitmap made at its first NULL of a batch (`builders/fixed.rs`); text, binary and list columns are Arrow builders | `self.u16s[self.slot[col]].push(v)`: one load, no `match`. Lists keep a small enum (items are few) |
 | `ChunkWriter<'chunk>` (DuckDB) | Per `exec`: fetch each output vector's data pointer and validity mask once (roadmap 5.3) | `*data[col].cast::<u16>().add(row) = v`; strings and blobs go to the vector's arena; lists track child offset per column |
 
 `ArrowSink` additionally has, outside the trait:

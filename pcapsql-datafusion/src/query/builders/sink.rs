@@ -1,5 +1,5 @@
-//! The Arrow row sink: stores the rows of one output of a scan in Arrow
-//! builders and hands them on as record batches.
+//! The Arrow row sink: stores the rows of one output of a scan column by
+//! column and hands them on as record batches.
 //!
 //! What a cell holds is decided in `pcapsql_core::scan` (`write_value` and
 //! the row writers), which is shared with every other frontend; this file
@@ -9,18 +9,22 @@ use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayRef, AsArray, BinaryBuilder, BooleanBuilder, FixedSizeBinaryBuilder,
-    Float64Builder, Int64Builder, Int8Builder, ListBuilder, StringBuilder, UInt16Builder,
-    UInt32Builder, UInt64Builder, UInt8Builder,
+    Array, ArrayRef, AsArray, BinaryBuilder, FixedSizeBinaryBuilder, ListBuilder, StringBuilder,
+    UInt16Builder, UInt32Builder,
 };
-use arrow::datatypes::{SchemaRef, TimestampMicrosecondType, TimestampNanosecondType};
+use arrow::datatypes::{
+    Float64Type, Int64Type, Int8Type, SchemaRef, TimestampMicrosecondType, TimestampNanosecondType,
+    UInt16Type, UInt32Type, UInt64Type, UInt8Type,
+};
+use arrow::error::ArrowError;
 use arrow::record_batch::{RecordBatch, RecordBatchOptions};
 
+use super::fixed::{Bits, FixedBytes, Values};
 use crate::error::{Error, QueryError};
 use crate::query::arrow_schema::{col_kind_to_arrow_type, out_columns_to_arrow_schema};
 use pcapsql_core::scan::{ColKind, Full, ListSink, OutCol, OutColumn, RowSink};
 
-/// Which of the sink's builder vectors holds a column.
+/// Which of the sink's vectors of columns holds a column.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Store {
     Bool,
@@ -39,8 +43,7 @@ enum Store {
     List,
 }
 
-/// Where a column's builder is: the vector of its type, and its index
-/// there.
+/// Where a column is: the vector of its type, and its index there.
 #[derive(Clone, Copy, Debug)]
 struct Slot {
     store: Store,
@@ -56,16 +59,21 @@ enum ListColumn {
     Fixed(ListBuilder<FixedSizeBinaryBuilder>),
 }
 
-/// A [`RowSink`] over Arrow builders: the rows of one output of a scan,
-/// taken out as [`RecordBatch`]es of at most `capacity` rows.
+/// A [`RowSink`] that builds Arrow arrays: the rows of one output of a
+/// scan, taken out as [`RecordBatch`]es of at most `capacity` rows.
 ///
-/// The builders are kept in one vector per Arrow type, with a map from the
+/// The columns are kept in one vector per Arrow type, with a map from the
 /// output column to its place there, so that storing a value is an indexed
 /// append with no dispatch on the column's type.
 ///
-/// A builder gives its buffers away with its batch (Arrow's `finish` leaves
-/// it empty, without capacity). After a full batch each builder is therefore
-/// replaced by one with room for the next: `capacity` rows, and for the
+/// A column of fixed width (booleans, numbers, timestamps, fixed-size
+/// binary) is a vector of its values and a validity bitmap that exists
+/// only once the batch has a NULL in that column (see [`super::fixed`]);
+/// storing a value is a push onto the vector. Text, binary and list columns
+/// are Arrow's builders.
+///
+/// A column gives its buffers away with its batch. After a full batch each
+/// column therefore gets room for the next: `capacity` rows, and for the
 /// bytes of text and binary values and the items of lists what the batch
 /// just taken held plus an eighth (see [`next_capacity`]), so that a batch
 /// like the last one is built without growing a buffer. After a batch that
@@ -80,23 +88,23 @@ pub struct ArrowSink {
     capacity: usize,
     rows: usize,
     slots: Box<[Slot]>,
-    bools: Vec<BooleanBuilder>,
-    u8s: Vec<UInt8Builder>,
-    u16s: Vec<UInt16Builder>,
-    u32s: Vec<UInt32Builder>,
-    u64s: Vec<UInt64Builder>,
-    i8s: Vec<Int8Builder>,
-    i64s: Vec<Int64Builder>,
-    f64s: Vec<Float64Builder>,
+    bools: Vec<Bits>,
+    u8s: Vec<Values<u8>>,
+    u16s: Vec<Values<u16>>,
+    u32s: Vec<Values<u32>>,
+    u64s: Vec<Values<u64>>,
+    i8s: Vec<Values<i8>>,
+    i64s: Vec<Values<i64>>,
+    f64s: Vec<Values<f64>>,
     strs: Vec<StringBuilder>,
     bins: Vec<BinaryBuilder>,
-    fixed: Vec<FixedSizeBinaryBuilder>,
+    fixed: Vec<FixedBytes>,
     /// Timestamps of either unit, as their integer.
-    timestamps: Vec<Int64Builder>,
+    timestamps: Vec<Values<i64>>,
     lists: Vec<ListColumn>,
 }
 
-/// The capacity, in value bytes or list items, of the builder that follows
+/// The capacity, in value bytes or list items, of the column that follows
 /// one whose batch held `used`: an eighth more, so that the usual variation
 /// between batches does not double the buffer, and little enough that a
 /// batch kept in memory is not much larger than its values.
@@ -104,9 +112,9 @@ fn next_capacity(used: usize) -> usize {
     used + used / 8
 }
 
-fn push<B>(builders: &mut Vec<B>, builder: B) -> u16 {
-    builders.push(builder);
-    (builders.len() - 1) as u16
+fn push<C>(columns: &mut Vec<C>, column: C) -> u16 {
+    columns.push(column);
+    (columns.len() - 1) as u16
 }
 
 impl ArrowSink {
@@ -153,43 +161,18 @@ impl ArrowSink {
             lists: Vec::new(),
         };
         let n = capacity;
-        let fixed = |width: u16| FixedSizeBinaryBuilder::with_capacity(n, i32::from(width));
         sink.slots = columns
             .iter()
             .map(|column| {
                 let (store, index) = match column.kind {
-                    ColKind::Bool => (
-                        Store::Bool,
-                        push(&mut sink.bools, BooleanBuilder::with_capacity(n)),
-                    ),
-                    ColKind::U8 => (
-                        Store::U8,
-                        push(&mut sink.u8s, UInt8Builder::with_capacity(n)),
-                    ),
-                    ColKind::U16 => (
-                        Store::U16,
-                        push(&mut sink.u16s, UInt16Builder::with_capacity(n)),
-                    ),
-                    ColKind::U32 => (
-                        Store::U32,
-                        push(&mut sink.u32s, UInt32Builder::with_capacity(n)),
-                    ),
-                    ColKind::U64 => (
-                        Store::U64,
-                        push(&mut sink.u64s, UInt64Builder::with_capacity(n)),
-                    ),
-                    ColKind::I8 => (
-                        Store::I8,
-                        push(&mut sink.i8s, Int8Builder::with_capacity(n)),
-                    ),
-                    ColKind::I64 => (
-                        Store::I64,
-                        push(&mut sink.i64s, Int64Builder::with_capacity(n)),
-                    ),
-                    ColKind::F64 => (
-                        Store::F64,
-                        push(&mut sink.f64s, Float64Builder::with_capacity(n)),
-                    ),
+                    ColKind::Bool => (Store::Bool, push(&mut sink.bools, Bits::with_capacity(n))),
+                    ColKind::U8 => (Store::U8, push(&mut sink.u8s, Values::with_capacity(n))),
+                    ColKind::U16 => (Store::U16, push(&mut sink.u16s, Values::with_capacity(n))),
+                    ColKind::U32 => (Store::U32, push(&mut sink.u32s, Values::with_capacity(n))),
+                    ColKind::U64 => (Store::U64, push(&mut sink.u64s, Values::with_capacity(n))),
+                    ColKind::I8 => (Store::I8, push(&mut sink.i8s, Values::with_capacity(n))),
+                    ColKind::I64 => (Store::I64, push(&mut sink.i64s, Values::with_capacity(n))),
+                    ColKind::F64 => (Store::F64, push(&mut sink.f64s, Values::with_capacity(n))),
                     ColKind::Str => (
                         Store::Str,
                         push(&mut sink.strs, StringBuilder::with_capacity(n, n * 32)),
@@ -198,14 +181,17 @@ impl ArrowSink {
                         Store::Bin,
                         push(&mut sink.bins, BinaryBuilder::with_capacity(n, n * 64)),
                     ),
-                    ColKind::Fixed(width) => (Store::Fixed, push(&mut sink.fixed, fixed(width))),
+                    ColKind::Fixed(width) => (
+                        Store::Fixed,
+                        push(&mut sink.fixed, FixedBytes::with_capacity(n, width)),
+                    ),
                     ColKind::TsMicros => (
                         Store::TsMicros,
-                        push(&mut sink.timestamps, Int64Builder::with_capacity(n)),
+                        push(&mut sink.timestamps, Values::with_capacity(n)),
                     ),
                     ColKind::TsNanos => (
                         Store::TsNanos,
-                        push(&mut sink.timestamps, Int64Builder::with_capacity(n)),
+                        push(&mut sink.timestamps, Values::with_capacity(n)),
                     ),
                     ColKind::ListU16 => (
                         Store::List,
@@ -241,7 +227,10 @@ impl ArrowSink {
                         Store::List,
                         push(
                             &mut sink.lists,
-                            ListColumn::Fixed(ListBuilder::with_capacity(fixed(width), n)),
+                            ListColumn::Fixed(ListBuilder::with_capacity(
+                                FixedSizeBinaryBuilder::with_capacity(n, i32::from(width)),
+                                n,
+                            )),
                         ),
                     ),
                 };
@@ -270,7 +259,7 @@ impl ArrowSink {
     /// holds none. A sink without columns (`SELECT count(*)`) gives a batch
     /// that carries only its row count.
     ///
-    /// After a full batch the builders have room for the next; after any
+    /// After a full batch the columns have room for the next; after any
     /// other they hold no memory.
     pub fn take_batch(&mut self) -> Result<Option<RecordBatch>, Error> {
         if self.rows == 0 {
@@ -281,39 +270,33 @@ impl ArrowSink {
         // slow enough to be flushed by time: no next batch to prepare for.
         let refill = self.rows >= self.capacity;
         self.rows = 0;
-        let arrays = self.finish_arrays(refill);
-        RecordBatch::try_new_with_options(Arc::clone(&self.schema), arrays, &options)
+        self.finish_arrays(refill)
+            .and_then(|arrays| {
+                RecordBatch::try_new_with_options(Arc::clone(&self.schema), arrays, &options)
+            })
             .map(Some)
             .map_err(|e| Error::Query(QueryError::Arrow(e.to_string())))
     }
 
     /// The columns' values so far as arrays, in column order, leaving every
-    /// builder empty: with room for a batch like this one with `refill`,
+    /// column empty: with room for a batch like this one with `refill`,
     /// without capacity otherwise.
-    pub(crate) fn finish_arrays(&mut self, refill: bool) -> Vec<ArrayRef> {
+    pub(crate) fn finish_arrays(&mut self, refill: bool) -> Result<Vec<ArrayRef>, ArrowError> {
         let n = self.capacity;
+        // The rows a fixed-width column gets room for.
+        let rows = refill.then_some(n);
         let mut arrays = Vec::with_capacity(self.slots.len());
-        // Finish a builder whose only capacity is its rows.
-        macro_rules! finish {
-            ($builders:expr, $i:expr, $new:expr) => {{
-                let array = $builders[$i].finish();
-                if refill {
-                    $builders[$i] = $new;
-                }
-                array
-            }};
-        }
         for slot in self.slots.iter() {
             let i = usize::from(slot.index);
             let array: ArrayRef = match slot.store {
-                Store::Bool => Arc::new(finish!(self.bools, i, BooleanBuilder::with_capacity(n))),
-                Store::U8 => Arc::new(finish!(self.u8s, i, UInt8Builder::with_capacity(n))),
-                Store::U16 => Arc::new(finish!(self.u16s, i, UInt16Builder::with_capacity(n))),
-                Store::U32 => Arc::new(finish!(self.u32s, i, UInt32Builder::with_capacity(n))),
-                Store::U64 => Arc::new(finish!(self.u64s, i, UInt64Builder::with_capacity(n))),
-                Store::I8 => Arc::new(finish!(self.i8s, i, Int8Builder::with_capacity(n))),
-                Store::I64 => Arc::new(finish!(self.i64s, i, Int64Builder::with_capacity(n))),
-                Store::F64 => Arc::new(finish!(self.f64s, i, Float64Builder::with_capacity(n))),
+                Store::Bool => self.bools[i].finish(rows),
+                Store::U8 => self.u8s[i].finish::<UInt8Type>(rows),
+                Store::U16 => self.u16s[i].finish::<UInt16Type>(rows),
+                Store::U32 => self.u32s[i].finish::<UInt32Type>(rows),
+                Store::U64 => self.u64s[i].finish::<UInt64Type>(rows),
+                Store::I8 => self.i8s[i].finish::<Int8Type>(rows),
+                Store::I64 => self.i64s[i].finish::<Int64Type>(rows),
+                Store::F64 => self.f64s[i].finish::<Float64Type>(rows),
                 Store::Str => {
                     let array = self.strs[i].finish();
                     if refill {
@@ -330,22 +313,9 @@ impl ArrowSink {
                     }
                     Arc::new(array)
                 }
-                Store::Fixed => {
-                    let array = self.fixed[i].finish();
-                    if refill {
-                        self.fixed[i] =
-                            FixedSizeBinaryBuilder::with_capacity(n, array.value_length());
-                    }
-                    Arc::new(array)
-                }
-                Store::TsMicros => Arc::new(
-                    finish!(self.timestamps, i, Int64Builder::with_capacity(n))
-                        .reinterpret_cast::<TimestampMicrosecondType>(),
-                ),
-                Store::TsNanos => Arc::new(
-                    finish!(self.timestamps, i, Int64Builder::with_capacity(n))
-                        .reinterpret_cast::<TimestampNanosecondType>(),
-                ),
+                Store::Fixed => self.fixed[i].finish(rows)?,
+                Store::TsMicros => self.timestamps[i].finish::<TimestampMicrosecondType>(rows),
+                Store::TsNanos => self.timestamps[i].finish::<TimestampNanosecondType>(rows),
                 Store::List => {
                     let column = &mut self.lists[i];
                     let array = match column {
@@ -390,10 +360,10 @@ impl ArrowSink {
             };
             arrays.push(array);
         }
-        arrays
+        Ok(arrays)
     }
 
-    /// The index of `col`'s builder in the vector of its type.
+    /// The index of `col` in the vector of its type.
     #[inline]
     fn at(&self, col: OutCol) -> usize {
         usize::from(self.slots[usize::from(col.0)].index)
@@ -405,19 +375,20 @@ impl RowSink for ArrowSink {
     fn null(&mut self, col: OutCol) {
         let slot = self.slots[usize::from(col.0)];
         let i = usize::from(slot.index);
+        let n = self.capacity;
         match slot.store {
-            Store::Bool => self.bools[i].append_null(),
-            Store::U8 => self.u8s[i].append_null(),
-            Store::U16 => self.u16s[i].append_null(),
-            Store::U32 => self.u32s[i].append_null(),
-            Store::U64 => self.u64s[i].append_null(),
-            Store::I8 => self.i8s[i].append_null(),
-            Store::I64 => self.i64s[i].append_null(),
-            Store::F64 => self.f64s[i].append_null(),
+            Store::Bool => self.bools[i].push_null(n),
+            Store::U8 => self.u8s[i].push_null(n),
+            Store::U16 => self.u16s[i].push_null(n),
+            Store::U32 => self.u32s[i].push_null(n),
+            Store::U64 => self.u64s[i].push_null(n),
+            Store::I8 => self.i8s[i].push_null(n),
+            Store::I64 => self.i64s[i].push_null(n),
+            Store::F64 => self.f64s[i].push_null(n),
             Store::Str => self.strs[i].append_null(),
             Store::Bin => self.bins[i].append_null(),
-            Store::Fixed => self.fixed[i].append_null(),
-            Store::TsMicros | Store::TsNanos => self.timestamps[i].append_null(),
+            Store::Fixed => self.fixed[i].push_null(n),
+            Store::TsMicros | Store::TsNanos => self.timestamps[i].push_null(n),
             Store::List => match &mut self.lists[i] {
                 ListColumn::U16(b) => b.append_null(),
                 ListColumn::U32(b) => b.append_null(),
@@ -430,49 +401,49 @@ impl RowSink for ArrowSink {
     #[inline]
     fn bool(&mut self, col: OutCol, v: bool) {
         let i = self.at(col);
-        self.bools[i].append_value(v);
+        self.bools[i].push(v);
     }
 
     #[inline]
     fn u8(&mut self, col: OutCol, v: u8) {
         let i = self.at(col);
-        self.u8s[i].append_value(v);
+        self.u8s[i].push(v);
     }
 
     #[inline]
     fn u16(&mut self, col: OutCol, v: u16) {
         let i = self.at(col);
-        self.u16s[i].append_value(v);
+        self.u16s[i].push(v);
     }
 
     #[inline]
     fn u32(&mut self, col: OutCol, v: u32) {
         let i = self.at(col);
-        self.u32s[i].append_value(v);
+        self.u32s[i].push(v);
     }
 
     #[inline]
     fn u64(&mut self, col: OutCol, v: u64) {
         let i = self.at(col);
-        self.u64s[i].append_value(v);
+        self.u64s[i].push(v);
     }
 
     #[inline]
     fn i8(&mut self, col: OutCol, v: i8) {
         let i = self.at(col);
-        self.i8s[i].append_value(v);
+        self.i8s[i].push(v);
     }
 
     #[inline]
     fn i64(&mut self, col: OutCol, v: i64) {
         let i = self.at(col);
-        self.i64s[i].append_value(v);
+        self.i64s[i].push(v);
     }
 
     #[inline]
     fn f64(&mut self, col: OutCol, v: f64) {
         let i = self.at(col);
-        self.f64s[i].append_value(v);
+        self.f64s[i].push(v);
     }
 
     #[inline]
@@ -492,15 +463,13 @@ impl RowSink for ArrowSink {
         let i = self.at(col);
         // The length was checked by the caller; should it be wrong all the
         // same, the cell is NULL rather than missing.
-        if self.fixed[i].append_value(v).is_err() {
-            self.fixed[i].append_null();
-        }
+        self.fixed[i].push(v, self.capacity);
     }
 
     #[inline]
     fn timestamp(&mut self, col: OutCol, v: i64) {
         let i = self.at(col);
-        self.timestamps[i].append_value(v);
+        self.timestamps[i].push(v);
     }
 
     type List<'s> = ArrowList<'s>;
@@ -764,10 +733,10 @@ mod tests {
                 .collect();
             let mut sink = ArrowSink::new(&columns, 1);
             assert_eq!(sink.schema().as_ref(), &schema, "{name}");
-            // The builders the sink starts with, and the ones that replace
+            // The columns the sink starts with, and the ones that replace
             // them after a full batch.
             for refill in [true, false] {
-                let arrays = sink.finish_arrays(refill);
+                let arrays = sink.finish_arrays(refill).expect("the arrays build");
                 assert_eq!(arrays.len(), schema.fields().len(), "{name}");
                 for (array, field) in arrays.iter().zip(schema.fields()) {
                     assert_eq!(

@@ -752,6 +752,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   batch after the first regrew from empty: 0.257 reallocations per packet at
   1,024 rows a batch (`frames`+`ipv4`+`udp`), now 0. The `scan` benchmark's
   parse pass is 0 to 8% faster.
+- **`pcapsql-datafusion`: fixed-width columns of the Arrow sink are plain
+  vectors.** A boolean, integer, float, timestamp or fixed-size binary
+  column of `ArrowSink` was an Arrow builder, whose append is a call of 39
+  instructions (55 once the batch has a NULL in the column) that is not
+  inlined into the row writer. It is now a vector of values, and a validity
+  bitmap that does not exist until the column's first NULL of a batch and is
+  then touched by NULLs only; the batch's array is built over both without a
+  copy. Text, binary and list columns keep their builders. The arrays are
+  byte for byte the builders' (a test compares the two over random rows with
+  NULLs at the first row, the last, the batch edges, none and all). A scan
+  into Arrow of every column of `frames`+`ipv4`+`udp` goes from 5,472 to
+  4,896 instructions per packet, of `frames`+`ipv4`+`tcp` from 8,168 to
+  7,163, of every per-packet table over mixed frames from 14,197 to 13,012
+  (callgrind; the new `sink_cost` example of `pcapsql-datafusion` is the
+  harness). The `scan` benchmark's single-partition
+  parse passes are 12 to 18% faster (medians of six interleaved runs on a
+  shared machine: `udp/mmap/1` 8.67 → 7.44 ms, `tcp_options/mmap/1` 12.94 →
+  10.57 ms); its four-partition passes and one-shot queries are within the
+  run-to-run spread.
 - **`pcapsql-datafusion`: UDFs parse a literal argument once.** At 8,192
   rows, `ip_in_cidr(col, '10.0.0.0/8')` 30 → 0.6 ns/row, `ip6_in_cidr` 64 →
   2.0, `has_tcp_flag` 8.1 → 0.7; `ip4_to_string`, `ip6_to_string` and
