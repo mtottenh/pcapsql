@@ -58,9 +58,8 @@ pub struct DecryptionContext {
 impl DecryptionContext {
     /// Create a new decryption context for TLS 1.2.
     ///
-    /// For TLS 1.2 with AEAD:
-    /// - The nonce is: implicit_iv (4 bytes) || explicit_nonce (8 bytes from record)
-    /// - The explicit_nonce is typically the sequence number
+    /// For TLS 1.2 with AEAD, see
+    /// [`decrypt_tls12_record`](Self::decrypt_tls12_record).
     pub fn new_tls12(
         keys: &Tls12KeyMaterial,
         algorithm: AeadAlgorithm,
@@ -126,12 +125,20 @@ impl DecryptionContext {
         self.sequence_number = seq;
     }
 
-    /// Decrypt a TLS 1.2 AEAD record in place.
+    /// Decrypt a TLS 1.2 AEAD record.
     ///
-    /// For TLS 1.2 AEAD ciphers:
+    /// For AES-GCM (RFC 5288):
     /// - Record format: explicit_nonce (8 bytes) || ciphertext || tag (16 bytes)
     /// - Nonce = implicit_iv (4 bytes) || explicit_nonce (8 bytes)
-    /// - AAD = seq_num (8 bytes) || type (1) || version (2) || length (2)
+    ///
+    /// For ChaCha20-Poly1305 (RFC 7905):
+    /// - Record format: ciphertext || tag (16 bytes)
+    /// - Nonce = iv (12 bytes) XOR padded_sequence_number
+    ///
+    /// For both, AAD = seq_num (8 bytes) || type (1) || version (2) ||
+    /// plaintext length (2), where the sequence number counts every record
+    /// the side has sent since its ChangeCipherSpec: its `Finished` is
+    /// record 0.
     ///
     /// Returns the decrypted plaintext.
     pub fn decrypt_tls12_record(
@@ -140,9 +147,7 @@ impl DecryptionContext {
         version: u16,
         ciphertext: &[u8],
     ) -> Result<Vec<u8>, DecryptionError> {
-        // TLS 1.2 AEAD record structure:
-        // explicit_nonce (8 bytes) || encrypted_data || auth_tag (16 bytes)
-        let explicit_nonce_len = 8;
+        let explicit_nonce_len = self.algorithm.tls12_explicit_nonce_len();
         let tag_len = self.algorithm.tag_len();
         let min_len = explicit_nonce_len + tag_len;
 
@@ -156,10 +161,27 @@ impl DecryptionContext {
         let explicit_nonce = &ciphertext[..explicit_nonce_len];
         let encrypted_with_tag = &ciphertext[explicit_nonce_len..];
 
-        // Construct the 12-byte nonce: implicit_iv (4) || explicit_nonce (8)
+        let fixed_iv_len = self.algorithm.tls12_fixed_iv_len();
+        if self.iv.len() != fixed_iv_len {
+            return Err(DecryptionError::InvalidIvLength {
+                expected: fixed_iv_len,
+                actual: self.iv.len(),
+            });
+        }
+        // The 12-byte nonce: the fixed IV, then the record's explicit part;
+        // without an explicit part, the sequence number is XORed in.
         let mut nonce_bytes = [0u8; 12];
-        nonce_bytes[..4].copy_from_slice(&self.iv[..4.min(self.iv.len())]);
-        nonce_bytes[4..].copy_from_slice(explicit_nonce);
+        nonce_bytes[..fixed_iv_len].copy_from_slice(&self.iv);
+        if explicit_nonce.is_empty() {
+            for (byte, sequence) in nonce_bytes[4..]
+                .iter_mut()
+                .zip(self.sequence_number.to_be_bytes())
+            {
+                *byte ^= sequence;
+            }
+        } else {
+            nonce_bytes[fixed_iv_len..].copy_from_slice(explicit_nonce);
+        }
 
         let nonce = Nonce::try_assume_unique_for_key(&nonce_bytes)
             .map_err(|_| DecryptionError::InvalidNonceLength(nonce_bytes.len()))?;

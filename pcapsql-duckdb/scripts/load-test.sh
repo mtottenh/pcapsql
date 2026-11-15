@@ -81,6 +81,8 @@ SELECT parse_filename(filename), frame_number, method, status_code FROM read_htt
 SELECT sni, is_decrypted, (SELECT count(*) FROM read_pcap('$fixtures/tls13_http2.pcap', protocol := 'http2')) FROM read_tls_sessions('$fixtures/tls13_http2.pcap');
 SELECT sni, is_decrypted FROM read_tls_sessions('$fixtures/tls13_http2.pcap', keylog := '$fixtures/tls13_http2.keys');
 SELECT h.frame_number, h.frame_type, h.method, h.status, c.server_port FROM read_http2('$fixtures/tls13_http2.pcap', keylog := '$fixtures/tls13_http2.keys') h JOIN read_tcp_connections('$fixtures/tls13_http2.pcap') c USING (connection_id) WHERE h.stream_id = 1 ORDER BY h.frame_number;
+SELECT version, is_decrypted, (SELECT count(*) FROM read_http2('$fixtures/tls12_http2.pcap', keylog := '$fixtures/tls12_http2.keys')) FROM read_tls_sessions('$fixtures/tls12_http2.pcap', keylog := '$fixtures/tls12_http2.keys');
+SELECT frame_number, method, status_code FROM read_http_messages('$fixtures/tls12_http1.pcap', keylog := '$fixtures/tls12_http1.keys');
 SET pcapsql_keylog = '$fixtures/tls13_http2.keys';
 SELECT count(*), (SELECT is_decrypted FROM read_tls_sessions('$fixtures/tls13_http2.pcap', keylog := '')) FROM read_http2('$fixtures/tls13_http2.pcap');
 COPY (SELECT * FROM read_frames('$captures/dns.cap') ORDER BY frame_number) TO '$scratch/copy.pcap' (FORMAT pcap, PRECISION 'us', SNAPLEN 65535);
@@ -146,6 +148,9 @@ example.test,true
 10,HEADERS,GET,NULL,443
 11,HEADERS,NULL,200,443
 12,DATA,NULL,NULL,443
+TLS 1.2,true,8
+8,GET,NULL
+10,NULL,200
 8,false
 19,19,TIMESTAMP_NS"
 

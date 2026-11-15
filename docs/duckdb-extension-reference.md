@@ -204,14 +204,40 @@ key log has secrets of: `tls_sessions.is_decrypted` is true for them, and
   or view it accepts the parameter and ignores it (the file is not opened),
   as every scan of a packet table ignores the setting. A `read_<table>`
   function of a packet table refuses it: it has no such parameter.
-- The per-packet `tls` table is not affected: it is the handshake as it is on
-  the wire. The replacement scan reads `frames` and is not affected either.
-- What is tested end to end is TLS 1.3 with `TLS_AES_128_GCM_SHA256`
-  carrying HTTP/2. `pcapsql-core` also derives keys for the other TLS 1.3
-  suites and for TLS 1.2 (`CLIENT_RANDOM` lines), but no test decrypts such a
-  capture, and `is_decrypted` is set from the TLS 1.3 `Finished` message: do
-  not rely on TLS 1.2 decryption. Decrypted application data is parsed as
-  HTTP/2; HTTP/1.x inside TLS is not parsed.
+- The per-packet `tls` table is not affected: it is the records as they are
+  on the wire. A record whose content is encrypted (application data, and
+  before TLS 1.3 everything a side sends after its ChangeCipherSpec) is a
+  row with the record's type and version and no handshake or alert column;
+  application data has `has_app_data` and `app_data_length`. A segment that
+  continues a record begun in an earlier one is not a row. The replacement
+  scan reads `frames` and is not affected either.
+- What is decrypted: TLS 1.3 (the four `*_TRAFFIC_SECRET` lines of a
+  session) and TLS 1.2 (its `CLIENT_RANDOM` line), with the cipher suites
+  that use AES-128-GCM, AES-256-GCM or ChaCha20-Poly1305: the three
+  TLS 1.3 suites `TLS_AES_128_GCM_SHA256`, `TLS_AES_256_GCM_SHA384` and
+  `TLS_CHACHA20_POLY1305_SHA256`, and in TLS 1.2 the `ECDHE_RSA`,
+  `ECDHE_ECDSA` and `DHE_RSA` suites with those three ciphers and the `RSA`
+  suites with the two AES-GCM ones. Each is tested on generated captures
+  (`pcapsql-core/tests/tls_fixtures.rs`); the extension's own tests read
+  three of them (`pcapsql-testgen/fixtures/`: HTTP/2 over TLS 1.3, HTTP/2
+  and HTTP/1.1 over TLS 1.2 with `TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256`).
+- `is_decrypted` is true when at least one record of the session was
+  decrypted and authenticated with the key log's secrets.
+- What a decrypted session carries is parsed as HTTP/2 (rows of `read_http2`)
+  or as HTTP/1.x (rows of `read_http_messages`, with those of HTTP in the
+  clear), by the protocol the server selected with ALPN; without that, by
+  whether the client starts with the HTTP/2 preface. Another protocol is
+  decrypted and not parsed.
+- What is not decrypted: a session with any other cipher suite (the CBC
+  suites, AES-CCM), which is listed with `is_decrypted = false` and gives no
+  rows, like one the key log has no secrets of; a TLS 1.3 session whose key
+  log lacks the two handshake secrets; TLS 1.3 early data (0-RTT), and
+  what a side sends after a TLS 1.3 `KeyUpdate`; a session whose handshake
+  is not in the capture. A response to `HEAD` (which announces a
+  `Content-Length` it does not send) is not a row of `http_messages`, in
+  the clear or inside TLS.
+- The secrets a pcapng capture carries itself (Decryption Secrets Blocks)
+  are not read: the key log is a file of its own.
 
 ```sql
 SET pcapsql_keylog = '/home/me/keys.log';

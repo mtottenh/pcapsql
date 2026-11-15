@@ -48,10 +48,13 @@ pub enum StreamParseResult {
 
     /// Parser produced a transformed stream for child parsing (e.g., TLS decryption).
     Transform {
+        /// The parser of the transformed stream, by name.
         child_protocol: &'static str,
+        /// The next bytes of the transformed stream of this direction.
         child_data: Vec<u8>,
         bytes_consumed: usize,
-        metadata: Option<ParsedMessage>,
+        /// The parser's own messages for the bytes consumed.
+        messages: Vec<ParsedMessage>,
     },
 
     /// Need more data before parsing can proceed.

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
 
@@ -40,6 +41,10 @@ pub struct StreamManager {
     total_memory: usize,
     /// Optional keylog for TLS decryption.
     keylog: Option<Arc<KeyLog>>,
+    /// What a transforming parser (TLS decryption) produced for each
+    /// direction of a connection and the child parser has not consumed yet:
+    /// the start of a message whose end is in a later record.
+    transformed: HashMap<(u64, Direction), Vec<u8>>,
 }
 
 impl StreamManager {
@@ -51,6 +56,7 @@ impl StreamManager {
             config,
             total_memory: 0,
             keylog: None,
+            transformed: HashMap::new(),
         }
     }
 
@@ -227,11 +233,11 @@ impl StreamManager {
                     child_protocol,
                     child_data,
                     bytes_consumed,
-                    metadata,
+                    messages: msgs,
                 } => {
-                    if let Some(mut meta) = metadata {
-                        meta.frame_number = frame_number;
-                        messages.push(meta);
+                    for mut msg in msgs {
+                        msg.frame_number = frame_number;
+                        messages.push(msg);
                     }
                     self.reassembler
                         .consume(connection_id, direction, bytes_consumed);
@@ -271,8 +277,12 @@ impl StreamManager {
     }
 
     /// Parse transformed/decrypted data with a child parser.
+    ///
+    /// The child sees the transformed stream of a direction the way a
+    /// parser sees a reassembled one: what it does not consume is kept and
+    /// given again with what follows.
     fn parse_transformed(
-        &self,
+        &mut self,
         connection_id: u64,
         direction: Direction,
         child_protocol: &str,
@@ -280,20 +290,44 @@ impl StreamManager {
         frame_number: u64,
         messages: &mut Vec<ParsedMessage>,
     ) -> Result<(), Error> {
+        let context = self.build_context(connection_id, direction);
         let parser = match self.stream_registry.get_parser(child_protocol) {
             Some(p) => p,
             None => return Ok(()), // No parser for child protocol
         };
+        let pending = self
+            .transformed
+            .entry((connection_id, direction))
+            .or_default();
+        pending.extend_from_slice(data);
 
-        let context = self.build_context(connection_id, direction);
-
-        if let StreamParseResult::Complete { messages: msgs, .. } =
-            parser.parse_stream(data, &context)
-        {
-            for mut msg in msgs {
-                msg.frame_number = frame_number;
-                messages.push(msg);
+        while !pending.is_empty() {
+            match parser.parse_stream(pending, &context) {
+                StreamParseResult::Complete {
+                    messages: msgs,
+                    bytes_consumed,
+                } => {
+                    for mut msg in msgs {
+                        msg.frame_number = frame_number;
+                        messages.push(msg);
+                    }
+                    if bytes_consumed == 0 {
+                        break;
+                    }
+                    pending.drain(..bytes_consumed.min(pending.len()));
+                }
+                StreamParseResult::NeedMore { .. }
+                    if pending.len() <= self.config.max_connection_buffer =>
+                {
+                    break; // Wait for the next record
+                }
+                // Not the child's protocol, or a message larger than a
+                // connection may buffer: nothing to wait for.
+                _ => pending.clear(),
             }
+        }
+        if pending.is_empty() {
+            self.transformed.remove(&(connection_id, direction));
         }
 
         Ok(())
@@ -364,7 +398,15 @@ impl StreamManager {
     ) -> Result<(), Error> {
         // Clean up reassembly buffers
         self.reassembler.remove(connection_id);
+        self.forget_transformed(connection_id);
         Ok(())
+    }
+
+    /// Drop what the child parsers of a connection left unconsumed.
+    fn forget_transformed(&mut self, connection_id: u64) {
+        for direction in [Direction::ToServer, Direction::ToClient] {
+            self.transformed.remove(&(connection_id, direction));
+        }
     }
 
     /// Cleanup timed-out connections.
@@ -375,6 +417,7 @@ impl StreamManager {
 
         for conn in &removed {
             self.reassembler.remove(conn.id);
+            self.forget_transformed(conn.id);
         }
 
         removed

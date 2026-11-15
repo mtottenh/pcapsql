@@ -21,7 +21,7 @@ use std::fmt::Write as _;
 
 use tls_parser::{
     parse_tls_extensions, parse_tls_plaintext, TlsCipherSuite, TlsExtension, TlsMessage,
-    TlsMessageHandshake, TlsVersion,
+    TlsMessageHandshake,
 };
 
 use super::{
@@ -170,20 +170,43 @@ impl Protocol for TlsProtocol {
         fields: &mut FieldSink<'_, 'a>,
     ) -> Parsed<'a> {
         // TLS record header is 5 bytes minimum
-        if data.len() < 5 {
+        let [record_type, major, minor, high, low, payload @ ..] = data else {
             return Parsed::error("TLS record too short", data);
+        };
+        let record_type = *record_type;
+        let version = u16::from_be_bytes([*major, *minor]);
+        let length = usize::from(u16::from_be_bytes([*high, *low]));
+        // A segment that does not start with a record header is the middle
+        // of a record that started in an earlier one, or not TLS at all: it
+        // has no record to describe.
+        let record_types = record_type::CHANGE_CIPHER_SPEC..=record_type::HEARTBEAT;
+        if !record_types.contains(&record_type) || *major != 3 {
+            return Parsed::error("not the start of a TLS record", data);
+        }
+        let header = |fields: &mut FieldSink<'_, 'a>| {
+            fields.push(("record_type", FieldValue::UInt8(record_type)));
+            fields.push(("record_version", FieldValue::UInt16(version)));
+            fields.push(("version", fields.name(tls_version_name(version))));
+        };
+
+        // A record whose content is encrypted is its header and nothing
+        // else: application data always, an alert that is not the two bytes
+        // of one (after the handshake, alerts are protected too).
+        let opaque = record_type == record_type::APPLICATION_DATA
+            || (record_type == record_type::ALERT && length != 2);
+        if opaque && payload.len() >= length {
+            header(fields);
+            if record_type == record_type::APPLICATION_DATA {
+                fields.push(("has_app_data", FieldValue::Bool(true)));
+                fields.push(("app_data_length", FieldValue::UInt32(length as u32)));
+            }
+            return Parsed::ok(&payload[length..], Hints::new());
         }
 
         // Use tls-parser for zero-copy parsing
         match parse_tls_plaintext(data) {
             Ok((remaining, record)) => {
-                // Record header fields
-                fields.push(("record_type", FieldValue::UInt8(record.hdr.record_type.0)));
-                fields.push(("record_version", FieldValue::UInt16(record.hdr.version.0)));
-                fields.push((
-                    "version",
-                    fields.name(tls_version_name(record.hdr.version.0)),
-                ));
+                header(fields);
 
                 // Process messages in the record
                 for msg in &record.msg {
@@ -206,14 +229,9 @@ impl Protocol for TlsProtocol {
                         TlsMessage::ChangeCipherSpec => {
                             fields.push(("is_change_cipher_spec", FieldValue::Bool(true)));
                         }
-                        TlsMessage::ApplicationData(app_data) => {
-                            // Application data is encrypted, just note its presence and size
-                            fields.push(("has_app_data", FieldValue::Bool(true)));
-                            fields.push((
-                                "app_data_length",
-                                FieldValue::UInt32(app_data.blob.len() as u32),
-                            ));
-                        }
+                        // A complete record of application data was the
+                        // opaque case above; an incomplete one is below.
+                        TlsMessage::ApplicationData(_) => {}
                     }
                 }
 
@@ -221,14 +239,15 @@ impl Protocol for TlsProtocol {
             }
             Err(nom::Err::Incomplete(_)) => {
                 // Partial record - extract what we can from the header
-                let record_type = data[0];
-                fields.push(("record_type", FieldValue::UInt8(record_type)));
-
-                let version = TlsVersion(u16::from_be_bytes([data[1], data[2]]));
-                fields.push(("record_version", FieldValue::UInt16(version.0)));
-                fields.push(("version", fields.name(tls_version_name(version.0))));
-
-                Parsed::partial(&data[5..], "TLS record incomplete")
+                header(fields);
+                Parsed::partial(payload, "TLS record incomplete")
+            }
+            // A complete handshake record that is not handshake messages is
+            // an encrypted one: before TLS 1.3, the `Finished` that follows
+            // ChangeCipherSpec, and everything after it.
+            Err(_) if record_type == record_type::HANDSHAKE && payload.len() >= length => {
+                header(fields);
+                Parsed::ok(&payload[length..], Hints::new())
             }
             Err(e) => Parsed::error(
                 fields.text_fmt(format_args!("TLS parse error: {e:?}")),
@@ -962,6 +981,110 @@ mod tests {
             result.get("alert_description_str"),
             Some(&FieldValue::Str("handshake_failure"))
         );
+    }
+
+    /// The record of `record_type` with `payload`, at the record version 1.2.
+    fn record(record_type: u8, payload: &[u8]) -> Vec<u8> {
+        let mut record = vec![record_type, 0x03, 0x03];
+        record.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+        record.extend_from_slice(payload);
+        record
+    }
+
+    /// The fields a parse gave, by name.
+    fn names(result: &crate::protocol::test_utils::ParsedLayer<'_>) -> Vec<&'static str> {
+        result.fields.iter().map(|(name, _)| *name).collect()
+    }
+
+    const RECORD_HEADER: [&str; 3] = ["record_type", "record_version", "version"];
+
+    #[test]
+    fn an_application_data_record_is_its_header_and_length() {
+        let packet = record(23, &[0xab; 40]);
+        let result = TlsProtocol.parse_layer(&packet, &ParseContext::new(1));
+
+        assert!(result.is_ok());
+        assert!(result.remaining.is_empty());
+        assert_eq!(result.get("record_type"), Some(&FieldValue::UInt8(23)));
+        assert_eq!(
+            result.get("record_version"),
+            Some(&FieldValue::UInt16(0x0303))
+        );
+        assert_eq!(result.get("version"), Some(&FieldValue::Str("TLS 1.2")));
+        assert_eq!(result.get("has_app_data"), Some(&FieldValue::Bool(true)));
+        assert_eq!(result.get("app_data_length"), Some(&FieldValue::UInt32(40)));
+        assert_eq!(
+            names(&result),
+            [&RECORD_HEADER[..], &["has_app_data", "app_data_length"]].concat()
+        );
+    }
+
+    #[test]
+    fn an_empty_application_data_record_is_a_row_too() {
+        let packet = record(23, &[]);
+        let result = TlsProtocol.parse_layer(&packet, &ParseContext::new(1));
+
+        assert!(result.is_ok());
+        assert_eq!(result.get("app_data_length"), Some(&FieldValue::UInt32(0)));
+    }
+
+    #[test]
+    fn an_encrypted_handshake_record_is_its_header() {
+        // A TLS 1.2 `Finished` after ChangeCipherSpec: an explicit nonce,
+        // 16 bytes of ciphertext and a tag, none of it a handshake message.
+        let packet = record(22, &[0xf7; 40]);
+        let result = TlsProtocol.parse_layer(&packet, &ParseContext::new(1));
+
+        assert!(result.is_ok());
+        assert!(result.remaining.is_empty());
+        assert_eq!(names(&result), RECORD_HEADER);
+        assert_eq!(result.get("record_type"), Some(&FieldValue::UInt8(22)));
+    }
+
+    #[test]
+    fn an_encrypted_alert_record_is_its_header() {
+        // A TLS 1.2 close_notify after ChangeCipherSpec: 26 bytes, which
+        // are not thirteen alerts.
+        let packet = record(21, &[0x01; 26]);
+        let result = TlsProtocol.parse_layer(&packet, &ParseContext::new(1));
+
+        assert!(result.is_ok());
+        assert_eq!(names(&result), RECORD_HEADER);
+        assert_eq!(result.get("record_type"), Some(&FieldValue::UInt8(21)));
+    }
+
+    #[test]
+    fn what_follows_an_opaque_record_is_left() {
+        let mut packet = record(23, &[0xab; 8]);
+        packet.extend(record(23, &[0xcd; 4]));
+        let result = TlsProtocol.parse_layer(&packet, &ParseContext::new(1));
+
+        assert!(result.is_ok());
+        assert_eq!(result.get("app_data_length"), Some(&FieldValue::UInt32(8)));
+        assert_eq!(result.remaining.len(), 9);
+    }
+
+    #[test]
+    fn an_incomplete_application_data_record_is_partial() {
+        let mut packet = record(23, &[0xab; 40]);
+        packet.truncate(20);
+        let result = TlsProtocol.parse_layer(&packet, &ParseContext::new(1));
+
+        assert!(!result.is_ok());
+        assert_eq!(names(&result), RECORD_HEADER);
+    }
+
+    #[test]
+    fn bytes_that_are_not_a_record_are_an_error() {
+        // A handshake "record" of SSL 2, and a content type that is none.
+        for packet in [
+            vec![22, 0x02, 0x00, 0x00, 0x04, 1, 2, 3, 4],
+            vec![99, 0x03, 0x03, 0x00, 0x04, 1, 2, 3, 4],
+        ] {
+            let result = TlsProtocol.parse_layer(&packet, &ParseContext::new(1));
+            assert!(!result.is_ok(), "{packet:?}");
+            assert!(names(&result).is_empty(), "{packet:?}");
+        }
     }
 
     #[test]

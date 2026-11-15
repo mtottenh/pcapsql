@@ -9,6 +9,10 @@ use super::{
 };
 use crate::schema::{DataKind, FieldDescriptor};
 
+/// The link type of a capture of raw IPv4 datagrams, with no link-layer
+/// header (`LINKTYPE_IPV4`).
+pub const LINKTYPE_IPV4: u16 = 228;
+
 /// IP protocol numbers for IP-in-IP encapsulation.
 mod ip_in_ip_protocol {
     /// IPv4 encapsulated in IP (IPIP)
@@ -215,10 +219,16 @@ impl Protocol for Ipv4Protocol {
     }
 
     fn dispatch(&self) -> Dispatch {
-        const RULES: &[DispatchRule] = &[DispatchRule::hints(
-            &[Cond::Hint(HintKey::EtherType, &[ethertype::IPV4 as u64])],
-            100,
-        )];
+        const RULES: &[DispatchRule] = &[
+            DispatchRule::Root {
+                link_type: LINKTYPE_IPV4,
+                priority: 100,
+            },
+            DispatchRule::hints(
+                &[Cond::Hint(HintKey::EtherType, &[ethertype::IPV4 as u64])],
+                100,
+            ),
+        ];
         Dispatch::Exact(RULES)
     }
 
@@ -232,6 +242,10 @@ impl Protocol for Ipv4Protocol {
     }
 
     fn can_parse(&self, context: &ParseContext) -> Option<u32> {
+        // A capture without a link layer: every frame is an IPv4 datagram.
+        if context.is_root() && context.link_type == LINKTYPE_IPV4 {
+            return Some(100);
+        }
         match context.hint(HintKey::EtherType) {
             Some(et) if et == ethertype::IPV4 as u64 => Some(100),
             _ => None,
@@ -525,5 +539,35 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.hint(HintKey::IpProtocol), Some(6u64));
         assert_eq!(result.hint(HintKey::IpVersion), Some(4u64));
+    }
+
+    /// A capture of raw IPv4 datagrams (`LINKTYPE_IPV4`) has no link layer:
+    /// the frame is the datagram, whatever the tables asked for.
+    #[test]
+    fn a_raw_ipv4_capture_starts_with_ipv4() {
+        use super::super::{default_registry, parse_packet, ParseBuf, ParseScope};
+        let udp = [0x9C, 0x40, 0x00, 0x35, 0x00, 0x08, 0x00, 0x00]; // 40000 -> 53, len 8
+        let mut datagram = vec![0x45, 0x00, 0x00, 28, 0, 1, 0x40, 0, 64, 17, 0, 0];
+        datagram.extend_from_slice(&[10, 0, 0, 1, 8, 8, 8, 8]);
+        datagram.extend_from_slice(&udp);
+        let registry = default_registry();
+        for scope in [
+            ParseScope::full(),
+            ParseScope::for_tables(&["udp"], &registry),
+        ] {
+            let mut buf = ParseBuf::new();
+            let layers: Vec<&str> =
+                parse_packet(&registry, LINKTYPE_IPV4, &datagram, &scope, &mut buf)
+                    .names()
+                    .collect();
+            assert_eq!(layers, ["ipv4", "udp"]);
+        }
+        // Not in a capture of another link type, where the bytes are
+        // something else.
+        assert_eq!(Ipv4Protocol.can_parse(&ParseContext::new(229)), None);
+        assert_eq!(
+            Ipv4Protocol.can_parse(&ParseContext::new(LINKTYPE_IPV4)),
+            Some(100)
+        );
     }
 }

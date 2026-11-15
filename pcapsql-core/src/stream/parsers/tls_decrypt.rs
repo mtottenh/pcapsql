@@ -2,11 +2,18 @@
 //!
 //! This parser extends the basic TLS metadata extraction with actual decryption
 //! of TLS records when SSLKEYLOGFILE keys are available.
+//!
+//! Which records of a connection are protected depends on the version. In
+//! TLS 1.3 they are the records of type application data, whose real type
+//! is inside the encryption. In TLS 1.2 they are every record a side sends
+//! after its ChangeCipherSpec, of any type, starting with its `Finished`:
+//! each of them counts in the sequence number the next one is
+//! authenticated with, so all of them are decrypted, not only the
+//! application data.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use bytes::BytesMut;
 use compact_str::CompactString;
 use tls_parser::{
     parse_tls_extensions, parse_tls_plaintext, TlsExtension, TlsMessage, TlsMessageHandshake,
@@ -21,26 +28,124 @@ use crate::tls::{
     extract_tls13_inner_content_type, Direction as TlsDirection, KeyLog, TlsSession, TlsVersion,
 };
 
+/// TLS content types.
+mod content_type {
+    pub const CHANGE_CIPHER_SPEC: u8 = 20;
+    pub const ALERT: u8 = 21;
+    pub const HANDSHAKE: u8 = 22;
+    pub const APPLICATION_DATA: u8 = 23;
+}
+
+/// Handshake message types read from decrypted records.
+mod handshake_type {
+    pub const ENCRYPTED_EXTENSIONS: u8 = 8;
+    pub const FINISHED: u8 = 20;
+}
+
+/// The parser of what a TLS connection carries.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Application {
+    Http2,
+    Http1,
+    /// A protocol no stream parser reads.
+    Other,
+}
+
+impl Application {
+    /// The application an ALPN protocol id names.
+    fn of_alpn(protocol: &str) -> Self {
+        match protocol {
+            "h2" => Application::Http2,
+            "http/1.1" | "http/1.0" => Application::Http1,
+            _ => Application::Other,
+        }
+    }
+
+    /// The name of the stream parser, when there is one.
+    fn parser(self) -> Option<&'static str> {
+        match self {
+            Application::Http2 => Some("http2"),
+            Application::Http1 => Some("http"),
+            Application::Other => None,
+        }
+    }
+}
+
+/// The HTTP/2 client connection preface, which a connection that
+/// negotiated nothing is recognised by.
+const HTTP2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+
+fn index(direction: Direction) -> usize {
+    match direction {
+        Direction::ToServer => 0,
+        Direction::ToClient => 1,
+    }
+}
+
 /// Per-connection TLS state.
 struct ConnectionTlsState {
     /// TLS session for decryption
     session: TlsSession,
-    /// Buffer for incomplete TLS records
-    buffer: BytesMut,
-    /// Whether handshake is complete
-    handshake_complete: bool,
-    /// Track if we've seen ChangeCipherSpec (TLS 1.2)
-    change_cipher_spec_seen: bool,
+    /// Whether each side (see [`index`]) has sent its ChangeCipherSpec:
+    /// before TLS 1.3, everything it sends after that is protected.
+    change_cipher_spec_seen: [bool; 2],
+    /// The decrypted handshake messages of each side that are not complete
+    /// yet: a message can span records.
+    handshake: [Vec<u8>; 2],
+    /// Whether the client offered `h2` (ALPN).
+    client_offers_http2: bool,
+    /// The protocol the server selected (ALPN), as an application.
+    selected: Option<Application>,
+    /// What the application data is parsed as, decided with the first of it.
+    application: Option<Application>,
 }
 
 impl ConnectionTlsState {
     fn new(keylog: Arc<KeyLog>) -> Self {
         Self {
             session: TlsSession::new(keylog),
-            buffer: BytesMut::new(),
-            handshake_complete: false,
-            change_cipher_spec_seen: false,
+            change_cipher_spec_seen: [false; 2],
+            handshake: [Vec::new(), Vec::new()],
+            client_offers_http2: false,
+            selected: None,
+            application: None,
         }
+    }
+
+    /// Whether the record of type `record_type` that a side sends is
+    /// protected: see the [module](self).
+    fn is_protected(&self, direction: Direction, record_type: u8) -> bool {
+        if self.session.handshake().effective_version() == Some(TlsVersion::Tls13) {
+            record_type == content_type::APPLICATION_DATA
+        } else {
+            record_type == content_type::APPLICATION_DATA
+                || (record_type != content_type::CHANGE_CIPHER_SPEC
+                    && self.change_cipher_spec_seen[index(direction)])
+        }
+    }
+
+    /// What the application data is, of which `data` from `direction` is
+    /// the first: what the server selected; without that, HTTP/2 when the
+    /// client starts with its preface or, the server speaking first, when
+    /// the client offered it; else HTTP/1.
+    fn application(&mut self, direction: Direction, data: &[u8]) -> Application {
+        if let Some(application) = self.application {
+            return application;
+        }
+        let http2 = match direction {
+            Direction::ToServer => {
+                let shared = data.len().min(HTTP2_PREFACE.len());
+                data[..shared] == HTTP2_PREFACE[..shared]
+            }
+            Direction::ToClient => self.client_offers_http2,
+        };
+        let application = match self.selected {
+            Some(selected) => selected,
+            None if http2 => Application::Http2,
+            None => Application::Http1,
+        };
+        self.application = Some(application);
+        application
     }
 }
 
@@ -48,13 +153,16 @@ impl ConnectionTlsState {
 ///
 /// When constructed with a `KeyLog`, this parser will attempt to decrypt
 /// TLS application data and return it via `StreamParseResult::Transform`
-/// for further parsing by child protocol parsers (e.g., HTTP/2).
+/// for further parsing by child protocol parsers (HTTP/2, HTTP/1).
 pub struct DecryptingTlsStreamParser {
     /// KeyLog for looking up TLS session keys
     keylog: Arc<KeyLog>,
     /// Per-connection TLS state
     sessions: Arc<Mutex<HashMap<u64, ConnectionTlsState>>>,
 }
+
+/// The fields of one record's message.
+type Fields = HashMap<&'static str, OwnedFieldValue>;
 
 impl DecryptingTlsStreamParser {
     /// Create a new decrypting TLS parser with the given keylog.
@@ -87,12 +195,11 @@ impl DecryptingTlsStreamParser {
         }
     }
 
-    /// Process a TLS handshake message.
+    /// Process a handshake message that was sent in the clear.
     fn process_handshake(
         state: &mut ConnectionTlsState,
         handshake: &TlsMessageHandshake,
-        _direction: Direction,
-        fields: &mut HashMap<&'static str, OwnedFieldValue>,
+        fields: &mut Fields,
     ) {
         match handshake {
             TlsMessageHandshake::ClientHello(ch) => {
@@ -128,6 +235,7 @@ impl DecryptingTlsStreamParser {
                                         .iter()
                                         .filter_map(|p| std::str::from_utf8(p).ok())
                                         .collect();
+                                    state.client_offers_http2 = protocols.contains(&"h2");
                                     if !protocols.is_empty() {
                                         fields.insert(
                                             "alpn",
@@ -152,13 +260,20 @@ impl DecryptingTlsStreamParser {
                 let cipher_suite = sh.cipher.0;
 
                 // Detect TLS version (check for TLS 1.3 via supported_versions extension)
-                let version = if let Some(ext_data) = &sh.ext {
-                    detect_tls13_from_extensions(ext_data).unwrap_or_else(|| {
-                        TlsVersion::from_wire(sh.version.0).unwrap_or(TlsVersion::Tls12)
-                    })
+                let extensions = sh
+                    .ext
+                    .and_then(|ext_data| parse_tls_extensions(ext_data).ok())
+                    .map(|(_, extensions)| extensions)
+                    .unwrap_or_default();
+                let version = if selects_tls13(&extensions) {
+                    TlsVersion::Tls13
                 } else {
                     TlsVersion::from_wire(sh.version.0).unwrap_or(TlsVersion::Tls12)
                 };
+                // Before TLS 1.3 the server selects the protocol here.
+                if let Some(selected) = selected_alpn(&extensions) {
+                    state.selected = Some(selected);
+                }
 
                 // Try to establish keys (may fail if keys not in keylog)
                 let _ = state
@@ -190,79 +305,183 @@ impl DecryptingTlsStreamParser {
         }
     }
 
-    /// Process TLS 1.3 encrypted handshake messages.
+    /// Process the decrypted content of a handshake record: the complete
+    /// messages of the side's handshake stream so far.
     ///
-    /// Parses the decrypted handshake data to detect Finished messages
-    /// and update the session state machine.
-    fn process_encrypted_handshake(
+    /// Read from them: the protocol a TLS 1.3 server selects
+    /// (`EncryptedExtensions`), and `Finished`, after which a TLS 1.3 side
+    /// changes keys.
+    fn process_decrypted_handshake(
         state: &mut ConnectionTlsState,
-        handshake_data: &[u8],
+        content: &[u8],
         direction: Direction,
-        fields: &mut HashMap<&'static str, OwnedFieldValue>,
     ) {
-        // Parse handshake message header (type + length)
-        if handshake_data.len() < 4 {
-            return;
-        }
-
-        let hs_type = handshake_data[0];
-        let _hs_len =
-            u32::from_be_bytes([0, handshake_data[1], handshake_data[2], handshake_data[3]])
-                as usize;
-
-        let hs_type_name = match hs_type {
-            1 => "ClientHello",
-            2 => "ServerHello",
-            4 => "NewSessionTicket",
-            8 => "EncryptedExtensions",
-            11 => "Certificate",
-            13 => "CertificateRequest",
-            15 => "CertificateVerify",
-            20 => "Finished",
-            24 => "KeyUpdate",
-            _ => "Unknown",
-        };
-
-        fields.insert(
-            "encrypted_hs_type",
-            OwnedFieldValue::OwnedString(CompactString::new(hs_type_name)),
-        );
-
-        // Handle Finished message - this signals key transition
-        if hs_type == 20 {
-            // Finished message
-            match direction {
-                Direction::ToClient => {
-                    // Server finished
-                    state.session.mark_server_finished();
-                    fields.insert("hs_finished", OwnedFieldValue::Str("server"));
+        let mut stream = std::mem::take(&mut state.handshake[index(direction)]);
+        stream.extend_from_slice(content);
+        let mut rest = stream.as_slice();
+        while let [message_type, a, b, c, after @ ..] = rest {
+            let length = u32::from_be_bytes([0, *a, *b, *c]) as usize;
+            if after.len() < length {
+                break;
+            }
+            let (body, after) = after.split_at(length);
+            rest = after;
+            match *message_type {
+                handshake_type::ENCRYPTED_EXTENSIONS => {
+                    // extensions<0..2^16-1>
+                    let selected = body
+                        .get(2..)
+                        .and_then(|extensions| parse_tls_extensions(extensions).ok())
+                        .and_then(|(_, extensions)| selected_alpn(&extensions));
+                    if let Some(selected) = selected {
+                        state.selected = Some(selected);
+                    }
                 }
-                Direction::ToServer => {
-                    // Client finished - this triggers transition to application data
-                    state.session.mark_client_finished();
-                    state.handshake_complete = true;
-                    fields.insert("hs_finished", OwnedFieldValue::Str("client"));
+                handshake_type::FINISHED => match direction {
+                    Direction::ToClient => state.session.mark_server_finished(),
+                    Direction::ToServer => state.session.mark_client_finished(),
+                },
+                _ => {}
+            }
+        }
+        let consumed = stream.len() - rest.len();
+        stream.drain(..consumed);
+        state.handshake[index(direction)] = stream;
+    }
+
+    /// One record that is not protected: the handshake up to
+    /// ChangeCipherSpec, and alerts before it.
+    fn process_plain_record(
+        state: &mut ConnectionTlsState,
+        record: &[u8],
+        direction: Direction,
+        fields: &mut Fields,
+    ) {
+        let payload = &record[5..];
+        match record[0] {
+            content_type::HANDSHAKE => {
+                fields.insert("record_type", OwnedFieldValue::Str("Handshake"));
+
+                // Parse handshake using tls-parser
+                if let Ok((_, record)) = parse_tls_plaintext(record) {
+                    for msg in &record.msg {
+                        if let TlsMessage::Handshake(hs) = msg {
+                            Self::process_handshake(state, hs, fields);
+                        }
+                    }
                 }
             }
+            content_type::CHANGE_CIPHER_SPEC => {
+                fields.insert("record_type", OwnedFieldValue::Str("ChangeCipherSpec"));
+                state.change_cipher_spec_seen[index(direction)] = true;
+            }
+            content_type::ALERT => {
+                fields.insert("record_type", OwnedFieldValue::Str("Alert"));
+                insert_alert(payload, fields);
+            }
+            other => {
+                fields.insert(
+                    "record_type",
+                    OwnedFieldValue::OwnedString(CompactString::new(format!("Unknown({other})"))),
+                );
+            }
+        }
+    }
+
+    /// One protected record: decrypted when the session has its keys.
+    /// Returns the application data it carries.
+    fn process_protected_record(
+        state: &mut ConnectionTlsState,
+        record: &[u8],
+        direction: Direction,
+        fields: &mut Fields,
+    ) -> Option<Vec<u8>> {
+        let record_type = record[0];
+        let payload = &record[5..];
+        fields.insert(
+            "record_type",
+            OwnedFieldValue::Str(match record_type {
+                content_type::HANDSHAKE => "Handshake",
+                content_type::ALERT => "Alert",
+                _ => "ApplicationData",
+            }),
+        );
+        if !state.session.can_decrypt() {
+            fields.insert(
+                "encrypted_length",
+                OwnedFieldValue::UInt16(payload.len() as u16),
+            );
+            return None;
+        }
+        let tls_direction = Self::to_tls_direction(direction);
+        let mut plaintext = match state
+            .session
+            .decrypt_record(tls_direction, record_type, payload)
+        {
+            Ok(plaintext) => plaintext,
+            Err(e) => {
+                // Decryption failed - note it and continue
+                fields.insert(
+                    "decrypt_error",
+                    OwnedFieldValue::OwnedString(CompactString::new(e.to_string())),
+                );
+                return None;
+            }
+        };
+        fields.insert(
+            "decrypted_length",
+            OwnedFieldValue::UInt64(plaintext.len() as u64),
+        );
+        // What the record carries: in TLS 1.3 the type is the last byte
+        // of the plaintext that is not padding.
+        let content_type =
+            if state.session.handshake().effective_version() == Some(TlsVersion::Tls13) {
+                let (inner_type, content) = extract_tls13_inner_content_type(&plaintext)?;
+                plaintext.truncate(content.len());
+                inner_type
+            } else {
+                record_type
+            };
+        match content_type {
+            content_type::HANDSHAKE => {
+                Self::process_decrypted_handshake(state, &plaintext, direction);
+                None
+            }
+            content_type::ALERT => {
+                insert_alert(&plaintext, fields);
+                None
+            }
+            content_type::APPLICATION_DATA => Some(plaintext),
+            _ => None,
         }
     }
 }
 
-/// Detect TLS 1.3 from ServerHello extensions.
-fn detect_tls13_from_extensions(ext_data: &[u8]) -> Option<TlsVersion> {
-    if let Ok((_, extensions)) = parse_tls_extensions(ext_data) {
-        for ext in extensions {
-            if let TlsExtension::SupportedVersions(versions) = ext {
-                // Check if any version is TLS 1.3 (0x0304)
-                for v in versions {
-                    if v.0 == 0x0304 {
-                        return Some(TlsVersion::Tls13);
-                    }
-                }
-            }
-        }
+/// The level and description of an alert.
+fn insert_alert(alert: &[u8], fields: &mut Fields) {
+    if let [level, description, ..] = alert {
+        fields.insert("alert_level", OwnedFieldValue::UInt8(*level));
+        fields.insert("alert_description", OwnedFieldValue::UInt8(*description));
     }
-    None
+}
+
+/// Whether a ServerHello's extensions select TLS 1.3 (supported_versions).
+fn selects_tls13(extensions: &[TlsExtension]) -> bool {
+    extensions.iter().any(|extension| {
+        matches!(extension, TlsExtension::SupportedVersions(versions)
+            if versions.iter().any(|version| version.0 == 0x0304))
+    })
+}
+
+/// The protocol a server's extensions select (ALPN), as an application.
+fn selected_alpn(extensions: &[TlsExtension]) -> Option<Application> {
+    extensions.iter().find_map(|extension| match extension {
+        TlsExtension::ALPN(protocols) => protocols
+            .first()
+            .and_then(|protocol| std::str::from_utf8(protocol).ok())
+            .map(Application::of_alpn),
+        _ => None,
+    })
 }
 
 impl StreamParser for DecryptingTlsStreamParser {
@@ -284,151 +503,31 @@ impl StreamParser for DecryptingTlsStreamParser {
             .entry(context.connection_id)
             .or_insert_with(|| ConnectionTlsState::new(Arc::clone(&self.keylog)));
 
-        // Append new data to buffer
-        state.buffer.extend_from_slice(data);
-
         let mut messages = Vec::new();
         let mut decrypted_data = Vec::new();
-        let mut total_consumed = 0;
-
-        // Process complete TLS records
-        loop {
-            if state.buffer.len() < 5 {
-                break; // Need at least record header
-            }
-
-            // Parse record header
-            let content_type = state.buffer[0];
-            let version = u16::from_be_bytes([state.buffer[1], state.buffer[2]]);
-            let length = u16::from_be_bytes([state.buffer[3], state.buffer[4]]) as usize;
-            let record_len = 5 + length;
-
-            if state.buffer.len() < record_len {
+        // The complete records of `data`: the caller keeps what is not
+        // consumed and gives it again with what follows.
+        let mut rest = data;
+        while let [record_type, major, minor, high, low, after @ ..] = rest {
+            let length = u16::from_be_bytes([*high, *low]) as usize;
+            if after.len() < length {
                 break; // Incomplete record
             }
-
-            // Extract record payload
-            let record_data = state.buffer[..record_len].to_vec();
-            let payload = &record_data[5..];
+            let (record, after) = rest.split_at(5 + length);
+            rest = after;
 
             let mut fields = HashMap::new();
+            let version = u16::from_be_bytes([*major, *minor]);
             fields.insert("version", tls_version_name(version).into());
 
-            match content_type {
-                22 => {
-                    // Handshake
-                    fields.insert("record_type", OwnedFieldValue::Str("Handshake"));
-
-                    // Parse handshake using tls-parser
-                    if let Ok((_, record)) = parse_tls_plaintext(&record_data) {
-                        for msg in &record.msg {
-                            if let TlsMessage::Handshake(hs) = msg {
-                                Self::process_handshake(state, hs, context.direction, &mut fields);
-                            }
-                        }
-                    }
+            if state.is_protected(context.direction, *record_type) {
+                let application =
+                    Self::process_protected_record(state, record, context.direction, &mut fields);
+                if let Some(application) = application {
+                    decrypted_data.extend_from_slice(&application);
                 }
-
-                23 => {
-                    // ApplicationData (in TLS 1.3, this can also be encrypted handshake)
-                    fields.insert("record_type", OwnedFieldValue::Str("ApplicationData"));
-
-                    // Try to decrypt if session is ready
-                    if state.session.can_decrypt() {
-                        let tls_dir = Self::to_tls_direction(context.direction);
-                        match state.session.decrypt_record(tls_dir, content_type, payload) {
-                            Ok(plaintext) => {
-                                // For TLS 1.3, extract the inner content type
-                                if state.session.is_tls13_handshake_phase() {
-                                    // During handshake phase, process inner content
-                                    if let Some((inner_type, inner_data)) =
-                                        extract_tls13_inner_content_type(&plaintext)
-                                    {
-                                        fields.insert(
-                                            "inner_content_type",
-                                            OwnedFieldValue::UInt8(inner_type),
-                                        );
-
-                                        if inner_type == 22 {
-                                            // Inner handshake message
-                                            Self::process_encrypted_handshake(
-                                                state,
-                                                inner_data,
-                                                context.direction,
-                                                &mut fields,
-                                            );
-                                        } else if inner_type == 23 {
-                                            // Actual application data during handshake (rare)
-                                            decrypted_data.extend_from_slice(inner_data);
-                                        }
-                                    }
-                                } else {
-                                    // In application data mode, extract inner content for TLS 1.3
-                                    // or use directly for TLS 1.2
-                                    let version = state.session.handshake().effective_version();
-                                    if version == Some(TlsVersion::Tls13) {
-                                        if let Some((inner_type, inner_data)) =
-                                            extract_tls13_inner_content_type(&plaintext)
-                                        {
-                                            if inner_type == 23 {
-                                                decrypted_data.extend_from_slice(inner_data);
-                                            }
-                                            // Handle post-handshake messages (NewSessionTicket, etc.)
-                                            else if inner_type == 22 {
-                                                fields.insert(
-                                                    "inner_content_type",
-                                                    OwnedFieldValue::UInt8(inner_type),
-                                                );
-                                            }
-                                        }
-                                    } else {
-                                        // TLS 1.2 - plaintext is the actual data
-                                        decrypted_data.extend_from_slice(&plaintext);
-                                    }
-                                }
-
-                                fields.insert(
-                                    "decrypted_length",
-                                    OwnedFieldValue::UInt64(plaintext.len() as u64),
-                                );
-                            }
-                            Err(e) => {
-                                // Decryption failed - log but continue
-                                fields.insert(
-                                    "decrypt_error",
-                                    OwnedFieldValue::OwnedString(CompactString::new(e.to_string())),
-                                );
-                            }
-                        }
-                    } else {
-                        fields.insert("encrypted_length", OwnedFieldValue::UInt16(length as u16));
-                    }
-                }
-
-                20 => {
-                    // ChangeCipherSpec
-                    fields.insert("record_type", OwnedFieldValue::Str("ChangeCipherSpec"));
-                    state.change_cipher_spec_seen = true;
-                }
-
-                21 => {
-                    // Alert
-                    fields.insert("record_type", OwnedFieldValue::Str("Alert"));
-                    if payload.len() >= 2 {
-                        fields.insert("alert_level", OwnedFieldValue::UInt8(payload[0]));
-                        fields.insert("alert_description", OwnedFieldValue::UInt8(payload[1]));
-                    }
-                }
-
-                _ => {
-                    // Unknown content type
-                    fields.insert(
-                        "record_type",
-                        OwnedFieldValue::OwnedString(CompactString::new(format!(
-                            "Unknown({content_type})"
-                        ))),
-                    );
-                }
+            } else {
+                Self::process_plain_record(state, record, context.direction, &mut fields);
             }
 
             // Create message for this record
@@ -441,47 +540,34 @@ impl StreamParser for DecryptingTlsStreamParser {
                 fields,
             };
             messages.push(message);
-
-            // Consume this record from buffer
-            state.buffer = state.buffer.split_off(record_len);
-            total_consumed += record_len;
         }
+        let bytes_consumed = data.len() - rest.len();
 
-        // Decide what to return
-        if !decrypted_data.is_empty() {
-            // We have decrypted data - transform to child protocol
-            // Guess child protocol based on ALPN or default to http2
-            let child_protocol = "http2"; // TODO: detect from ALPN
-
-            // Return first TLS message as metadata, transform for child parsing
-            let metadata = if !messages.is_empty() {
-                Some(messages.remove(0))
-            } else {
-                None
+        if bytes_consumed == 0 {
+            // No complete record yet
+            return StreamParseResult::NeedMore {
+                minimum_bytes: Some(5), // At least record header
             };
-
-            StreamParseResult::Transform {
+        }
+        let child_protocol = if decrypted_data.is_empty() {
+            None
+        } else {
+            state
+                .application(context.direction, &decrypted_data)
+                .parser()
+        };
+        match child_protocol {
+            // Decrypted data of a protocol with a parser
+            Some(child_protocol) => StreamParseResult::Transform {
                 child_protocol,
                 child_data: decrypted_data,
-                bytes_consumed: total_consumed,
-                metadata,
-            }
-        } else if !messages.is_empty() {
-            // Have TLS messages but no decrypted data
-            StreamParseResult::Complete {
+                bytes_consumed,
                 messages,
-                bytes_consumed: total_consumed,
-            }
-        } else if total_consumed == 0 {
-            // No complete records yet
-            StreamParseResult::NeedMore {
-                minimum_bytes: Some(5), // At least record header
-            }
-        } else {
-            StreamParseResult::Complete {
-                messages: vec![],
-                bytes_consumed: total_consumed,
-            }
+            },
+            None => StreamParseResult::Complete {
+                messages,
+                bytes_consumed,
+            },
         }
     }
 
