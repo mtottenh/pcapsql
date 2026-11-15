@@ -99,7 +99,9 @@ pcapsql-duckdb/
       writer.rs           # ChunkWriter: RowSink over a DataChunkRef
       fs.rs               # DuckFile: Read adapter over duckdb_neo::file::File
       pushdown.rs         # Expression -> FramePredicate
-      scalar.rs, macros.rs, replacement.rs, options.rs, registry.rs
+      relation.rs         # the tables and views the engine reads, as scan plans
+      listing.rs          # pcap_protocols(), pcap_views(), pcap_schema()
+      scalar.rs, macros.rs, replacement.rs, settings.rs
       guard.rs            # catch_unwind + error conversion for every callback
   ext/                    # cdylib "pcapsql": entrypoint only, feature build-extension
   itest/                  # in-process tests: build-extension-static + linked libduckdb

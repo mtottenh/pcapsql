@@ -6,9 +6,10 @@
 
 pub mod fs;
 pub mod guard;
+mod listing;
 mod macros;
 pub mod pushdown;
-mod registry;
+mod relation;
 pub mod replacement;
 mod scalar;
 pub mod settings;
@@ -20,7 +21,7 @@ use duckdb_neo::{extension::Extension, Result};
 
 /// Register every pcapsql function with the extension that is being loaded.
 pub fn register(extension: &Extension) -> Result<()> {
-    registry::register(extension)?;
+    listing::register(extension)?;
     // Before the scan functions, which read them.
     settings::register(extension)?;
     table::register(extension)?;
