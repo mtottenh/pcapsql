@@ -325,12 +325,9 @@ impl CloudLocation {
             );
         }
 
-        let store = builder.build().map_err(|e| {
-            Error::Io(io::Error::new(
-                io::ErrorKind::Other,
-                format!("Failed to build GCS store: {e}"),
-            ))
-        })?;
+        let store = builder
+            .build()
+            .map_err(|e| Error::Io(io::Error::other(format!("Failed to build GCS store: {e}"))))?;
 
         Ok(Arc::new(store))
     }
@@ -353,10 +350,9 @@ impl CloudLocation {
         }
 
         let store = builder.build().map_err(|e| {
-            Error::Io(io::Error::new(
-                io::ErrorKind::Other,
-                format!("Failed to build Azure store: {e}"),
-            ))
+            Error::Io(io::Error::other(format!(
+                "Failed to build Azure store: {e}"
+            )))
         })?;
 
         Ok(Arc::new(store))
@@ -588,8 +584,12 @@ impl Read for ObjectStoreReader {
     }
 }
 
-// ObjectStoreReader is Send because all its fields are Send
-unsafe impl Send for ObjectStoreReader {}
+// A reader is moved to the thread that scans its partition; fail here, not there.
+const _: fn() = || {
+    fn assert_send<T: Send>() {}
+    assert_send::<ObjectStoreReader>();
+    assert_send::<CloudPacketReader>();
+};
 
 // Required for async compatibility
 impl Unpin for ObjectStoreReader {}
@@ -1088,9 +1088,6 @@ impl PacketReader for CloudPacketReader {
         self.link_type
     }
 }
-
-// CloudPacketReader is Send
-unsafe impl Send for CloudPacketReader {}
 
 // Required for async compatibility
 impl Unpin for CloudPacketReader {}
