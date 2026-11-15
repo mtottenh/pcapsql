@@ -11,7 +11,7 @@ use datafusion::common::Result as DFResult;
 use datafusion::logical_expr::{
     ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
 };
-use pcapsql_core::protocol::{ntp_mode as mode, ntp_stratum as stratum};
+use pcapsql_core::format::{ntp_mode_name, ntp_stratum_name};
 
 /// Create the `ntp_mode_name()` UDF.
 ///
@@ -76,22 +76,8 @@ impl ScalarUDFImpl for NtpModeNameUdf {
             .downcast_ref::<UInt8Array>()
             .expect("ntp_mode_name: expected uint8 array");
 
-        let result: StringArray = values.iter().map(|opt| opt.map(ntp_mode_to_name)).collect();
+        let result: StringArray = values.iter().map(|opt| opt.map(ntp_mode_name)).collect();
         Ok(ColumnarValue::Array(Arc::new(result)))
-    }
-}
-
-fn ntp_mode_to_name(m: u8) -> String {
-    match m {
-        mode::RESERVED => "Reserved".to_string(),
-        mode::SYMMETRIC_ACTIVE => "Symmetric Active".to_string(),
-        mode::SYMMETRIC_PASSIVE => "Symmetric Passive".to_string(),
-        mode::CLIENT => "Client".to_string(),
-        mode::SERVER => "Server".to_string(),
-        mode::BROADCAST => "Broadcast".to_string(),
-        mode::CONTROL => "NTP Control".to_string(),
-        mode::PRIVATE => "Private".to_string(),
-        _ => format!("Unknown ({m})"),
     }
 }
 
@@ -136,54 +122,7 @@ impl ScalarUDFImpl for NtpStratumNameUdf {
             .downcast_ref::<UInt8Array>()
             .expect("ntp_stratum_name: expected uint8 array");
 
-        let result: StringArray = values
-            .iter()
-            .map(|opt| opt.map(ntp_stratum_to_name))
-            .collect();
+        let result: StringArray = values.iter().map(|opt| opt.map(ntp_stratum_name)).collect();
         Ok(ColumnarValue::Array(Arc::new(result)))
-    }
-}
-
-fn ntp_stratum_to_name(s: u8) -> String {
-    match s {
-        stratum::UNSPECIFIED => "Unspecified".to_string(),
-        stratum::PRIMARY => "Primary Reference".to_string(),
-        2..=15 => format!("Secondary (stratum {s})"),
-        stratum::UNSYNCHRONIZED => "Unsynchronized".to_string(),
-        _ => format!("Reserved ({s})"),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_ntp_mode_name() {
-        assert_eq!(ntp_mode_to_name(mode::RESERVED), "Reserved");
-        assert_eq!(ntp_mode_to_name(mode::SYMMETRIC_ACTIVE), "Symmetric Active");
-        assert_eq!(
-            ntp_mode_to_name(mode::SYMMETRIC_PASSIVE),
-            "Symmetric Passive"
-        );
-        assert_eq!(ntp_mode_to_name(mode::CLIENT), "Client");
-        assert_eq!(ntp_mode_to_name(mode::SERVER), "Server");
-        assert_eq!(ntp_mode_to_name(mode::BROADCAST), "Broadcast");
-        assert_eq!(ntp_mode_to_name(mode::CONTROL), "NTP Control");
-        assert_eq!(ntp_mode_to_name(mode::PRIVATE), "Private");
-        assert_eq!(ntp_mode_to_name(8), "Unknown (8)");
-    }
-
-    #[test]
-    fn test_ntp_stratum_name() {
-        assert_eq!(ntp_stratum_to_name(stratum::UNSPECIFIED), "Unspecified");
-        assert_eq!(ntp_stratum_to_name(stratum::PRIMARY), "Primary Reference");
-        assert_eq!(ntp_stratum_to_name(2), "Secondary (stratum 2)");
-        assert_eq!(ntp_stratum_to_name(15), "Secondary (stratum 15)");
-        assert_eq!(
-            ntp_stratum_to_name(stratum::UNSYNCHRONIZED),
-            "Unsynchronized"
-        );
-        assert_eq!(ntp_stratum_to_name(17), "Reserved (17)");
     }
 }

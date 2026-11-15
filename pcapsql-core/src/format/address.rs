@@ -4,6 +4,7 @@
 //! - Format binary address values as human-readable strings
 //! - Detect which columns represent network addresses based on type and name
 
+use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 use crate::schema::{DataKind, FieldDescriptor};
@@ -74,6 +75,28 @@ pub fn format_mac(bytes: &[u8]) -> Option<String> {
         "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
         bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5]
     ))
+}
+
+/// Write a `u32` as a dotted-decimal IPv4 address: [`format_ipv4`] without
+/// the `String`.
+pub fn write_ipv4(value: u32, out: &mut impl fmt::Write) -> fmt::Result {
+    write!(out, "{}", Ipv4Addr::from(value))
+}
+
+/// Write 16 bytes as an IPv6 address in RFC 5952 form: [`format_ipv6`]
+/// without the `String`.
+pub fn write_ipv6(bytes: &[u8; 16], out: &mut impl fmt::Write) -> fmt::Result {
+    write!(out, "{}", Ipv6Addr::from(*bytes))
+}
+
+/// Write 6 bytes as a colon-separated lowercase MAC address: [`format_mac`]
+/// without the `String`.
+pub fn write_mac(bytes: &[u8; 6], out: &mut impl fmt::Write) -> fmt::Result {
+    write!(
+        out,
+        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5]
+    )
 }
 
 /// Detect if a column represents a network address based on its type and name.
@@ -390,5 +413,31 @@ mod tests {
 
         let field = FieldDescriptor::new("Dst_Mac", DataKind::FixedBinary(6));
         assert_eq!(detect_address_column(&field), Some(AddressKind::Mac));
+    }
+
+    #[test]
+    fn writers_match_formatters() {
+        for value in [0u32, 0x0A000001, 0xC0A80101, u32::MAX] {
+            let mut s = String::new();
+            write_ipv4(value, &mut s).unwrap();
+            assert_eq!(s, format_ipv4(value));
+        }
+
+        let v6: [[u8; 16]; 3] = [
+            [0; 16],
+            [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+            [0xff; 16],
+        ];
+        for bytes in v6 {
+            let mut s = String::new();
+            write_ipv6(&bytes, &mut s).unwrap();
+            assert_eq!(Some(s), format_ipv6(&bytes));
+        }
+
+        for bytes in [[0u8; 6], [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff], [0x0a; 6]] {
+            let mut s = String::new();
+            write_mac(&bytes, &mut s).unwrap();
+            assert_eq!(Some(s), format_mac(&bytes));
+        }
     }
 }

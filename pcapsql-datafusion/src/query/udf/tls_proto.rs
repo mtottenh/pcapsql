@@ -11,7 +11,7 @@ use datafusion::common::Result as DFResult;
 use datafusion::logical_expr::{
     ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
 };
-use pcapsql_core::protocol::{tls_record_type as record_type, tls_version as version};
+use pcapsql_core::format::{tls_record_type_name, tls_version_name};
 
 /// Create the `tls_version_name()` UDF.
 ///
@@ -76,25 +76,8 @@ impl ScalarUDFImpl for TlsVersionNameUdf {
             .downcast_ref::<UInt16Array>()
             .expect("tls_version_name: expected uint16 array");
 
-        let result: StringArray = values
-            .iter()
-            .map(|opt| opt.map(tls_version_to_name))
-            .collect();
+        let result: StringArray = values.iter().map(|opt| opt.map(tls_version_name)).collect();
         Ok(ColumnarValue::Array(Arc::new(result)))
-    }
-}
-
-fn tls_version_to_name(ver: u16) -> String {
-    match ver {
-        version::SSL_2_0 => "SSL 2.0".to_string(),
-        version::SSL_3_0 => "SSL 3.0".to_string(),
-        version::TLS_1_0 => "TLS 1.0".to_string(),
-        version::TLS_1_1 => "TLS 1.1".to_string(),
-        version::TLS_1_2 => "TLS 1.2".to_string(),
-        version::TLS_1_3 => "TLS 1.3".to_string(),
-        // GREASE values (RFC 8701) - pattern 0x?a?a
-        v if (v & 0x0f0f) == 0x0a0a => "GREASE".to_string(),
-        _ => format!("Unknown (0x{ver:04x})"),
     }
 }
 
@@ -141,56 +124,8 @@ impl ScalarUDFImpl for TlsRecordTypeNameUdf {
 
         let result: StringArray = values
             .iter()
-            .map(|opt| opt.map(tls_record_type_to_name))
+            .map(|opt| opt.map(tls_record_type_name))
             .collect();
         Ok(ColumnarValue::Array(Arc::new(result)))
-    }
-}
-
-fn tls_record_type_to_name(rt: u8) -> String {
-    match rt {
-        record_type::CHANGE_CIPHER_SPEC => "ChangeCipherSpec".to_string(),
-        record_type::ALERT => "Alert".to_string(),
-        record_type::HANDSHAKE => "Handshake".to_string(),
-        record_type::APPLICATION_DATA => "ApplicationData".to_string(),
-        record_type::HEARTBEAT => "Heartbeat".to_string(),
-        _ => format!("Unknown ({rt})"),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_tls_version_name() {
-        assert_eq!(tls_version_to_name(version::SSL_2_0), "SSL 2.0");
-        assert_eq!(tls_version_to_name(version::SSL_3_0), "SSL 3.0");
-        assert_eq!(tls_version_to_name(version::TLS_1_0), "TLS 1.0");
-        assert_eq!(tls_version_to_name(version::TLS_1_1), "TLS 1.1");
-        assert_eq!(tls_version_to_name(version::TLS_1_2), "TLS 1.2");
-        assert_eq!(tls_version_to_name(version::TLS_1_3), "TLS 1.3");
-        // GREASE values
-        assert_eq!(tls_version_to_name(0x0a0a), "GREASE");
-        assert_eq!(tls_version_to_name(0x1a1a), "GREASE");
-        assert_eq!(tls_version_to_name(0xfafa), "GREASE");
-        // Unknown
-        assert_eq!(tls_version_to_name(0x0305), "Unknown (0x0305)");
-    }
-
-    #[test]
-    fn test_tls_record_type_name() {
-        assert_eq!(
-            tls_record_type_to_name(record_type::CHANGE_CIPHER_SPEC),
-            "ChangeCipherSpec"
-        );
-        assert_eq!(tls_record_type_to_name(record_type::ALERT), "Alert");
-        assert_eq!(tls_record_type_to_name(record_type::HANDSHAKE), "Handshake");
-        assert_eq!(
-            tls_record_type_to_name(record_type::APPLICATION_DATA),
-            "ApplicationData"
-        );
-        assert_eq!(tls_record_type_to_name(record_type::HEARTBEAT), "Heartbeat");
-        assert_eq!(tls_record_type_to_name(99), "Unknown (99)");
     }
 }

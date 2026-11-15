@@ -10,7 +10,7 @@ use datafusion::common::Result as DFResult;
 use datafusion::logical_expr::{
     ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
 };
-use pcapsql_core::protocol::{rcode, record_type};
+use pcapsql_core::format::{dns_class_name, dns_rcode_name, dns_type_name};
 
 /// Create the `dns_type_name()` UDF that converts DNS query type number to name.
 ///
@@ -88,68 +88,10 @@ impl ScalarUDFImpl for DnsTypeNameUdf {
 
         let result: StringArray = type_values
             .iter()
-            .map(|opt| opt.map(dns_type_to_name))
+            .map(|opt| opt.map(dns_type_name))
             .collect();
 
         Ok(ColumnarValue::Array(Arc::new(result)))
-    }
-}
-
-/// Convert DNS type number to name.
-fn dns_type_to_name(qtype: u16) -> String {
-    match qtype {
-        record_type::A => "A".to_string(),
-        record_type::NS => "NS".to_string(),
-        record_type::CNAME => "CNAME".to_string(),
-        record_type::SOA => "SOA".to_string(),
-        record_type::PTR => "PTR".to_string(),
-        record_type::MX => "MX".to_string(),
-        record_type::TXT => "TXT".to_string(),
-        17 => "RP".to_string(),
-        18 => "AFSDB".to_string(),
-        24 => "SIG".to_string(),
-        25 => "KEY".to_string(),
-        record_type::AAAA => "AAAA".to_string(),
-        29 => "LOC".to_string(),
-        record_type::SRV => "SRV".to_string(),
-        35 => "NAPTR".to_string(),
-        36 => "KX".to_string(),
-        37 => "CERT".to_string(),
-        39 => "DNAME".to_string(),
-        record_type::OPT => "OPT".to_string(),
-        42 => "APL".to_string(),
-        43 => "DS".to_string(),
-        44 => "SSHFP".to_string(),
-        45 => "IPSECKEY".to_string(),
-        46 => "RRSIG".to_string(),
-        47 => "NSEC".to_string(),
-        48 => "DNSKEY".to_string(),
-        49 => "DHCID".to_string(),
-        50 => "NSEC3".to_string(),
-        51 => "NSEC3PARAM".to_string(),
-        52 => "TLSA".to_string(),
-        53 => "SMIMEA".to_string(),
-        55 => "HIP".to_string(),
-        59 => "CDS".to_string(),
-        60 => "CDNSKEY".to_string(),
-        61 => "OPENPGPKEY".to_string(),
-        62 => "CSYNC".to_string(),
-        63 => "ZONEMD".to_string(),
-        64 => "SVCB".to_string(),
-        65 => "HTTPS".to_string(),
-        99 => "SPF".to_string(),
-        108 => "EUI48".to_string(),
-        109 => "EUI64".to_string(),
-        249 => "TKEY".to_string(),
-        250 => "TSIG".to_string(),
-        251 => "IXFR".to_string(),
-        252 => "AXFR".to_string(),
-        record_type::ANY => "ANY".to_string(),
-        256 => "URI".to_string(),
-        257 => "CAA".to_string(),
-        32768 => "TA".to_string(),
-        32769 => "DLV".to_string(),
-        _ => format!("TYPE{qtype}"),
     }
 }
 
@@ -196,37 +138,10 @@ impl ScalarUDFImpl for DnsRcodeNameUdf {
 
         let result: StringArray = rcode_values
             .iter()
-            .map(|opt| opt.map(dns_rcode_to_name))
+            .map(|opt| opt.map(|rcode| dns_rcode_name(u16::from(rcode))))
             .collect();
 
         Ok(ColumnarValue::Array(Arc::new(result)))
-    }
-}
-
-/// Convert DNS response code to name.
-fn dns_rcode_to_name(rcode_val: u8) -> String {
-    match rcode_val {
-        rcode::NOERROR => "NOERROR".to_string(),
-        rcode::FORMERR => "FORMERR".to_string(),
-        rcode::SERVFAIL => "SERVFAIL".to_string(),
-        rcode::NXDOMAIN => "NXDOMAIN".to_string(),
-        rcode::NOTIMP => "NOTIMP".to_string(),
-        rcode::REFUSED => "REFUSED".to_string(),
-        rcode::YXDOMAIN => "YXDOMAIN".to_string(),
-        rcode::YXRRSET => "YXRRSET".to_string(),
-        rcode::NXRRSET => "NXRRSET".to_string(),
-        rcode::NOTAUTH => "NOTAUTH".to_string(),
-        rcode::NOTZONE => "NOTZONE".to_string(),
-        rcode::DSOTYPENI => "DSOTYPENI".to_string(),
-        rcode::BADVERS => "BADVERS".to_string(),
-        rcode::BADKEY => "BADKEY".to_string(),
-        rcode::BADTIME => "BADTIME".to_string(),
-        rcode::BADMODE => "BADMODE".to_string(),
-        rcode::BADNAME => "BADNAME".to_string(),
-        rcode::BADALG => "BADALG".to_string(),
-        rcode::BADTRUNC => "BADTRUNC".to_string(),
-        rcode::BADCOOKIE => "BADCOOKIE".to_string(),
-        _ => format!("RCODE{rcode_val}"),
     }
 }
 
@@ -273,67 +188,9 @@ impl ScalarUDFImpl for DnsClassNameUdf {
 
         let result: StringArray = class_values
             .iter()
-            .map(|opt| opt.map(dns_class_to_name))
+            .map(|opt| opt.map(dns_class_name))
             .collect();
 
         Ok(ColumnarValue::Array(Arc::new(result)))
-    }
-}
-
-/// Convert DNS class to name.
-fn dns_class_to_name(class: u16) -> String {
-    match class {
-        1 => "IN".to_string(),
-        3 => "CH".to_string(),
-        4 => "HS".to_string(),
-        254 => "NONE".to_string(),
-        255 => "ANY".to_string(),
-        _ => format!("CLASS{class}"),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_dns_type_name() {
-        assert_eq!(dns_type_to_name(1), "A");
-        assert_eq!(dns_type_to_name(28), "AAAA");
-        assert_eq!(dns_type_to_name(5), "CNAME");
-        assert_eq!(dns_type_to_name(15), "MX");
-        assert_eq!(dns_type_to_name(2), "NS");
-        assert_eq!(dns_type_to_name(12), "PTR");
-        assert_eq!(dns_type_to_name(6), "SOA");
-        assert_eq!(dns_type_to_name(16), "TXT");
-        assert_eq!(dns_type_to_name(33), "SRV");
-        assert_eq!(dns_type_to_name(255), "ANY");
-        assert_eq!(dns_type_to_name(257), "CAA");
-        assert_eq!(dns_type_to_name(65), "HTTPS");
-        // Unknown type
-        assert_eq!(dns_type_to_name(999), "TYPE999");
-    }
-
-    #[test]
-    fn test_dns_rcode_name() {
-        assert_eq!(dns_rcode_to_name(0), "NOERROR");
-        assert_eq!(dns_rcode_to_name(1), "FORMERR");
-        assert_eq!(dns_rcode_to_name(2), "SERVFAIL");
-        assert_eq!(dns_rcode_to_name(3), "NXDOMAIN");
-        assert_eq!(dns_rcode_to_name(4), "NOTIMP");
-        assert_eq!(dns_rcode_to_name(5), "REFUSED");
-        assert_eq!(dns_rcode_to_name(9), "NOTAUTH");
-        // Unknown rcode
-        assert_eq!(dns_rcode_to_name(99), "RCODE99");
-    }
-
-    #[test]
-    fn test_dns_class_name() {
-        assert_eq!(dns_class_to_name(1), "IN");
-        assert_eq!(dns_class_to_name(3), "CH");
-        assert_eq!(dns_class_to_name(4), "HS");
-        assert_eq!(dns_class_to_name(255), "ANY");
-        // Unknown class
-        assert_eq!(dns_class_to_name(99), "CLASS99");
     }
 }
