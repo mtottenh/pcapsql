@@ -1,0 +1,148 @@
+duckdb library version: {'v': v2.0.0, 'source_id': d54cbbe3df}
+native: row generation only     69.8 M rows/s,   14.3 ns/row (check 21474836463207680)
+native: generation + arrow build (all 11 cols, 2048 rows/batch)     15.6 M rows/s,   64.2 ns/row
+native: generation + arrow build, builders re-reserved (all 11 cols, 2048 rows/batch)     13.3 M rows/s,   75.3 ns/row
+native: generation + arrow build + FFI export (all 11 cols, 2048 rows/batch)     14.6 M rows/s,   68.5 ns/row
+equality over 300000 rows [arrow cached importer, 2048-row batches]: direct-arrow={'c': 0} arrow-direct={'c': 0} arrow rows={'c': 300000}
+equality over 300000 rows [arrow cached importer, 8192-row batches]: direct-arrow={'c': 0} arrow-direct={'c': 0} arrow rows={'c': 300000}
+equality over 300000 rows [arrow cached importer, 3000-row batches]: direct-arrow={'c': 0} arrow-direct={'c': 0} arrow rows={'c': 300000}
+equality over 300000 rows [arrow importer per exec, 2048-row batches]: direct-arrow={'c': 0} arrow-direct={'c': 0} arrow rows={'c': 300000}
+sample: {'frame_number': 11, 'ts': '2023-11-14 22:13:20.000010003', 'src_port': 13654, 'dst_port': 53, 'seq': 774553834, 'ack': NULL, 'flag': false, 'name': icmpv6, 'host': host-10.example.com, 'payload': '\\xD2\\xD8\\xE8\\xF8>\\xC1*.\\xD3\\xD8\\xE8\\xF8>\\xC1*.\\xD4\\xD8\\xE8\\xF8>\\xC1*.\\xD5\\xD8\\xE8\\xF8>\\xC1*.\\xD6\\xD8\\xE8\\xF8>\\xC1*.', 'opts': NULL}
+types:  {'t': 'UBIGINT,TIMESTAMP_NS,USMALLINT,USMALLINT,UINTEGER,UINTEGER,BOOLEAN,VARCHAR,VARCHAR,BLOB,UINTEGER[]'}
+fixed cost per chunk, arrow path, 1 column (u64), importer cached: 1.20 us per exec call (0.59 ns/row if spread over 2048 rows)
+fixed cost per chunk, arrow path, 1 column (u64), importer per exec: 2.16 us per exec call (1.05 ns/row if spread over 2048 rows)
+fixed cost per chunk, arrow path, 11 columns, importer cached: 9.64 us per exec call (4.71 ns/row if spread over 2048 rows)
+fixed cost per chunk, arrow path, 11 columns, importer per exec: 19.49 us per exec call (9.52 ns/row if spread over 2048 rows)
+
+rows per query: 10000000, repetitions: 5 (sources interleaved within each repetition), threads=1
+columns: M rows/s and whole-query ns/row from the fastest run (median run in brackets); ns/row spent inside the exec callback, fastest (median)
+
+== count(*) (the scan still asks for column 0, frame_number u64)
+direct                          66.05 M rows/s | query   15.1 ns/row (median   17.6) | in exec   14.8 ns/row (median   17.2) | result equal to direct
+direct (2nd registration)       66.67 M rows/s | query   15.0 ns/row (median   16.1) | in exec   14.6 ns/row (median   15.7) | result equal to direct
+arrow/cached/2048               46.19 M rows/s | query   21.6 ns/row (median   22.6) | in exec   21.3 ns/row (median   22.2) | result equal to direct
+arrow/cached/8192               49.22 M rows/s | query   20.3 ns/row (median   22.9) | in exec   20.0 ns/row (median   22.4) | result equal to direct
+arrow/per-exec/2048             49.05 M rows/s | query   20.4 ns/row (median   21.5) | in exec   20.0 ns/row (median   21.0) | result equal to direct
+arrow/cached+reserve/2048       49.65 M rows/s | query   20.1 ns/row (median   21.1) | in exec   19.8 ns/row (median   20.8) | result equal to direct
+stored table (consume only)   7124.78 M rows/s | query    0.1 ns/row (median    0.1) | in exec    0.0 ns/row (median    0.0) | result equal to direct
+   result: {'c': 10000000}
+
+== fixed-width x6, light (u64, ts_ns, 2x u16, 2x u32 one nullable)
+direct                          39.88 M rows/s | query   25.1 ns/row (median   26.1) | in exec   21.5 ns/row (median   22.7) | result equal to direct
+direct (2nd registration)       41.60 M rows/s | query   24.0 ns/row (median   26.0) | in exec   20.9 ns/row (median   22.5) | result equal to direct
+arrow/cached/2048               22.73 M rows/s | query   44.0 ns/row (median   47.4) | in exec   41.8 ns/row (median   45.2) | result equal to direct
+arrow/cached/8192               27.18 M rows/s | query   36.8 ns/row (median   47.2) | in exec   35.1 ns/row (median   44.9) | result equal to direct
+arrow/per-exec/2048             24.90 M rows/s | query   40.2 ns/row (median   47.7) | in exec   38.3 ns/row (median   45.4) | result equal to direct
+arrow/cached+reserve/2048       26.58 M rows/s | query   37.6 ns/row (median   44.9) | in exec   35.7 ns/row (median   42.7) | result equal to direct
+stored table (consume only)   1225.32 M rows/s | query    0.8 ns/row (median    1.0) | in exec    0.0 ns/row (median    0.0) | result equal to direct
+   result: {'a': 10000000, 'b': 10000000, 'd': 10000000, 'e': 10000000, 'f': 10000000, 'g': 8571429}
+
+== fixed-width x6, heavy
+direct                          34.75 M rows/s | query   28.8 ns/row (median   36.3) | in exec   18.4 ns/row (median   23.1) | result equal to direct
+direct (2nd registration)       29.85 M rows/s | query   33.5 ns/row (median   37.8) | in exec   21.4 ns/row (median   24.3) | result equal to direct
+arrow/cached/2048               20.13 M rows/s | query   49.7 ns/row (median   56.4) | in exec   38.7 ns/row (median   43.8) | result equal to direct
+arrow/cached/8192               21.74 M rows/s | query   46.0 ns/row (median   57.9) | in exec   35.5 ns/row (median   44.6) | result equal to direct
+arrow/per-exec/2048             18.07 M rows/s | query   55.3 ns/row (median   61.3) | in exec   43.6 ns/row (median   48.1) | result equal to direct
+arrow/cached+reserve/2048       17.27 M rows/s | query   57.9 ns/row (median   58.9) | in exec   44.7 ns/row (median   45.3) | result equal to direct
+stored table (consume only)     91.35 M rows/s | query   10.9 ns/row (median   12.0) | in exec    0.0 ns/row (median    0.0) | result equal to direct
+   result: {'c': 10000000, 'a': 50000005000000, 'b': 17000000049999995029999994, 'd': 327674830656, 'e': 21640000000, 'f': 21474836602804416, 'g': 18407005551353333, 'h': 8571429}
+
+== bool x1, light
+direct                          68.23 M rows/s | query   14.7 ns/row (median   14.8) | in exec   13.9 ns/row (median   13.9) | result equal to direct
+direct (2nd registration)       66.63 M rows/s | query   15.0 ns/row (median   16.4) | in exec   14.3 ns/row (median   15.6) | result equal to direct
+arrow/cached/2048               54.89 M rows/s | query   18.2 ns/row (median   21.6) | in exec   17.7 ns/row (median   21.1) | result equal to direct
+arrow/cached/8192               54.59 M rows/s | query   18.3 ns/row (median   23.1) | in exec   17.9 ns/row (median   22.3) | result equal to direct
+arrow/per-exec/2048             48.72 M rows/s | query   20.5 ns/row (median   21.6) | in exec   20.0 ns/row (median   21.1) | result equal to direct
+arrow/cached+reserve/2048       48.35 M rows/s | query   20.7 ns/row (median   22.7) | in exec   20.2 ns/row (median   22.1) | result equal to direct
+stored table (consume only)   7713.01 M rows/s | query    0.1 ns/row (median    0.1) | in exec    0.0 ns/row (median    0.0) | result equal to direct
+   result: {'a': 10000000}
+
+== bool x1, heavy
+direct                          69.55 M rows/s | query   14.4 ns/row (median   17.0) | in exec   13.2 ns/row (median   15.6) | result equal to direct
+direct (2nd registration)       60.09 M rows/s | query   16.6 ns/row (median   17.1) | in exec   15.3 ns/row (median   15.7) | result equal to direct
+arrow/cached/2048               44.54 M rows/s | query   22.5 ns/row (median   24.9) | in exec   21.3 ns/row (median   23.7) | result equal to direct
+arrow/cached/8192               44.41 M rows/s | query   22.5 ns/row (median   24.0) | in exec   21.5 ns/row (median   22.7) | result equal to direct
+arrow/per-exec/2048             50.69 M rows/s | query   19.7 ns/row (median   23.7) | in exec   18.6 ns/row (median   22.5) | result equal to direct
+arrow/cached+reserve/2048       51.99 M rows/s | query   19.2 ns/row (median   21.5) | in exec   18.3 ns/row (median   20.4) | result equal to direct
+stored table (consume only)   1155.80 M rows/s | query    0.9 ns/row (median    0.9) | in exec    0.0 ns/row (median    0.0) | result equal to direct
+   result: {'c': 10000000, 'a': 3333334}
+
+== strings x2 (name 3-16 B, host ~22 B), light
+direct                          39.59 M rows/s | query   25.3 ns/row (median   32.0) | in exec   24.0 ns/row (median   30.4) | result equal to direct
+direct (2nd registration)       32.52 M rows/s | query   30.8 ns/row (median   34.6) | in exec   29.2 ns/row (median   32.8) | result equal to direct
+arrow/cached/2048               23.83 M rows/s | query   42.0 ns/row (median   46.2) | in exec   40.7 ns/row (median   44.8) | result equal to direct
+arrow/cached/8192               21.75 M rows/s | query   46.0 ns/row (median   49.5) | in exec   44.4 ns/row (median   47.9) | result equal to direct
+arrow/per-exec/2048             22.75 M rows/s | query   44.0 ns/row (median   52.0) | in exec   42.7 ns/row (median   50.2) | result equal to direct
+arrow/cached+reserve/2048       28.80 M rows/s | query   34.7 ns/row (median   43.8) | in exec   33.7 ns/row (median   42.5) | result equal to direct
+stored table (consume only)    186.32 M rows/s | query    5.4 ns/row (median    5.5) | in exec    0.0 ns/row (median    0.0) | result equal to direct
+   result: {'a': 10000000, 'b': 8000000}
+
+== strings x2, heavy
+direct                          18.02 M rows/s | query   55.5 ns/row (median   61.6) | in exec   28.5 ns/row (median   31.7) | result equal to direct
+direct (2nd registration)       17.40 M rows/s | query   57.5 ns/row (median   60.3) | in exec   29.5 ns/row (median   31.0) | result equal to direct
+arrow/cached/2048               13.78 M rows/s | query   72.6 ns/row (median   81.9) | in exec   44.1 ns/row (median   49.8) | result equal to direct
+arrow/cached/8192               13.47 M rows/s | query   74.2 ns/row (median   80.3) | in exec   45.8 ns/row (median   48.8) | result equal to direct
+arrow/per-exec/2048             13.37 M rows/s | query   74.8 ns/row (median   76.2) | in exec   45.9 ns/row (median   46.8) | result equal to direct
+arrow/cached+reserve/2048       14.70 M rows/s | query   68.0 ns/row (median   73.2) | in exec   40.5 ns/row (median   43.6) | result equal to direct
+stored table (consume only)     31.92 M rows/s | query   31.3 ns/row (median   33.0) | in exec    0.0 ns/row (median    0.0) | result equal to direct
+   result: {'c': 10000000, 'a': 70000000, 'b': 175111200, 'd': 8000000, 'e': 63773966673467239772500000, 'f': 101166061002528971976389900}
+
+== blob x1 (40 B), light
+direct                          52.02 M rows/s | query   19.2 ns/row (median   25.6) | in exec   18.3 ns/row (median   24.2) | result equal to direct
+direct (2nd registration)       50.52 M rows/s | query   19.8 ns/row (median   21.8) | in exec   18.9 ns/row (median   20.6) | result equal to direct
+arrow/cached/2048               33.97 M rows/s | query   29.4 ns/row (median   32.6) | in exec   28.8 ns/row (median   31.8) | result equal to direct
+arrow/cached/8192               32.41 M rows/s | query   30.9 ns/row (median   34.2) | in exec   30.0 ns/row (median   33.1) | result equal to direct
+arrow/per-exec/2048             34.85 M rows/s | query   28.7 ns/row (median   31.8) | in exec   28.1 ns/row (median   31.1) | result equal to direct
+arrow/cached+reserve/2048       37.79 M rows/s | query   26.5 ns/row (median   27.5) | in exec   25.9 ns/row (median   26.9) | result equal to direct
+stored table (consume only)   7575.16 M rows/s | query    0.1 ns/row (median    0.1) | in exec    0.0 ns/row (median    0.0) | result equal to direct
+   result: {'a': 10000000}
+
+== blob x1, heavy
+direct                          42.19 M rows/s | query   23.7 ns/row (median   30.8) | in exec   16.2 ns/row (median   21.0) | result equal to direct
+direct (2nd registration)       41.05 M rows/s | query   24.4 ns/row (median   27.2) | in exec   16.7 ns/row (median   18.6) | result equal to direct
+arrow/cached/2048               28.66 M rows/s | query   34.9 ns/row (median   41.4) | in exec   26.8 ns/row (median   31.8) | result equal to direct
+arrow/cached/8192               25.28 M rows/s | query   39.6 ns/row (median   47.5) | in exec   30.5 ns/row (median   36.5) | result equal to direct
+arrow/per-exec/2048             26.77 M rows/s | query   37.4 ns/row (median   41.0) | in exec   28.9 ns/row (median   31.8) | result equal to direct
+arrow/cached+reserve/2048       33.50 M rows/s | query   29.9 ns/row (median   38.3) | in exec   22.8 ns/row (median   29.0) | result equal to direct
+stored table (consume only)     71.23 M rows/s | query   14.0 ns/row (median   16.8) | in exec    0.0 ns/row (median    0.0) | result equal to direct
+   result: {'c': 10000000, 'a': 400000000, 'b': 92272172089229919020984592}
+
+== list<u32> x1, light
+direct                          62.81 M rows/s | query   15.9 ns/row (median   20.1) | in exec   15.2 ns/row (median   19.2) | result equal to direct
+direct (2nd registration)       55.23 M rows/s | query   18.1 ns/row (median   18.7) | in exec   17.3 ns/row (median   17.8) | result equal to direct
+arrow/cached/2048               44.82 M rows/s | query   22.3 ns/row (median   27.6) | in exec   21.4 ns/row (median   26.5) | result equal to direct
+arrow/cached/8192               43.13 M rows/s | query   23.2 ns/row (median   27.9) | in exec   22.1 ns/row (median   26.7) | result equal to direct
+arrow/per-exec/2048             43.05 M rows/s | query   23.2 ns/row (median   29.1) | in exec   22.3 ns/row (median   27.9) | result equal to direct
+arrow/cached+reserve/2048       45.38 M rows/s | query   22.0 ns/row (median   27.6) | in exec   21.1 ns/row (median   26.4) | result equal to direct
+stored table (consume only)    320.35 M rows/s | query    3.1 ns/row (median    3.4) | in exec    0.0 ns/row (median    0.0) | result equal to direct
+   result: {'a': 9090910}
+
+== list<u32> x1, heavy
+direct                          42.82 M rows/s | query   23.4 ns/row (median   31.9) | in exec   15.4 ns/row (median   20.9) | result equal to direct
+direct (2nd registration)       34.75 M rows/s | query   28.8 ns/row (median   29.5) | in exec   18.9 ns/row (median   19.4) | result equal to direct
+arrow/cached/2048               26.68 M rows/s | query   37.5 ns/row (median   42.1) | in exec   27.4 ns/row (median   31.0) | result equal to direct
+arrow/cached/8192               33.51 M rows/s | query   29.8 ns/row (median   38.0) | in exec   21.8 ns/row (median   27.6) | result equal to direct
+arrow/per-exec/2048             29.07 M rows/s | query   34.4 ns/row (median   38.1) | in exec   25.4 ns/row (median   28.1) | result equal to direct
+arrow/cached+reserve/2048       30.82 M rows/s | query   32.4 ns/row (median   39.0) | in exec   23.6 ns/row (median   28.5) | result equal to direct
+stored table (consume only)    102.07 M rows/s | query    9.8 ns/row (median   12.1) | in exec    0.0 ns/row (median    0.0) | result equal to direct
+   result: {'c': 10000000, 'a': 13636365, 'b': 9090910, 'd': 106780019364928880457764608}
+
+== all 11 columns, light
+direct                          21.80 M rows/s | query   45.9 ns/row (median   50.5) | in exec   40.6 ns/row (median   44.3) | result equal to direct
+direct (2nd registration)       17.37 M rows/s | query   57.6 ns/row (median   60.8) | in exec   50.9 ns/row (median   53.6) | result equal to direct
+arrow/cached/2048                9.91 M rows/s | query  100.9 ns/row (median  109.1) | in exec   95.4 ns/row (median  103.0) | result equal to direct
+arrow/cached/8192                8.87 M rows/s | query  112.7 ns/row (median  120.6) | in exec  105.8 ns/row (median  114.1) | result equal to direct
+arrow/per-exec/2048              9.89 M rows/s | query  101.1 ns/row (median  140.0) | in exec   95.3 ns/row (median  131.5) | result equal to direct
+arrow/cached+reserve/2048       10.08 M rows/s | query   99.2 ns/row (median  108.9) | in exec   93.6 ns/row (median  103.0) | result equal to direct
+stored table (consume only)    104.65 M rows/s | query    9.6 ns/row (median   11.1) | in exec    0.0 ns/row (median    0.0) | result equal to direct
+   result: {'a': 10000000, 'b': 10000000, 'd': 10000000, 'e': 10000000, 'f': 10000000, 'g': 8571429, 'h': 10000000, 'i': 10000000, 'j': 8000000, 'k': 10000000, 'l': 9090910}
+
+== all 11 columns, heavy
+direct                           9.59 M rows/s | query  104.3 ns/row (median  126.8) | in exec   46.5 ns/row (median   56.2) | result equal to direct
+direct (2nd registration)        8.74 M rows/s | query  114.4 ns/row (median  125.1) | in exec   51.1 ns/row (median   55.6) | result equal to direct
+arrow/cached/2048                5.24 M rows/s | query  190.8 ns/row (median  192.7) | in exec  117.9 ns/row (median  118.0) | result equal to direct
+arrow/cached/8192                5.65 M rows/s | query  176.8 ns/row (median  195.1) | in exec  108.4 ns/row (median  118.5) | result equal to direct
+arrow/per-exec/2048              5.18 M rows/s | query  192.9 ns/row (median  228.0) | in exec  121.8 ns/row (median  143.1) | result equal to direct
+arrow/cached+reserve/2048        5.90 M rows/s | query  169.4 ns/row (median  187.2) | in exec  101.4 ns/row (median  112.2) | result equal to direct
+stored table (consume only)     13.91 M rows/s | query   71.9 ns/row (median   82.2) | in exec    0.0 ns/row (median    0.0) | result equal to direct
+   result: {'c': 10000000, 'a': 50000005000000, 'b': 17000000049999995029999994, 'd': 327674830656, 'e': 21640000000, 'f': 21474836602804416, 'g': 18407005551353333, 'h': 8571429, 'i': 3333334, 'j': 70000000, 'k': 175111200, 'l': 8000000, 'm': 63773966673467239772500000, 'o': 101166061002528971976389900, 'p': 400000000, 'q': 92272172089229919020984592, 'r': 13636365, 's': 9090910, 't': 106780019364928880457764608}
