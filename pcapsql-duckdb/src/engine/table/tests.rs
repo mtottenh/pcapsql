@@ -1,7 +1,8 @@
 use pcapsql_core::io::{Compression, StreamHeader};
 use pcapsql_core::scan::FramePredicate;
 
-use super::args::{has_wildcard, DEFAULT_PROTOCOL};
+use super::args::DEFAULT_PROTOCOL;
+use super::function::has_wildcard;
 use super::report::parsed_protocols;
 use super::*;
 

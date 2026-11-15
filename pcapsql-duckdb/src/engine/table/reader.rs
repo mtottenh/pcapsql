@@ -11,7 +11,7 @@ use pcapsql_core::io::{
 };
 use pcapsql_core::scan::PartitionScan;
 
-use super::{protocols, BindData, PcapScan, Shared};
+use super::{function::CaptureFunction, protocols, BindData, PcapScan, Shared};
 use crate::engine::fs::DuckFile;
 
 /// A partition being scanned by a worker.
@@ -50,7 +50,7 @@ impl PcapScan {
                 file.seek(0)?;
                 // The decompressor is ours rather than the reader's, so that a read error
                 // can be remembered between the two (`Tracked`).
-                let tracked = Tracked::new(file, header.compression, shared, &fault)
+                let tracked = Tracked::new(file, header.compression, &shared.file_bytes, &fault)
                     .map_err(|error| failed(&error))?;
                 let plain = StreamHeader {
                     compression: Compression::None,
@@ -62,7 +62,7 @@ impl PcapScan {
             // record, and the reader is told by the index what the capture's header said.
             Some(index) => {
                 let file = DuckFile::open_at(context, path, range.start.byte_offset)?;
-                let tracked = Tracked::new(file, Compression::None, shared, &fault)
+                let tracked = Tracked::new(file, Compression::None, &shared.file_bytes, &fault)
                     .map_err(|error| failed(&error))?;
                 ReadPacketReader::at(tracked, index.format, index, range)
             }
@@ -79,17 +79,6 @@ impl PcapScan {
             file: number,
             first_frame,
         })
-    }
-
-    /// Learn the capture's compression, format and link type from the head of `file`.
-    pub(super) fn probe(&self, file: &mut DuckFile, path: &str) -> Result<StreamHeader> {
-        match StreamHeader::probe(file) {
-            Ok((header, _head)) => Ok(header),
-            Err(error) => Err(self.invalid(format_args!(
-                "'{path}' is not a capture file pcapsql can read \
-                 (pcap or pcapng, optionally gzip- or zstd-compressed): {error}"
-            ))),
-        }
     }
 }
 
@@ -140,16 +129,17 @@ pub(super) struct Tracked {
 }
 
 impl Tracked {
-    /// `file` from its position on, decompressed, counted against the scan's progress.
-    fn new(
+    /// `file` from its position on, decompressed, with the bytes read from it added to
+    /// `bytes`: the progress of a scan.
+    pub(super) fn new(
         file: DuckFile,
         compression: Compression,
-        shared: &Shared,
+        bytes: &Arc<AtomicU64>,
         fault: &Fault,
     ) -> io::Result<Self> {
         let counted = Counted {
             file,
-            bytes: shared.file_bytes.clone(),
+            bytes: bytes.clone(),
         };
         Ok(Self {
             inner: DecompressReader::new(counted, compression)?,

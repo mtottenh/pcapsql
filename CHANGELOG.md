@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **DuckDB extension: `pcap_time_range(files)` and the capture time
+  functions.** `pcap_time_range(files, strict := false)` returns one row per
+  capture file: `filename`, `start_time` and `end_time` (`TIMESTAMP_NS`, the
+  smallest and largest timestamp of a frame; NULL for a capture without
+  frames), `frames`, `duration` (seconds), `link_type` and `truncated`. The
+  files argument is that of the scan functions (a path, a pattern, a list;
+  gzip and zstd). A row is one pass over the records of its file that parses
+  no protocol; several files are read on several threads. A capture that ends
+  inside a record gives the row of its complete frames with `truncated`
+  set, and an error with `strict := true`. Over it, as macros, the time
+  functions of the command-line tool with the capture as an argument (that
+  tool has one capture per session, DuckDB has none): `start_time(files)`,
+  `end_time(files)` and `relative_time(ts, files)`, seconds as a `DOUBLE`.
+  With several files the start is the smallest of theirs and the end the
+  largest. Each is a scalar subquery DuckDB 2.0.0 runs once per statement,
+  also when the macro is in the projection and in the filter. They return
+  what the command-line tool's functions return for the same capture (the
+  golden corpus queries of those functions are now compared between the
+  engines), except that timestamps are `TIMESTAMP_NS`, so `relative_time`
+  keeps the nanoseconds of a capture that has them, and that a capture
+  without frames gives NULL instead of the Unix epoch. No name clashes with
+  a function of DuckDB 2.0.0, so none has a `pcap_` prefix.
+
 - **DuckDB extension: `COPY ... TO 'x.pcap' (FORMAT pcap)`.** The rows of a
   query written as a classic pcap file, a packet per row:
   `COPY (SELECT * FROM read_frames('in.pcapng') WHERE ... ORDER BY

@@ -12,6 +12,9 @@
 //! SELECT timestamp, ip4_to_string(src_ip_v4), dst_port FROM read_tcp_packets('capture.pcap');
 //! ```
 //!
+//! (`pcap_time_range(files)`, which says when each capture begins and ends, is registered here
+//! too and takes the same files argument; it is described in its own module, `time_range`.)
+//!
 //! All of them are one implementation, [`PcapScan`], which holds no scan logic: which columns a
 //! table has, what a cell holds, which rows a frame adds, where a chunk ends and where a capture
 //! can be split are decided by `pcapsql_core::scan`, the layer the DataFusion frontend runs too.
@@ -200,12 +203,14 @@
 //! when it starts and fails there, whatever the query goes on to read.
 
 mod args;
+mod function;
 mod keylog;
 mod layout;
 mod reader;
 mod report;
 #[cfg(test)]
 mod tests;
+mod time_range;
 
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -230,6 +235,7 @@ use pcapsql_core::io::{BoundaryIndex, PacketReader};
 use pcapsql_core::scan::{Catalog, CompiledScan, OutColumn, PartitionQueue, Step};
 use pcapsql_core::{default_registry, ProtocolRegistry};
 
+use self::function::CaptureFunction;
 use self::keylog::Keys;
 use self::layout::{estimated_rows, Layout};
 use self::reader::Scanning;
@@ -276,7 +282,8 @@ pub(super) fn register(extension: &Extension) -> Result<()> {
         let name = format!("read_{}", relation.name());
         builder(&name, Some(relation)).register(extension)?;
     }
-    builder("read_pcap", None).register(extension)
+    builder("read_pcap", None).register(extension)?;
+    time_range::register(extension)
 }
 
 type Builder = duckdb_neo::table_function::TableFunctionBuilder<guard::Guarded<PcapScan>>;
@@ -303,19 +310,9 @@ struct PcapScan {
     relation: Option<Relation>,
 }
 
-impl PcapScan {
-    /// An error of this function: `message` with the function's SQL name in front, as every
-    /// message of a scan function starts.
-    fn error(&self, code: DuckDBError, message: impl std::fmt::Display) -> Error {
-        Error {
-            code,
-            message: format!("{}: {message}", self.name),
-        }
-    }
-
-    /// An [`error`](Self::error) about what the call was given.
-    fn invalid(&self, message: impl std::fmt::Display) -> Error {
-        self.error(DuckDBError::InputInvalid, message)
+impl CaptureFunction for PcapScan {
+    fn name(&self) -> &str {
+        &self.name
     }
 }
 

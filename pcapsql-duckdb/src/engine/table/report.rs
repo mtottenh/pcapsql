@@ -1,19 +1,20 @@
-//! What a scan says: the line on what it reads for the log, its read and truncation errors,
-//! and the check of how a partition ended.
+//! What a scan says: the line on what it reads for the log, and the check of how a partition
+//! ended. The read and truncation errors are those of every function over capture files
+//! ([`CaptureFunction`]).
 
 use std::sync::atomic::Ordering;
 
 use duckdb_neo::{
     connection::Context,
-    error::DuckDBError,
     log::{Log, LogLevel},
-    Error, Result,
+    Result,
 };
 use pcapsql_core::io::PacketReader;
 use pcapsql_core::scan::CompiledScan;
 
 use super::{
-    keylog::Keys, layout::Layout, reader::Scanning, BindData, PcapScan, Shared, Worker, LOG_TYPE,
+    function::CaptureFunction, keylog::Keys, layout::Layout, reader::Scanning, BindData, PcapScan,
+    Shared, Worker, LOG_TYPE,
 };
 use crate::engine::pushdown;
 
@@ -49,39 +50,6 @@ impl PcapScan {
             layout.note,
             parsed_protocols(plan)
         )
-    }
-
-    /// The error of a read of the capture `path` that failed after `frame` complete frames.
-    pub(super) fn read_error(
-        &self,
-        path: &str,
-        frame: u64,
-        error: &dyn std::fmt::Display,
-    ) -> Error {
-        self.error(
-            DuckDBError::IoReadFailure,
-            format_args!("cannot read '{path}' after frame {frame}: {error}"),
-        )
-    }
-
-    /// What is wrong with the capture `path`, which ends inside the record after `last_frame`.
-    pub(super) fn truncation(&self, path: &str, last_frame: u64) -> String {
-        format!(
-            "{}: '{path}' is truncated: the capture ends inside the record that follows frame \
-             {last_frame}, the last complete one",
-            self.name
-        )
-    }
-
-    /// The error of a strict scan of such a capture.
-    pub(super) fn truncation_error(&self, path: &str, last_frame: u64) -> Error {
-        Error {
-            code: DuckDBError::IoEof,
-            message: format!(
-                "{}; without strict := true the complete frames are returned",
-                self.truncation(path, last_frame)
-            ),
-        }
     }
 
     /// Check how the scan of a partition ended: with an error the reader swallowed, inside a

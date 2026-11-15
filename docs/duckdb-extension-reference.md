@@ -23,8 +23,9 @@ is described in
 |---|---|---|
 | Scan table functions | 54 | `read_pcap`, `read_<table>` for each of the 32 tables (28 of packets, 4 of TCP streams), and `read_<view>` for each of the 21 `*_packets` views |
 | Listing table functions | 3 | `pcap_protocols`, `pcap_views`, `pcap_schema` |
+| Capture summary table function | 1 | `pcap_time_range` |
 | Scalar functions | 40 | `ip4`, `ip4_to_string`, `ip6`, `ip6_to_string`, `mac`, `mac_to_string`, `is_private_ip`, `is_loopback_ip`, `is_multicast_ip`, `is_multicast_ip6`, `is_link_local_ip6`, `mac_is_broadcast`, `mac_is_multicast`, `mac_is_local`, `ip_in_cidr`, `ip6_in_cidr`, `tcp_flags_str`, `has_tcp_flag`, `ethertype_name`, `ip_proto_name`, `dscp_name`, `ecn_name`, `icmp_type_name`, `icmp_code_name`, `icmpv6_type_name`, `icmpv6_code_name`, `dns_type_name`, `dns_class_name`, `dns_rcode_name`, `bgp_message_type_name`, `bgp_origin_name`, `ospf_packet_type_name`, `ospf_lsa_type_name`, `gtp_message_type_name`, `ntp_mode_name`, `ntp_stratum_name`, `tls_record_type_name`, `tls_version_name`, `pcap_hex`, `pcap_unhex` |
-| Macros | 6 | `format_ip4`, `format_ip6`, `format_mac`, `format_ip4_list`, `format_ip6_list`, `format_mac_list` |
+| Macros | 9 | `format_ip4`, `format_ip6`, `format_mac`, `format_ip4_list`, `format_ip6_list`, `format_mac_list`, `start_time`, `end_time`, `relative_time` |
 | Settings | 5 | `pcapsql_parallel_scan`, `pcapsql_parallel_min_file_size`, `pcapsql_index_stride`, `pcapsql_filter_pushdown`, `pcapsql_keylog` |
 | Replacement scan | 1 | `FROM 'capture.pcap'` |
 | Copy format | 1 | `FORMAT pcap`, for `COPY ... TO`, with the options `LINKTYPE`, `SNAPLEN` and `PRECISION` |
@@ -242,9 +243,9 @@ SELECT method, authority, path FROM http2 WHERE method IS NOT NULL;
 
 | Parameter | Type | Default | On | Meaning |
 |---|---|---|---|---|
-| `files` | `VARCHAR` or `VARCHAR[]` | required | all | The only positional argument: a path, a glob pattern (`*`, `?`, `[...]`, `**`), or a list of paths and patterns. Files are opened through DuckDB's file system |
+| `files` | `VARCHAR` or `VARCHAR[]` | required | all, and `pcap_time_range` | The only positional argument: a path, a glob pattern (`*`, `?`, `[...]`, `**`), or a list of paths and patterns. Files are opened through DuckDB's file system |
 | `protocol` | `VARCHAR` | `'frames'` | `read_pcap` | The table to read, in any case. An unknown name is an error |
-| `strict` | `BOOLEAN` | `false` | all | `true` makes a capture that ends inside a record an error. By default the complete packets are returned and a warning is logged |
+| `strict` | `BOOLEAN` | `false` | all, and `pcap_time_range` | `true` makes a capture that ends inside a record an error. By default the complete packets are returned and a warning is logged |
 | `filename` | `BOOLEAN` | `false` | all | `true` adds a `filename VARCHAR` column after the table's columns, with the path of the file each row is from |
 | `keylog` | `VARCHAR` | `NULL` | `read_pcap`, `read_tcp_connections`, `read_tls_sessions`, `read_http_messages`, `read_http2` | The path of a TLS key log to decrypt with. NULL or not given: the setting `pcapsql_keylog`. Empty: none. See "TLS decryption" |
 
@@ -345,6 +346,85 @@ SELECT name, description FROM pcap_protocols();
 SELECT * FROM pcap_schema('dns');
 ```
 
+## Capture time
+
+### `pcap_time_range(files, strict := false)`
+
+One row per capture file: when it begins and ends, and how many frames it
+has. `files` is the argument of the scan functions (a path, a pattern, or a
+list of them; see "Parameters" and "Input files").
+
+| Column | Type | Meaning |
+|---|---|---|
+| `filename` | `VARCHAR` | The path of the file, as `files` expanded to it |
+| `start_time` | `TIMESTAMP_NS` | The smallest timestamp of a frame. NULL for a capture without frames |
+| `end_time` | `TIMESTAMP_NS` | The largest timestamp of a frame. NULL for a capture without frames |
+| `frames` | `UBIGINT` | The number of complete frames |
+| `duration` | `DOUBLE` | Seconds from `start_time` to `end_time`. NULL for a capture without frames |
+| `link_type` | `UINTEGER` | The link-layer type the capture's header declares; for pcapng, that of its first interface |
+| `truncated` | `BOOLEAN` | Whether the capture ends inside a record |
+
+- The timestamps have the type of `read_frames.timestamp`. They are the
+  smallest and the largest of all frames, which are not the first and the
+  last frame's when the frames are not in time order.
+- A row costs one pass over the records of its file: every record is read
+  (a compressed capture is decompressed), none is parsed. The extension keeps
+  no index of a capture between statements, so no call is answered without
+  that pass. Several files are read on several threads, and the rows come
+  back in no particular order.
+- A capture that ends inside a record gives the row of its complete frames,
+  with `truncated` true; nothing is logged. With `strict := true` the
+  statement fails instead, as a scan does. The pass reads to the end of the
+  file, so it always finds a broken tail.
+- Every file is opened and probed when the statement is bound, as for a scan.
+
+```sql
+SELECT * FROM pcap_time_range('capture.pcap');
+SELECT min(start_time), max(end_time), sum(frames) FROM pcap_time_range('logs/*.pcap.gz');
+```
+
+### `start_time(files)`, `end_time(files)`, `relative_time(ts, files)`
+
+The command-line tool's `start_time()`, `end_time()` and `relative_time(ts)`,
+with the capture as an argument: that tool has one capture per session,
+DuckDB has none. They are macros over `pcap_time_range` (see "Macros").
+
+| Macro | Returns | Result |
+|---|---|---|
+| `start_time(files)` | `TIMESTAMP_NS` | The smallest timestamp of a frame of the files |
+| `end_time(files)` | `TIMESTAMP_NS` | The largest timestamp of a frame of the files |
+| `relative_time(ts, files)` | `DOUBLE` | Seconds from `start_time(files)` to `ts`; negative for a `ts` before it |
+
+- With several files the start is the smallest of theirs and the end the
+  largest. Without a frame in the files all three are NULL (the command-line
+  tool answers the Unix epoch there). A NULL `ts` gives NULL.
+- `ts` is a `TIMESTAMP_NS`, as the tables have it, or any other timestamp
+  type `epoch_ns` takes (`TIMESTAMP`, `TIMESTAMPTZ`, ...).
+- `relative_time` is the difference in nanoseconds divided by 1e9. The
+  command-line tool divides a difference in microseconds by 1e6: the two are
+  equal to the last bit on a capture with microsecond timestamps whose
+  difference is below 2^53 ns (104 days), and this one keeps the nanoseconds
+  of a capture that has them.
+- `files` must be a constant (a literal, a prepared statement's parameter,
+  `getvariable(...)`): a column is refused, as for a scan.
+- The macro is a scalar subquery that does not depend on the row. DuckDB
+  2.0.0 runs it once per statement, also when it is written several times
+  with the same files, in the projection and in the filter (`EXPLAIN` shows
+  one `PCAP_TIME_RANGE` under a common subplan), so the files are read once
+  for the range, whatever the number of rows.
+- A filter on `relative_time` is applied by DuckDB to the rows of the scan;
+  it is not a filter on `timestamp` the scan takes over ("Pushdown").
+- DuckDB 2.0.0 does not let another item of the same `SELECT` list refer to
+  the alias of an expression that has a subquery, which these macros have:
+  `SELECT relative_time(timestamp, 'x.pcap') AS rel, rel * 1000` is refused.
+  Use a subquery or a common table expression.
+
+```sql
+SELECT frame_number, relative_time(timestamp, 'capture.pcap') AS seconds
+FROM read_tcp('capture.pcap')
+WHERE relative_time(timestamp, 'capture.pcap') < 10;
+```
+
 ## Scalar functions
 
 A NULL argument gives NULL, and so does an argument the function cannot use
@@ -432,6 +512,11 @@ Registered by the extension, not stored in a database file.
 | `format_ip4_list(ips)` | `list_transform(ips, lambda x: ip4_to_string(x))` |
 | `format_ip6_list(ips)` | `list_transform(ips, lambda x: ip6_to_string(x))` |
 | `format_mac_list(macs)` | `list_transform(macs, lambda x: mac_to_string(x))` |
+| `start_time(files)` | `(SELECT min(start_time) FROM pcap_time_range(files))` |
+| `end_time(files)` | `(SELECT max(end_time) FROM pcap_time_range(files))` |
+| `relative_time(ts, files)` | `(epoch_ns(ts) - epoch_ns((SELECT min(start_time) FROM pcap_time_range(files)))) / 1e9` |
+
+The last three are described under "Capture time".
 
 ## Settings
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # LOAD the built extension in the stock DuckDB command-line shell, call each kind of function,
-# read captures and write one.
+# read captures, summarize them and write one.
 #
 #   load-test.sh <path to pcapsql.duckdb_extension> <DuckDB version> <extension version>
 #
@@ -89,6 +89,12 @@ SELECT count(*), (SELECT is_decrypted FROM read_tls_sessions('$fixtures/tls13_ht
 COPY (SELECT * FROM read_frames('$captures/dns.cap') ORDER BY frame_number) TO '$scratch/copy.pcap' (FORMAT pcap, PRECISION 'us', SNAPLEN 65535);
 COPY (SELECT f.* FROM read_frames('$scratch/dns.cap.gz') f JOIN read_dns('$scratch/dns.cap.gz') d USING (frame_number) WHERE d.is_query ORDER BY frame_number) TO '$scratch/queries.pcap';
 SELECT count(*), count(*) FILTER (is_query), min(typeof(timestamp)) FROM read_dns('$scratch/queries.pcap');
+SELECT parse_filename(filename), start_time, end_time, frames, duration, link_type, truncated FROM pcap_time_range(['$captures/dns.cap', '$scratch/cut.cap', '$scratch/dns.cap.gz']) ORDER BY 1;
+SELECT start_time('$captures/v6*'), end_time('$captures/v6*'), typeof(start_time('$scratch/dns.cap.gz'));
+SELECT frame_number, relative_time(timestamp, '$captures/dns.cap') FROM read_dns('$captures/dns.cap') WHERE relative_time(timestamp, '$captures/dns.cap') BETWEEN 4 AND 5;
+SELECT count(*) FROM duckdb_functions() WHERE function_type = 'macro' AND function_name IN (
+    'format_ip4', 'format_ip6', 'format_mac', 'format_ip4_list', 'format_ip6_list', 'format_mac_list',
+    'start_time', 'end_time', 'relative_time');
 "
 expected="pcapsql,true,$extension_version
 32
@@ -154,7 +160,14 @@ TLS 1.2,true,8
 8,GET,NULL
 10,NULL,200
 8,false
-19,19,TIMESTAMP_NS"
+19,19,TIMESTAMP_NS
+cut.cap,2005-03-30 08:47:46.496046,2005-03-30 08:50:54.349862,17,187.853816,1,true
+dns.cap,2005-03-30 08:47:46.496046,2005-03-30 08:52:25.375359,38,278.879313,1,false
+dns.cap.gz,2005-03-30 08:47:46.496046,2005-03-30 08:52:25.375359,38,278.879313,1,false
+1999-03-11 13:45:02.141757,2007-08-05 19:16:44.219461,TIMESTAMP_NS
+3,4.005222
+4,4.837355
+9"
 
 actual=$("$duckdb" -unsigned -csv -noheader -c "$sql")
 if [ "$actual" != "$expected" ]; then
