@@ -453,7 +453,7 @@ fn pcapng_blocks(bytes: &[u8]) -> Vec<usize> {
         blocks.push(at);
         let length = u32::from_le_bytes(bytes[at + 4..at + 8].try_into().unwrap()) as usize;
         assert!(
-            length >= 12 && length % 4 == 0,
+            length >= 12 && length.is_multiple_of(4),
             "block at {at} has length {length}"
         );
         at += length;

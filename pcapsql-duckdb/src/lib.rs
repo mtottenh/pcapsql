@@ -10,6 +10,8 @@
 //! What is registered today:
 //!
 //! ```sql
+//! SELECT * FROM read_tcp('capture.pcap') WHERE dst_port = 443;
+//! SELECT * FROM read_pcap('capture.pcapng.gz', protocol := 'dns');
 //! SELECT * FROM pcap_protocols();          -- name, description, field_count, kind
 //! SELECT * FROM pcap_schema('tcp');        -- column_name, column_type, nullable
 //! SELECT ip4('192.168.1.1');               -- 3232235777
@@ -18,15 +20,17 @@
 //! SELECT format_mac(mac('aabbccddeeff'));  -- aa:bb:cc:dd:ee:ff
 //! ```
 //!
-//! That is `pcap_protocols()` and `pcap_schema()`, the sixteen scalar functions and the six
-//! `format_*` macros; the README lists them. The scalar functions have no logic here: they are
-//! loops over the kernels of `pcapsql_core::format`. The tables and columns the two listing
-//! functions show are those of `pcapsql_core::scan::Catalog`.
+//! That is the scan functions (`read_pcap` and one `read_<table>` per table), `pcap_protocols()`
+//! and `pcap_schema()`, the sixteen scalar functions and the six `format_*` macros; the README
+//! lists them. None of them has logic of its own. The scan functions run the shared scan layer,
+//! `pcapsql_core::scan`, which the DataFusion engine runs too: the tables and columns are those
+//! of `pcapsql_core::scan::Catalog`, and its driver decides what every row holds. The scalar
+//! functions are loops over the kernels of `pcapsql_core::format`.
 //!
-//! The packet scans are not registered yet. Their building blocks are here:
-//! [`engine::writer::ChunkWriter`] stores the rows of the shared scan layer in a DuckDB chunk,
-//! [`engine::fs::DuckFile`] reads a capture through DuckDB's file system, and [`engine::types`]
-//! maps the catalogue's column kinds to DuckDB types.
+//! What is here is the DuckDB side: `engine::table` is the table function behind every scan
+//! function, [`engine::writer::ChunkWriter`] stores the rows of the scan layer in a DuckDB
+//! chunk, [`engine::fs::DuckFile`] reads a capture through DuckDB's file system, and
+//! [`engine::types`] maps the catalogue's column kinds to DuckDB types.
 //!
 //! See `docs/duckdb-v2-extension-roadmap.md` for the plan this follows.
 

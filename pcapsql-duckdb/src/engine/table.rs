@@ -439,10 +439,13 @@ impl TableFunctionCallbacks for PcapScan {
                         break;
                     }
                 }
-                Step::Done | Step::End => {
+                Step::End => {
                     let finished = worker.scanning.take().expect("the scan was just stepped");
                     self.end_of_capture(context, bound, &finished)?;
                 }
+                // Nothing more is wanted (no plan built here has a row cap, so this does not
+                // happen): the rest of the capture was not read, and nothing is known about it.
+                Step::Done => worker.scanning = None,
             }
         }
         // A chunk without rows ends the scan, which is the case exactly when nothing is left
@@ -483,10 +486,12 @@ impl PcapScan {
         if declared.iter().all(Option::is_none) {
             return Ok(Vec::new());
         }
-        declared.into_iter().collect::<Option<Vec<_>>>().ok_or_else(|| Error {
+        let all: Option<Vec<ColId>> = declared.into_iter().collect();
+        all.ok_or_else(|| Error {
             code: DuckDBError::QueryNotImplemented,
             message: format!(
-                "{}: DuckDB asked for a column the function did not declare (columns {projected:?} of {})",
+                "{}: DuckDB asked for a column the function did not declare \
+                 (columns {projected:?} of {})",
                 self.name,
                 bound.columns.len()
             ),
