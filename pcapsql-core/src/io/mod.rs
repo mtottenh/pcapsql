@@ -27,6 +27,7 @@ mod index;
 #[cfg(feature = "mmap")]
 mod mmap;
 mod pcap_stream;
+mod probe;
 mod read_source;
 mod source;
 mod stdin;
@@ -43,12 +44,13 @@ pub use mmap::{MmapPacketReader, MmapPacketSource};
 pub use pcap_stream::{
     Delivered, GenericPcapReader, InterfaceInfo, InterfaceState, Pause, PcapFormat,
 };
+pub use probe::StreamHeader;
 pub use read_source::ReadPacketReader;
 pub use source::{
     FilePacketReader, FilePacketSource, PacketPosition, PacketRange, PacketReader, PacketRef,
     PacketSource, PacketSourceMetadata, SeekCost, SeekablePacketSource,
 };
-pub use stdin::{StdinPacketReader, StdinPacketSource, StreamHeader};
+pub use stdin::{StdinPacketReader, StdinPacketSource};
 
 #[cfg(feature = "cloud")]
 pub use cloud::{
