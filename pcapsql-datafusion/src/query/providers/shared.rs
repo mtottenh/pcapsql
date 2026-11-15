@@ -624,7 +624,7 @@ fn push_partition<R: PacketReader>(
                 last_flush = Instant::now();
                 continue;
             }
-            Err(e) => return Err(e.into()),
+            Err(e) => return Err(e),
         };
         left = left.saturating_sub((scan.stats().packets - before) as usize);
         match step {
