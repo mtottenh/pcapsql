@@ -4,8 +4,9 @@
 //!
 //! - [`Map`]: one argument, the kernel returns the value (`ip4`, `mac`, `dns_type_name`, ...);
 //! - [`MapInto`]: one argument, the kernel puts the value in a buffer the loop lends it and
-//!   returns the part it filled (`pcap_unhex`);
-//! - [`Format`]: one argument, the kernel writes text (`ip4_to_string`, `pcap_hex`, ...);
+//!   returns the part it filled (`pcap_unhex`, `ip4_to_string`, `mac_to_string`);
+//! - [`Format`]: one argument, the kernel writes text of any length (`ip6_to_string`,
+//!   `tcp_flags_str`, `pcap_hex`);
 //! - [`Match`]: a value and a text pattern, tested for each row (`ip6_in_cidr`);
 //! - [`MatchPlain`]: the same for a fixed-width value whose test always has an answer
 //!   (`ip_in_cidr`, `has_tcp_flag`), with the answers of a chunk stored as one slice when the
@@ -57,7 +58,10 @@ pub(super) fn register(extension: &Extension) -> Result<()> {
     .example("ip4_to_string(3232235777)")
     .register::<String, _>(
         extension,
-        Format::<u32, _>::new(|address, out| format::write_ipv4(*address, out).ok()),
+        // The text goes from the kernel's buffer, on the stack, into the vector.
+        MapInto::<u32, String, [u8; format::IPV4_TEXT_LEN], _>::new(|address, text| {
+            Some(format::ipv4_text(*address, text))
+        }),
     )?;
     Function::new("ip6", "The 16 bytes of an IPv6 address.")
         .parameter::<String>("address")
@@ -90,8 +94,8 @@ pub(super) fn register(extension: &Extension) -> Result<()> {
     .example("mac_to_string(mac('aa-bb-cc-dd-ee-ff'))")
     .register::<String, _>(
         extension,
-        Format::<BlobValue, _>::new(|address, out| {
-            format::write_mac(address.try_into().ok()?, out).ok()
+        MapInto::<BlobValue, String, [u8; format::MAC_TEXT_LEN], _>::new(|address, text| {
+            Some(format::mac_text(address.try_into().ok()?, text))
         }),
     )?;
 
@@ -409,7 +413,8 @@ where
         output.set_size(rows)?;
         let mut writer = output.writer()?;
         // The vector writer takes finished text, not a `fmt::Write` sink, so the kernels write
-        // into one buffer that is reused for every row of the chunk.
+        // into one buffer that is reused for every row of the chunk. (A kernel whose text has a
+        // longest form is a `MapInto` over a buffer of that length, with no copy in between.)
         let mut text = String::new();
         for (row, value) in input.reader()?.iter().enumerate() {
             text.clear();
