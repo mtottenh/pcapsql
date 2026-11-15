@@ -20,7 +20,13 @@
 //!   a parsed value is turned into a column's kind, so every frontend
 //!   stores the same cells;
 //! - the [`route`]: which rows a frame adds to which output, with row
-//!   predicates, row caps and sinks of bounded size ([`Router`]);
+//!   predicates, row caps and sinks of bounded size ([`Router`]). The
+//!   outputs are `frames`, the protocol tables, and fused joins
+//!   ([`FusedScan`]): joins of those tables on `frame_number`, evaluated per
+//!   frame over the frame's own layers, so that a table of joined rows
+//!   costs one pass and no join operator;
+//! - the [`views`]: the `*_packets` tables, each a fixed fused join with
+//!   named columns ([`PacketsView`]), defined once for every frontend;
 //! - the [`driver`]: one partition of a scan, read step by step
 //!   ([`PartitionScan`]). It reads the packets, parses them and routes
 //!   their rows (of the frames the plan's [`FramePredicate`] accepts, and
@@ -35,11 +41,12 @@
 //! - [`testing`]: a recording sink and the conformance suite a sink
 //!   implementation runs in its tests.
 //!
-//! Fused joins and stream tables are not built here yet: a frontend that
-//! has them feeds its own builders from a [`FrameObserver`].
+//! Stream tables are not built here yet: a frontend that has them feeds
+//! its own builders from a [`FrameObserver`].
 
 pub mod catalog;
 pub mod driver;
+mod fused;
 pub mod partition;
 pub mod plan;
 pub mod predicate;
@@ -48,6 +55,7 @@ pub mod row;
 pub mod sink;
 mod tables;
 pub mod testing;
+pub mod views;
 
 pub use catalog::{
     Catalog, ColId, ColKind, ColumnDef, ColumnSource, StreamTable, TableDef, TableId, TableKind,
@@ -56,10 +64,11 @@ pub use catalog::{
 pub use driver::{FrameObserver, NoObserver, PartitionScan, ScanStats, Step};
 pub use partition::{partition_target, plan_ranges, PartitionPolicy, PartitionQueue};
 pub use plan::{
-    CompiledScan, FusedMember, FusedScan, JoinKind, MemberJoin, OutCol, OutColumn, OutputId,
-    OutputPlan, PlanError, ScanPlan, TableScan,
+    CompiledScan, FusedColumn, FusedFilter, FusedMember, FusedScan, FusedValue, JoinKind,
+    MemberJoin, OutCol, OutColumn, OutputId, OutputPlan, PlanError, ScanPlan, TableScan,
 };
 pub use predicate::{CmpOp, CompiledPredicate, FramePredicate, Literal, RowPredicate};
 pub use route::{Routed, Router};
 pub use row::{write_frame_row, write_layer_row, write_value, FieldResolver};
 pub use sink::{Full, ListSink, RowSink};
+pub use views::{PacketsView, ViewColumn};

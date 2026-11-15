@@ -4,10 +4,11 @@
 //!
 //! A [`Router`] takes one frame at a time (the packet and its parsed
 //! layers) and writes the frame's rows to the sinks of a
-//! [`CompiledScan`]'s outputs: the frame's row to `frames`, and each layer's
+//! [`CompiledScan`]'s outputs: the frame's row to `frames`, each layer's
 //! row to the protocol table named after it, subject to the output's row
-//! predicate and row cap. It is the per-partition state of a scan's
-//! per-packet outputs: make one per partition.
+//! predicate and row cap, and the frame's joined rows to each fused join
+//! ([`FusedScan`](super::FusedScan)). It is the per-partition state of a
+//! scan's per-packet outputs: make one per partition.
 //!
 //! # Bounded sinks
 //!
@@ -15,13 +16,14 @@
 //! The router never writes to a sink that is full. It queues every output
 //! whose rows must be taken now ([`Router::take_flush`]); the caller empties
 //! those sinks and carries on. A frame can have several rows for one output
-//! (a tunnelled packet has two `ipv4` layers), so a sink can fill in the
-//! middle of a frame. [`Router::route_frame`] then returns
-//! [`Routed::Redeliver`]: the frame is not finished, and the same frame must
-//! be routed again once the queued outputs were emptied. The router
-//! remembers, per output, which of the frame's rows it has written, and
-//! skips them: no row is lost and none is written twice, however small the
-//! sinks are and however many rows a frame has.
+//! (a tunnelled packet has two `ipv4` layers, and as many rows in a join
+//! anchored on `ipv4`), so a sink can fill in the middle of a frame.
+//! [`Router::route_frame`] then returns [`Routed::Redeliver`]: the frame is
+//! not finished, and the same frame must be routed again once the queued
+//! outputs were emptied. The router remembers, per output, which of the
+//! frame's rows it has written, and skips them: no row is lost and none is
+//! written twice, however small the sinks are and however many rows a frame
+//! has.
 //!
 //! The loop around a router is therefore:
 //!
@@ -42,6 +44,7 @@
 //! [`Pause::After`](crate::io::Pause::After) when the frame was consumed but
 //! a flush is pending.
 
+use super::fused::FusedState;
 use super::plan::{CompiledScan, Feed, OutputId};
 use super::predicate::CompiledPredicate;
 use super::row::{write_frame_row, write_layer_row, FieldResolver};
@@ -75,7 +78,8 @@ struct Cursor {
     limit: u64,
     /// While a frame is being redelivered: the index of the first of its
     /// layers this output has not handled (for `frames`, 0 while its row is
-    /// unwritten). 0 otherwise.
+    /// unwritten; for a fused join, the index of the first of the frame's
+    /// joined rows). 0 otherwise.
     next: usize,
     /// The sink is full and has not been taken yet.
     blocked: bool,
@@ -93,16 +97,13 @@ impl Cursor {
 
     #[inline]
     fn routed(&self) -> bool {
-        matches!(self.feed, Feed::Frames | Feed::Layer(_))
+        matches!(self.feed, Feed::Frames | Feed::Layer(_) | Feed::Fused)
     }
 }
 
-/// Routes frames to the sinks of a compiled scan's `frames` and
-/// protocol-table outputs. See the [module](self) documentation.
-///
-/// The outputs of fused joins are not routed here yet: their cursors exist
-/// (so that [`OutputId`]s index the same way everywhere) but nothing is
-/// written to them, and they do not count in [`Router::all_done`].
+/// Routes frames to the sinks of a compiled scan's per-packet outputs:
+/// `frames`, the protocol tables and the fused joins. See the
+/// [module](self) documentation.
 #[derive(Debug)]
 pub struct Router {
     /// One per output of the plan, in the plan's order.
@@ -112,6 +113,9 @@ pub struct Router {
     /// The output (if any) for each layer name seen so far. Layer names are
     /// the parsers' `&'static str`s, so a pointer compare finds the entry.
     layers: Vec<(&'static str, Option<usize>)>,
+    /// The fused joins: each output's index and its join state. Empty in a
+    /// plan without any, which then pays one test per frame for them.
+    fused: Vec<(usize, FusedState)>,
     /// Outputs whose rows must be taken now.
     flush: Vec<u16>,
     /// The frame being redelivered.
@@ -139,10 +143,17 @@ impl Router {
             })
             .collect();
         let frames = outputs.iter().position(|c| c.feed == Feed::Frames);
+        let fused = plan
+            .outputs()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, output)| Some((index, FusedState::new(output.fused()?))))
+            .collect();
         Self {
             outputs,
             frames,
             layers: Vec::new(),
+            fused,
             flush: Vec::new(),
             pending: None,
         }
@@ -152,21 +163,24 @@ impl Router {
     /// the order [`parse_packet`](crate::parse_packet) returns them.
     ///
     /// `sinks[i]` is the sink of output `i` of the plan
-    /// ([`CompiledScan::outputs`]); only the sinks of `frames` and
-    /// protocol-table outputs are used, and those come first, so a slice
-    /// that stops before the fused joins will do.
+    /// ([`CompiledScan::outputs`]).
     ///
     /// A row is written to an output unless the output is done (it reached
     /// its row cap or was [closed](Self::close_output)) or its predicate
-    /// drops the row. An output whose sink reported `Full`, or that reached
-    /// its row cap with this frame, is queued for [`take_flush`](Self::take_flush).
-    /// Take every queued output before routing again: the router does not
-    /// write to a full sink, so until then its rows cannot make progress.
+    /// (for a fused join, its filter) drops the row. An output whose sink
+    /// reported `Full`, or that reached its row cap with this frame, is
+    /// queued for [`take_flush`](Self::take_flush). Take every queued output
+    /// before routing again: the router does not write to a full sink, so
+    /// until then its rows cannot make progress.
     ///
     /// # Panics
     ///
     /// If `sinks` is shorter than the outputs this frame has rows for.
-    #[inline]
+    // Not inlined into the packet callback of a driver. The compiler's choice
+    // depended on what else was instantiated for the sink, and inlined, the
+    // loop below kept less in registers: a scan of four tables ran 2% more
+    // instructions. Out of line it is compiled the same whatever the plan.
+    #[inline(never)]
     pub fn route_frame<S: RowSink>(
         &mut self,
         sinks: &mut [S],
@@ -184,6 +198,7 @@ impl Router {
             outputs,
             frames,
             layers: layer_outputs,
+            fused,
             flush,
             ..
         } = self;
@@ -245,6 +260,10 @@ impl Router {
             }
         }
 
+        if !fused.is_empty() && route_fused(outputs, fused, flush, sinks, packet, layers) {
+            redeliver = true;
+        }
+
         if redeliver {
             // An output that is not waiting has handled the whole frame.
             for out in outputs.iter_mut() {
@@ -304,9 +323,9 @@ impl Router {
         self.outputs[usize::from(output.0)].done()
     }
 
-    /// True when every output this router feeds (`frames` and the protocol
-    /// tables) is done, so that nothing it could still write would be
-    /// observed. Also true when it feeds none.
+    /// True when every output this router feeds (`frames`, the protocol
+    /// tables and the fused joins) is done, so that nothing it could still
+    /// write would be observed. Also true when it feeds none.
     pub fn all_done(&self) -> bool {
         self.outputs.iter().all(|out| !out.routed() || out.done())
     }
@@ -315,6 +334,55 @@ impl Router {
     pub fn rows(&self, output: OutputId) -> u64 {
         self.outputs[usize::from(output.0)].rows
     }
+}
+
+/// Write the frame's joined rows to the fused joins. Returns whether a row
+/// is waiting for a full sink.
+///
+/// Kept out of line: [`Router::route_frame`] is the packet loop of every
+/// scan, and a scan without a fused join never gets here.
+#[inline(never)]
+fn route_fused<S: RowSink>(
+    outputs: &mut [Cursor],
+    fused: &mut [(usize, FusedState)],
+    flush: &mut Vec<u16>,
+    sinks: &mut [S],
+    packet: &PacketRef<'_>,
+    layers: &[(&'static str, ParseResult<'_>)],
+) -> bool {
+    let mut redeliver = false;
+    for (index, state) in fused {
+        let index = *index;
+        let out = &mut outputs[index];
+        if out.done() || out.next == usize::MAX {
+            continue;
+        }
+        // Evaluated again when the frame is redelivered: the same frame
+        // gives the same rows, numbered the same way.
+        let rows = state.join(layers);
+        for row in out.next..rows {
+            if !state.keeps(row, packet, layers) {
+                continue;
+            }
+            if out.blocked {
+                out.stalled = true;
+                out.next = row;
+                redeliver = true;
+                break;
+            }
+            let full = state.write_row(&mut sinks[index], row, packet, layers);
+            out.rows += 1;
+            out.blocked = full.is_break();
+            if (out.blocked || out.done()) && !out.queued {
+                out.queued = true;
+                flush.push(index as u16);
+            }
+            if out.done() {
+                break;
+            }
+        }
+    }
+    redeliver
 }
 
 /// The output fed by layers named `layer`, if any.
