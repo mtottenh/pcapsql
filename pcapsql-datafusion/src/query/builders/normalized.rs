@@ -1,20 +1,24 @@
 //! Subscription-scoped batch set builder.
 //!
-//! Routes parsed packets into Arrow builders for exactly the tables (and
-//! columns) a parse pass subscribes to, applying parse-time predicates and
-//! row caps before any Arrow materialization happens.
+//! Delivers the rows of one parse pass, per subscribed table, as Arrow
+//! batches. Which rows a packet adds to which table (with parse-time
+//! predicates and row caps applied before any Arrow materialization) is
+//! decided by the scan layer's `Router`, which writes them into one
+//! [`ArrowSink`] per table; this type owns what is specific to DataFusion:
+//! where a completed batch goes, backpressure, and the time-based flush of a
+//! continuous engine.
 
 use std::collections::HashMap;
 
 use super::fused::FusedBatchBuilder;
-use super::protocol::ProtocolBatchBuilder;
+use super::sink::ArrowSink;
 use crate::error::Error;
 use arrow::record_batch::RecordBatch;
 use std::sync::Arc;
 
 use crate::query::providers::{BatchSender, CompiledSubscription, OverflowStats, Pacer};
 use pcapsql_core::io::PacketRef;
-use pcapsql_core::scan::CompiledPredicate;
+use pcapsql_core::scan::{OutputId, Routed, Router};
 use pcapsql_core::ParseResult;
 
 /// Where a table's completed batches go.
@@ -40,55 +44,29 @@ impl BatchSink {
     }
 }
 
-/// The rows of one output table: a protocol table's, or a fused join's.
-enum RowBuilder {
-    Protocol(ProtocolBatchBuilder),
-    Fused(FusedBatchBuilder),
-}
-
-impl RowBuilder {
-    fn try_build(&mut self) -> Result<Option<RecordBatch>, Error> {
-        match self {
-            RowBuilder::Protocol(b) => b.try_build(),
-            RowBuilder::Fused(b) => b.try_build(),
-        }
-    }
-
-    fn finish(&mut self) -> Result<Option<RecordBatch>, Error> {
-        match self {
-            RowBuilder::Protocol(b) => b.finish(),
-            RowBuilder::Fused(b) => b.finish(),
-        }
-    }
-}
-
-/// Per-table build state within one parse pass.
-struct TableSlot {
-    name: String,
-    builder: RowBuilder,
-    sink: BatchSink,
-    predicate: Option<CompiledPredicate>,
+/// The rows of a fused join, which are not routed by the scan layer yet:
+/// its builder, row cap and row count.
+struct FusedRows {
+    builder: FusedBatchBuilder,
     fetch: Option<usize>,
     rows_added: usize,
-    /// The streaming consumer dropped its receiver; nothing more is wanted.
-    consumer_gone: bool,
 }
 
-impl TableSlot {
+impl FusedRows {
     fn capped(&self) -> bool {
         self.fetch.is_some_and(|f| self.rows_added >= f)
     }
+}
 
-    /// Nothing further this slot produces can be observed.
-    fn done(&self) -> bool {
-        self.capped() || self.consumer_gone
-    }
-
-    fn emit(&mut self, batch: RecordBatch) {
-        if self.sink.emit(batch) {
-            self.consumer_gone = true;
-        }
-    }
+/// Per-table delivery state within one parse pass.
+struct TableSlot {
+    name: String,
+    sink: BatchSink,
+    /// The streaming consumer dropped its receiver; nothing more is wanted.
+    consumer_gone: bool,
+    /// `Some` for a fused join. A protocol table's rows are in the batch
+    /// set's `sinks`, and its row cap and count with the router.
+    fused: Option<FusedRows>,
 }
 
 /// Routes each packet's parsed layers into the subscribed tables' builders.
@@ -104,18 +82,18 @@ impl TableSlot {
 /// let batches = batch_set.finish()?;
 /// ```
 pub struct NormalizedBatchSet {
-    /// Every subscribed table. Indexed rather than keyed by name: a packet
-    /// touches several of them, and resolving names per packet showed up
-    /// in profiles.
+    /// Decides which rows a packet adds to which protocol table (and
+    /// `frames`), and writes them to `sinks`.
+    router: Router,
+    /// The Arrow builders of the protocol tables: `sinks[i]` belongs to
+    /// `slots[i]`. The compiled plan lists the protocol tables before the
+    /// fused joins, so these are the first slots.
+    sinks: Vec<ArrowSink>,
+    /// Every subscribed table, in the order of the compiled plan's outputs.
     slots: Vec<TableSlot>,
-    /// Index of the `frames` slot, if subscribed.
-    frames: Option<usize>,
     /// Indices of the slots that are fused joins (in name order), fed after
     /// the protocol tables.
     fused: Vec<usize>,
-    /// The slot (if any) for each layer name seen so far. Layer names are
-    /// the parsers' `&'static str`s, so a pointer compare finds the entry.
-    layer_slots: Vec<(&'static str, Option<usize>)>,
     /// Streaming only: wakes the producer when a consumer takes a batch.
     pacer: Option<Arc<Pacer>>,
 }
@@ -154,58 +132,57 @@ impl NormalizedBatchSet {
         mut sink_for: impl FnMut(&str) -> BatchSink,
     ) -> Self {
         let mut slots = Vec::new();
+        let mut sinks = Vec::new();
         let mut fused = Vec::new();
-        // The protocol tables, then the fused joins: each with its schema,
-        // and its predicate and row cap from the compiled plan.
+        // The protocol tables, then the fused joins. A protocol table's
+        // predicate and row cap are the router's, from the compiled plan.
         for (output, plan) in subscription.outputs() {
-            let builder = match &output.spec {
+            let fused_rows = match &output.spec {
                 Some(spec) => {
                     fused.push(slots.len());
-                    RowBuilder::Fused(FusedBatchBuilder::new(Arc::clone(spec), batch_size))
+                    Some(FusedRows {
+                        builder: FusedBatchBuilder::new(Arc::clone(spec), batch_size),
+                        fetch: plan
+                            .fetch()
+                            .map(|rows| usize::try_from(rows).unwrap_or(usize::MAX)),
+                        rows_added: 0,
+                    })
                 }
-                None => RowBuilder::Protocol(ProtocolBatchBuilder::with_schema(
-                    output.name.clone(),
-                    Arc::clone(&output.schema),
-                    batch_size,
-                )),
+                None => {
+                    debug_assert_eq!(sinks.len(), slots.len(), "tables precede fused joins");
+                    sinks.push(ArrowSink::with_schema(
+                        Arc::clone(&output.schema),
+                        &plan.columns,
+                        batch_size,
+                    ));
+                    None
+                }
             };
             slots.push(TableSlot {
                 name: output.name.clone(),
-                builder,
                 sink: sink_for(&output.name),
-                // The predicate remembers where it found each field in the
-                // previous row: every batch set has its own copy.
-                predicate: plan.predicate().cloned(),
-                fetch: plan
-                    .fetch()
-                    .map(|rows| usize::try_from(rows).unwrap_or(usize::MAX)),
-                rows_added: 0,
                 consumer_gone: false,
+                fused: fused_rows,
             });
         }
-        let frames = slots.iter().position(|s| s.name == "frames");
         Self {
+            router: Router::new(subscription.scan()),
+            sinks,
             slots,
-            frames,
             fused,
-            layer_slots: Vec::new(),
             pacer: None,
         }
     }
 
-    /// The slot of the table a parsed layer named `layer` goes to.
-    #[inline]
-    fn slot_for_layer(&mut self, layer: &'static str) -> Option<usize> {
-        if let Some((_, slot)) = self
-            .layer_slots
-            .iter()
-            .find(|(name, _)| std::ptr::eq(*name, layer))
-        {
-            return *slot;
+    /// Nothing further the table at `index` produces can be observed: it
+    /// reached its row cap, or its consumer is gone.
+    fn done(&self, index: usize) -> bool {
+        let slot = &self.slots[index];
+        match &slot.fused {
+            Some(rows) => rows.capped() || slot.consumer_gone,
+            // A table whose consumer is gone is closed in the router.
+            None => self.router.is_done(OutputId(index as u16)),
         }
-        let slot = self.slots.iter().position(|s| s.name == layer);
-        self.layer_slots.push((layer, slot));
-        slot
     }
 
     /// Streaming: the producer may proceed with a batch for `name` when that
@@ -240,7 +217,13 @@ impl NormalizedBatchSet {
                 pacer.wait_until(|| Self::may_proceed(slots, index));
             }
         }
-        self.slots[index].emit(batch);
+        let slot = &mut self.slots[index];
+        if slot.sink.emit(batch) {
+            slot.consumer_gone = true;
+            if slot.fused.is_none() {
+                self.router.close_output(OutputId(index as u16));
+            }
+        }
     }
 
     /// Add a packet to the subscribed tables.
@@ -252,88 +235,44 @@ impl NormalizedBatchSet {
         packet: PacketRef<'_>,
         parsed: &[(&'static str, ParseResult<'_>)],
     ) -> Result<(), Error> {
-        let frame_number = packet.frame_number;
-
-        // The frames table is fed from packet metadata, not parse results.
-        if let Some(index) = self.frames {
-            let slot = &mut self.slots[index];
-            // Predicates on frames are never pushed down (metadata fields are
-            // not parse fields); only the row cap applies.
-            if !slot.done() {
-                if let RowBuilder::Protocol(builder) = &mut slot.builder {
-                    builder.add_frame_from_raw(
-                        packet.frame_number,
-                        packet.timestamp_ns,
-                        packet.captured_len,
-                        packet.original_len,
-                        packet.data,
-                        packet.link_type,
-                    );
-                }
-                slot.rows_added += 1;
-                // A full batch goes out; so does a partial one the moment the
-                // row cap is reached, since nothing will be added to it (a
-                // LIMIT on a live pipe would otherwise wait for input that
-                // is not wanted).
-                let batch = if slot.capped() {
-                    slot.builder.finish()?
-                } else {
-                    slot.builder.try_build()?
-                };
-                if let Some(batch) = batch {
+        // The frame's row in `frames` and each layer's row in its table.
+        // The router asks for a table's batch when its sink is full, and
+        // also the moment its row cap is reached, since nothing will be
+        // added to it (a LIMIT on a live pipe would otherwise wait for input
+        // that is not wanted). A sink that fills in the middle of a frame
+        // (a tunnelled packet has several rows in one table) leaves the
+        // frame unfinished: it is routed again once the batch is out.
+        loop {
+            let routed = self.router.route_frame(&mut self.sinks, &packet, parsed);
+            while let Some(OutputId(output)) = self.router.take_flush() {
+                let index = usize::from(output);
+                if let Some(batch) = self.sinks[index].take_batch()? {
                     self.deliver(index, batch);
                 }
             }
-        }
-
-        // Route each parsed protocol layer to its table, if subscribed.
-        for (proto_name, result) in parsed {
-            if let Some(index) = self.slot_for_layer(proto_name) {
-                let slot = &mut self.slots[index];
-                if slot.done() {
-                    continue;
-                }
-                if let Some(predicate) = &mut slot.predicate {
-                    // Conservative: only a positively-false comparison drops
-                    // the row; DataFusion re-checks everything kept.
-                    if !predicate.keeps(result) {
-                        continue;
-                    }
-                }
-                if let RowBuilder::Protocol(builder) = &mut slot.builder {
-                    builder.add_parsed_row(frame_number, result);
-                }
-                slot.rows_added += 1;
-                let batch = if slot.capped() {
-                    slot.builder.finish()?
-                } else {
-                    slot.builder.try_build()?
-                };
-                if let Some(batch) = batch {
-                    self.deliver(index, batch);
-                }
+            if routed == Routed::Consumed {
+                break;
             }
         }
 
         // Fused joins: the frame's joined rows, from the same layers.
         for i in 0..self.fused.len() {
             let index = self.fused[i];
-            let slot = &mut self.slots[index];
-            if slot.done() {
+            if self.done(index) {
                 continue;
             }
-            let RowBuilder::Fused(builder) = &mut slot.builder else {
+            let Some(rows) = &mut self.slots[index].fused else {
                 continue;
             };
-            let added = builder.add_packet(&packet, parsed);
+            let added = rows.builder.add_packet(&packet, parsed);
             if added == 0 {
                 continue;
             }
-            slot.rows_added += added;
-            let batch = if slot.capped() {
-                slot.builder.finish()?
+            rows.rows_added += added;
+            let batch = if rows.capped() {
+                rows.builder.finish()?
             } else {
-                slot.builder.try_build()?
+                rows.builder.try_build()?
             };
             if let Some(batch) = batch {
                 self.deliver(index, batch);
@@ -343,15 +282,24 @@ impl NormalizedBatchSet {
         Ok(())
     }
 
+    /// The rows the table at `index` holds that are not in a batch yet, as
+    /// one.
+    fn take_pending(&mut self, index: usize) -> Result<Option<RecordBatch>, Error> {
+        match &mut self.slots[index].fused {
+            Some(rows) => rows.builder.finish(),
+            None => self.sinks[index].take_batch(),
+        }
+    }
+
     /// Streaming: deliver every table's partially filled batch now (a
     /// continuous engine's time-based flush), leaving the builders empty.
     pub fn flush_partial(&mut self) -> Result<(), Error> {
         let mut pending = Vec::new();
-        for (index, slot) in self.slots.iter_mut().enumerate() {
-            if slot.done() {
+        for index in 0..self.slots.len() {
+            if self.done(index) {
                 continue;
             }
-            if let Some(batch) = slot.builder.finish()? {
+            if let Some(batch) = self.take_pending(index)? {
                 pending.push((index, batch));
             }
         }
@@ -367,7 +315,7 @@ impl NormalizedBatchSet {
     /// above a filter that could not be pushed to the scan — or was cancelled.
     /// The parse loop can stop reading the source.
     pub fn all_capped(&self) -> bool {
-        !self.slots.is_empty() && self.slots.iter().all(TableSlot::done)
+        !self.slots.is_empty() && (0..self.slots.len()).all(|index| self.done(index))
     }
 
     /// Finish building. Flushes each table's final partial batch into its
@@ -397,11 +345,18 @@ impl NormalizedBatchSet {
         ),
         Error,
     > {
-        let mut out = HashMap::with_capacity(self.slots.len());
+        let Self {
+            mut sinks, slots, ..
+        } = self;
+        let mut out = HashMap::with_capacity(slots.len());
         let mut overflowed = HashMap::new();
-        for mut slot in self.slots {
-            if let Some(batch) = slot.builder.finish()? {
-                slot.emit(batch);
+        for (index, mut slot) in slots.into_iter().enumerate() {
+            let last = match &mut slot.fused {
+                Some(rows) => rows.builder.finish()?,
+                None => sinks[index].take_batch()?,
+            };
+            if let Some(batch) = last {
+                slot.sink.emit(batch);
             }
             let batches = match slot.sink {
                 BatchSink::Accumulate(v) => v,
@@ -417,11 +372,13 @@ impl NormalizedBatchSet {
 
     /// Rows added to a table so far (pending and built).
     pub fn row_count(&self, table_name: &str) -> usize {
-        self.slots
-            .iter()
-            .find(|s| s.name == table_name)
-            .map(|s| s.rows_added)
-            .unwrap_or(0)
+        let Some(index) = self.slots.iter().position(|s| s.name == table_name) else {
+            return 0;
+        };
+        match &self.slots[index].fused {
+            Some(rows) => rows.rows_added,
+            None => usize::try_from(self.router.rows(OutputId(index as u16))).unwrap_or(usize::MAX),
+        }
     }
 }
 
@@ -631,6 +588,47 @@ mod tests {
         assert_eq!(frames.len(), 3);
         let total: usize = frames.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total, 5);
+    }
+
+    /// A frame with several rows in one table (a tunnel) may straddle a
+    /// batch boundary: no batch exceeds the batch size, and every row is
+    /// there once, in order.
+    #[test]
+    fn multi_row_frames_split_across_batches() {
+        use arrow::array::{Array, UInt16Array, UInt64Array};
+        for batch_size in [1, 2, 3, 4, 100] {
+            let mut bs = batch_set(batch_size, &sub_full(&["frames", "tcp"]));
+            let mut expected = Vec::new();
+            for frame in 1..=7u64 {
+                // 1, 2 or 3 tcp layers per frame.
+                let layers: Vec<_> = (0..=(frame % 3) as u16)
+                    .map(|depth| ("tcp", create_tcp_result(1000 * frame as u16 + depth)))
+                    .collect();
+                expected.extend(
+                    layers
+                        .iter()
+                        .enumerate()
+                        .map(|(depth, _)| (frame, 1000 * frame as u16 + depth as u16)),
+                );
+                bs.add_packet_from_ref(create_test_packet(frame), &layers)
+                    .unwrap();
+            }
+            assert_eq!(bs.row_count("tcp"), expected.len());
+            assert_eq!(bs.row_count("frames"), 7);
+            let batches = bs.finish().unwrap();
+            let mut rows = Vec::new();
+            for batch in &batches["tcp"] {
+                assert!(batch.num_rows() <= batch_size, "batch size {batch_size}");
+                let frames = batch.column_by_name("frame_number").unwrap();
+                let frames = frames.as_any().downcast_ref::<UInt64Array>().unwrap();
+                let ports = batch.column_by_name("dst_port").unwrap();
+                let ports = ports.as_any().downcast_ref::<UInt16Array>().unwrap();
+                rows.extend((0..batch.num_rows()).map(|i| (frames.value(i), ports.value(i))));
+            }
+            assert_eq!(rows, expected, "batch size {batch_size}");
+            let frames: usize = batches["frames"].iter().map(|b| b.num_rows()).sum();
+            assert_eq!(frames, 7);
+        }
     }
 
     #[test]

@@ -63,6 +63,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   remembered position. `scan::FramePredicate` is an exact range of frame
   numbers and timestamps; no scan applies it yet. `ParseScope` gains the
   `required()` and `projections()` accessors, `Catalog` gains `try_get`.
+- **`pcapsql-core`: row sinks, and one place that decides what a cell
+  holds.** A frontend stores rows by implementing `scan::RowSink` (a typed,
+  infallible method per kind of value, a `ListSink` for list cells, and
+  `end_row`, which answers `Full` when no further row fits).
+  `scan::write_value` converts a parsed `FieldValue` to a column's `ColKind`
+  or NULL (the rules the Arrow builders had, now documented on the
+  function), and `write_layer_row` / `write_frame_row` write a whole row of
+  a protocol table or of `frames` with a `FieldResolver`, which remembers
+  per column where its field was in the previous row. Every frontend
+  therefore stores the same cells. Formatting an address or a number into a
+  string column no longer allocates.
+- **`pcapsql-core`: routing.** `scan::Router` writes one frame's rows to
+  the sinks of a `CompiledScan`'s `frames` and protocol-table outputs, with
+  each output's row predicate and row cap. It works with sinks of any size:
+  an output whose sink is full, or that reached its row cap, is handed to
+  the caller (`take_flush`), and a frame whose rows did not all fit
+  (`Routed::Redeliver`; a tunnelled packet has several rows in one table) is
+  routed again without losing or repeating a row. Fused joins are not routed
+  yet.
+- **`pcapsql-core`: `scan::testing`.** `RecordingSink` records rows as
+  engine-neutral `Cell`s and checks how it is called, and
+  `run_conformance` is the suite a `RowSink` implementation runs from its
+  own tests (every kind with and without NULL, lists, empty and
+  NUL-containing strings, `Full` exactly at capacity, reuse after a drain,
+  outputs without columns).
 
 ### Changed
 
@@ -107,6 +132,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     filter again either way.
   - A table subscribed with every one of its field columns named is parsed
     unprojected, as one subscribed without a column list already was.
+- **`pcapsql-datafusion`: `frames` and the protocol tables are built
+  through the core scan layer.** The rows a packet adds, and what each cell
+  holds, come from `scan::Router` and `scan::write_value`; apart from the
+  two fixes below, query results are unchanged. In the library:
+  - `query::builders::ArrowSink` is the Arrow `scan::RowSink`: builders kept
+    per Arrow type and reused across batches, `take_batch()` for the rows
+    held (an output without columns keeps its row count), `rows()` and
+    `is_full()`. It replaces `ProtocolBatchBuilder`, which is gone together
+    with its `add_parsed_row` and `add_frame_from_raw`; a row is written
+    with `scan::write_layer_row` / `write_frame_row`.
+  - `NormalizedBatchSet` keeps its interface. It now holds a `Router` and
+    an `ArrowSink` per table and adds only delivery, backpressure and the
+    time-based flush. A batch is never larger than the batch size, also when
+    a frame with several rows in one table straddles the boundary.
+  - `query::arrow_schema::arrow_type_to_col_kind` is the inverse of
+    `col_kind_to_arrow_type`.
+  - Fused joins (`FusedBatchBuilder`) still build their own columns, with
+    the same conversion rules as the tables.
+
+### Fixed
+
+- A value of the wrong length for a fixed-size binary column (a MAC or IPv6
+  address column given, say, a 3-byte value by a parser) is now NULL.
+  Before, nothing was stored for it, the column came out one row short and
+  the whole batch, and with it the query, failed.
+- A wrong-length item of a list of fixed-size binaries (`dns.answer_ip6s`)
+  is now a NULL item. Before, the item was dropped, which shortened the
+  list and shifted the items after it.
+- An unsigned 64-bit value above `i64::MAX` written to a timestamp column
+  is now NULL. Before, it wrapped to a negative timestamp. No built-in
+  parser emits such a value; this is the rule the integer columns already
+  followed (out of range is NULL, never wrapped).
 
 ## [0.4.1] - 2026-10-24
 

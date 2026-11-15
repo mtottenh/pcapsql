@@ -6,7 +6,7 @@ use std::sync::Arc;
 use arrow::array::Array;
 use arrow::record_batch::{RecordBatch, RecordBatchOptions};
 
-use super::protocol::DynamicBuilder;
+use super::dynamic::DynamicBuilder;
 use crate::error::{Error, QueryError};
 use crate::query::fusion::{FrameJoinSpec, JoinKind};
 use pcapsql_core::io::PacketRef;
