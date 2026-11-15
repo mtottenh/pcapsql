@@ -325,6 +325,7 @@ async fn s3_all_legacy_variants_and_pcapng() {
             interfaces: vec![6, 9],
             sections: 2,
             add_interface_midstream: true,
+            if_tsoffset: 0,
         });
         let key = format!("formats/pcapng_{name}.pcapng");
         upload(&ep, &key, gc.bytes.clone()).await;
