@@ -33,6 +33,11 @@ gcs = ["cloud", "object_store/gcp"]
 azure = ["cloud", "object_store/azure"]
 cloud-all = ["s3", "gcs", "azure"]
 
+# `scan::testing`: a sink that records rows and the conformance suite every
+# sink implementation runs. For the tests of a crate that implements a sink
+# or compares scans; no build of the library needs it.
+testing = []
+
 [dependencies]
 # Parsing
 etherparse.workspace = true
@@ -85,6 +90,9 @@ hpack.workspace = true
 netlink-packet-core.workspace = true
 
 [dev-dependencies]
+# This crate with `testing` on, for its own integration tests (the unit
+# tests have the module without it).
+pcapsql-core = { path = ".", features = ["testing"] }
 tempfile.workspace = true
 hex.workspace = true
 proptest.workspace = true

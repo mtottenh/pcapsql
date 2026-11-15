@@ -38,8 +38,8 @@
 //!   ([`partition_target`]), which ranges of it a plan's frame predicate
 //!   leaves to scan ([`plan_ranges`]) and a queue workers claim them from
 //!   ([`PartitionQueue`]);
-//! - [`testing`]: a recording sink and the conformance suite a sink
-//!   implementation runs in its tests.
+//! - `testing`, behind the cargo feature of that name: a recording sink
+//!   and the conformance suite a sink implementation runs in its tests.
 //!
 //! Stream tables are not built here yet: a frontend that has them feeds
 //! its own builders from a [`FrameObserver`].
@@ -54,6 +54,7 @@ pub mod route;
 pub mod row;
 pub mod sink;
 mod tables;
+#[cfg(any(test, feature = "testing"))]
 pub mod testing;
 pub mod views;
 

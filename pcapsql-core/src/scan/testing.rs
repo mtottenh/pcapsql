@@ -2,8 +2,10 @@
 //! conformance suite every [`RowSink`] must pass.
 //!
 //! **Unstable API** (see the [module](super) documentation). This module is
-//! compiled into the library so that the crates implementing a sink can run
-//! the suite from their own tests; nothing on the scan path uses it.
+//! part of the library, behind the cargo feature `testing`, so that the
+//! crates implementing a sink can run the suite from their own tests (they
+//! turn the feature on in their dev-dependencies); nothing on the scan path
+//! uses it, and a build without the feature does not compile it.
 //!
 //! A sink implementation runs the suite by implementing [`SinkHarness`] and
 //! calling [`run_conformance`] from a test.
