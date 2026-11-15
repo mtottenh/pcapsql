@@ -37,9 +37,9 @@
 //! What is here is the DuckDB side: `engine::table` is the table function behind every scan
 //! function, [`engine::writer::ChunkWriter`] stores the rows of the scan layer in a DuckDB
 //! chunk, [`engine::fs::DuckFile`] reads a capture through DuckDB's file system,
-//! [`engine::types`] maps the catalogue's column kinds to DuckDB types, [`engine::pushdown`]
+//! [`engine::types`] maps the catalogue's column kinds to DuckDB types, `engine::pushdown`
 //! turns the filters DuckDB offers a scan into the scan layer's frame predicate, and
-//! [`engine::replacement`] answers a capture path named where a table is expected.
+//! `engine::replacement` answers a capture path named where a table is expected.
 //!
 //! See `docs/duckdb-v2-extension-roadmap.md` for the plan this follows.
 

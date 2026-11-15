@@ -4,18 +4,21 @@
 //! that touches either is kept below this module. `scripts/check-neo-containment.sh` enforces
 //! that in CI.
 
+// Public: what the in-process tests (`itest/`) drive on their own, beside the functions
+// `register` registers.
 pub mod fs;
 pub mod guard;
-mod listing;
-mod macros;
-pub mod pushdown;
-mod relation;
-pub mod replacement;
-mod scalar;
-pub mod settings;
-mod table;
 pub mod types;
 pub mod writer;
+
+mod listing;
+mod macros;
+mod pushdown;
+mod relation;
+mod replacement;
+mod scalar;
+mod settings;
+mod table;
 
 use duckdb_neo::{extension::Extension, Result};
 
