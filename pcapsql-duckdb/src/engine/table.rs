@@ -288,6 +288,20 @@ struct ArgumentPositions {
 impl PcapScan {
     const FILE: usize = 0;
 
+    /// An error of this function: `message` with the function's SQL name in front, as every
+    /// message of a scan function starts.
+    fn error(&self, code: DuckDBError, message: impl std::fmt::Display) -> Error {
+        Error {
+            code,
+            message: format!("{}: {message}", self.name),
+        }
+    }
+
+    /// An [`error`](Self::error) about what the call was given.
+    fn invalid(&self, message: impl std::fmt::Display) -> Error {
+        self.error(DuckDBError::InputInvalid, message)
+    }
+
     fn positions(&self) -> ArgumentPositions {
         match self.relation {
             Some(_) => ArgumentPositions {
@@ -325,29 +339,23 @@ impl PcapScan {
     /// The entries of the one positional argument: the path or pattern, or those of the list,
     /// in its order.
     fn file_argument(&self, arguments: &[BindArgument]) -> Result<Vec<String>> {
-        let name = &self.name;
         let argument = arguments
             .get(Self::FILE)
-            .ok_or_else(|| Error::invalid_input(format!("{name}: a capture file is required")))?;
-        let value = argument.value.as_ref().ok_or_else(|| {
-            Error::invalid_input(format!("{name}: the capture file must be a constant"))
-        })?;
+            .ok_or_else(|| self.invalid("a capture file is required"))?;
+        let value = argument
+            .value
+            .as_ref()
+            .ok_or_else(|| self.invalid("the capture file must be a constant"))?;
         if value.is_null()? {
-            return Err(Error::invalid_input(format!(
-                "{name}: the capture file must not be NULL"
-            )));
+            return Err(self.invalid("the capture file must not be NULL"));
         }
         let entry = |value: &duckdb_neo::value::Value| -> Result<String> {
             if value.is_null()? {
-                return Err(Error::invalid_input(format!(
-                    "{name}: the capture file must not be NULL"
-                )));
+                return Err(self.invalid("the capture file must not be NULL"));
             }
             let path = value.get::<String>()?.unwrap_or_default();
             if path.is_empty() {
-                return Err(Error::invalid_input(format!(
-                    "{name}: the capture file must not be an empty path"
-                )));
+                return Err(self.invalid("the capture file must not be an empty path"));
             }
             Ok(path)
         };
@@ -355,13 +363,13 @@ impl PcapScan {
         match declared.as_str() {
             "VARCHAR" => Ok(vec![entry(value)?]),
             // The type of `[]` is not a list of VARCHAR, whatever DuckDB calls it.
-            _ if declared.ends_with("[]") && value.child_count()? == 0 => Err(
-                Error::invalid_input(format!("{name}: the list of capture files is empty")),
-            ),
+            _ if declared.ends_with("[]") && value.child_count()? == 0 => {
+                Err(self.invalid("the list of capture files is empty"))
+            }
             "VARCHAR[]" => value.children()?.iter().map(entry).collect(),
-            _ => Err(Error::invalid_input(format!(
-                "{name}: the capture files must be a VARCHAR path or pattern, or a list of \
-                 them, not {declared}"
+            _ => Err(self.invalid(format_args!(
+                "the capture files must be a VARCHAR path or pattern, or a list of them, not \
+                 {declared}"
             ))),
         }
     }
@@ -374,10 +382,10 @@ impl PcapScan {
             let mut matched = fs::glob(context, entry)?;
             if matched.is_empty() {
                 if has_wildcard(entry) {
-                    return Err(Error {
-                        code: DuckDBError::IoFileNotFound,
-                        message: format!("{}: no file matches the pattern '{entry}'", self.name),
-                    });
+                    return Err(self.error(
+                        DuckDBError::IoFileNotFound,
+                        format_args!("no file matches the pattern '{entry}'"),
+                    ));
                 }
                 // Not a pattern: the open says what is wrong with the path.
                 matched.push(entry.clone());
@@ -396,7 +404,6 @@ impl PcapScan {
         index: usize,
         parameter: &str,
     ) -> Result<T> {
-        let name = &self.name;
         arguments
             .get(index)
             .and_then(|argument| argument.value.as_ref())
@@ -404,8 +411,8 @@ impl PcapScan {
             .transpose()?
             .flatten()
             .ok_or_else(|| {
-                Error::invalid_input(format!(
-                    "{name}: {parameter} must be a constant and must not be NULL"
+                self.invalid(format_args!(
+                    "{parameter} must be a constant and must not be NULL"
                 ))
             })
     }
@@ -419,9 +426,8 @@ impl PcapScan {
         let protocol: String = self.named(arguments, index, "protocol")?;
         // The names are lower case; any case is accepted, as `pcap_schema` does.
         Relation::find(&protocol.to_ascii_lowercase()).ok_or_else(|| {
-            Error::invalid_input(format!(
-                "{}: there is no protocol table '{protocol}'; {}",
-                self.name,
+            self.invalid(format_args!(
+                "there is no protocol table '{protocol}'; {}",
                 registry::WHERE_TO_LOOK
             ))
         })
@@ -637,10 +643,7 @@ impl TableFunctionCallbacks for PcapScan {
             .relation
             .plan(&projection.columns, frames.clone())
             .compile(Catalog::builtin(), protocols())
-            .map_err(|error| Error {
-                code: DuckDBError::QueryPlanner,
-                message: format!("{}: {error}", self.name),
-            })?;
+            .map_err(|error| self.error(DuckDBError::QueryPlanner, error))?;
         let columns = plan.outputs()[0].columns.clone();
 
         let settings = ScanSettings::read(context)?;
@@ -855,15 +858,12 @@ impl TablePartitioningCallbacks for PcapScan {
         // DuckDB asks after a chunk that has rows, and rows only come out of a claimed
         // partition. Should it ever ask earlier, an error is the answer: an index made up here
         // could be another worker's.
-        worker
-            .and_then(|worker| worker.ordinal)
-            .ok_or_else(|| Error {
-                code: DuckDBError::QueryExecutor,
-                message: format!(
-                    "{}: DuckDB asked where rows belong before the worker claimed a partition",
-                    self.name
-                ),
-            })
+        worker.and_then(|worker| worker.ordinal).ok_or_else(|| {
+            self.error(
+                DuckDBError::QueryExecutor,
+                "DuckDB asked where rows belong before the worker claimed a partition",
+            )
+        })
     }
 }
 
@@ -893,14 +893,15 @@ impl PcapScan {
             });
         }
         let all: Option<Vec<usize>> = declared.into_iter().collect();
-        let columns = all.ok_or_else(|| Error {
-            code: DuckDBError::QueryNotImplemented,
-            message: format!(
-                "{}: DuckDB asked for a column the function did not declare \
-                 (columns {projected:?} of {})",
-                self.name,
-                bound.columns + usize::from(bound.filename.is_some())
-            ),
+        let columns = all.ok_or_else(|| {
+            self.error(
+                DuckDBError::QueryNotImplemented,
+                format_args!(
+                    "DuckDB asked for a column the function did not declare \
+                     (columns {projected:?} of {})",
+                    bound.columns + usize::from(bound.filename.is_some())
+                ),
+            )
         })?;
         Ok(Projection { columns, filename })
     }
@@ -1136,26 +1137,19 @@ impl PcapScan {
     fn probe(&self, file: &mut DuckFile, path: &str) -> Result<StreamHeader> {
         match StreamHeader::probe(file) {
             Ok((header, _head)) => Ok(header),
-            Err(error) => Err(Error {
-                code: DuckDBError::InputInvalid,
-                message: format!(
-                    "{}: '{path}' is not a capture file pcapsql can read \
-                     (pcap or pcapng, optionally gzip- or zstd-compressed): {error}",
-                    self.name
-                ),
-            }),
+            Err(error) => Err(self.invalid(format_args!(
+                "'{path}' is not a capture file pcapsql can read \
+                 (pcap or pcapng, optionally gzip- or zstd-compressed): {error}"
+            ))),
         }
     }
 
     /// The error of a read of the capture `path` that failed after `frame` complete frames.
     fn read_error(&self, path: &str, frame: u64, error: &dyn std::fmt::Display) -> Error {
-        Error {
-            code: DuckDBError::IoReadFailure,
-            message: format!(
-                "{}: cannot read '{path}' after frame {frame}: {error}",
-                self.name
-            ),
-        }
+        self.error(
+            DuckDBError::IoReadFailure,
+            format_args!("cannot read '{path}' after frame {frame}: {error}"),
+        )
     }
 
     /// What is wrong with the capture `path`, which ends inside the record after `last_frame`.
