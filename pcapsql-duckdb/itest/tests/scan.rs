@@ -765,7 +765,7 @@ fn a_function_is_scanned_afresh_by_each_reference_and_each_execution() -> Result
     )?;
     let estimate = capture.len() / 512;
     assert!(
-        plan[0][1].contains(&format!("~{estimate} rows")) || plan[0][1].contains('~'),
+        plan[0][1].contains(&format!("~{estimate} rows")),
         "{}",
         plan[0][1]
     );
