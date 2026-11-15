@@ -25,9 +25,9 @@ pub fn all_table_names() -> Vec<&'static str> {
 }
 
 /// Names of the tables produced by stream analysis (TCP reassembly → TLS →
-/// HTTP) rather than by per-packet parsing. They are built by the stream
-/// subscriber of the packet pass, which needs the whole capture in order
-/// (one partition).
+/// HTTP) rather than by per-packet parsing. They are built by the scan of
+/// the packet pass when the capture ends, which needs the whole capture in
+/// order (one partition).
 pub fn stream_table_names() -> Vec<&'static str> {
     Catalog::builtin()
         .tables()

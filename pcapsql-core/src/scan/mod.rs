@@ -33,15 +33,17 @@
 //!   has something to do, so
 //!   that an engine that pushes rows to its consumer and one whose consumer
 //!   pulls a chunk at a time run the same loop;
+//! - the stream tables (`tcp_connections`, `tls_sessions`, `http_messages`,
+//!   `http2`): outputs of a plan like the others, whose rows the driver
+//!   derives from the TCP streams it reassembles while it reads the
+//!   partition, and writes when the partition ends
+//!   ([`ScanPlan::streams`], [`PartitionScan::with_keylog`]);
 //! - partitioning: how many partitions a capture is worth
 //!   ([`partition_target`]), which ranges of it a plan's frame predicate
 //!   leaves to scan ([`plan_ranges`]) and a queue workers claim them from
 //!   ([`PartitionQueue`]);
 //! - `testing`, behind the cargo feature of that name: a recording sink
 //!   and the conformance suite a sink implementation runs in its tests.
-//!
-//! Stream tables are not built here yet: a frontend that has them feeds
-//! its own builders from a [`FrameObserver`].
 //!
 //! Every item is a name of this module (`pcapsql_core::scan::ScanPlan`);
 //! the files it is written in (`catalog.rs`, `plan.rs`, `driver.rs`, ...)
@@ -57,6 +59,7 @@ mod predicate;
 mod route;
 mod row;
 mod sink;
+mod stream;
 mod tables;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
@@ -65,7 +68,7 @@ mod views;
 pub use catalog::{
     Catalog, ColId, ColKind, ColumnDef, ColumnSource, TableDef, TableId, TableKind, TimestampUnit,
 };
-pub use driver::{FrameObserver, NoObserver, PartitionScan, ScanStats, Step};
+pub use driver::{PartitionScan, ScanStats, Step};
 pub use partition::{partition_target, plan_ranges, PartitionPolicy, PartitionQueue};
 pub use plan::{
     CompiledScan, FusedColumn, FusedFilter, FusedMember, FusedScan, FusedValue, JoinKind,

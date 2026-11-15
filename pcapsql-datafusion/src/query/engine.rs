@@ -27,7 +27,7 @@ use crate::error::{Error, QueryError};
 use crate::query::filter::row_predicate;
 use crate::query::providers::{
     auto_target_partitions, merge_ordered_partitions, CachedTable, ParseStats, ParseSubscription,
-    PartitionStat, QueryTables, ServedFrom, TableCache, TableData, TableSubscription,
+    PartitionStat, PassOptions, QueryTables, ServedFrom, TableCache, TableData, TableSubscription,
 };
 use crate::query::udf::CaptureTimeRange;
 #[cfg(feature = "cloud")]
@@ -212,10 +212,13 @@ impl QueryEngine {
         let parse_source: Arc<dyn ParseSource> = Arc::new(SourceParser {
             source,
             registry: registry.clone(),
-            batch_size: opts.batch_size,
-            partitions: parallelism,
-            progress: opts.progress.clone(),
-            keylog: opts.keylog.clone(),
+            options: PassOptions {
+                batch_size: opts.batch_size,
+                target_partitions: parallelism,
+                progress: opts.progress.clone(),
+                keylog: opts.keylog.clone(),
+                flush_interval: None,
+            },
         });
         Self::finish_build(parse_source, registry, parallelism, opts, false).await
     }
@@ -236,10 +239,13 @@ impl QueryEngine {
         let parse_source: Arc<dyn ParseSource> = Arc::new(SequentialParser {
             source,
             registry: registry.clone(),
-            batch_size: opts.batch_size,
-            progress: opts.progress.clone(),
-            keylog: opts.keylog.clone(),
-            flush_interval: opts.continuous.then_some(opts.flush_interval),
+            options: PassOptions {
+                batch_size: opts.batch_size,
+                target_partitions: 1,
+                progress: opts.progress.clone(),
+                keylog: opts.keylog.clone(),
+                flush_interval: opts.continuous.then_some(opts.flush_interval),
+            },
         });
         Self::finish_build(parse_source, registry, 1, opts, true).await
     }
@@ -782,8 +788,9 @@ impl QueryEngine {
             ..Default::default()
         };
 
-        // Stream-analysis tables (TCP reassembly → TLS → HTTP) are built by a
-        // subscriber of the same packet pass, not by per-packet builders.
+        // Stream-analysis tables (TCP reassembly → TLS → HTTP) are built by
+        // the scan of the same packet pass when the capture ends, not packet
+        // by packet.
         // They are complete only at end of capture and need the whole capture
         // in order, so a query touching one takes the single-partition
         // materialize path. Cached ones are hits like any table.

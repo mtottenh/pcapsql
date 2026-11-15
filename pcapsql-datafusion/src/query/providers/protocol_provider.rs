@@ -26,7 +26,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
 
 use super::exchange::BatchReceiver;
-use super::shared::{StreamingHandle, TableData};
+use super::stats::TableData;
+use super::streamed::StreamingHandle;
 use super::ProtocolScanExec;
 use crate::query::filter;
 use arrow::datatypes::SchemaRef;
@@ -88,20 +89,16 @@ impl QueryTables {
     /// Serve the streamed tables of an in-flight parse (takes the handle's
     /// receivers).
     pub fn insert_streams(&mut self, handle: &mut StreamingHandle) {
-        for (name, receivers) in handle.receivers.drain() {
-            let schema = handle
-                .schemas
-                .get(&name)
-                .expect("streaming table schema")
-                .clone();
-            let slots: Vec<Mutex<Option<BatchReceiver>>> = receivers
+        for table in handle.tables.drain(..) {
+            let slots: Vec<Mutex<Option<BatchReceiver>>> = table
+                .receivers
                 .into_iter()
                 .map(|rx| Mutex::new(Some(rx)))
                 .collect();
             self.tables.insert(
-                name,
+                table.name.to_string(),
                 Arc::new(PreparedTable::Stream {
-                    schema,
+                    schema: table.schema,
                     receivers: Arc::new(slots),
                 }),
             );

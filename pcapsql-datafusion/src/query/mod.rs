@@ -34,14 +34,12 @@ pub mod providers;
 mod query_stream;
 mod session;
 mod source;
-pub mod stream_tables;
 pub mod streaming;
 pub mod tables;
 pub mod udf;
 pub mod views;
 pub mod windowing;
 
-pub use builders::NormalizedBatchSet;
 pub use engine::{QueryEngine, QueryOutput};
 pub use filter::{is_pushable, row_predicate};
 pub use options::{CloudSourceOptions, EngineOptions, RetentionPolicy, SourceSpec};

@@ -18,14 +18,14 @@ use super::catalog::{
 };
 use super::fused::{FusedCell, FusedFilterPlan, FusedMemberPlan, FusedPlan};
 use super::predicate::{CompiledPredicate, FramePredicate, RowPredicate};
+use super::stream::{StreamPlan, StreamTable};
 use crate::{ParseScope, ProtocolRegistry};
 
 /// A column of a scan's output: its position in [`OutputPlan::columns`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct OutCol(pub u16);
 
-/// A per-packet output of a compiled scan: its index into
-/// [`CompiledScan::outputs`].
+/// An output of a compiled scan: its index into [`CompiledScan::outputs`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct OutputId(pub u16);
 
@@ -182,7 +182,8 @@ pub struct ScanPlan {
     /// Fused joins.
     pub fused: Vec<FusedScan>,
     /// Scans of [stream tables](TableKind::Stream). At most one per table.
-    /// Any of these pins the pass to one partition.
+    /// Any of these pins the pass to one partition, which is then read to
+    /// its end: the rows of a stream table exist when the capture ends.
     pub streams: Vec<TableScan>,
     /// Which frames the pass covers: exactly the packets this accepts give
     /// rows, to every per-packet output. Must be
@@ -238,13 +239,10 @@ pub enum PlanError {
         /// What is wrong with it.
         reason: &'static str,
     },
-    /// A plan with [stream tables](ScanPlan::streams) given to
-    /// [`ScanPlan::compile`]. The scan driver builds no stream table: run as
-    /// it is, the plan would give that table no rows. A frontend that
-    /// builds stream tables itself says so with
-    /// [`ScanPlan::compile_with_streams`].
-    #[error("the scan driver does not build stream table {0}")]
-    StreamsNotBuilt(&'static str),
+    /// A [stream table](TableKind::Stream) of the catalogue that stream
+    /// analysis does not build. No table of the built-in catalogue is one.
+    #[error("stream analysis does not build table {0}")]
+    StreamNotBuilt(&'static str),
     /// More outputs or output columns than an [`OutputId`] or [`OutCol`]
     /// can number.
     #[error("the plan has too many outputs or columns")]
@@ -278,6 +276,8 @@ pub struct OutputPlan {
     feed: Feed,
     /// The join, of a fused output.
     fused: Option<Arc<FusedPlan>>,
+    /// What each column holds, of a stream table's output.
+    stream: Option<StreamPlan>,
 }
 
 /// What an output's rows are made from.
@@ -289,7 +289,7 @@ pub(crate) enum Feed {
     Layer(&'static str),
     /// The joined rows of a fused join.
     Fused,
-    /// Stream analysis, at the end of the pass.
+    /// Stream analysis, when the partition ends.
     Stream,
 }
 
@@ -302,6 +302,11 @@ impl OutputPlan {
     /// The resolved join of a fused output.
     pub(crate) fn fused(&self) -> Option<&Arc<FusedPlan>> {
         self.fused.as_ref()
+    }
+
+    /// The resolved columns of a stream table's output.
+    pub(crate) fn stream(&self) -> Option<&StreamPlan> {
+        self.stream.as_ref()
     }
 
     /// The row predicate, if it can drop any row. It keeps per-row lookup
@@ -321,7 +326,8 @@ impl OutputPlan {
 pub struct CompiledScan {
     scope: ParseScope,
     outputs: Box<[OutputPlan]>,
-    stream_outputs: Box<[OutputPlan]>,
+    /// How many of `outputs` (the last ones) are stream tables.
+    streams: usize,
     frames: FramePredicate,
     timestamps: TimestampUnit,
 }
@@ -334,24 +340,19 @@ impl CompiledScan {
         &self.scope
     }
 
-    /// The per-packet outputs: [`ScanPlan::tables`], then
-    /// [`ScanPlan::fused`], each in plan order. [`OutputId`] indexes this
-    /// slice.
+    /// The outputs: [`ScanPlan::tables`], then [`ScanPlan::fused`], then
+    /// [`ScanPlan::streams`], each in plan order. [`OutputId`] indexes this
+    /// slice. The first two groups get their rows packet by packet; a
+    /// stream table gets its rows when the partition ends.
     pub fn outputs(&self) -> &[OutputPlan] {
         &self.outputs
     }
 
-    /// The stream-table outputs, in the order of [`ScanPlan::streams`].
-    /// Empty unless the plan was compiled with
-    /// [`ScanPlan::compile_with_streams`]: the frontend builds them.
-    pub fn stream_outputs(&self) -> &[OutputPlan] {
-        &self.stream_outputs
-    }
-
-    /// Stream analysis needs the whole capture in order, so a pass with a
-    /// stream table cannot be split into partitions.
+    /// Whether any output is a stream table. Stream analysis needs the
+    /// whole capture in order, so such a pass cannot be split into
+    /// partitions.
     pub fn requires_single_partition(&self) -> bool {
-        !self.stream_outputs.is_empty()
+        self.streams > 0
     }
 
     /// Which frames the pass covers ([`ScanPlan::frames`]). The scan
@@ -414,37 +415,17 @@ impl ScanPlan {
     /// its columns.
     ///
     /// The compiled scan is one a [`PartitionScan`](super::PartitionScan)
-    /// runs in full: every output of the plan gets its rows. A plan with
-    /// [stream tables](Self::streams), which the driver does not build, is
-    /// therefore refused ([`PlanError::StreamsNotBuilt`]); see
-    /// [`compile_with_streams`](Self::compile_with_streams).
+    /// runs in full: every output of the plan gets its rows, the
+    /// [stream tables](Self::streams) included.
     pub fn compile(
-        &self,
-        catalog: &Catalog,
-        registry: &ProtocolRegistry,
-    ) -> Result<CompiledScan, PlanError> {
-        if let Some(scan) = self.streams.first() {
-            let table = catalog
-                .try_get(scan.table)
-                .ok_or(PlanError::UnknownTable(scan.table))?;
-            return Err(PlanError::StreamsNotBuilt(table.name));
-        }
-        self.compile_with_streams(catalog, registry)
-    }
-
-    /// [`compile`](Self::compile), for a frontend that builds the plan's
-    /// [stream tables](Self::streams) itself: from the frames a
-    /// [`FrameObserver`](super::FrameObserver) is shown, with the columns of
-    /// [`CompiledScan::stream_outputs`]. The scan driver produces the
-    /// per-packet outputs only, and parses what stream analysis needs.
-    pub fn compile_with_streams(
         &self,
         catalog: &Catalog,
         registry: &ProtocolRegistry,
     ) -> Result<CompiledScan, PlanError> {
         let table_of = |id: TableId| catalog.try_get(id).ok_or(PlanError::UnknownTable(id));
         let mut needs = FieldNeeds::default();
-        let mut outputs = Vec::with_capacity(self.tables.len() + self.fused.len());
+        let mut outputs =
+            Vec::with_capacity(self.tables.len() + self.fused.len() + self.streams.len());
 
         let mut seen = HashSet::new();
         for scan in &self.tables {
@@ -491,6 +472,7 @@ impl ScanPlan {
                     _ => Feed::Layer(table.name),
                 },
                 fused: None,
+                stream: None,
             });
         }
 
@@ -639,16 +621,13 @@ impl ScanPlan {
                 fetch: fused.fetch,
                 feed: Feed::Fused,
                 fused: Some(Arc::new(plan)),
+                stream: None,
             });
-        }
-        if outputs.len() > usize::from(u16::MAX) {
-            return Err(PlanError::TooLarge);
         }
 
         if !self.streams.is_empty() && !self.frames.is_all() {
             return Err(PlanError::StreamFramePredicate);
         }
-        let mut stream_outputs = Vec::with_capacity(self.streams.len());
         let mut seen = HashSet::new();
         for scan in &self.streams {
             let table = table_of(scan.table)?;
@@ -661,20 +640,32 @@ impl ScanPlan {
             if scan.predicate.is_some() {
                 return Err(PlanError::StreamPredicate(table.name));
             }
-            stream_outputs.push(OutputPlan {
+            let built =
+                StreamTable::named(table.name).ok_or(PlanError::StreamNotBuilt(table.name))?;
+            let columns = self.scan_columns(table, scan)?;
+            let stream =
+                StreamPlan::resolve(built, &columns).map_err(|index| PlanError::UnknownColumn {
+                    table: table.name,
+                    column: scan.columns[index],
+                })?;
+            outputs.push(OutputPlan {
                 table: Some(scan.table),
-                columns: self.scan_columns(table, scan)?,
+                columns,
                 predicate: None,
                 fetch: scan.fetch,
                 feed: Feed::Stream,
                 fused: None,
+                stream: Some(stream),
             });
+        }
+        if outputs.len() > usize::from(u16::MAX) {
+            return Err(PlanError::TooLarge);
         }
 
         Ok(CompiledScan {
             scope: parse_scope(catalog, registry, &needs, !self.streams.is_empty()),
             outputs: outputs.into(),
-            stream_outputs: stream_outputs.into(),
+            streams: self.streams.len(),
             frames: self.frames.clone(),
             timestamps: self.timestamps,
         })

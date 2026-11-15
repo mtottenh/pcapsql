@@ -11,27 +11,23 @@
 //!   reads, parses, routes rows        (per-query column subsets, parse-time
 //!        │                             predicates and row caps applied
 //!        │                             before any Arrow materialization)
-//!        │                         ──► ArrowSink per fused join (a view's
-//!        │                             joined row, from the frame's own
-//!        │ every frame, once           layers; see `crate::query::fusion`)
-//!        ▼
-//! NormalizedBatchSet ──► the stream subscriber
-//!   (the scan's observer)
-//!        └─► delivery of every table's batches: accumulated, or sent to
-//!            the plan through its exchange
+//!                                  ──► ArrowSink per fused join (a view's
+//!                                      joined row, from the frame's own
+//!                                      layers; see `crate::query::fusion`)
+//!                                  ──► ArrowSink per stream table, written
+//!                                      when the capture ends
 //! ```
 //!
 //! Each protocol table contains only the fields relevant to that protocol,
 //! with `frame_number` as the linking key for JOINs.
 //!
 //! Reading a partition, which rows a packet adds to `frames`, the protocol
-//! tables and the fused joins, and what each cell holds, is decided in
-//! `pcapsql_core::scan` (`PartitionScan`, `Router`, `write_value`), which
-//! the frontends share. Here the rows land in an [`ArrowSink`] per table
-//! or fused join, and [`NormalizedBatchSet`] delivers the batches.
+//! tables and the fused joins, which rows the stream tables have, and what
+//! each cell holds, is decided in `pcapsql_core::scan` (`PartitionScan`,
+//! `Router`, `write_value`), which the frontends share. Here the rows land
+//! in an [`ArrowSink`] per table or fused join; where its batches go is
+//! `crate::query::providers::BatchDelivery`'s.
 
-mod normalized;
 mod sink;
 
-pub use normalized::NormalizedBatchSet;
 pub use sink::{ArrowList, ArrowSink};
