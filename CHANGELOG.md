@@ -561,6 +561,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   row in the function; the whole filter query over 20M rows on one thread
   3.5 → 3.1 ns/row and 5.1 → 4.6 (native expressions: 2.3 and 3.9). The
   crate's second audited `unsafe` call; `make check_unsafe` pins the two.
+- **DuckDB extension: `ip_in_cidr` and `has_tcp_flag` with a literal pattern
+  keep the SIMD compare in a chunk with NULLs**: the values are read as slices
+  of the rows of the 64-row words of the validity mask that have no NULL,
+  words that are all NULL are skipped, and only words with both are read a row
+  at a time; the slot of a NULL row is never read. With a third of the rows
+  NULL in runs of 1,000 (the `tcp_flags` of packets that are not TCP) the
+  functions execute 29 → 7 and 28 → 5 instructions per row, and a filter over
+  20M rows on one thread takes 5.1 → 3.4 and 6.2 → 4.3 ns/row (native
+  expressions: 2.3 and 1.4); with 1% of the rows NULL at random, 26 → 17 and
+  25 → 15 instructions; chunks without NULLs, with 10% at random and behind a
+  selection are within 3% of what they were. The audited `unsafe` of
+  `engine::scalar` is now its module `valid` (three `unsafe`s, pinned by
+  `make check_unsafe`), whose tests run under Miri.
 - **Hex decoding without a `Vec` per value.** New
   `format::parse_hex_into(text, &mut Vec<u8>)` decodes into a buffer the
   caller keeps, by table lookup; `parse_hex` is a wrapper and accepts and

@@ -10,8 +10,8 @@
 //!   `pcap_hex`);
 //! - [`Match`]: a value and a text pattern, tested for each row (`ip6_in_cidr`);
 //! - [`MatchPlain`]: the same for a fixed-width value whose test always has an answer
-//!   (`ip_in_cidr`, `has_tcp_flag`), with the answers of a chunk stored as one slice when the
-//!   pattern is constant.
+//!   (`ip_in_cidr`, `has_tcp_flag`), with the answers of a chunk computed over slices of its
+//!   values and stored as one slice when the pattern is constant.
 //!
 //! The kernel is a type parameter of the loop (a function item or a closure that captures
 //! nothing), not a function pointer in it: each function gets its own copy of the loop, with the
@@ -21,12 +21,13 @@
 //! selection, so flat, constant and dictionary inputs all work. NULL in gives NULL out, and so
 //! does a value the kernel rejects: no function raises an error for its input.
 //!
-//! One function here has an `unsafe` call, the second of the two places in the crate that do
-//! (`scripts/check-unsafe.sh`): [`values_without_nulls`] borrows the values of a flat vector
-//! without NULLs as a slice, and says why it may.
+//! One module here has `unsafe` code, the second of the two places in the crate that do
+//! (`scripts/check-unsafe.sh`): [`valid`] borrows the values of rows of a flat vector as a
+//! slice when none of those rows is NULL, and says why it may.
 
 use std::borrow::{Borrow, Cow};
 use std::marker::PhantomData;
+use std::ops::Range;
 
 use duckdb_neo::{
     connection::Context,
@@ -563,52 +564,535 @@ where
     }
 }
 
-/// The values of a flat vector that has no NULL row, as a slice: row `r` is `values[r]`. `None`
-/// for a vector with a NULL row and for one that is not flat (its rows are behind the selection
-/// of a dictionary or constant vector), whose values the caller reads through the reader.
+/// The values of rows of a flat vector as slices, for the rows that are not NULL.
 ///
-/// This is the one `unsafe` call of the crate outside `engine::writer`. Nothing is required of
-/// the caller: the function checks what the call needs.
-fn values_without_nulls<'vector, I>(reader: &VectorReader<'vector, I>) -> Option<&'vector [I]>
-where
-    I: PlainNative + NativeElement<Native<'vector> = I>,
-{
-    let rows = reader.len();
-    // Flat: the slots of the vector are its rows, in order, and there are `rows` of them.
-    if !matches!(reader.selection(), Selection::Identity) {
-        return None;
-    }
-    // No NULL: bit `r % 64` of word `r / 64` of the mask is set for every row `r`. The bits after
-    // the last row say nothing. A vector without a mask has no NULL.
-    if let Some(validity) = reader.validity() {
-        let (words, tail) = (rows / 64, rows % 64);
-        if validity.get(..words)?.iter().any(|word| *word != u64::MAX) {
+/// This module is the one place of the crate outside `engine::writer` with `unsafe` code
+/// (`scripts/check-unsafe.sh`). It has two functions. [`values`](valid::values) is what the rest
+/// of the file calls, and requires nothing of its caller: it checks what the borrow needs.
+/// `slots` forms the slice, from a pointer and a validity mask instead of a vector, so that its
+/// tests can give it a buffer whose NULL slots are not initialised, under Miri.
+///
+/// What is and is not read: a slot is covered by a slice only if its row is in the range asked
+/// for and the range has no NULL row. The slot of a NULL row is never part of a slice and is
+/// never read, as an integer or as anything else: DuckDB does not promise to initialise it (an
+/// operator need not write it, and the buffer is not zeroed), and reading uninitialised memory as
+/// an integer is undefined behaviour. So `VectorReader::as_slice`, which exposes every slot of
+/// the vector, is not what is called here.
+#[allow(unsafe_code)]
+mod valid {
+    use std::ops::Range;
+    use std::slice;
+
+    use duckdb_neo::vector::{NativeElement, PlainNative, Selection, VectorReader};
+
+    /// The values of rows `rows` of a flat vector as a slice: `values[i]` is row
+    /// `rows.start + i`. `None` if one of the rows is NULL, if the range is not of rows of the
+    /// vector, and for a vector that is not flat (its rows are behind the selection of a
+    /// dictionary or constant vector): the caller reads those rows through the reader.
+    pub(super) fn values<'vector, I>(
+        reader: &VectorReader<'vector, I>,
+        rows: Range<usize>,
+    ) -> Option<&'vector [I]>
+    where
+        I: PlainNative + NativeElement<Native<'vector> = I>,
+    {
+        // Flat: slot `r` of the vector is row `r`, and the mask is of the rows.
+        if !matches!(reader.selection(), Selection::Identity) {
             return None;
         }
-        if tail != 0 && !validity.get(words)? & ((1u64 << tail) - 1) != 0 {
+        // SAFETY: what `slots` requires, in its order.
+        //
+        // - The pointer is the `data` of the view DuckDB gave `duckdb-neo` for this vector
+        //   (`duckdb_v2_vector_get_view`), which is where DuckDB itself reads the rows from. The
+        //   vector is flat (checked above), so that buffer has a slot for each of its
+        //   `reader.len()` rows, in row order. The vector's logical type was checked to be the
+        //   one stored as `I` when `duckdb-neo` attached the type to it (`Vector::cast`),
+        //   `I::Native` is `I` (the bound above), and a `PlainNative` type has the size and
+        //   alignment of the slot.
+        // - `'vector` is the reader's borrow of the vector. It is a shared borrow, so for as
+        //   long as it lasts there is no writer of the vector, nothing resizes it, and DuckDB,
+        //   which is waiting for this function call to return, does not free it.
+        // - The mask is the `validity` of the same view, of the same rows: bit `r % 64` of word
+        //   `r / 64` is set when row `r` is not NULL, and a vector without a mask has no NULL.
+        //   DuckDB reads the slot of a row that is not NULL as a value of the vector's type
+        //   wherever it evaluates one, so whichever operator produced the vector wrote it; and
+        //   every bit pattern of the slot is a value of a `PlainNative` type.
+        //
+        // Nothing is assumed of the slot of a NULL row.
+        unsafe { slots(reader.as_ptr(), reader.len(), reader.validity(), rows) }
+    }
+
+    /// Slots `rows` of the `len` slots at `data` as a slice, if the bit of each of them is set
+    /// in `validity`, or there is no mask. `None` otherwise, also for a range that is not within
+    /// `0..len`, for a mask that is too short for it, and for a pointer that is null or not
+    /// aligned for `T`.
+    ///
+    /// No slot outside `rows` is covered by the slice, and no slot at all is read here.
+    ///
+    /// # Safety
+    ///
+    /// - `data` is null, or points to the first of `len` slots of the size of `T` in one
+    ///   allocation;
+    /// - nothing writes or frees those slots for `'a`;
+    /// - slot `r` holds an initialised value of `T` if bit `r % 64` of `validity[r / 64]` is
+    ///   set, and, when `validity` is `None`, for every `r < len`. Other slots need not be
+    ///   initialised.
+    unsafe fn slots<'a, T>(
+        data: *const T,
+        len: usize,
+        validity: Option<&[u64]>,
+        rows: Range<usize>,
+    ) -> Option<&'a [T]> {
+        if data.is_null() || !data.is_aligned() || rows.start > rows.end || rows.end > len {
             return None;
         }
+        if !validity.is_none_or(|validity| all_set(validity, rows.clone())) {
+            return None;
+        }
+        // SAFETY: `data` is not null and is aligned for `T` (checked above), and
+        // `rows.start <= rows.end <= len` (checked above), so `data.add(rows.start)` is within
+        // the allocation of the `len` slots, or one past its end for an empty range at `len`,
+        // and the `rows.end - rows.start` slots from there are slots `rows` of it: of one
+        // allocation, and no more than `isize::MAX` bytes, as an allocation is. Each of them
+        // holds an initialised `T`: its bit is set in the mask (checked above) or there is no
+        // mask, which is when the caller promises that. Nothing writes or frees them for `'a`
+        // (the caller's promise), and a shared slice does not either.
+        Some(unsafe { slice::from_raw_parts(data.add(rows.start), rows.end - rows.start) })
     }
-    // SAFETY: `VectorReader::as_slice` returns the vector's physical slots as `&[I::Native]`,
-    // for the lifetime of the borrow of the vector the reader holds, and requires one thing:
-    // that every slot it exposes, including that of a NULL row and one no row selects, is
-    // initialised as `I::Native`. DuckDB does not promise that for the slot of a NULL row (an
-    // operator need not write it, and the buffer is not zeroed), so:
-    //
-    // - the vector is flat (checked above), so the slots exposed are exactly rows `0..rows`:
-    //   there is no slot that a selection leaves out;
-    // - no row is NULL (checked above), and DuckDB reads the slot of a non-NULL row as a value
-    //   of the vector's type wherever it evaluates one, so every operator writes it: all of
-    //   `0..rows` are initialised;
-    // - the vector's logical type was checked to be the one stored as `I` when `duckdb-neo`
-    //   attached the type to it (`Vector::cast`), `I::Native` is `I` (the bound above), and
-    //   every bit pattern of a slot is a value of a `PlainNative` type.
-    //
-    // The reader borrows the vector, so nothing resizes or writes it while the slice lives.
-    #[allow(unsafe_code)]
-    let values = unsafe { reader.as_slice() }?;
-    // Flat storage has one slot per row.
-    (values.len() == rows).then_some(values)
+
+    /// Whether every one of bits `bits` is set, where bit `b` is bit `b % 64` of `words[b / 64]`.
+    /// False for a bit of a word that is not there.
+    fn all_set(words: &[u64], bits: Range<usize>) -> bool {
+        if bits.is_empty() {
+            return true;
+        }
+        let (first, last) = (bits.start / 64, (bits.end - 1) / 64);
+        (first..=last).all(|index| {
+            // The bits of this word that are in the range: `low..high`, at least one.
+            let low = if index == first { bits.start % 64 } else { 0 };
+            let high = if index == last {
+                (bits.end - 1) % 64 + 1
+            } else {
+                64
+            };
+            let mask = (u64::MAX >> (64 - (high - low))) << low;
+            words.get(index).is_some_and(|word| word & mask == mask)
+        })
+    }
+
+    /// These run under Miri (`cargo +nightly miri test -p pcapsql-duckdb --lib valid`), which
+    /// reports a read of a slot that was never written. Miri runs them a thousand times slower,
+    /// so under it they take fewer sizes, and fewer ranges of each.
+    #[cfg(test)]
+    mod tests {
+        use std::mem::MaybeUninit;
+
+        use super::super::{Nulls, Spans};
+        use super::*;
+
+        /// A buffer of `len` slots where slot `r` holds `r` if `valid(r)` and is not
+        /// initialised otherwise, and its validity mask. The bits after the last slot are set,
+        /// as DuckDB may leave them.
+        fn column(len: usize, valid: impl Fn(usize) -> bool) -> (Vec<MaybeUninit<u32>>, Vec<u64>) {
+            let mut slots = Vec::with_capacity(len);
+            let mut validity = vec![0u64; len.div_ceil(64)];
+            for row in 0..len {
+                if valid(row) {
+                    slots.push(MaybeUninit::new(row as u32));
+                    validity[row / 64] |= 1 << (row % 64);
+                } else {
+                    slots.push(MaybeUninit::uninit());
+                }
+            }
+            if let Some(last) = validity.last_mut().filter(|_| !len.is_multiple_of(64)) {
+                *last |= u64::MAX << (len % 64);
+            }
+            (slots, validity)
+        }
+
+        /// `slots` over a buffer of [`column`].
+        fn slice<'a>(
+            slots: &'a [MaybeUninit<u32>],
+            validity: Option<&[u64]>,
+            rows: Range<usize>,
+        ) -> Option<&'a [u32]> {
+            // SAFETY: the pointer is of the `slots.len()` slots of the buffer, which is borrowed
+            // for `'a`; `column` initialised each slot whose bit it set, and the tests that pass
+            // no mask initialised every slot.
+            unsafe { super::slots(slots.as_ptr().cast::<u32>(), slots.len(), validity, rows) }
+        }
+
+        /// Whether a row is valid.
+        type Valid = Box<dyn Fn(usize) -> bool>;
+
+        /// The NULL patterns of the tests: which rows of `len` are valid.
+        fn patterns(len: usize) -> Vec<(&'static str, Valid)> {
+            // A fixed pseudo-random sequence: the same NULLs in every run.
+            let random = |percent: u64| {
+                Box::new(move |row: usize| {
+                    let hash =
+                        (row as u64 ^ 0x9e37_79b9_7f4a_7c15).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+                    (hash >> 32) % 100 >= percent
+                }) as Valid
+            };
+            vec![
+                ("no NULL", Box::new(|_| true)),
+                ("all NULL", Box::new(|_| false)),
+                ("first", Box::new(|row| row != 0)),
+                ("last", Box::new(move |row| row + 1 != len)),
+                ("bit 0 of each word", Box::new(|row| row % 64 != 0)),
+                ("bit 63 of each word", Box::new(|row| row % 64 != 63)),
+                ("only bit 0 of each word", Box::new(|row| row % 64 == 0)),
+                ("only bit 63 of each word", Box::new(|row| row % 64 == 63)),
+                ("alternate rows", Box::new(|row| row % 2 == 0)),
+                ("alternate words", Box::new(|row| row / 64 % 2 == 0)),
+                (
+                    "alternate words, NULL first",
+                    Box::new(|row| row / 64 % 2 == 1),
+                ),
+                ("runs", Box::new(|row| row % 100 < 37)),
+                ("runs across words", Box::new(|row| (row + 50) % 200 < 130)),
+                ("1% NULL", random(1)),
+                ("50% NULL", random(50)),
+                ("99% NULL", random(99)),
+            ]
+        }
+
+        /// The numbers of rows of the tests: around a word of the mask and, without Miri,
+        /// around a chunk.
+        fn sizes() -> &'static [usize] {
+            if cfg!(miri) {
+                &[0, 1, 63, 64, 65, 127, 128, 129, 200]
+            } else {
+                &[0, 1, 63, 64, 65, 127, 128, 129, 2047, 2048, 2049, 4097]
+            }
+        }
+
+        #[test]
+        fn a_range_is_a_slice_exactly_when_it_has_no_null() {
+            for len in [0, 1, 63, 64, 65, 130] {
+                // From every row, or under Miri from the rows around the words.
+                let starts: Vec<usize> = if cfg!(miri) {
+                    [0, 1, 31, 62, 63, 64, 65, 66, 127, 128, 129, 130]
+                        .into_iter()
+                        .filter(|start| *start <= len)
+                        .collect()
+                } else {
+                    (0..=len).collect()
+                };
+                for (name, valid) in patterns(len) {
+                    let (slots, validity) = column(len, &valid);
+                    for &start in &starts {
+                        // Ranges of up to a word and a row, or under Miri those around a word.
+                        let ends: Vec<usize> = if cfg!(miri) {
+                            vec![start, start + 1, start + 63, start + 64, start + 65, len]
+                        } else {
+                            (start..=start + 65).collect()
+                        };
+                        for end in ends.into_iter().filter(|end| *end <= len) {
+                            let values = slice(&slots, Some(&validity), start..end);
+                            let context = format_args!("{len} {name} {start}..{end}");
+                            if (start..end).all(&valid) {
+                                let values = values.unwrap_or_else(|| panic!("{context}"));
+                                let rows = (start..end).map(|row| row as u32);
+                                assert!(values.iter().copied().eq(rows), "{context}");
+                            } else {
+                                assert_eq!(values, None, "{context}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        /// What `MatchPlain` does with a chunk: the sum of the values of its rows that are not
+        /// NULL, read as slices where the mask has no NULL and by row where it has some.
+        fn sum(slots: &[MaybeUninit<u32>], validity: Option<&[u64]>, context: &str) -> u64 {
+            let mut covered = 0;
+            let mut sum = 0;
+            for (span, nulls) in Spans::new(validity, slots.len()) {
+                assert_eq!(span.start, covered, "{context}");
+                assert!(!span.is_empty(), "{context}");
+                covered = span.end;
+                let is_valid = |row: usize| {
+                    validity.is_none_or(|words| words[row / 64] & (1 << (row % 64)) != 0)
+                };
+                let values = slice(slots, validity, span.clone());
+                match nulls {
+                    Nulls::None => {
+                        // Reads every slot of the slice: Miri would report one not written.
+                        let values = values.unwrap_or_else(|| panic!("{context} {span:?}"));
+                        assert!(values.iter().copied().eq(span.map(|row| row as u32)));
+                        sum += values.iter().map(|value| u64::from(*value)).sum::<u64>();
+                    }
+                    Nulls::All => assert!(!span.clone().any(is_valid), "{context} {span:?}"),
+                    Nulls::Some => {
+                        assert_eq!(values, None, "{context} {span:?}");
+                        assert!(span.clone().any(&is_valid), "{context} {span:?}");
+                        // A row that is not NULL is a slice of one.
+                        for row in span.filter(|row| is_valid(*row)) {
+                            let value = slice(slots, validity, row..row + 1).unwrap();
+                            sum += u64::from(value[0]);
+                        }
+                    }
+                }
+            }
+            assert_eq!(covered, slots.len(), "{context}");
+            sum
+        }
+
+        #[test]
+        fn the_spans_of_a_mask_read_every_valid_row_and_no_other() {
+            for &len in sizes() {
+                for (name, valid) in patterns(len) {
+                    let (slots, validity) = column(len, &valid);
+                    let expected: u64 = (0..len)
+                        .filter(|row| valid(*row))
+                        .map(|row| row as u64)
+                        .sum();
+                    assert_eq!(sum(&slots, Some(&validity), name), expected, "{len} {name}");
+                }
+            }
+        }
+
+        #[test]
+        fn runs_of_nulls_of_every_length_leave_the_rows_around_them() {
+            let len = 700;
+            let lengths: Vec<usize> = if cfg!(miri) {
+                vec![1, 2, 63, 64, 65, 127, 128, 129, 200]
+            } else {
+                (1..=200).collect()
+            };
+            for nulls in lengths {
+                // A different place in the word for each length.
+                let offset = nulls * 7 % 300;
+                let valid = |row: usize| !(offset..offset + nulls).contains(&row);
+                let (slots, validity) = column(len, valid);
+                let expected: u64 = (0..len)
+                    .filter(|row| valid(*row))
+                    .map(|row| row as u64)
+                    .sum();
+                let context = format!("{nulls} NULLs at {offset}");
+                assert_eq!(
+                    sum(&slots, Some(&validity), &context),
+                    expected,
+                    "{context}"
+                );
+                // The rows before the NULLs and after them are slices; a range that reaches
+                // into the NULLs from either side is not.
+                for (rows, lent) in [
+                    (0..offset, true),
+                    (offset + nulls..len, true),
+                    (0..offset + 1, false),
+                    (offset + nulls - 1..len, false),
+                    (offset..offset + nulls, false),
+                ] {
+                    let values = slice(&slots, Some(&validity), rows.clone());
+                    assert_eq!(values.is_some(), lent, "{context} {rows:?}");
+                    if let Some(values) = values {
+                        assert!(values.iter().copied().eq(rows.map(|row| row as u32)));
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn a_vector_without_a_mask_is_one_slice() {
+            for &len in sizes() {
+                let (slots, _) = column(len, |_| true);
+                let spans: Vec<_> = Spans::new(None, len).collect();
+                assert_eq!(
+                    spans,
+                    Vec::from_iter((len != 0).then_some((0..len, Nulls::None)))
+                );
+                let expected: u64 = (0..len).map(|row| row as u64).sum();
+                assert_eq!(sum(&slots, None, "no mask"), expected, "{len}");
+            }
+        }
+
+        #[test]
+        fn words_that_are_alike_are_one_span() {
+            let words = [
+                u64::MAX,
+                u64::MAX,
+                0,
+                0,
+                0,
+                0b101,
+                u64::MAX,
+                1 << 63,
+                0,
+                u64::MAX,
+            ];
+            let spans: Vec<_> = Spans::new(Some(&words), 640 - 3).collect();
+            assert_eq!(
+                spans,
+                [
+                    (0..128, Nulls::None),
+                    (128..320, Nulls::All),
+                    (320..384, Nulls::Some),
+                    (384..448, Nulls::None),
+                    (448..512, Nulls::Some),
+                    (512..576, Nulls::All),
+                    (576..637, Nulls::None),
+                ]
+            );
+            // A mask without a NULL is one span, as no mask is.
+            let spans: Vec<_> = Spans::new(Some(&[u64::MAX; 33]), 2049).collect();
+            assert_eq!(spans, [(0..2049, Nulls::None)]);
+            let spans: Vec<_> = Spans::new(Some(&[0; 33]), 2049).collect();
+            assert_eq!(spans, [(0..2049, Nulls::All)]);
+        }
+
+        #[test]
+        fn the_bits_after_the_last_row_are_not_rows() {
+            let spans: Vec<_> = Spans::new(Some(&[u64::MAX, !0b111]), 67).collect();
+            assert_eq!(spans, [(0..64, Nulls::None), (64..67, Nulls::All)]);
+            let spans: Vec<_> = Spans::new(Some(&[u64::MAX, 0b111]), 67).collect();
+            assert_eq!(spans, [(0..67, Nulls::None)]);
+            let spans: Vec<_> = Spans::new(Some(&[0, 0b111 << 3]), 67).collect();
+            assert_eq!(spans, [(0..67, Nulls::All)]);
+            let spans: Vec<_> = Spans::new(Some(&[u64::MAX, 0b101]), 67).collect();
+            assert_eq!(spans, [(0..64, Nulls::None), (64..67, Nulls::Some)]);
+            // Nor is a row whose word the mask does not have one to read.
+            let spans: Vec<_> = Spans::new(Some(&[1 << 63]), 100).collect();
+            assert_eq!(spans, [(0..64, Nulls::Some), (64..100, Nulls::All)]);
+        }
+
+        #[test]
+        fn what_is_not_a_range_of_the_slots_is_not_a_slice() {
+            let (slots, validity) = column(130, |_| true);
+            assert_eq!(slice(&slots, Some(&validity), 0..131), None);
+            assert_eq!(slice(&slots, None, 131..131), None);
+            #[allow(clippy::reversed_empty_ranges)]
+            let reversed = 5..4;
+            assert_eq!(slice(&slots, None, reversed), None);
+            // A mask without the word of a row: nothing says the row is valid.
+            assert_eq!(slice(&slots, Some(&validity[..2]), 100..129), None);
+            assert_eq!(
+                slice(&slots, Some(&validity[..2]), 100..128).map(<[u32]>::len),
+                Some(28)
+            );
+            assert_eq!(slice(&slots, Some(&[]), 0..1), None);
+            assert_eq!(slice(&slots, Some(&[]), 7..7), Some(&[][..]));
+            // SAFETY: a null pointer, and one that is not aligned for `u32`, are refused before
+            // anything is made of them.
+            unsafe {
+                assert_eq!(super::slots::<u32>(std::ptr::null(), 4, None, 0..4), None);
+                let unaligned = slots.as_ptr().cast::<u8>().wrapping_add(1).cast::<u32>();
+                assert_eq!(super::slots(unaligned, 4, None, 0..4), None);
+            }
+        }
+    }
+}
+
+/// What the validity mask says of a span of rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Nulls {
+    /// No row of the span is NULL.
+    None,
+    /// Some rows are NULL and some are not.
+    Some,
+    /// Every row is NULL.
+    All,
+}
+
+/// The bits of the rows of the word of a validity mask whose first row is `first`, one of
+/// `rows` rows: all 64, or in the last word the low ones of as many rows as are left.
+fn row_bits(first: usize, rows: usize) -> u64 {
+    u64::MAX >> (64 - rows.saturating_sub(first).clamp(1, 64))
+}
+
+/// Rows `0..rows` in spans of whole words of a validity mask, in order, where row `r` is bit
+/// `r % 64` of word `r / 64`, set when the row is not NULL. A span is the rows of one word that
+/// has both NULLs and rows that are not, or of as many words in a row as have no NULL, or of as
+/// many as have nothing else; the last word has the rows there are, and its other bits say
+/// nothing. Without a mask no row is NULL, and the rows are one span.
+///
+/// The mask has a word for every row ([`MatchPlain`] gives it no other); the rows of a word
+/// that is not there are [`Nulls::All`], which nothing reads.
+struct Spans<'a> {
+    validity: Option<&'a [u64]>,
+    /// The first row no span has covered yet: the first of a word.
+    next: usize,
+    rows: usize,
+}
+
+impl<'a> Spans<'a> {
+    fn new(validity: Option<&'a [u64]>, rows: usize) -> Self {
+        Self {
+            validity,
+            next: 0,
+            rows,
+        }
+    }
+
+    /// The rows of the word that `start` is the first row of: where they end, and their NULLs.
+    fn word(&self, words: &[u64], start: usize) -> (usize, Nulls) {
+        let end = self.rows.min(start + 64);
+        let all = row_bits(start, self.rows);
+        let nulls = match words.get(start / 64).map_or(all, |word| !word & all) {
+            0 => Nulls::None,
+            nulls if nulls == all => Nulls::All,
+            _ => Nulls::Some,
+        };
+        (end, nulls)
+    }
+}
+
+impl Iterator for Spans<'_> {
+    type Item = (Range<usize>, Nulls);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let start = self.next;
+        if start >= self.rows {
+            return None;
+        }
+        let Some(words) = self.validity else {
+            self.next = self.rows;
+            return Some((start..self.rows, Nulls::None));
+        };
+        let (mut end, nulls) = self.word(words, start);
+        if nulls != Nulls::Some {
+            // The words after it that are alike.
+            while end < self.rows {
+                let (after, next) = self.word(words, end);
+                if next != nulls {
+                    break;
+                }
+                end = after;
+            }
+        }
+        self.next = end;
+        Some((start..end, nulls))
+    }
+}
+
+/// Make the rows among `0..rows` that are NULL in a validity mask NULL in the output: row `r`
+/// is bit `r % 64` of word `r / 64`, set when the row is not NULL. With `stored`, only the rows
+/// of the words that have a row that is not NULL, which are the ones [`MatchPlain`] stores
+/// answers in.
+#[inline(always)]
+fn null_rows(
+    writer: &mut VectorWriter<'_, bool>,
+    words: &[u64],
+    rows: usize,
+    stored: bool,
+) -> Result<()> {
+    for (index, word) in words.iter().enumerate().take(rows.div_ceil(64)) {
+        let first = index * 64;
+        let all = row_bits(first, rows);
+        let mut nulls = !word & all;
+        if stored && nulls == all {
+            continue;
+        }
+        // Words without a NULL are skipped.
+        while nulls != 0 {
+            writer.set_null(first + nulls.trailing_zeros() as usize)?;
+            nulls &= nulls - 1;
+        }
+    }
+    Ok(())
 }
 
 /// The rows of a chunk a [`MatchPlain`] has room to answer at once: DuckDB's vector size
@@ -620,17 +1104,24 @@ const BLOCK: usize = 2048;
 /// not a pattern.
 ///
 /// With a constant pattern (a literal) the answers of a chunk are computed into an array of
-/// `bool`s in a loop that does nothing else, and copied into the output as one slice, which
-/// also marks the rows valid; the rows of NULL values are then made NULL from the input's
-/// validity mask, which costs nothing for an input without NULLs. A NULL value is not tested:
-/// its answer is `false` until then.
+/// `bool`s in a loop that does nothing else, and copied into the output as slices, which also
+/// marks the rows valid. The loop reads the values of a flat vector as a slice
+/// ([`valid::values`]) and does nothing but test them, so the compiler turns it into a SIMD
+/// compare.
 ///
-/// The loop that computes the answers reads the values as a slice ([`values_without_nulls`]) and
-/// does nothing but test them, so the compiler turns it into a SIMD compare. `duckdb-neo` lends
-/// that slice only on the promise that every slot of the vector holds a value, which is not so
-/// for the slot of a NULL row: a chunk with a NULL value, and one whose values are behind a
-/// selection (a dictionary or constant vector), is read through the vector reader instead, a row
-/// at a time.
+/// A slice of values is of rows that are not NULL, because the slot of a NULL row holds nothing
+/// that may be read: the whole chunk when it has no validity mask, and otherwise the rows of
+/// the 64-row words of the mask that have no NULL ([`Spans`]). The rows of a word that are all
+/// NULL are not read and not written (the output is made NULL first, once, if there is such a
+/// word). Those of a word with some NULLs are read through the vector reader, a row at a time,
+/// which reads the rows that are not NULL; the answer of a NULL row is `false` until its row
+/// is made NULL from the mask, after the answers are stored. So NULLs that come in runs, as the
+/// `tcp_flags` of packets that are not TCP do, cost the SIMD compare only the words at the ends
+/// of each run.
+///
+/// Where NULLs are here and there in more than three words of four, nothing is gained by
+/// telling the words apart, and the whole chunk is read through the reader; so is a chunk
+/// whose values are behind a selection (a dictionary or constant vector).
 struct MatchPlain<I, P, Parse, Test> {
     parse: Parse,
     test: Test,
@@ -700,7 +1191,7 @@ where
         };
 
         let mut block = [false; BLOCK];
-        let Some(answers) = block.get_mut(..values.len()) else {
+        let Some(answers) = block.get_mut(..rows) else {
             // More rows than DuckDB puts in a chunk: answer them one by one.
             for (row, value) in values.iter().enumerate() {
                 let answer = value.map(|value| (self.test)(*value, &pattern));
@@ -708,45 +1199,123 @@ where
             }
             return Ok(());
         };
-        if let Some(values) = values_without_nulls(&values) {
-            // Nothing but the test, over two slices: a SIMD compare. No row is NULL.
-            for (answer, value) in answers.iter_mut().zip(values) {
-                *answer = (self.test)(*value, &pattern);
+        let validity = values.validity();
+        // A flat vector: row `r` is slot `r`, and bit `r % 64` of word `r / 64` of the mask.
+        let flat = matches!(values.selection(), Selection::Identity)
+            && validity.is_none_or(|words| words.len() >= rows.div_ceil(64));
+        // The whole words of the mask that have NULLs and rows that are not NULL.
+        let mixed = validity.filter(|_| flat).map_or(0, |words| {
+            let whole = words.iter().take(rows / 64);
+            whole
+                .filter(|word| **word != 0 && **word != u64::MAX)
+                .count()
+        });
+        if !flat || mixed * 64 > rows / 4 * 3 {
+            // The rows are behind a selection, or NULL here and there.
+            let validity = validity.map(|words| (words, flat));
+            self.answer_rows(&values, validity, answers, &mut writer, &pattern)
+        } else {
+            self.answer_spans(&values, validity, answers, &mut writer, &pattern)
+        }
+    }
+}
+
+impl<I, P, Parse, Test> MatchPlain<I, P, Parse, Test>
+where
+    I: PlainNative
+        + for<'a> ReadableNativeElement<Ref<'a> = &'a I>
+        + for<'a> NativeElement<Native<'a> = I>
+        + 'static,
+    Test: Fn(I, &P) -> bool,
+{
+    /// The answers of a chunk, all of its rows read through the reader, which reads the ones
+    /// that are not NULL: computed in `answers` and stored in the output; then its NULLs, from
+    /// the mask of the rows if `validity` says it is that (the mask of a flat vector), and
+    /// through the reader if it is of the slots a selection maps the rows to.
+    ///
+    /// Not inlined, and nor is [`Self::answer_spans`]: each loop is compiled as it is without
+    /// the other beside it.
+    #[inline(never)]
+    fn answer_rows(
+        &self,
+        values: &VectorReader<'_, I>,
+        validity: Option<(&[u64], bool)>,
+        answers: &mut [bool],
+        writer: &mut VectorWriter<'_, bool>,
+        pattern: &P,
+    ) -> Result<()> {
+        // (`for_each`, not `for`: the reader then tells a flat, a constant and a dictionary
+        // vector apart once, not for every row.)
+        let mut slots = answers.iter_mut();
+        values.iter().for_each(|value| {
+            if let Some(answer) = slots.next() {
+                *answer = value.is_some_and(|value| (self.test)(*value, pattern));
             }
-            return writer.write_slice(0, answers);
-        }
-        for (answer, value) in answers.iter_mut().zip(values.iter()) {
-            *answer = value.is_some_and(|value| (self.test)(*value, &pattern));
-        }
+        });
         // Marks the rows valid.
         writer.write_slice(0, answers)?;
-
         // The NULLs. A vector without a validity mask has none.
-        let Some(validity) = values.validity() else {
-            return Ok(());
-        };
-        if matches!(values.selection(), Selection::Identity) {
-            // A flat vector: row `r` is bit `r % 64` of word `r / 64`, set when not NULL. Whole
-            // words without a NULL are skipped.
-            for (index, word) in validity.iter().enumerate() {
-                let mut nulls = !word;
-                while nulls != 0 {
-                    let row = index * 64 + nulls.trailing_zeros() as usize;
-                    if row >= rows {
-                        // Bits after the last row.
-                        break;
-                    }
-                    writer.set_null(row)?;
-                    nulls &= nulls - 1;
-                }
-            }
-        } else {
-            // The mask is of the physical slots a selection maps the rows to.
-            for row in 0..rows {
+        match validity {
+            Some((words, true)) => null_rows(writer, words, answers.len(), false),
+            Some((_, false)) => (0..answers.len()).try_for_each(|row| {
                 if values.is_null(row)? {
                     writer.set_null(row)?;
                 }
+                Ok(())
+            }),
+            None => Ok(()),
+        }
+    }
+
+    /// The answers of a flat chunk, whose `validity` has a word for each of its rows, computed
+    /// in `answers` a span of the mask at a time and stored in the output; then its NULLs.
+    #[inline(never)]
+    fn answer_spans(
+        &self,
+        values: &VectorReader<'_, I>,
+        validity: Option<&[u64]>,
+        answers: &mut [bool],
+        writer: &mut VectorWriter<'_, bool>,
+        pattern: &P,
+    ) -> Result<()> {
+        let rows = answers.len();
+        // The answers of rows `stored..span.start` are computed and not stored yet.
+        let mut stored = 0;
+        for (span, nulls) in Spans::new(validity, rows) {
+            let slice = match nulls {
+                Nulls::None => valid::values(values, span.clone()),
+                Nulls::Some => None,
+                Nulls::All => {
+                    // Nothing to read. The first such span makes every row of the output NULL,
+                    // none of which has an answer stored yet; these rows stay so, and storing
+                    // the answers of the rows before them marks those valid.
+                    if stored == 0 {
+                        writer.fill_null()?;
+                    }
+                    let answers = answers.get(stored..span.start).unwrap_or_default();
+                    writer.write_slice(stored, answers)?;
+                    stored = span.end;
+                    continue;
+                }
+            };
+            let answers = answers.get_mut(span.clone()).unwrap_or_default();
+            if let Some(values) = slice {
+                // Nothing but the test, over two slices: a SIMD compare. No row is NULL.
+                for (answer, value) in answers.iter_mut().zip(values) {
+                    *answer = (self.test)(*value, pattern);
+                }
+            } else {
+                // Rows with NULLs among them, one by one: the reader reads the others.
+                for (answer, row) in answers.iter_mut().zip(span) {
+                    let value = values.get(row)?;
+                    *answer = value.is_some_and(|value| (self.test)(*value, pattern));
+                }
             }
+        }
+        writer.write_slice(stored, answers.get(stored..).unwrap_or_default())?;
+        // The NULLs among the rows that were stored.
+        if let Some(words) = validity {
+            null_rows(writer, words, rows, true)?;
         }
         Ok(())
     }
