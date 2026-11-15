@@ -804,6 +804,13 @@ fn a_scan_reports_its_progress_as_the_share_of_the_file_read() -> Result<()> {
     let capture = golden::legacy(mixed_frames(250_000));
     let path = fixture.write("long.pcap", &capture);
     connection.execute("SET progress_bar_time = 0", Parameters::None)?;
+    // One partition, read by the thread that also updates the progress, between the slices of
+    // its task: the samples then follow the scan. With several partitions (the capture is
+    // large enough) DuckDB updates the progress when that thread has finished a slice of its
+    // own partition, by when the others are nearly through theirs, and a sampler may see
+    // nothing between the first read and the end. `scan_parallel.rs` has the test for that
+    // case, which reads the progress between the chunks of a result.
+    connection.execute("SET pcapsql_parallel_scan = false", Parameters::None)?;
     let tracker = QueryProgressTracker::new(&connection)?;
 
     let done = Arc::new(AtomicBool::new(false));
