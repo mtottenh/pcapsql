@@ -476,6 +476,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Streaming queries could return rows out of capture order.** In the
+  bounded exchange between a parse pass and DataFusion, the consumer read
+  the channel and then the overflow queue without the queue's lock. A
+  producer could put one batch in the channel and queue the next between the
+  two reads, and the queued batch was returned first. An un-`ORDER`ed query
+  over a table larger than the exchange then came out with one batch ahead
+  of an earlier one, about once in thirty runs on a loaded machine. Both
+  reads are now made under the lock the producer holds while sending.
+
 - A value of the wrong length for a fixed-size binary column (a MAC or IPv6
   address column given, say, a 3-byte value by a parser) is now NULL.
   Before, nothing was stored for it, the column came out one row short and

@@ -254,23 +254,24 @@ impl BatchReceiver {
     /// once the producer has finished and both are exhausted.
     pub async fn recv(&mut self) -> Option<Item> {
         loop {
-            match self.rx.try_recv() {
-                Ok(item) => {
+            // The channel and the queue are read under the queue's lock, the
+            // one the producer holds across its `try_send`. Without it the
+            // producer could, between the two reads, put one batch in the
+            // channel and queue the next, and the queued one would be
+            // returned first.
+            let polled = {
+                let mut overflow = self.shared.overflow.lock().expect("overflow lock poisoned");
+                match self.rx.try_recv() {
+                    Ok(item) => Some(Some(item)),
+                    Err(TryRecvError::Empty) => overflow.pop().map(|batch| Some(Ok(batch))),
+                    Err(TryRecvError::Disconnected) => Some(overflow.pop().map(Ok)),
+                }
+            };
+            if let Some(next) = polled {
+                if next.is_some() {
                     self.pacer.bump();
-                    return Some(item);
                 }
-                Err(TryRecvError::Empty) => {}
-                Err(TryRecvError::Disconnected) => {
-                    let next = self.pop_overflow().map(Ok);
-                    if next.is_some() {
-                        self.pacer.bump();
-                    }
-                    return next;
-                }
-            }
-            if let Some(batch) = self.pop_overflow() {
-                self.pacer.bump();
-                return Some(Ok(batch));
+                return next;
             }
             // Nothing pending: park. The flag tells the producer this table
             // is wanted, so a backlogged sibling must not wait on us.
@@ -355,6 +356,30 @@ mod tests {
             "all four queued at once"
         );
         assert!(rx.recv().await.is_none());
+    }
+
+    /// A producer on another thread, racing the consumer: with a channel of
+    /// one, most batches go channel, queue, channel, queue. The consumer must
+    /// never return a queued batch ahead of the channel's.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn order_holds_against_a_concurrent_producer() {
+        const BATCHES: u64 = 2_000;
+        for _ in 0..50 {
+            let (mut tx, mut rx) = channel(1, Pacer::new());
+            let producer = std::thread::spawn(move || {
+                for v in 0..BATCHES {
+                    assert!(!tx.send(batch(v)));
+                }
+                tx.finish();
+            });
+            let mut want = 0;
+            while let Some(item) = rx.recv().await {
+                assert_eq!(value(&item.unwrap()), want);
+                want += 1;
+            }
+            assert_eq!(want, BATCHES);
+            producer.join().unwrap();
+        }
     }
 
     #[tokio::test]
