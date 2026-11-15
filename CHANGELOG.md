@@ -35,6 +35,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tables carry a `timestamp` column marked as opt-in (`ColumnDef::default`
   is `false`) for engines that cannot fuse a join against `frames`. The
   `scan` module is unstable API.
+- **`pcapsql-core`: the scalar function kernels, in `pcapsql_core::format`.**
+  The engine-independent logic of the SQL scalar functions now lives in core,
+  for any engine built on it (the DuckDB extension) to wrap: protocol number
+  names (`names`: IP protocol, EtherType, DSCP, ECN, DNS type/class/rcode,
+  ICMP and ICMPv6 type and code, BGP, GTP, OSPF, NTP, TLS), TCP flags
+  (`write_tcp_flags`, `has_tcp_flag`, `tcp_flag_mask`), IPv4/IPv6 parsing,
+  CIDR membership and address classes (`cidr`), MAC parsing and classes
+  (`mac`), and hex (`write_hex`, `parse_hex`). A kernel takes one value and
+  returns a scalar, a `Cow<'static, str>` that borrows whenever the text is a
+  fixed name, or writes to a `fmt::Write` sink; null handling and
+  registration stay with the engine. Also new: `write_ipv4`, `write_ipv6`
+  and `write_mac` (the `format_*` functions without the `String`), and
+  `dns_opcode_name`, which no SQL function uses yet.
 
 ### Changed
 
@@ -48,6 +61,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SELECT *` are unchanged. The per-table `*_table_schema()` functions,
   `encap_fields`, `frame_number_field` and the `STREAM_TABLES` constant
   (now `stream_table_names()`) are gone from the library.
+- **The scalar SQL functions call the core kernels.** `ip_proto_name()`,
+  `tcp_flags_str()`, `ip_in_cidr()`, `mac()`, `hex()` and the rest of the
+  network, protocol and utility functions are now Arrow wrappers over
+  `pcapsql_core::format`, with the same result for every input. The name
+  functions no longer allocate a `String` per row for a known value, and
+  `tcp_flags_str()` and `hex()` write into the output column directly.
 
 ## [0.4.1] - 2026-10-24
 

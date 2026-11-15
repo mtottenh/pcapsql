@@ -457,6 +457,233 @@ mod tests {
         }
     }
 
+    /// One column of strings from `sql`, NULL as `None`.
+    async fn string_column(ctx: &SessionContext, sql: &str) -> Vec<Option<String>> {
+        let batches = ctx
+            .sql(sql)
+            .await
+            .unwrap_or_else(|e| panic!("{sql}: plan: {e}"))
+            .collect()
+            .await
+            .unwrap_or_else(|e| panic!("{sql}: exec: {e}"));
+        let mut out = Vec::new();
+        for batch in &batches {
+            let column = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap_or_else(|| panic!("{sql}: not Utf8: {}", batch.column(0).data_type()));
+            out.extend(column.iter().map(|v| v.map(str::to_string)));
+        }
+        out
+    }
+
+    /// The scalar UDFs are wrappers over `pcapsql_core::format`. This pins
+    /// what each returns through SQL: the named value, the fallback text for
+    /// an unknown one, NULL for NULL, and NULL for input that does not parse.
+    #[tokio::test]
+    async fn scalar_udfs_known_fallback_null_and_invalid() {
+        let ctx = SessionContext::new();
+        register_all_udfs(&ctx).unwrap();
+        let cases: &[(&str, Option<&str>)] = &[
+            // Names: known, fallback, NULL.
+            ("ip_proto_name(17)", Some("UDP")),
+            ("ip_proto_name(0)", Some("HOPOPT")),
+            ("ip_proto_name(200)", Some("Proto 200")),
+            ("ip_proto_name(NULL)", None),
+            ("ethertype_name(34525)", Some("IPv6")),
+            ("ethertype_name(4660)", Some("0x1234")),
+            ("ethertype_name(NULL)", None),
+            ("dscp_name(0)", Some("CS0/BE")),
+            ("dscp_name(2)", Some("DSCP2")),
+            ("ecn_name(3)", Some("CE")),
+            ("ecn_name(NULL)", None),
+            ("dns_type_name(28)", Some("AAAA")),
+            ("dns_type_name(999)", Some("TYPE999")),
+            ("dns_type_name(NULL)", None),
+            ("dns_rcode_name(3)", Some("NXDOMAIN")),
+            ("dns_rcode_name(16)", Some("BADVERS")),
+            ("dns_rcode_name(99)", Some("RCODE99")),
+            ("dns_rcode_name(NULL)", None),
+            ("dns_class_name(255)", Some("ANY")),
+            ("dns_class_name(99)", Some("CLASS99")),
+            ("icmp_type_name(0)", Some("Echo Reply")),
+            ("icmp_type_name(NULL)", None),
+            ("icmpv6_type_name(135)", Some("Neighbor Solicitation")),
+            ("icmp_code_name(3, 3)", Some("Port Unreachable")),
+            ("icmp_code_name(8, 0)", Some("No Code")),
+            ("icmp_code_name(8, 7)", Some("Code 7")),
+            ("icmp_code_name(3, NULL)", None),
+            ("icmp_code_name(NULL, 3)", None),
+            ("icmpv6_code_name(1, 4)", Some("Port Unreachable")),
+            ("icmpv6_code_name(128, 9)", Some("Code 9")),
+            ("icmpv6_code_name(NULL, 0)", None),
+            ("bgp_message_type_name(4)", Some("KEEPALIVE")),
+            ("bgp_message_type_name(99)", Some("Unknown (99)")),
+            ("bgp_origin_name(2)", Some("INCOMPLETE")),
+            ("gtp_message_type_name(255)", Some("G-PDU")),
+            ("gtp_message_type_name(200)", Some("Unknown (200)")),
+            ("ospf_packet_type_name(4)", Some("Link State Update")),
+            ("ospf_lsa_type_name(1)", Some("Router-LSA")),
+            ("ospf_lsa_type_name(99)", Some("Unknown (99)")),
+            ("ntp_mode_name(4)", Some("Server")),
+            ("ntp_stratum_name(3)", Some("Secondary (stratum 3)")),
+            ("ntp_stratum_name(200)", Some("Reserved (200)")),
+            ("tls_version_name(772)", Some("TLS 1.3")),
+            ("tls_version_name(2570)", Some("GREASE")),
+            ("tls_version_name(1)", Some("Unknown (0x0001)")),
+            ("tls_record_type_name(23)", Some("ApplicationData")),
+            ("tls_record_type_name(99)", Some("Unknown (99)")),
+            ("tls_record_type_name(NULL)", None),
+            // TCP flags: no flag set is the empty string, not NULL.
+            ("tcp_flags_str(18)", Some("SYN,ACK")),
+            (
+                "tcp_flags_str(511)",
+                Some("FIN,SYN,RST,PSH,ACK,URG,ECE,CWR,NS"),
+            ),
+            ("tcp_flags_str(0)", Some("")),
+            ("tcp_flags_str(NULL)", None),
+            ("has_tcp_flag(18, 'ack')", Some("true")),
+            ("has_tcp_flag(18, 'RST')", Some("false")),
+            ("has_tcp_flag(18, 'nonsense')", Some("false")),
+            ("has_tcp_flag(NULL, 'SYN')", None),
+            ("has_tcp_flag(18, NULL)", None),
+            // IPv4.
+            ("ip4('192.168.1.1')", Some("3232235777")),
+            ("ip4('not an ip')", None),
+            ("ip4('192.168.1')", None),
+            ("ip4(NULL)", None),
+            ("ip4_to_string(0)", Some("0.0.0.0")),
+            ("ip4_to_string(NULL)", None),
+            ("ip_in_cidr(ip4('10.1.2.3'), '10.0.0.0/8')", Some("true")),
+            ("ip_in_cidr(ip4('11.1.2.3'), '10.0.0.0/8')", Some("false")),
+            ("ip_in_cidr(ip4('11.1.2.3'), '0.0.0.0/0')", Some("true")),
+            ("ip_in_cidr(ip4('10.0.0.1'), '10.0.0.1/32')", Some("true")),
+            ("ip_in_cidr(ip4('10.0.0.2'), '10.0.0.1/32')", Some("false")),
+            // Host bits in the network are ignored.
+            ("ip_in_cidr(ip4('10.9.9.9'), '10.1.2.3/8')", Some("true")),
+            // Notation that does not parse is NULL, not false.
+            ("ip_in_cidr(ip4('10.1.2.3'), '10.0.0.0/33')", None),
+            ("ip_in_cidr(ip4('10.1.2.3'), '10.0.0.0')", None),
+            ("ip_in_cidr(ip4('10.1.2.3'), 'x/8')", None),
+            ("ip_in_cidr(NULL, '10.0.0.0/8')", None),
+            ("ip_in_cidr(ip4('10.1.2.3'), NULL)", None),
+            ("is_private_ip(ip4('172.16.0.1'))", Some("true")),
+            ("is_private_ip(ip4('8.8.8.8'))", Some("false")),
+            ("is_private_ip(NULL)", None),
+            ("is_multicast_ip(ip4('224.0.0.1'))", Some("true")),
+            ("is_multicast_ip(ip4('8.8.8.8'))", Some("false")),
+            ("is_loopback_ip(ip4('8.8.8.8'))", Some("false")),
+            // IPv6.
+            (
+                "ip6_to_string(ip6('2001:DB8:0:0:0:0:0:1'))",
+                Some("2001:db8::1"),
+            ),
+            ("ip6_to_string(ip6('nope'))", None),
+            ("ip6_to_string(ip6(NULL))", None),
+            (
+                "ip6_in_cidr(ip6('2001:db8::1'), '2001:db8::/32')",
+                Some("true"),
+            ),
+            (
+                "ip6_in_cidr(ip6('fe80::1'), '2001:db8::/32')",
+                Some("false"),
+            ),
+            ("ip6_in_cidr(ip6('fe80::1'), '::/0')", Some("true")),
+            ("ip6_in_cidr(ip6('febf::1'), 'fe80::/10')", Some("true")),
+            ("ip6_in_cidr(ip6('fec0::1'), 'fe80::/10')", Some("false")),
+            ("ip6_in_cidr(ip6('::1'), '::1/128')", Some("true")),
+            ("ip6_in_cidr(ip6('fe80::1'), 'fe80::/129')", None),
+            ("ip6_in_cidr(ip6('fe80::1'), 'fe80::')", None),
+            ("ip6_in_cidr(ip6('fe80::1'), NULL)", None),
+            ("ip6_in_cidr(ip6(NULL), 'fe80::/10')", None),
+            ("is_link_local_ip6(ip6('fe80::1'))", Some("true")),
+            ("is_link_local_ip6(ip6('2001:db8::1'))", Some("false")),
+            ("is_link_local_ip6(ip6(NULL))", None),
+            ("is_multicast_ip6(ip6('ff02::1'))", Some("true")),
+            ("is_multicast_ip6(ip6('fe80::1'))", Some("false")),
+            // MAC.
+            (
+                "mac_to_string(mac('AA-BB-CC-DD-EE-FF'))",
+                Some("aa:bb:cc:dd:ee:ff"),
+            ),
+            (
+                "mac_to_string(mac('aabbccddeeff'))",
+                Some("aa:bb:cc:dd:ee:ff"),
+            ),
+            (
+                "mac_to_string(mac(' a:b:c:d:e:f '))",
+                Some("0a:0b:0c:0d:0e:0f"),
+            ),
+            ("mac_to_string(mac('aa:bb:cc:dd:ee'))", None),
+            ("mac_to_string(mac('aa:bb:cc:dd:ee:gg'))", None),
+            ("mac_to_string(mac(NULL))", None),
+            ("mac_is_broadcast(mac('ff:ff:ff:ff:ff:ff'))", Some("true")),
+            ("mac_is_broadcast(mac('ff:ff:ff:ff:ff:fe'))", Some("false")),
+            ("mac_is_broadcast(mac(NULL))", None),
+            ("mac_is_multicast(mac('01:00:5e:00:00:01'))", Some("true")),
+            ("mac_is_multicast(mac('00:11:22:33:44:55'))", Some("false")),
+            ("mac_is_local(mac('02:00:00:00:00:01'))", Some("true")),
+            ("mac_is_local(mac('00:11:22:33:44:55'))", Some("false")),
+            // Hex.
+            ("hex(unhex('DEADBEEF'))", Some("deadbeef")),
+            ("hex(unhex(' 0xdead '))", Some("dead")),
+            ("hex(unhex(''))", Some("")),
+            ("hex(unhex('abc'))", None),
+            ("hex(unhex('zz'))", None),
+            ("hex(unhex(NULL))", None),
+        ];
+        for (call, want) in cases {
+            let got = string_column(&ctx, &format!("SELECT arrow_cast({call}, 'Utf8') AS v")).await;
+            assert_eq!(got, [want.map(str::to_string)], "{call}");
+        }
+    }
+
+    /// The functions that write into a `StringBuilder` keep rows apart:
+    /// NULLs and empty results between non-empty ones, over a column.
+    #[tokio::test]
+    async fn string_building_udfs_over_a_column() {
+        let ctx = SessionContext::new();
+        register_all_udfs(&ctx).unwrap();
+        let some = |s: &str| Some(s.to_string());
+
+        let flags = string_column(
+            &ctx,
+            "SELECT tcp_flags_str(f) FROM (VALUES (1, 2), (2, NULL), (3, 0), (4, 18), (5, 0), \
+             (6, 511), (7, NULL), (8, 4)) AS t(i, f) ORDER BY i",
+        )
+        .await;
+        assert_eq!(
+            flags,
+            [
+                some("SYN"),
+                None,
+                some(""),
+                some("SYN,ACK"),
+                some(""),
+                some("FIN,SYN,RST,PSH,ACK,URG,ECE,CWR,NS"),
+                None,
+                some("RST"),
+            ]
+        );
+
+        let hex = string_column(
+            &ctx,
+            "SELECT hex(unhex(h)) FROM (VALUES (1, 'de'), (2, NULL), (3, ''), (4, 'ADBEEF'), \
+             (5, 'xyz'), (6, '00')) AS t(i, h) ORDER BY i",
+        )
+        .await;
+        assert_eq!(
+            hex,
+            [some("de"), None, some(""), some("adbeef"), None, some("00")]
+        );
+
+        // A value longer than the kernel's internal block.
+        let long = "0123456789abcdef".repeat(40);
+        let got = string_column(&ctx, &format!("SELECT hex(unhex('{long}'))")).await;
+        assert_eq!(got, [Some(long)]);
+    }
+
     #[test]
     fn test_register_network_udfs() {
         let ctx = SessionContext::new();

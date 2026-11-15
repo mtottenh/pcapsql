@@ -10,7 +10,7 @@ use datafusion::common::Result as DFResult;
 use datafusion::logical_expr::{
     ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
 };
-use pcapsql_core::protocol::{dscp, ecn, ethertype};
+use pcapsql_core::format::{dscp_name, ecn_name, ethertype_name, ip_proto_name};
 
 /// Create the `ip_proto_name()` UDF that converts IP protocol number to name.
 ///
@@ -99,158 +99,10 @@ impl ScalarUDFImpl for IpProtoNameUdf {
 
         let result: StringArray = proto_values
             .iter()
-            .map(|opt| opt.map(ip_proto_to_name))
+            .map(|opt| opt.map(ip_proto_name))
             .collect();
 
         Ok(ColumnarValue::Array(Arc::new(result)))
-    }
-}
-
-/// Convert IP protocol number to name.
-fn ip_proto_to_name(proto: u8) -> String {
-    match proto {
-        0 => "HOPOPT".to_string(),
-        1 => "ICMP".to_string(),
-        2 => "IGMP".to_string(),
-        3 => "GGP".to_string(),
-        4 => "IPv4".to_string(),
-        5 => "ST".to_string(),
-        6 => "TCP".to_string(),
-        7 => "CBT".to_string(),
-        8 => "EGP".to_string(),
-        9 => "IGP".to_string(),
-        10 => "BBN-RCC-MON".to_string(),
-        11 => "NVP-II".to_string(),
-        12 => "PUP".to_string(),
-        13 => "ARGUS".to_string(),
-        14 => "EMCON".to_string(),
-        15 => "XNET".to_string(),
-        16 => "CHAOS".to_string(),
-        17 => "UDP".to_string(),
-        18 => "MUX".to_string(),
-        19 => "DCN-MEAS".to_string(),
-        20 => "HMP".to_string(),
-        21 => "PRM".to_string(),
-        22 => "XNS-IDP".to_string(),
-        23 => "TRUNK-1".to_string(),
-        24 => "TRUNK-2".to_string(),
-        25 => "LEAF-1".to_string(),
-        26 => "LEAF-2".to_string(),
-        27 => "RDP".to_string(),
-        28 => "IRTP".to_string(),
-        29 => "ISO-TP4".to_string(),
-        30 => "NETBLT".to_string(),
-        31 => "MFE-NSP".to_string(),
-        32 => "MERIT-INP".to_string(),
-        33 => "DCCP".to_string(),
-        34 => "3PC".to_string(),
-        35 => "IDPR".to_string(),
-        36 => "XTP".to_string(),
-        37 => "DDP".to_string(),
-        38 => "IDPR-CMTP".to_string(),
-        39 => "TP++".to_string(),
-        40 => "IL".to_string(),
-        41 => "IPv6".to_string(),
-        42 => "SDRP".to_string(),
-        43 => "IPv6-Route".to_string(),
-        44 => "IPv6-Frag".to_string(),
-        45 => "IDRP".to_string(),
-        46 => "RSVP".to_string(),
-        47 => "GRE".to_string(),
-        48 => "DSR".to_string(),
-        49 => "BNA".to_string(),
-        50 => "ESP".to_string(),
-        51 => "AH".to_string(),
-        52 => "I-NLSP".to_string(),
-        53 => "SWIPE".to_string(),
-        54 => "NARP".to_string(),
-        55 => "MOBILE".to_string(),
-        56 => "TLSP".to_string(),
-        57 => "SKIP".to_string(),
-        58 => "ICMPv6".to_string(),
-        59 => "IPv6-NoNxt".to_string(),
-        60 => "IPv6-Opts".to_string(),
-        62 => "CFTP".to_string(),
-        64 => "SAT-EXPAK".to_string(),
-        65 => "KRYPTOLAN".to_string(),
-        66 => "RVD".to_string(),
-        67 => "IPPC".to_string(),
-        69 => "SAT-MON".to_string(),
-        70 => "VISA".to_string(),
-        71 => "IPCV".to_string(),
-        72 => "CPNX".to_string(),
-        73 => "CPHB".to_string(),
-        74 => "WSN".to_string(),
-        75 => "PVP".to_string(),
-        76 => "BR-SAT-MON".to_string(),
-        77 => "SUN-ND".to_string(),
-        78 => "WB-MON".to_string(),
-        79 => "WB-EXPAK".to_string(),
-        80 => "ISO-IP".to_string(),
-        81 => "VMTP".to_string(),
-        82 => "SECURE-VMTP".to_string(),
-        83 => "VINES".to_string(),
-        84 => "TTP/IPTM".to_string(),
-        85 => "NSFNET-IGP".to_string(),
-        86 => "DGP".to_string(),
-        87 => "TCF".to_string(),
-        88 => "EIGRP".to_string(),
-        89 => "OSPF".to_string(),
-        90 => "Sprite-RPC".to_string(),
-        91 => "LARP".to_string(),
-        92 => "MTP".to_string(),
-        93 => "AX.25".to_string(),
-        94 => "IPIP".to_string(),
-        95 => "MICP".to_string(),
-        96 => "SCC-SP".to_string(),
-        97 => "ETHERIP".to_string(),
-        98 => "ENCAP".to_string(),
-        100 => "GMTP".to_string(),
-        101 => "IFMP".to_string(),
-        102 => "PNNI".to_string(),
-        103 => "PIM".to_string(),
-        104 => "ARIS".to_string(),
-        105 => "SCPS".to_string(),
-        106 => "QNX".to_string(),
-        107 => "A/N".to_string(),
-        108 => "IPComp".to_string(),
-        109 => "SNP".to_string(),
-        110 => "Compaq-Peer".to_string(),
-        111 => "IPX-in-IP".to_string(),
-        112 => "VRRP".to_string(),
-        113 => "PGM".to_string(),
-        115 => "L2TP".to_string(),
-        116 => "DDX".to_string(),
-        117 => "IATP".to_string(),
-        118 => "STP".to_string(),
-        119 => "SRP".to_string(),
-        120 => "UTI".to_string(),
-        121 => "SMP".to_string(),
-        122 => "SM".to_string(),
-        123 => "PTP".to_string(),
-        124 => "ISIS".to_string(),
-        125 => "FIRE".to_string(),
-        126 => "CRTP".to_string(),
-        127 => "CRUDP".to_string(),
-        128 => "SSCOPMCE".to_string(),
-        129 => "IPLT".to_string(),
-        130 => "SPS".to_string(),
-        131 => "PIPE".to_string(),
-        132 => "SCTP".to_string(),
-        133 => "FC".to_string(),
-        134 => "RSVP-E2E-IGNORE".to_string(),
-        135 => "Mobility".to_string(),
-        136 => "UDPLite".to_string(),
-        137 => "MPLS-in-IP".to_string(),
-        138 => "manet".to_string(),
-        139 => "HIP".to_string(),
-        140 => "Shim6".to_string(),
-        141 => "WESP".to_string(),
-        142 => "ROHC".to_string(),
-        143 => "Ethernet".to_string(),
-        253 => "Experimentation".to_string(),
-        254 => "Experimentation".to_string(),
-        _ => format!("Proto {proto}"),
     }
 }
 
@@ -297,73 +149,10 @@ impl ScalarUDFImpl for EthertypeNameUdf {
 
         let result: StringArray = ethertype_values
             .iter()
-            .map(|opt| opt.map(ethertype_to_name))
+            .map(|opt| opt.map(ethertype_name))
             .collect();
 
         Ok(ColumnarValue::Array(Arc::new(result)))
-    }
-}
-
-/// Convert EtherType to name.
-fn ethertype_to_name(etype: u16) -> String {
-    match etype {
-        ethertype::IPV4 => "IPv4".to_string(),
-        ethertype::ARP => "ARP".to_string(),
-        ethertype::WAKE_ON_LAN => "Wake-on-LAN".to_string(),
-        ethertype::AVTP => "AVTP".to_string(),
-        ethertype::TRILL => "IETF TRILL".to_string(),
-        ethertype::SRP => "SRP".to_string(),
-        ethertype::DEC_MOP_RC => "DEC MOP RC".to_string(),
-        ethertype::DECNET => "DECnet".to_string(),
-        ethertype::DEC_LAT => "DEC LAT".to_string(),
-        ethertype::RARP => "RARP".to_string(),
-        ethertype::APPLETALK => "AppleTalk".to_string(),
-        ethertype::AARP => "AARP".to_string(),
-        ethertype::VLAN => "VLAN".to_string(),
-        ethertype::SLPP => "SLPP".to_string(),
-        ethertype::VLACP => "VLACP".to_string(),
-        ethertype::IPX => "IPX".to_string(),
-        ethertype::QNX_QNET => "QNX Qnet".to_string(),
-        ethertype::IPV6 => "IPv6".to_string(),
-        ethertype::FLOW_CONTROL => "Flow Control".to_string(),
-        ethertype::LACP => "LACP".to_string(),
-        ethertype::COBRANET => "CobraNet".to_string(),
-        ethertype::MPLS => "MPLS".to_string(),
-        ethertype::MPLS_MULTICAST => "MPLS Multicast".to_string(),
-        ethertype::PPPOE_DISCOVERY => "PPPoE Discovery".to_string(),
-        ethertype::PPPOE_SESSION => "PPPoE Session".to_string(),
-        ethertype::HOMEPLUG_MME => "HomePlug 1.0 MME".to_string(),
-        ethertype::EAP_OVER_LAN => "EAP over LAN".to_string(),
-        ethertype::PROFINET => "PROFINET".to_string(),
-        ethertype::HYPERSCSI => "HyperSCSI".to_string(),
-        ethertype::ATA_OVER_ETHERNET => "ATA over Ethernet".to_string(),
-        ethertype::ETHERCAT => "EtherCAT".to_string(),
-        ethertype::QINQ => "QinQ".to_string(),
-        ethertype::POWERLINK => "Powerlink".to_string(),
-        ethertype::GOOSE => "GOOSE".to_string(),
-        ethertype::GSE => "GSE".to_string(),
-        ethertype::SV => "SV".to_string(),
-        ethertype::MIKROTIK_ROMON => "MikroTik RoMON".to_string(),
-        ethertype::LLDP => "LLDP".to_string(),
-        ethertype::SERCOS_III => "SERCOS III".to_string(),
-        ethertype::WSMP => "WSMP".to_string(),
-        ethertype::HOMEPLUG_AV_MME => "HomePlug AV MME".to_string(),
-        ethertype::MRP => "MRP".to_string(),
-        ethertype::MACSEC => "MACsec".to_string(),
-        ethertype::PBB => "PBB".to_string(),
-        ethertype::PTP => "PTP".to_string(),
-        ethertype::NC_SI => "NC-SI".to_string(),
-        ethertype::PRP => "PRP".to_string(),
-        ethertype::CFM_OAM => "CFM/OAM".to_string(),
-        ethertype::FCOE => "FCoE".to_string(),
-        ethertype::FCOE_INIT => "FCoE Init".to_string(),
-        ethertype::ROCE => "RoCE".to_string(),
-        ethertype::TTE => "TTE".to_string(),
-        ethertype::HSR => "HSR".to_string(),
-        ethertype::ECTP => "ECTP".to_string(),
-        ethertype::QINQ_OLD => "QinQ (old)".to_string(),
-        ethertype::VERITAS_LLT => "Veritas LLT".to_string(),
-        _ => format!("0x{etype:04X}"),
     }
 }
 
@@ -408,24 +197,9 @@ impl ScalarUDFImpl for DscpNameUdf {
             .downcast_ref::<UInt8Array>()
             .expect("dscp_name: expected uint8 array");
 
-        let result: StringArray = dscp_values
-            .iter()
-            .map(|opt| opt.map(dscp_to_name))
-            .collect();
+        let result: StringArray = dscp_values.iter().map(|opt| opt.map(dscp_name)).collect();
 
         Ok(ColumnarValue::Array(Arc::new(result)))
-    }
-}
-
-/// Convert DSCP (Differentiated Services Code Point) value to name per RFC 2474/4594.
-fn dscp_to_name(value: u8) -> String {
-    // Use the to_name function from pcapsql-core, which returns a static str for known values
-    let name = dscp::to_name(value);
-    if name.is_empty() {
-        // Unknown DSCP value - format with numeric value
-        format!("DSCP{}", value & 0x3F)
-    } else {
-        name.to_string()
     }
 }
 
@@ -470,121 +244,8 @@ impl ScalarUDFImpl for EcnNameUdf {
             .downcast_ref::<UInt8Array>()
             .expect("ecn_name: expected uint8 array");
 
-        let result: StringArray = ecn_values.iter().map(|opt| opt.map(ecn_to_name)).collect();
+        let result: StringArray = ecn_values.iter().map(|opt| opt.map(ecn_name)).collect();
 
         Ok(ColumnarValue::Array(Arc::new(result)))
-    }
-}
-
-/// Convert ECN (Explicit Congestion Notification) value to name per RFC 3168.
-fn ecn_to_name(value: u8) -> String {
-    ecn::to_name(value).to_string()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_ip_proto_name() {
-        assert_eq!(ip_proto_to_name(1), "ICMP");
-        assert_eq!(ip_proto_to_name(2), "IGMP");
-        assert_eq!(ip_proto_to_name(6), "TCP");
-        assert_eq!(ip_proto_to_name(17), "UDP");
-        assert_eq!(ip_proto_to_name(41), "IPv6");
-        assert_eq!(ip_proto_to_name(47), "GRE");
-        assert_eq!(ip_proto_to_name(50), "ESP");
-        assert_eq!(ip_proto_to_name(51), "AH");
-        assert_eq!(ip_proto_to_name(58), "ICMPv6");
-        assert_eq!(ip_proto_to_name(89), "OSPF");
-        assert_eq!(ip_proto_to_name(132), "SCTP");
-        // Unknown protocol
-        assert_eq!(ip_proto_to_name(200), "Proto 200");
-    }
-
-    #[test]
-    fn test_ethertype_name() {
-        assert_eq!(ethertype_to_name(0x0800), "IPv4");
-        assert_eq!(ethertype_to_name(0x0806), "ARP");
-        assert_eq!(ethertype_to_name(0x8100), "VLAN");
-        assert_eq!(ethertype_to_name(0x86DD), "IPv6");
-        assert_eq!(ethertype_to_name(0x8847), "MPLS");
-        assert_eq!(ethertype_to_name(0x8848), "MPLS Multicast");
-        assert_eq!(ethertype_to_name(0x88A8), "QinQ");
-        assert_eq!(ethertype_to_name(0x88CC), "LLDP");
-        assert_eq!(ethertype_to_name(0x88E5), "MACsec");
-        // Unknown ethertype
-        assert_eq!(ethertype_to_name(0x1234), "0x1234");
-    }
-
-    #[test]
-    fn test_common_protocols() {
-        // Most commonly seen protocols
-        assert_eq!(ip_proto_to_name(1), "ICMP");
-        assert_eq!(ip_proto_to_name(6), "TCP");
-        assert_eq!(ip_proto_to_name(17), "UDP");
-        assert_eq!(ip_proto_to_name(58), "ICMPv6");
-    }
-
-    #[test]
-    fn test_common_ethertypes() {
-        // Most commonly seen ethertypes
-        assert_eq!(ethertype_to_name(0x0800), "IPv4");
-        assert_eq!(ethertype_to_name(0x86DD), "IPv6");
-        assert_eq!(ethertype_to_name(0x0806), "ARP");
-        assert_eq!(ethertype_to_name(0x8100), "VLAN");
-    }
-
-    #[test]
-    fn test_dscp_class_selector() {
-        // Class Selector values using constants from pcapsql-core
-        assert_eq!(dscp_to_name(dscp::CS0), "CS0/BE");
-        assert_eq!(dscp_to_name(dscp::CS1), "CS1");
-        assert_eq!(dscp_to_name(dscp::CS2), "CS2");
-        assert_eq!(dscp_to_name(dscp::CS3), "CS3");
-        assert_eq!(dscp_to_name(dscp::CS4), "CS4");
-        assert_eq!(dscp_to_name(dscp::CS5), "CS5");
-        assert_eq!(dscp_to_name(dscp::CS6), "CS6");
-        assert_eq!(dscp_to_name(dscp::CS7), "CS7");
-    }
-
-    #[test]
-    fn test_dscp_assured_forwarding() {
-        // Assured Forwarding values using constants from pcapsql-core
-        assert_eq!(dscp_to_name(dscp::AF11), "AF11");
-        assert_eq!(dscp_to_name(dscp::AF12), "AF12");
-        assert_eq!(dscp_to_name(dscp::AF13), "AF13");
-        assert_eq!(dscp_to_name(dscp::AF21), "AF21");
-        assert_eq!(dscp_to_name(dscp::AF22), "AF22");
-        assert_eq!(dscp_to_name(dscp::AF23), "AF23");
-        assert_eq!(dscp_to_name(dscp::AF31), "AF31");
-        assert_eq!(dscp_to_name(dscp::AF32), "AF32");
-        assert_eq!(dscp_to_name(dscp::AF33), "AF33");
-        assert_eq!(dscp_to_name(dscp::AF41), "AF41");
-        assert_eq!(dscp_to_name(dscp::AF42), "AF42");
-        assert_eq!(dscp_to_name(dscp::AF43), "AF43");
-    }
-
-    #[test]
-    fn test_dscp_special_values() {
-        // Special PHBs using constants from pcapsql-core
-        assert_eq!(dscp_to_name(dscp::EF), "EF");
-        assert_eq!(dscp_to_name(dscp::VA), "VA");
-        assert_eq!(dscp_to_name(dscp::LE), "LE");
-        // Unknown value
-        assert_eq!(dscp_to_name(2), "DSCP2");
-        assert_eq!(dscp_to_name(63), "DSCP63");
-    }
-
-    #[test]
-    fn test_ecn_values() {
-        // ECN values using constants from pcapsql-core
-        assert_eq!(ecn_to_name(ecn::NOT_ECT), "Not-ECT");
-        assert_eq!(ecn_to_name(ecn::ECT1), "ECT(1)");
-        assert_eq!(ecn_to_name(ecn::ECT0), "ECT(0)");
-        assert_eq!(ecn_to_name(ecn::CE), "CE");
-        // Values should be masked to 2 bits
-        assert_eq!(ecn_to_name(4), "Not-ECT"); // 100 & 11 = 00
-        assert_eq!(ecn_to_name(7), "CE"); // 111 & 11 = 11
     }
 }

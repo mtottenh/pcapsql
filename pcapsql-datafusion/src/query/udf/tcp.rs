@@ -4,25 +4,13 @@
 
 use std::sync::Arc;
 
-use arrow::array::{Array, BooleanArray, StringArray, UInt16Array};
+use arrow::array::{Array, BooleanArray, StringBuilder, UInt16Array};
 use arrow::datatypes::DataType;
 use datafusion::common::Result as DFResult;
 use datafusion::logical_expr::{
     ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
 };
-
-/// TCP flag bit positions and names.
-const TCP_FLAGS: &[(u16, &str)] = &[
-    (0x001, "FIN"),
-    (0x002, "SYN"),
-    (0x004, "RST"),
-    (0x008, "PSH"),
-    (0x010, "ACK"),
-    (0x020, "URG"),
-    (0x040, "ECE"),
-    (0x080, "CWR"),
-    (0x100, "NS"),
-];
+use pcapsql_core::format::{has_tcp_flag, write_tcp_flags};
 
 /// Create the `tcp_flags_str()` UDF that converts TCP flags bitmap to human-readable string.
 ///
@@ -87,27 +75,23 @@ impl ScalarUDFImpl for TcpFlagsStrUdf {
             .downcast_ref::<UInt16Array>()
             .expect("tcp_flags_str: expected uint16 array");
 
-        let result: StringArray = flags_values
-            .iter()
-            .map(|opt| opt.map(format_tcp_flags))
-            .collect();
-
-        Ok(ColumnarValue::Array(Arc::new(result)))
-    }
-}
-
-/// Convert TCP flags bitmap to comma-separated string.
-fn format_tcp_flags(flags: u16) -> String {
-    let mut names = Vec::new();
-    for &(bit, name) in TCP_FLAGS {
-        if flags & bit != 0 {
-            names.push(name);
+        // "FIN,SYN,RST,PSH,ACK,URG,ECE,CWR,NS" is 34 bytes; most rows are
+        // one or two flags.
+        let mut result = StringBuilder::with_capacity(flags_values.len(), flags_values.len() * 8);
+        for flags in flags_values.iter() {
+            match flags {
+                Some(flags) => {
+                    // The kernel writes straight into the builder's value
+                    // buffer; the empty append closes the row.
+                    write_tcp_flags(flags, &mut result)
+                        .expect("writing to a StringBuilder does not fail");
+                    result.append_value("");
+                }
+                None => result.append_null(),
+            }
         }
-    }
-    if names.is_empty() {
-        String::new()
-    } else {
-        names.join(",")
+
+        Ok(ColumnarValue::Array(Arc::new(result.finish())))
     }
 }
 
@@ -160,81 +144,11 @@ impl ScalarUDFImpl for HasTcpFlagUdf {
             .iter()
             .zip(name_values.iter())
             .map(|(flags_opt, name_opt)| match (flags_opt, name_opt) {
-                (Some(flags), Some(name)) => Some(check_tcp_flag(flags, name)),
+                (Some(flags), Some(name)) => Some(has_tcp_flag(flags, name)),
                 _ => None,
             })
             .collect();
 
         Ok(ColumnarValue::Array(Arc::new(result)))
-    }
-}
-
-/// Check if a specific TCP flag is set (case-insensitive).
-fn check_tcp_flag(flags: u16, name: &str) -> bool {
-    let name_upper = name.to_uppercase();
-    for &(bit, flag_name) in TCP_FLAGS {
-        if flag_name == name_upper && flags & bit != 0 {
-            return true;
-        }
-    }
-    false
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_tcp_flags_str() {
-        // SYN only
-        assert_eq!(format_tcp_flags(0x002), "SYN");
-        // SYN+ACK
-        assert_eq!(format_tcp_flags(0x012), "SYN,ACK");
-        // FIN+ACK
-        assert_eq!(format_tcp_flags(0x011), "FIN,ACK");
-        // RST
-        assert_eq!(format_tcp_flags(0x004), "RST");
-        // All flags
-        assert_eq!(
-            format_tcp_flags(0x1FF),
-            "FIN,SYN,RST,PSH,ACK,URG,ECE,CWR,NS"
-        );
-        // Empty
-        assert_eq!(format_tcp_flags(0x000), "");
-    }
-
-    #[test]
-    fn test_has_tcp_flag() {
-        assert!(check_tcp_flag(0x002, "SYN"));
-        assert!(check_tcp_flag(0x002, "syn")); // Case insensitive
-        assert!(check_tcp_flag(0x002, "Syn")); // Mixed case
-        assert!(!check_tcp_flag(0x002, "ACK"));
-        assert!(check_tcp_flag(0x012, "SYN"));
-        assert!(check_tcp_flag(0x012, "ACK"));
-        assert!(!check_tcp_flag(0x012, "RST"));
-    }
-
-    #[test]
-    fn test_common_flag_combinations() {
-        // SYN (connection initiation)
-        assert_eq!(format_tcp_flags(0x002), "SYN");
-
-        // SYN-ACK (connection response)
-        assert_eq!(format_tcp_flags(0x012), "SYN,ACK");
-
-        // ACK (acknowledgment)
-        assert_eq!(format_tcp_flags(0x010), "ACK");
-
-        // FIN-ACK (graceful close)
-        assert_eq!(format_tcp_flags(0x011), "FIN,ACK");
-
-        // RST (reset)
-        assert_eq!(format_tcp_flags(0x004), "RST");
-
-        // RST-ACK
-        assert_eq!(format_tcp_flags(0x014), "RST,ACK");
-
-        // PSH-ACK (push data)
-        assert_eq!(format_tcp_flags(0x018), "PSH,ACK");
     }
 }
