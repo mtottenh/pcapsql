@@ -17,7 +17,7 @@ pcapsql-duckdb = { path = "..", default-features = false, features = ["static"] 
 duckdb-neo = { version = "=0.20000.2", default-features = false, features = ["build-extension-static"] }
 # The sink trait and its conformance suite, for the test-only `chunk_rows` function; the packet
 # reader; and the kernels, to compare what the SQL functions return with what the kernels return.
-pcapsql-core = { path = "../../pcapsql-core" }
+pcapsql-core = { path = "../../pcapsql-core", features = ["testing"] }
 # The deterministic capture writer and the golden corpus of the DataFusion frontend, its
 # `corpus` module (src/golden.rs), and the temporary directory the captures are written to.
 pcapsql-testgen = { path = "../../pcapsql-testgen" }

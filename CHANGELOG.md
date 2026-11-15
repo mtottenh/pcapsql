@@ -116,7 +116,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `run_conformance` is the suite a `RowSink` implementation runs from its
   own tests (every kind with and without NULL, lists, empty and
   NUL-containing strings, `Full` exactly at capacity, reuse after a drain,
-  outputs without columns).
+  outputs without columns). The module is behind the cargo feature
+  `testing`, which a crate turns on in its dev-dependencies.
 - **`pcapsql-core`: the scan driver.** `scan::PartitionScan` reads one
   partition of a `CompiledScan` (a whole capture, or one range of it) step
   by step: `step(sinks, max_packets)` reads packets, parses them with the
