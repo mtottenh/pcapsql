@@ -392,6 +392,12 @@ impl Catalog {
         &self.tables[usize::from(id.0)]
     }
 
+    /// The table with this id, or `None` when the catalogue has no such
+    /// table.
+    pub fn try_get(&self, id: TableId) -> Option<&TableDef> {
+        self.tables.get(usize::from(id.0))
+    }
+
     /// Every table with its id, in catalogue order.
     pub fn tables(&self) -> impl Iterator<Item = (TableId, &TableDef)> {
         self.tables

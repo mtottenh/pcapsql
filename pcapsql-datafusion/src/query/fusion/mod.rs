@@ -65,15 +65,15 @@ use datafusion::logical_expr::{
 use datafusion::optimizer::{OptimizerConfig, OptimizerRule};
 use datafusion::physical_plan::ExecutionPlan;
 
+use pcapsql_core::scan::{Catalog, FusedMember, FusedScan};
+
+use crate::error::{Error, QueryError};
 use crate::query::providers::ProtocolTableProvider;
 use crate::query::tables;
 
-/// How a member joins into the tree.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum JoinKind {
-    Inner,
-    Left,
-}
+/// How a member joins into the tree, and its join onto an earlier member:
+/// the scan layer's own types.
+pub use pcapsql_core::scan::{JoinKind, MemberJoin};
 
 /// One table of a fused join.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -85,17 +85,6 @@ pub struct Member {
     /// `None` for the first member (the root of the tree); otherwise the
     /// join that brings it in.
     pub join: Option<MemberJoin>,
-}
-
-/// The join of one member onto an earlier one: equal `frame_number` (always,
-/// and trivially true within one frame) and, when `depth` is set, equal
-/// `encap_depth`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct MemberJoin {
-    pub kind: JoinKind,
-    /// Index of the member whose keys this one is compared with.
-    pub with: usize,
-    pub depth: bool,
 }
 
 /// One output column of the fused table.
@@ -134,6 +123,53 @@ impl FrameJoinSpec {
             }
         }
         out
+    }
+
+    /// The join as the scan layer describes it: the members' tables and the
+    /// output columns resolved against the table catalogue, with `fetch` as
+    /// the per-partition row cap. The Arrow `schema` and the aliases stay
+    /// here.
+    pub fn to_fused_scan(&self, fetch: Option<usize>) -> Result<FusedScan, Error> {
+        let catalog = Catalog::builtin();
+        let mut tables = Vec::with_capacity(self.members.len());
+        let mut members = Vec::with_capacity(self.members.len());
+        for member in &self.members {
+            let (id, table) = catalog.table(&member.table).ok_or_else(|| {
+                Error::Query(QueryError::UnknownTable {
+                    table: member.table.clone(),
+                })
+            })?;
+            tables.push(table);
+            members.push(FusedMember {
+                table: id,
+                join: member.join,
+            });
+        }
+        let invalid = || {
+            Error::Query(QueryError::Execution(format!(
+                "fused join {} names a member it does not have",
+                self.name
+            )))
+        };
+        let mut columns = Vec::with_capacity(self.columns.len());
+        for column in &self.columns {
+            let table = tables.get(column.member).ok_or_else(invalid)?;
+            let (id, _) = table
+                .default_columns()
+                .find(|(_, c)| c.name == column.column)
+                .ok_or_else(|| {
+                    Error::Query(QueryError::UnknownColumn {
+                        table: table.name.to_string(),
+                        column: column.column.clone(),
+                    })
+                })?;
+            columns.push((u16::try_from(column.member).map_err(|_| invalid())?, id));
+        }
+        Ok(FusedScan {
+            members,
+            columns,
+            fetch: fetch.map(|rows| rows as u64),
+        })
     }
 
     /// `table (alias) kind table (alias) …` for plan display and errors.

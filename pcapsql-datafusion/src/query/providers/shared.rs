@@ -30,10 +30,10 @@ use super::exchange::{
 };
 use crate::error::Error;
 use crate::query::builders::NormalizedBatchSet;
-use crate::query::filter::FilterEvaluator;
 use crate::query::fusion::FrameJoinSpec;
 use crate::query::stream_tables::StreamSubscriber;
 use crate::query::tables;
+use pcapsql_core::scan::{Catalog, RowPredicate, ScanPlan, TableDef, TableScan};
 use pcapsql_core::KeyLog;
 
 /// Minimum object size before a `Cheap`-seek source is partitioned.
@@ -71,7 +71,7 @@ pub struct TableSubscription {
     /// Columns to materialize (schema order is preserved); `None` = all.
     pub columns: Option<HashSet<String>>,
     /// Parse-time predicate (conservative; DataFusion re-checks).
-    pub predicate: Option<FilterEvaluator>,
+    pub predicate: Option<RowPredicate>,
     /// Per-partition row cap from a pushed-down `LIMIT`.
     pub fetch: Option<usize>,
 }
@@ -199,6 +199,79 @@ impl ParseSubscription {
         scope
     }
 
+    /// The subscription as the scan layer's plan: tables and columns
+    /// resolved against the table catalogue, each table's columns in schema
+    /// order, fused joins in name order.
+    pub(crate) fn scan_plan(&self) -> Result<ScanPlan, Error> {
+        let catalog = Catalog::builtin();
+        let mut plan = ScanPlan::default();
+        for (name, sub) in &self.tables {
+            plan.tables.push(table_scan(catalog, name, sub)?);
+        }
+        let mut fused: Vec<&String> = self.fused.keys().collect();
+        fused.sort();
+        for name in fused {
+            let sub = &self.fused[name];
+            plan.fused.push(sub.spec.to_fused_scan(sub.fetch)?);
+        }
+        let mut streams: Vec<&String> = self.stream_tables.iter().collect();
+        streams.sort();
+        for name in streams {
+            plan.streams
+                .push(table_scan(catalog, name, &TableSubscription::default())?);
+        }
+        Ok(plan)
+    }
+
+    /// The scope of the pass, compiled from [`Self::scan_plan`] and checked
+    /// against the one [`Self::parse_scope`] builds.
+    fn checked_parse_scope(&self, registry: &ProtocolRegistry) -> Result<ParseScope, Error> {
+        let execution = |e: String| Error::Query(crate::error::QueryError::Execution(e));
+        let compiled = self
+            .scan_plan()?
+            .compile(Catalog::builtin(), registry)
+            .map_err(|e| execution(e.to_string()))?;
+        let legacy = self.parse_scope(registry);
+        scope_equivalence(&legacy, compiled.scope())
+            .map_err(|e| execution(format!("scan plan scope differs for {self:?}: {e}")))?;
+        if let Some(path) = std::env::var_os("PCAPSQL_SCOPE_EQUIVALENCE_LOG") {
+            use std::io::Write;
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+            {
+                let mut tables: Vec<String> = self
+                    .tables
+                    .iter()
+                    .map(|(name, sub)| {
+                        let mut columns: Option<Vec<&String>> =
+                            sub.columns.as_ref().map(|c| c.iter().collect());
+                        if let Some(columns) = columns.as_mut() {
+                            columns.sort();
+                        }
+                        format!(
+                            "{name}{columns:?} predicate={} fetch={:?}",
+                            sub.predicate.is_some(),
+                            sub.fetch
+                        )
+                    })
+                    .collect();
+                tables.sort();
+                let mut fused: Vec<String> =
+                    self.fused.values().map(|f| f.spec.describe()).collect();
+                fused.sort();
+                let mut streams: Vec<&String> = self.stream_tables.iter().collect();
+                streams.sort();
+                let _ = writeln!(
+                    file,
+                    "tables={tables:?} fused={fused:?} streams={streams:?}"
+                );
+            }
+        }
+        Ok(compiled.scope().clone())
+    }
+
     /// The Arrow schema a subscribed table (or fused join) materializes: the
     /// column subset for a protocol table, the spec's schema for a fused
     /// join.
@@ -221,6 +294,71 @@ impl ParseSubscription {
             }
         }
     }
+}
+
+/// The scan of `name` for a subscription: the table's columns DataFusion
+/// sees (the default ones) in schema order, restricted to the subscribed
+/// set.
+fn table_scan(catalog: &Catalog, name: &str, sub: &TableSubscription) -> Result<TableScan, Error> {
+    let (id, table) = catalog.table(name).ok_or_else(|| {
+        Error::Query(crate::error::QueryError::Execution(format!(
+            "Unknown table: {name}"
+        )))
+    })?;
+    let columns = table
+        .default_columns()
+        .filter(|(_, c)| sub.columns.as_ref().is_none_or(|set| set.contains(c.name)))
+        .map(|(id, _)| id)
+        .collect();
+    Ok(TableScan {
+        table: id,
+        columns,
+        predicate: sub.predicate.clone(),
+        fetch: sub.fetch.map(|rows| rows as u64),
+    })
+}
+
+/// Whether the scope compiled from a scan plan (`compiled`) parses what the
+/// scope built from the subscription's names (`legacy`) parses: the same
+/// protocols, and per protocol the same field projection. The one
+/// sanctioned difference: a subscription that names every field column of a
+/// table projects them all in `legacy`, while the plan, which has no "all
+/// columns" marker, leaves such a table unprojected.
+fn scope_equivalence(legacy: &ParseScope, compiled: &ParseScope) -> Result<(), String> {
+    if legacy.required() != compiled.required() {
+        return Err(format!(
+            "required protocols {:?} != {:?}",
+            legacy.required(),
+            compiled.required()
+        ));
+    }
+    let every_field = |table: &TableDef| -> HashSet<String> {
+        table
+            .columns
+            .iter()
+            .filter_map(|c| match c.source {
+                pcapsql_core::scan::ColumnSource::Field(name) => Some(name.to_string()),
+                _ => None,
+            })
+            .collect()
+    };
+    let protocols: HashSet<&String> = legacy
+        .projections()
+        .keys()
+        .chain(compiled.projections().keys())
+        .collect();
+    for protocol in protocols {
+        let old = legacy.projections().get(protocol);
+        let new = compiled.projections().get(protocol);
+        let all = Catalog::builtin()
+            .table(protocol)
+            .map(|(_, table)| every_field(table));
+        let same = old == new || (new.is_none() && old.is_some() && old == all.as_ref());
+        if !same {
+            return Err(format!("projection of {protocol}: {old:?} != {new:?}"));
+        }
+    }
+    Ok(())
 }
 
 /// One table's materialized data: its (possibly column-subset) schema and
@@ -550,7 +688,7 @@ pub fn run_shared_parse<S: SeekablePacketSource>(
         );
     }
 
-    let scope = subscription.parse_scope(registry);
+    let scope = subscription.checked_parse_scope(registry)?;
     let progress_count = AtomicU64::new(0);
     let results: Vec<Result<PartitionOutput, Error>> = std::thread::scope(|thread_scope| {
         let handles: Vec<_> = ranges
@@ -604,7 +742,7 @@ pub fn run_shared_parse_sequential<S: PacketSource>(
     subscription: &ParseSubscription,
     keylog: Option<Arc<KeyLog>>,
 ) -> Result<SharedParseState, Error> {
-    let scope = subscription.parse_scope(registry);
+    let scope = subscription.checked_parse_scope(registry)?;
     let subscriber = (!subscription.stream_tables.is_empty())
         .then(|| StreamSubscriber::new(subscription.stream_tables.clone(), keylog));
     let progress_count = AtomicU64::new(0);
@@ -807,7 +945,7 @@ fn start_streaming_parse<O: OpenReader>(
             "stream tables cannot be streamed; use run_shared_parse".into(),
         )));
     }
-    let scope = Arc::new(subscription.parse_scope(registry));
+    let scope = Arc::new(subscription.checked_parse_scope(registry)?);
     let num_partitions = openers.len();
     let progress_count = Arc::new(AtomicU64::new(0));
 
@@ -943,4 +1081,244 @@ pub fn run_streaming_parse_sequential<S: PacketSource>(
         subscription,
         flush_interval,
     )
+}
+
+#[cfg(test)]
+mod scope_equivalence_tests {
+    use super::*;
+    use crate::query::fusion::{FusedColumn, JoinKind, Member, MemberJoin};
+    use arrow::datatypes::Schema;
+    use pcapsql_core::scan::{CmpOp, ColumnSource};
+
+    /// The subscription shapes of one table: all columns, none, all of them
+    /// named one by one, the pseudo-columns only, every single column,
+    /// every column but one, and each half.
+    fn column_sets(table: &TableDef) -> Vec<Option<HashSet<String>>> {
+        let names: Vec<&str> = table.default_columns().map(|(_, c)| c.name).collect();
+        let set = |names: &[&str]| Some(names.iter().map(|n| n.to_string()).collect());
+        let mut sets = vec![None, set(&[]), set(&names)];
+        sets.push(Some(
+            table
+                .default_columns()
+                .filter(|(_, c)| !matches!(c.source, ColumnSource::Field(_)))
+                .map(|(_, c)| c.name.to_string())
+                .collect(),
+        ));
+        for (i, name) in names.iter().enumerate() {
+            sets.push(set(&[name]));
+            let mut rest = names.clone();
+            rest.remove(i);
+            sets.push(set(&rest));
+        }
+        sets.push(set(&names[..names.len() / 2]));
+        sets.push(set(&names[names.len() / 2..]));
+        sets
+    }
+
+    /// Compile `sub`'s plan and check its scope against the legacy one.
+    fn check(sub: &ParseSubscription, registry: &ProtocolRegistry) -> ParseScope {
+        let compiled = sub
+            .scan_plan()
+            .expect("plan")
+            .compile(Catalog::builtin(), registry)
+            .expect("compile");
+        let legacy = sub.parse_scope(registry);
+        if let Err(e) = scope_equivalence(&legacy, compiled.scope()) {
+            panic!("{sub:?}: {e}");
+        }
+        assert_eq!(
+            compiled.requires_single_partition(),
+            !sub.stream_tables.is_empty()
+        );
+        compiled.scope().clone()
+    }
+
+    fn fused_spec(
+        members: &[(&str, Option<MemberJoin>)],
+        columns: &[(usize, &str)],
+    ) -> FusedSubscription {
+        FusedSubscription {
+            spec: Arc::new(FrameJoinSpec {
+                name: format!("fused_{}", members.len()),
+                members: members
+                    .iter()
+                    .map(|(table, join)| Member {
+                        table: table.to_string(),
+                        alias: table.to_string(),
+                        join: *join,
+                    })
+                    .collect(),
+                // The scope does not depend on the Arrow schema.
+                schema: Arc::new(Schema::empty()),
+                columns: columns
+                    .iter()
+                    .map(|(member, column)| FusedColumn {
+                        member: *member,
+                        column: column.to_string(),
+                    })
+                    .collect(),
+            }),
+            fetch: Some(10),
+        }
+    }
+
+    /// For every packet table and every column-set shape, alone and next to
+    /// other tables, with and without predicates, row caps, stream tables
+    /// and fused joins, the scope compiled from the scan plan is the scope
+    /// the subscription's own `parse_scope` builds.
+    #[test]
+    fn compiled_scope_equals_legacy_scope() {
+        let registry = pcapsql_core::default_registry();
+        let catalog = Catalog::builtin();
+        let join = |kind, with| {
+            Some(MemberJoin {
+                kind,
+                with,
+                depth: true,
+            })
+        };
+        let fused = [
+            fused_spec(
+                &[("frames", None), ("tcp", join(JoinKind::Inner, 0))],
+                &[
+                    (0, "timestamp"),
+                    (0, "frame_number"),
+                    (1, "dst_port"),
+                    (1, "encap_depth"),
+                ],
+            ),
+            fused_spec(
+                &[
+                    ("udp", None),
+                    ("ipv4", join(JoinKind::Left, 0)),
+                    ("dns", join(JoinKind::Inner, 0)),
+                ],
+                &[(0, "src_port"), (1, "ttl"), (1, "tunnel_id")],
+            ),
+        ];
+        let beside: [(&str, Option<&[&str]>); 3] = [
+            ("tcp", None),
+            ("frames", Some(&["length"])),
+            ("ipv6", Some(&["hop_limit", "encap_depth"])),
+        ];
+        let stream_sets: [&[&str]; 3] = [
+            &[],
+            &["tcp_connections"],
+            &["http_messages", "tls_sessions"],
+        ];
+        let mut checked = 0usize;
+        let mut identical = 0usize;
+        for (_, table) in catalog.tables().filter(|(_, t)| !t.is_stream()) {
+            let first_field = table
+                .default_columns()
+                .find(|(_, c)| matches!(c.source, ColumnSource::Field(_)));
+            for columns in column_sets(table) {
+                for with_predicate in [false, true] {
+                    let predicate = first_field
+                        .filter(|_| with_predicate)
+                        .map(|(id, _)| RowPredicate::cmp(id, CmpOp::Eq, 1));
+                    // As in a query: a filtered column is one the scan
+                    // materializes.
+                    let mut columns = columns.clone();
+                    if let (Some((_, filtered)), Some(set), true) =
+                        (first_field, columns.as_mut(), with_predicate)
+                    {
+                        set.insert(filtered.name.to_string());
+                    }
+                    for streams in stream_sets {
+                        for others in 0..4usize {
+                            let mut sub = ParseSubscription::default();
+                            sub.tables.insert(
+                                table.name.to_string(),
+                                TableSubscription {
+                                    columns: columns.clone(),
+                                    predicate: predicate.clone(),
+                                    fetch: with_predicate.then_some(5),
+                                },
+                            );
+                            if others & 1 != 0 {
+                                // Other tables beside it (the table's own
+                                // subscription wins when it is one of them).
+                                for (name, columns) in beside {
+                                    sub.tables.entry(name.to_string()).or_insert_with(|| {
+                                        TableSubscription {
+                                            columns: columns
+                                                .map(|c| c.iter().map(|s| s.to_string()).collect()),
+                                            ..Default::default()
+                                        }
+                                    });
+                                }
+                            }
+                            if others & 2 != 0 {
+                                for f in &fused {
+                                    sub.fused.insert(f.spec.name.clone(), f.clone());
+                                }
+                            }
+                            sub.stream_tables = streams.iter().map(|s| s.to_string()).collect();
+                            let compiled = check(&sub, &registry);
+                            let legacy = sub.parse_scope(&registry);
+                            checked += 1;
+                            if legacy.projections() == compiled.projections() {
+                                identical += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Fused joins and stream tables on their own.
+        for streams in stream_sets {
+            for with_fused in [false, true] {
+                let mut sub = ParseSubscription::default();
+                if with_fused {
+                    for f in &fused {
+                        sub.fused.insert(f.spec.name.clone(), f.clone());
+                    }
+                }
+                sub.stream_tables = streams.iter().map(|s| s.to_string()).collect();
+                let compiled = check(&sub, &registry);
+                assert_eq!(
+                    sub.parse_scope(&registry).projections(),
+                    compiled.projections()
+                );
+                checked += 1;
+                identical += 1;
+            }
+        }
+        println!("{checked} subscriptions checked, {identical} with identical projections");
+        // The others name every field column of a table one by one (the
+        // sanctioned difference `scope_equivalence` describes).
+        assert!(checked > 10_000, "{checked}");
+        assert!(
+            identical > checked / 2 && identical < checked,
+            "{identical} of {checked}"
+        );
+    }
+
+    /// A predicate's column the subscription does not materialize is the one
+    /// case where the plan extracts a field the legacy scope leaves out; the
+    /// engine never builds such a subscription (an `Inexact` filter's
+    /// columns are in the scan's projection), so the check reports it.
+    #[test]
+    fn predicate_on_an_unprojected_column_is_reported() {
+        let registry = pcapsql_core::default_registry();
+        let (_, tcp) = Catalog::builtin().table("tcp").unwrap();
+        let (dst_port, _) = tcp.column("dst_port").unwrap();
+        let mut sub = ParseSubscription::default();
+        sub.tables.insert(
+            "tcp".to_string(),
+            TableSubscription {
+                columns: Some(HashSet::from(["src_port".to_string()])),
+                predicate: Some(RowPredicate::cmp(dst_port, CmpOp::Eq, 443)),
+                fetch: None,
+            },
+        );
+        let compiled = sub
+            .scan_plan()
+            .unwrap()
+            .compile(Catalog::builtin(), &registry)
+            .unwrap();
+        let error = scope_equivalence(&sub.parse_scope(&registry), compiled.scope()).unwrap_err();
+        assert!(error.starts_with("projection of tcp"), "{error}");
+    }
 }

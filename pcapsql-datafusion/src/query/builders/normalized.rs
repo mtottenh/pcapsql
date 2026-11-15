@@ -9,12 +9,12 @@ use std::collections::HashMap;
 use super::fused::FusedBatchBuilder;
 use super::protocol::ProtocolBatchBuilder;
 use crate::error::{Error, QueryError};
-use crate::query::filter::FilterEvaluator;
 use arrow::record_batch::RecordBatch;
 use std::sync::Arc;
 
 use crate::query::providers::{BatchSender, OverflowStats, Pacer, ParseSubscription};
 use pcapsql_core::io::PacketRef;
+use pcapsql_core::scan::{Catalog, CompiledPredicate};
 use pcapsql_core::ParseResult;
 
 /// Where a table's completed batches go.
@@ -67,7 +67,7 @@ struct TableSlot {
     name: String,
     builder: RowBuilder,
     sink: BatchSink,
-    predicate: Option<FilterEvaluator>,
+    predicate: Option<CompiledPredicate>,
     fetch: Option<usize>,
     rows_added: usize,
     /// The streaming consumer dropped its receiver; nothing more is wanted.
@@ -166,7 +166,10 @@ impl NormalizedBatchSet {
                     batch_size,
                 )),
                 sink: sink_for(name),
-                predicate: sub.predicate.clone(),
+                predicate: sub.predicate.as_ref().and_then(|predicate| {
+                    let (_, table) = Catalog::builtin().table(name)?;
+                    predicate.compile(table)
+                }),
                 fetch: sub.fetch,
                 rows_added: 0,
                 consumer_gone: false,
@@ -301,10 +304,10 @@ impl NormalizedBatchSet {
                 if slot.done() {
                     continue;
                 }
-                if let Some(predicate) = &slot.predicate {
+                if let Some(predicate) = &mut slot.predicate {
                     // Conservative: only a positively-false comparison drops
                     // the row; DataFusion re-checks everything kept.
-                    if !predicate.matches_result(result) {
+                    if !predicate.keeps(result) {
                         continue;
                     }
                 }
@@ -567,8 +570,10 @@ mod tests {
     #[test]
     fn predicate_drops_only_positively_false_rows() {
         let mut sub = sub_full(&["tcp"]);
+        let (_, tcp) = Catalog::builtin().table("tcp").unwrap();
         sub.tables.get_mut("tcp").unwrap().predicate =
-            FilterEvaluator::try_from_exprs(&[col("dst_port").eq(lit(443i32))]);
+            crate::query::filter::row_predicate(&[col("dst_port").eq(lit(443i32))], tcp);
+        assert!(sub.tables["tcp"].predicate.is_some());
 
         let mut bs = NormalizedBatchSet::new(1000, &sub).unwrap();
         bs.add_packet_from_ref(create_test_packet(1), &[("tcp", create_tcp_result(80))])
