@@ -141,18 +141,26 @@ impl BatchDelivery {
     /// `sinks` (the ones this delivery was made with), deliver it, and
     /// close every exchange (buffered batches become the receivers' tails).
     /// The result is indexed by [`OutputId`].
-    pub fn finish(self, mut sinks: Vec<ArrowSink>) -> Result<Vec<Delivered>, Error> {
-        let mut delivered = Vec::with_capacity(self.slots.len());
-        for (mut slot, sink) in self.slots.into_iter().zip(&mut sinks) {
+    ///
+    /// A final batch waits for its consumer like any other: every exchange
+    /// is still open while the batches are delivered, so the wait rule of
+    /// [`deliver`](Self::deliver) holds, and a consumer that keeps pace sees
+    /// no overflow at the end of the pass either.
+    pub fn finish(mut self, mut sinks: Vec<ArrowSink>) -> Result<Vec<Delivered>, Error> {
+        for (index, sink) in sinks.iter_mut().enumerate() {
             if let Some(batch) = sink.take_batch()? {
-                slot.emit(batch);
+                let output = OutputId(u16::try_from(index).expect("outputs fit an OutputId"));
+                self.deliver(output, batch);
             }
-            delivered.push(match slot {
+        }
+        Ok(self
+            .slots
+            .into_iter()
+            .map(|slot| match slot {
                 Slot::Accumulate(batches) => Delivered::Batches(batches),
                 Slot::Stream(sender) => Delivered::Streamed(sender.finish()),
-            });
-        }
-        Ok(delivered)
+            })
+            .collect())
     }
 }
 
