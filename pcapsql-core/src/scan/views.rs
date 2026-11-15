@@ -65,7 +65,7 @@ impl ViewColumn {
     }
 }
 
-/// A `*_packets` view. See the [module](self) documentation.
+/// A `*_packets` view: a fixed fused join with named columns.
 #[derive(Clone, Debug)]
 pub struct PacketsView {
     /// The view's name (`tcp_packets`).

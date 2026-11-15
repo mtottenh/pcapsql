@@ -13,7 +13,7 @@
 //! [`FusedState::join`] finds the frame's joined rows (not generic: it only
 //! compares layer names and depths) and [`FusedState::write_row`] writes one
 //! of them to a sink (generic over the sink and inlined into the router,
-//! like the writers of [`row`](super::row), whose cells it uses).
+//! like the writers of `row.rs`, whose cells it uses).
 
 use std::ops::ControlFlow;
 use std::sync::Arc;

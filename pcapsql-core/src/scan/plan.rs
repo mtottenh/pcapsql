@@ -371,7 +371,7 @@ impl CompiledScan {
 
     /// Which frames the pass covers ([`ScanPlan::frames`]). The scan
     /// driver enforces it; a frontend also plans its partitions with it
-    /// ([`plan_ranges`](super::partition::plan_ranges)).
+    /// ([`plan_ranges`](super::plan_ranges)).
     pub fn frames(&self) -> &FramePredicate {
         &self.frames
     }
