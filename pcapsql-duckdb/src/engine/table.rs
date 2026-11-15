@@ -21,8 +21,8 @@
 //!
 //! | Callback | Work | State |
 //! |---|---|---|
-//! | `bind` | Resolve the table or view, declare its columns, expand the files argument through DuckDB's file system, open and probe every file, estimate the row count | [`Bound`]: the files, table, `strict`, `filename`, and the predicate `pushdown_filter` fills in |
-//! | `pushdown_filter` | Accept the filters on `frame_number` and `timestamp` that are exactly a `FramePredicate` (`engine::pushdown`) | The predicate, in [`Bound`] |
+//! | `bind` | Resolve the table or view, declare its columns, expand the files argument through DuckDB's file system, open and probe every file, estimate the row count | [`BindData`]: the files, table, `strict`, `filename`, and the predicate `pushdown_filter` fills in |
+//! | `pushdown_filter` | Accept the filters on `frame_number` and `timestamp` that are exactly a `FramePredicate` (`engine::pushdown`) | The predicate, in [`BindData`] |
 //! | `init_global_state` | Map the projected columns and the predicate to a `ScanPlan` (a table scan, or a view's fused scan) and compile it; decide the partitions of every file, which for a capture worth splitting takes one pass over it, and leave out those the predicate rules out | [`Shared`]: the compiled plan, the partition queue over all files and the indexes it was cut from, the progress counter |
 //! | `max_threads` | The number of partitions | |
 //! | `init_local_state` | Number the worker; no file yet | [`Worker`] |
@@ -422,7 +422,7 @@ impl PcapScan {
 
 /// What `bind` learned.
 #[derive(Debug)]
-struct Bound {
+struct BindData {
     /// The paths of the files, as the file system's `glob` returned them, in the order they
     /// are read. Never empty.
     files: Box<[String]>,
@@ -488,10 +488,10 @@ struct Shared {
     /// The partitions of all files: those of the first file, then those of the second, each
     /// file's in capture order. Each is claimed by one worker.
     queue: PartitionQueue,
-    /// The file of every partition of `queue`, as an index into `files` and `Bound::files`.
+    /// The file of every partition of `queue`, as an index into `files` and `BindData::files`.
     /// It never decreases.
     owners: Box<[usize]>,
-    /// What the scan keeps per file, in the order of `Bound::files`.
+    /// What the scan keeps per file, in the order of `BindData::files`.
     files: Box<[ScannedFile]>,
     /// Bytes read from the files so far by all workers, for `progress`.
     file_bytes: Arc<AtomicU64>,
@@ -524,7 +524,7 @@ struct Scanning {
     scan: PartitionScan<ReadPacketReader<Tracked>>,
     /// The first read error of the reader stack under `scan`.
     fault: Fault,
-    /// The file the partition is of: an index into `Bound::files`.
+    /// The file the partition is of: an index into `BindData::files`.
     file: usize,
     /// The number of the partition's first frame.
     first_frame: u64,
@@ -543,7 +543,7 @@ struct Worker {
 }
 
 impl TableFunctionCallbacks for PcapScan {
-    type BindData = Bound;
+    type BindData = BindData;
     type GlobalState = Shared;
     type LocalState = Worker;
 
@@ -552,7 +552,7 @@ impl TableFunctionCallbacks for PcapScan {
         context: &Context,
         arguments: Vec<BindArgument>,
         bind_handle: BindFunctionHandle<'_>,
-    ) -> Result<Bound> {
+    ) -> Result<BindData> {
         let entries = self.file_argument(&arguments)?;
         let relation = self.relation(&arguments)?;
         let positions = self.positions();
@@ -600,7 +600,7 @@ impl TableFunctionCallbacks for PcapScan {
         // An estimate: the frames are only counted when the scan starts, and then only for a
         // capture that is split (see `layout`).
         bind_handle.set_cardinality(rows, false)?;
-        Ok(Bound {
+        Ok(BindData {
             files: files.into(),
             total_size,
             relation,
@@ -614,7 +614,7 @@ impl TableFunctionCallbacks for PcapScan {
     fn init_global_state(
         &self,
         context: &Context,
-        bound: &Bound,
+        bound: &BindData,
         column_data: InitColumnData<'_>,
     ) -> Result<Option<Shared>> {
         let projected = (0..column_data.count()?)
@@ -672,7 +672,7 @@ impl TableFunctionCallbacks for PcapScan {
     fn max_threads(
         &self,
         _context: &Context,
-        _bound: &Bound,
+        _bound: &BindData,
         shared: Option<&Shared>,
         _column_data: InitColumnData<'_>,
     ) -> Result<Option<NonZeroUsize>> {
@@ -684,7 +684,7 @@ impl TableFunctionCallbacks for PcapScan {
     fn init_local_state(
         &self,
         _context: &Context,
-        _bound: &Bound,
+        _bound: &BindData,
         shared: Option<&Shared>,
         _column_data: InitColumnData<'_>,
     ) -> Result<Option<Worker>> {
@@ -699,7 +699,7 @@ impl TableFunctionCallbacks for PcapScan {
     fn exec(
         &self,
         context: &Context,
-        bound: &Bound,
+        bound: &BindData,
         worker: Option<&mut Worker>,
         shared: Option<&Shared>,
         output: DataChunkRef<'_>,
@@ -764,7 +764,7 @@ impl TableFunctionCallbacks for PcapScan {
     fn progress(
         &self,
         _context: &Context,
-        bound: &Bound,
+        bound: &BindData,
         shared: Option<&Shared>,
     ) -> Result<Option<f64>> {
         let Some(shared) = shared else {
@@ -785,7 +785,7 @@ impl TableClaimBatchCallbacks for PcapScan {
     fn claim_batch(
         &self,
         context: &Context,
-        bound: &Bound,
+        bound: &BindData,
         worker: Option<&mut Worker>,
         shared: Option<&Shared>,
     ) -> Result<bool> {
@@ -816,7 +816,7 @@ impl TableFilterPushdownCallbacks for PcapScan {
     fn pushdown_filter(
         &self,
         context: &Context,
-        bound: &Bound,
+        bound: &BindData,
         offered: PushdownData<'_>,
     ) -> Result<()> {
         if !settings::filter_pushdown(context)? {
@@ -832,7 +832,7 @@ impl TablePartitioningCallbacks for PcapScan {
     fn partition_data(
         &self,
         _context: &Context,
-        _bound: &Bound,
+        _bound: &BindData,
         worker: Option<&mut Worker>,
         _shared: Option<&Shared>,
         _partition_data: PartitionData<'_>,
@@ -861,7 +861,7 @@ impl PcapScan {
     /// any other, or DuckDB's row identifier, which is not a declared column: the plan then has
     /// no columns, and the scan layer only counts the rows. The same goes for a query that
     /// uses no column but `filename`.
-    fn projection(&self, bound: &Bound, projected: &[usize]) -> Result<Projection> {
+    fn projection(&self, bound: &BindData, projected: &[usize]) -> Result<Projection> {
         let filename = bound
             .filename
             .and_then(|declared| projected.iter().position(|&index| index == declared));
@@ -1031,7 +1031,7 @@ impl PcapScan {
     fn open(
         &self,
         context: &Context,
-        bound: &Bound,
+        bound: &BindData,
         shared: &Shared,
         number: usize,
         range: &PacketRange,
@@ -1151,7 +1151,7 @@ impl PcapScan {
     fn end_of_partition(
         &self,
         context: &Context,
-        bound: &Bound,
+        bound: &BindData,
         shared: &Shared,
         worker: &Worker,
         finished: &Scanning,
@@ -1346,9 +1346,9 @@ impl Read for Tracked {
 mod tests {
     use super::*;
 
-    fn bound(relation: &str) -> Bound {
+    fn bound(relation: &str) -> BindData {
         let relation = Relation::find(relation).unwrap();
-        Bound {
+        BindData {
             files: Box::new(["x.pcap".to_owned()]),
             total_size: 0,
             relation,
