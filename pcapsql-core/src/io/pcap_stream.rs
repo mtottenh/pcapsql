@@ -298,6 +298,9 @@ pub struct GenericPcapReader<R: Read> {
     /// Set once an EPB with an interface id beyond the IDB table has been
     /// logged, so a malformed capture warns once rather than per packet.
     warned_bad_if_id: bool,
+    /// Whether the last read stopped at a record cut short by the end of the
+    /// input (see [`Self::truncated`]).
+    truncated: bool,
 }
 
 /// Inner reader using enum dispatch for format-specific handling.
@@ -358,6 +361,7 @@ impl<R: Read> GenericPcapReader<R> {
             big_endian: false,
             capacity: BUFFER_SIZE,
             warned_bad_if_id: false,
+            truncated: false,
         })
     }
 
@@ -421,6 +425,20 @@ impl<R: Read> GenericPcapReader<R> {
         }
     }
 
+    /// Whether the input ended inside a record: the last call that read
+    /// (`process_packets*` with `max > 0`) stopped because the record after
+    /// the last complete one declares more bytes than the input has left. The
+    /// capture was cut short, or is still being written.
+    ///
+    /// A reader that has only ever stopped at a record boundary (the clean end
+    /// of the capture, a pause, `max` packets) reports `false`, and so does one
+    /// that has not reached the end of its input. On a stream that stalled
+    /// inside a record the answer goes back to `false` when a later call finds
+    /// the rest of the record.
+    pub fn truncated(&self) -> bool {
+        self.truncated
+    }
+
     /// Snapshot of the current PCAPNG interface table.
     pub fn interface_state(&self) -> InterfaceState {
         InterfaceState {
@@ -465,6 +483,10 @@ impl<R: Read> GenericPcapReader<R> {
         F: FnMut(PacketRef<'_>) -> ControlFlow<Pause>,
     {
         let nano = self.format.legacy_is_nano();
+        if max > 0 {
+            // This call reads: what it finds replaces what the last one found.
+            self.truncated = false;
+        }
         match &mut self.inner {
             ReaderInner::Legacy(reader) => process_legacy_packets(
                 reader,
@@ -473,6 +495,7 @@ impl<R: Read> GenericPcapReader<R> {
                 &mut self.link_type,
                 nano,
                 &mut self.capacity,
+                &mut self.truncated,
                 f,
             ),
             ReaderInner::Ng(reader) => process_pcapng_packets(
@@ -484,6 +507,7 @@ impl<R: Read> GenericPcapReader<R> {
                 &mut self.big_endian,
                 &mut self.capacity,
                 &mut self.warned_bad_if_id,
+                &mut self.truncated,
                 f,
             ),
         }
@@ -560,6 +584,7 @@ fn process_legacy_packets<S: Read, F>(
     link_type: &mut u32,
     nano: bool,
     capacity: &mut usize,
+    truncated: &mut bool,
     mut f: F,
 ) -> Result<Delivered, Error>
 where
@@ -598,6 +623,7 @@ where
             // present. Stop cleanly with the complete prefix, but say so.
             Err(PcapParserError::UnexpectedEof) => {
                 warn_truncated("Legacy PCAP", reader.consumed(), *frame_number);
+                *truncated = true;
                 break;
             }
             Err(PcapParserError::Incomplete(_)) => {
@@ -641,6 +667,7 @@ fn process_pcapng_packets<S: Read, F>(
     big_endian: &mut bool,
     capacity: &mut usize,
     warned_bad_if_id: &mut bool,
+    truncated: &mut bool,
     mut f: F,
 ) -> Result<Delivered, Error>
 where
@@ -762,6 +789,7 @@ where
             Err(PcapParserError::Eof) => break,
             Err(PcapParserError::UnexpectedEof) => {
                 warn_truncated("PCAPNG", reader.consumed(), *frame_number);
+                *truncated = true;
                 break;
             }
             Err(PcapParserError::Incomplete(_)) => {

@@ -270,6 +270,22 @@ pub trait PacketReader: Send + Unpin {
         false
     }
 
+    /// Whether the input ended inside a record: the last call that read
+    /// stopped because the record after the last complete one declares more
+    /// bytes than the input has left (a capture cut short, or one still
+    /// being written). The packets of the complete records were delivered;
+    /// this tells that end from the clean end of a capture, which
+    /// [`process_packets_flow`](Self::process_packets_flow) reports the same
+    /// way.
+    ///
+    /// Only a reader that reads to the end of its input can see this: a
+    /// reader of a [`PacketRange`] with an end stops at that frame and
+    /// reports `false`. The default is `false`, for a reader that cannot
+    /// tell.
+    fn truncated(&self) -> bool {
+        false
+    }
+
     /// Get the link type for packets from this reader.
     fn link_type(&self) -> u32;
 }
