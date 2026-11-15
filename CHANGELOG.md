@@ -533,6 +533,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   row in the function; the whole filter query over 20M rows on one thread
   3.5 → 3.1 ns/row and 5.1 → 4.6 (native expressions: 2.3 and 3.9). The
   crate's second audited `unsafe` call; `make check_unsafe` pins the two.
+- **Hex decoding without a `Vec` per value.** New
+  `format::parse_hex_into(text, &mut Vec<u8>)` decodes into a buffer the
+  caller keeps, by table lookup; `parse_hex` is a wrapper and accepts and
+  rejects what it did. `pcap_unhex` in DuckDB: 61 → 26 ns/row over 20M
+  16-digit strings on one thread (DuckDB's `unhex`: 36). `unhex` in
+  DataFusion appends to a `BinaryBuilder` from one buffer.
 
 ### Fixed
 

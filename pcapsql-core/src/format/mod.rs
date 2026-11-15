@@ -46,6 +46,6 @@ pub use cidr::{
     parse_ipv4, parse_ipv6,
 };
 pub use flags::{has_tcp_flag, tcp_flag_mask, write_tcp_flags, TCP_FLAGS};
-pub use hex::{parse_hex, write_hex};
+pub use hex::{parse_hex, parse_hex_into, write_hex};
 pub use mac::{is_broadcast_mac, is_local_mac, is_multicast_mac, parse_mac};
 pub use names::*;

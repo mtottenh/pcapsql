@@ -1,8 +1,10 @@
 //! Scalar functions: vector loops over the kernels of `pcapsql_core::format`.
 //!
-//! No function has logic of its own here. Each is one of four loops, instantiated with a kernel:
+//! No function has logic of its own here. Each is one of five loops, instantiated with a kernel:
 //!
 //! - [`Map`]: one argument, the kernel returns the value (`ip4`, `mac`, `dns_type_name`, ...);
+//! - [`MapInto`]: one argument, the kernel puts the value in a buffer the loop lends it and
+//!   returns the part it filled (`pcap_unhex`);
 //! - [`Format`]: one argument, the kernel writes text (`ip4_to_string`, `pcap_hex`, ...);
 //! - [`Match`]: a value and a text pattern, tested for each row (`ip6_in_cidr`);
 //! - [`MatchPlain`]: the same for a fixed-width value whose test always has an answer
@@ -192,7 +194,7 @@ pub(super) fn register(extension: &Extension) -> Result<()> {
         .example("pcap_unhex('dead')")
         .register::<BlobValue, _>(
             extension,
-            Map::<String, BlobValue, _, _>::new(format::parse_hex),
+            MapInto::<String, BlobValue, Vec<u8>, _>::new(format::parse_hex_into),
         )
 }
 
@@ -304,6 +306,63 @@ where
         for (row, value) in input.reader()?.iter().enumerate() {
             let result = value.and_then(&self.kernel);
             writer.set_option(row, result.as_ref().map(Borrow::borrow))?;
+        }
+        Ok(())
+    }
+}
+
+/// `f(I) -> O`, where the kernel `K` puts the value in the buffer it is lent and returns the
+/// part of the buffer that holds it, or `None` for NULL.
+///
+/// The buffer, an `S`, is one for the chunk: a kernel whose value is a `Vec` (`parse_hex_into`)
+/// allocates when a value is longer than every one before it in the chunk, not for every row,
+/// and a kernel whose value has a longest form writes it on the stack.
+struct MapInto<I, O, S, K> {
+    kernel: K,
+    types: PhantomData<fn(I, S) -> O>,
+}
+
+impl<I, O, S, K> MapInto<I, O, S, K>
+where
+    I: ReadableNativeElement + 'static,
+    O: WritableNativeElement + 'static,
+    K: for<'a, 'b> Fn(I::Ref<'a>, &'b mut S) -> Option<&'b O::Write>,
+{
+    fn new(kernel: K) -> Self {
+        Self {
+            kernel,
+            types: PhantomData,
+        }
+    }
+}
+
+impl<I, O, S, K> ScalarCallbacks for MapInto<I, O, S, K>
+where
+    I: ReadableNativeElement + 'static,
+    O: WritableNativeElement + 'static,
+    S: Default + 'static,
+    K: for<'a, 'b> Fn(I::Ref<'a>, &'b mut S) -> Option<&'b O::Write> + Send + Sync + 'static,
+{
+    type BindData = ();
+    type InitData = ();
+
+    fn exec(
+        &self,
+        _context: &Context,
+        _bind_data: Option<&()>,
+        _init_data: Option<&mut ()>,
+        vectors: &mut VectorCollection,
+        output: Vector<'_, Unknown>,
+    ) -> Result<()> {
+        let rows = vectors.row_count()?;
+        let input = argument::<I>(vectors)?;
+        let mut output = output.cast::<O>()?;
+        output.set_size(rows)?;
+        let mut writer = output.writer()?;
+        let mut buffer = S::default();
+        for (row, value) in input.reader()?.iter().enumerate() {
+            let result = value.and_then(|value| (self.kernel)(value, &mut buffer));
+            writer.set_option(row, result)?;
         }
         Ok(())
     }

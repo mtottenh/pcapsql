@@ -736,6 +736,29 @@ fn pcap_unhex_decodes_text() -> Result<()> {
         )?,
         ["01", "NULL", "NULL", "", "FF00"]
     );
+    // One buffer takes the bytes of every row of a chunk: a row gets its own bytes and nothing
+    // of what a longer row, or one that stopped at a character that is not hex, left there.
+    assert_eq!(
+        column(
+            &connection,
+            "SELECT hex(pcap_unhex(x)) FROM (VALUES
+                 ('00112233445566778899aabbccddeeff0123'), ('ab'), ('0011223344zz'), (''),
+                 ('abc'), ('cd'), (NULL), ('ef01'), ('0x'), ('FFEEDDCCBBAA99887766554433221100'))
+                 t(x)",
+        )?,
+        [
+            "00112233445566778899AABBCCDDEEFF0123",
+            "AB",
+            "NULL",
+            "",
+            "NULL",
+            "CD",
+            "NULL",
+            "EF01",
+            "",
+            "FFEEDDCCBBAA99887766554433221100"
+        ]
+    );
     assert_eq!(
         rows(
             &connection,
