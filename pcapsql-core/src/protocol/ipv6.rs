@@ -1,12 +1,11 @@
 //! IPv6 protocol parser with extension header support.
 
 use etherparse::Ipv6HeaderSlice;
-use smallvec::SmallVec;
 
 use super::ethernet::ethertype;
 use super::{
-    Cond, Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult, Protocol,
-    TunnelType,
+    Cond, Dispatch, DispatchRule, FieldSink, FieldValue, HintKey, Hints, ParseContext, Parsed,
+    Protocol, TunnelType,
 };
 use crate::schema::{DataKind, FieldDescriptor};
 
@@ -79,11 +78,14 @@ impl Protocol for Ipv6Protocol {
         }
     }
 
-    fn parse<'a>(&self, data: &'a [u8], _context: &ParseContext) -> ParseResult<'a> {
+    fn parse_into<'a>(
+        &self,
+        data: &'a [u8],
+        _context: &ParseContext,
+        fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
         match Ipv6HeaderSlice::from_slice(data) {
             Ok(ipv6) => {
-                let mut fields = SmallVec::new();
-
                 fields.push(("version", FieldValue::UInt8(6)));
                 fields.push(("traffic_class", FieldValue::UInt8(ipv6.traffic_class())));
                 fields.push(("flow_label", FieldValue::UInt32(ipv6.flow_label().value())));
@@ -97,14 +99,9 @@ impl Protocol for Ipv6Protocol {
                 let payload = &data[base_header_len..];
                 let first_next_header = ipv6.next_header().0;
 
-                // Parse extension headers
-                let (final_next_header, ext_consumed, ext_fields) =
-                    parse_extension_headers(first_next_header, payload);
-
-                // Merge extension header fields
-                for (k, v) in ext_fields {
-                    fields.push((k, v));
-                }
+                // Parse extension headers; their fields follow the header's
+                let (final_next_header, ext_consumed) =
+                    parse_extension_headers(first_next_header, payload, fields);
 
                 let mut child_hints = Hints::new();
                 child_hints.insert(HintKey::IpProtocol, final_next_header as u64);
@@ -136,9 +133,9 @@ impl Protocol for Ipv6Protocol {
                 } else {
                     data.len()
                 };
-                ParseResult::success(fields, &data[total_consumed..end], child_hints)
+                Parsed::ok(&data[total_consumed..end], child_hints)
             }
-            Err(e) => ParseResult::error(format!("IPv6 parse error: {e}"), data),
+            Err(e) => Parsed::error(fields.text_fmt(format_args!("IPv6 parse error: {e}")), data),
         }
     }
 
@@ -191,12 +188,13 @@ impl Protocol for Ipv6Protocol {
     }
 }
 
-/// Parse IPv6 extension headers and return (final_next_header, bytes_consumed, fields).
+/// Parse IPv6 extension headers into `fields` and return
+/// (final_next_header, bytes_consumed).
 fn parse_extension_headers(
     first_nh: u8,
     data: &[u8],
-) -> (u8, usize, SmallVec<[(&'static str, FieldValue<'_>); 16]>) {
-    let mut fields = SmallVec::new();
+    fields: &mut FieldSink<'_, '_>,
+) -> (u8, usize) {
     let mut offset = 0;
     let mut current_nh = first_nh;
 
@@ -219,12 +217,7 @@ fn parse_extension_headers(
             }
             next_header::ROUTING => {
                 has_routing = true;
-                if let Some((next_nh, consumed, routing_fields)) =
-                    parse_routing_header(&data[offset..])
-                {
-                    for (k, v) in routing_fields {
-                        fields.push((k, v));
-                    }
+                if let Some((next_nh, consumed)) = parse_routing_header(&data[offset..], fields) {
                     current_nh = next_nh;
                     offset += consumed;
                 } else {
@@ -233,12 +226,7 @@ fn parse_extension_headers(
             }
             next_header::FRAGMENT => {
                 has_fragment = true;
-                if let Some((next_nh, consumed, frag_fields)) =
-                    parse_fragment_header(&data[offset..])
-                {
-                    for (k, v) in frag_fields {
-                        fields.push((k, v));
-                    }
+                if let Some((next_nh, consumed)) = parse_fragment_header(&data[offset..], fields) {
                     current_nh = next_nh;
                     offset += consumed;
                 } else {
@@ -281,7 +269,7 @@ fn parse_extension_headers(
     fields.push(("ext_fragment", FieldValue::Bool(has_fragment)));
     fields.push(("ext_destination", FieldValue::Bool(has_destination)));
 
-    (current_nh, offset, fields)
+    (current_nh, offset)
 }
 
 /// Parse a generic extension header (Hop-by-Hop, Destination Options, Mobility).
@@ -303,18 +291,13 @@ fn parse_generic_ext_header(data: &[u8]) -> Option<(u8, usize)> {
     Some((next_header, total_len))
 }
 
-/// Parse Fragment Header.
-/// Returns (next_header, bytes_consumed, fields) or None if parsing fails.
-#[allow(clippy::type_complexity)]
-fn parse_fragment_header(
-    data: &[u8],
-) -> Option<(u8, usize, SmallVec<[(&'static str, FieldValue<'_>); 16]>)> {
+/// Parse Fragment Header into `fields`.
+/// Returns (next_header, bytes_consumed) or None if parsing fails.
+fn parse_fragment_header(data: &[u8], fields: &mut FieldSink<'_, '_>) -> Option<(u8, usize)> {
     // Fragment header is exactly 8 bytes
     if data.len() < 8 {
         return None;
     }
-
-    let mut fields = SmallVec::new();
 
     let next_header = data[0];
     // data[1] is reserved
@@ -327,20 +310,15 @@ fn parse_fragment_header(
     fields.push(("frag_more", FieldValue::Bool(more_fragments)));
     fields.push(("frag_id", FieldValue::UInt32(identification)));
 
-    Some((next_header, 8, fields))
+    Some((next_header, 8))
 }
 
-/// Parse Routing Header.
-/// Returns (next_header, bytes_consumed, fields) or None if parsing fails.
-#[allow(clippy::type_complexity)]
-fn parse_routing_header(
-    data: &[u8],
-) -> Option<(u8, usize, SmallVec<[(&'static str, FieldValue<'_>); 16]>)> {
+/// Parse Routing Header into `fields`.
+/// Returns (next_header, bytes_consumed) or None if parsing fails.
+fn parse_routing_header(data: &[u8], fields: &mut FieldSink<'_, '_>) -> Option<(u8, usize)> {
     if data.len() < 4 {
         return None;
     }
-
-    let mut fields = SmallVec::new();
 
     let next_header = data[0];
     let hdr_ext_len = data[1] as usize;
@@ -357,7 +335,7 @@ fn parse_routing_header(
     fields.push(("routing_type", FieldValue::UInt8(routing_type)));
     fields.push(("segments_left", FieldValue::UInt8(segments_left)));
 
-    Some((next_header, total_len, fields))
+    Some((next_header, total_len))
 }
 
 /// Parse Authentication Header.

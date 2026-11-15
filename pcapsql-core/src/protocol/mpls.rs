@@ -13,12 +13,12 @@
 //! IP-in-IP). The labels themselves are in the `mpls` table (`label`,
 //! `labels`, `stack_depth`), joinable on `frame_number`.
 
-use compact_str::CompactString;
-use smallvec::SmallVec;
+use std::fmt::Write as _;
 
 use super::ethernet::ethertype;
 use super::{
-    Cond, Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult, Protocol,
+    Cond, Dispatch, DispatchRule, FieldSink, FieldValue, HintKey, Hints, ParseContext, Parsed,
+    Protocol,
 };
 use crate::schema::{DataKind, FieldDescriptor};
 
@@ -107,17 +107,21 @@ impl Protocol for MplsProtocol {
         }
     }
 
-    fn parse<'a>(&self, data: &'a [u8], _context: &ParseContext) -> ParseResult<'a> {
+    fn parse_into<'a>(
+        &self,
+        data: &'a [u8],
+        _context: &ParseContext,
+        fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
         // Each MPLS label stack entry is 4 bytes
         if data.len() < 4 {
-            return ParseResult::error("MPLS: label stack entry too short".to_string(), data);
+            return Parsed::error("MPLS: label stack entry too short", data);
         }
 
-        let mut fields = SmallVec::new();
         let mut offset = 0;
         let mut stack_depth = 0u8;
-        // Typical MPLS stack has 1-3 labels
-        let mut labels = Vec::with_capacity(3);
+        // The labels of the stack, comma-separated
+        let mut labels = fields.text_builder();
         let mut bottom_of_stack = false;
 
         // Parse all labels in the stack
@@ -135,8 +139,10 @@ impl Protocol for MplsProtocol {
         while !bottom_of_stack && offset + 4 <= data.len() {
             // Check stack depth limit for safety
             if stack_depth >= MAX_LABEL_STACK_DEPTH {
-                return ParseResult::error(
-                    format!("MPLS: label stack too deep (max {MAX_LABEL_STACK_DEPTH})"),
+                return Parsed::error(
+                    fields.text_fmt(format_args!(
+                        "MPLS: label stack too deep (max {MAX_LABEL_STACK_DEPTH})"
+                    )),
                     data,
                 );
             }
@@ -171,13 +177,17 @@ impl Protocol for MplsProtocol {
                 has_special_label = true;
             }
 
-            labels.push(label.to_string());
+            if stack_depth > 0 {
+                labels.push_str(",");
+            }
+            // Writing to an arena string does not fail.
+            let _ = write!(labels, "{label}");
             stack_depth += 1;
             offset += 4;
         }
 
         if stack_depth == 0 {
-            return ParseResult::error("MPLS: no labels found".to_string(), data);
+            return Parsed::error("MPLS: no labels found", data);
         }
 
         fields.push(("label", FieldValue::UInt32(top_label)));
@@ -185,10 +195,7 @@ impl Protocol for MplsProtocol {
         fields.push(("bottom", FieldValue::Bool(bottom_of_stack)));
         fields.push(("ttl", FieldValue::UInt8(top_ttl)));
         fields.push(("stack_depth", FieldValue::UInt8(stack_depth)));
-        fields.push((
-            "labels",
-            FieldValue::OwnedString(CompactString::new(labels.join(","))),
-        ));
+        fields.push(("labels", labels.finish()));
 
         // Add special label fields
         fields.push(("is_reserved_label", FieldValue::Bool(has_special_label)));
@@ -223,7 +230,7 @@ impl Protocol for MplsProtocol {
 
         // No tunnel boundary: label switching is not encapsulation (see the
         // module docs), so the inner IP layer keeps encap_depth 0.
-        ParseResult::success(fields, &data[offset..], child_hints)
+        Parsed::ok(&data[offset..], child_hints)
     }
 
     fn schema_fields(&self) -> Vec<FieldDescriptor> {
@@ -308,10 +315,7 @@ mod tests {
         assert_eq!(result.get("bottom"), Some(&FieldValue::Bool(true)));
         assert_eq!(result.get("ttl"), Some(&FieldValue::UInt8(64)));
         assert_eq!(result.get("stack_depth"), Some(&FieldValue::UInt8(1)));
-        assert_eq!(
-            result.get("labels"),
-            Some(&FieldValue::OwnedString(CompactString::new("1000")))
-        );
+        assert_eq!(result.get("labels"), Some(&FieldValue::Str("1000")));
         assert_eq!(result.remaining.len(), 4);
     }
 
@@ -344,10 +348,7 @@ mod tests {
         // Stack depth should be 3
         assert_eq!(result.get("stack_depth"), Some(&FieldValue::UInt8(3)));
         // Labels string
-        assert_eq!(
-            result.get("labels"),
-            Some(&FieldValue::OwnedString(CompactString::new("100,200,300")))
-        );
+        assert_eq!(result.get("labels"), Some(&FieldValue::Str("100,200,300")));
         // Bottom flag reflects the last label
         assert_eq!(result.get("bottom"), Some(&FieldValue::Bool(true)));
     }

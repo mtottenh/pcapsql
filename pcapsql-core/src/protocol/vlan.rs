@@ -1,10 +1,9 @@
 //! IEEE 802.1Q VLAN tag parser.
 
-use smallvec::SmallVec;
-
 use super::ethernet::ethertype;
 use super::{
-    Cond, Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult, Protocol,
+    Cond, Dispatch, DispatchRule, FieldSink, FieldValue, HintKey, Hints, ParseContext, Parsed,
+    Protocol,
 };
 use crate::schema::{DataKind, FieldDescriptor};
 
@@ -45,15 +44,18 @@ impl Protocol for VlanProtocol {
         }
     }
 
-    fn parse<'a>(&self, data: &'a [u8], _context: &ParseContext) -> ParseResult<'a> {
+    fn parse_into<'a>(
+        &self,
+        data: &'a [u8],
+        _context: &ParseContext,
+        fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
         // VLAN tag is 4 bytes total, but the TPID (2 bytes) was already
         // consumed by the Ethernet parser, so we just have TCI (2 bytes)
         // and the inner EtherType (2 bytes).
         if data.len() < 4 {
-            return ParseResult::error("VLAN tag too short".to_string(), data);
+            return Parsed::error("VLAN tag too short", data);
         }
-
-        let mut fields = SmallVec::new();
 
         // TCI (Tag Control Information) - 2 bytes
         let tci = u16::from_be_bytes([data[0], data[1]]);
@@ -80,7 +82,7 @@ impl Protocol for VlanProtocol {
         child_hints.insert(HintKey::VlanId, vlan_id as u64);
 
         // VLAN tag is 4 bytes
-        ParseResult::success(fields, &data[4..], child_hints)
+        Parsed::ok(&data[4..], child_hints)
     }
 
     fn schema_fields(&self) -> Vec<FieldDescriptor> {

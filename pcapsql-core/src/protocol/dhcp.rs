@@ -490,9 +490,7 @@ mod tests {
         assert_eq!(result.get("flags"), Some(&FieldValue::UInt16(0x8000)));
         assert_eq!(
             result.get("chaddr"),
-            Some(&FieldValue::OwnedString(CompactString::new(
-                "00:11:22:33:44:55"
-            )))
+            Some(&FieldValue::Str("00:11:22:33:44:55"))
         );
         assert_eq!(result.get("message_type"), Some(&FieldValue::UInt8(1)));
     }
@@ -512,18 +510,13 @@ mod tests {
         assert_eq!(result.get("xid"), Some(&FieldValue::UInt32(0xABCDEF01)));
         assert_eq!(
             result.get("yiaddr"),
-            Some(&FieldValue::OwnedString(CompactString::new(
-                "192.168.1.100"
-            )))
+            Some(&FieldValue::Str("192.168.1.100"))
         );
-        assert_eq!(
-            result.get("siaddr"),
-            Some(&FieldValue::OwnedString(CompactString::new("192.168.1.1")))
-        );
+        assert_eq!(result.get("siaddr"), Some(&FieldValue::Str("192.168.1.1")));
         assert_eq!(result.get("message_type"), Some(&FieldValue::UInt8(2)));
         assert_eq!(
             result.get("server_id"),
-            Some(&FieldValue::OwnedString(CompactString::new("192.168.1.1")))
+            Some(&FieldValue::Str("192.168.1.1"))
         );
     }
 
@@ -555,19 +548,12 @@ mod tests {
         assert_eq!(result.get("lease_time"), Some(&FieldValue::UInt32(86400)));
         assert_eq!(
             result.get("subnet_mask"),
-            Some(&FieldValue::OwnedString(CompactString::new(
-                "255.255.255.0"
-            )))
+            Some(&FieldValue::Str("255.255.255.0"))
         );
-        assert_eq!(
-            result.get("router"),
-            Some(&FieldValue::OwnedString(CompactString::new("192.168.1.1")))
-        );
+        assert_eq!(result.get("router"), Some(&FieldValue::Str("192.168.1.1")));
         assert_eq!(
             result.get("dns_servers"),
-            Some(&FieldValue::OwnedString(CompactString::new(
-                "8.8.8.8,8.8.4.4"
-            )))
+            Some(&FieldValue::Str("8.8.8.8,8.8.4.4"))
         );
     }
 

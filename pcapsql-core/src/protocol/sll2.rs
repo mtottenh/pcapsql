@@ -18,11 +18,9 @@
 //! | 11     | 1    | link-layer address length   |
 //! | 12     | 8    | link-layer address          |
 
-use smallvec::SmallVec;
-
 use super::linux_sll::{arphrd, arphrd_name, packet_type_name};
 use super::{
-    Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult, Protocol,
+    Dispatch, DispatchRule, FieldSink, FieldValue, HintKey, Hints, ParseContext, Parsed, Protocol,
 };
 use crate::schema::{DataKind, FieldDescriptor};
 
@@ -74,10 +72,18 @@ impl Protocol for Sll2Protocol {
         None
     }
 
-    fn parse<'a>(&self, data: &'a [u8], _context: &ParseContext) -> ParseResult<'a> {
+    fn parse_into<'a>(
+        &self,
+        data: &'a [u8],
+        _context: &ParseContext,
+        fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
         if data.len() < LINUX_SLL2_HEADER_LEN {
-            return ParseResult::error(
-                format!("Linux SLL2 header too short: {} bytes", data.len()),
+            return Parsed::error(
+                fields.text_fmt(format_args!(
+                    "Linux SLL2 header too short: {} bytes",
+                    data.len()
+                )),
                 data,
             );
         }
@@ -88,7 +94,6 @@ impl Protocol for Sll2Protocol {
         let pkt_type = data[10];
         let addr_len = data[11];
 
-        let mut fields = SmallVec::new();
         fields.push(("protocol", FieldValue::UInt16(protocol)));
         fields.push(("interface_index", FieldValue::UInt32(interface_index)));
         fields.push(("arphrd_type", FieldValue::UInt16(arphrd_type)));
@@ -128,7 +133,7 @@ impl Protocol for Sll2Protocol {
             }
         }
 
-        ParseResult::success(fields, remaining, child_hints)
+        Parsed::ok(remaining, child_hints)
     }
 
     fn schema_fields(&self) -> Vec<FieldDescriptor> {

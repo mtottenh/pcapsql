@@ -617,7 +617,7 @@ mod tests {
         );
         assert_eq!(
             result.get("version_name"),
-            Some(&FieldValue::OwnedString(CompactString::new("QUIC v1")))
+            Some(&FieldValue::Str("QUIC v1"))
         );
     }
 
@@ -670,10 +670,7 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(result.get("dcid_length"), Some(&FieldValue::UInt8(4)));
-        assert_eq!(
-            result.get("dcid"),
-            Some(&FieldValue::OwnedString(CompactString::new("aabbccdd")))
-        );
+        assert_eq!(result.get("dcid"), Some(&FieldValue::Str("aabbccdd")));
     }
 
     #[test]
@@ -689,10 +686,7 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(result.get("scid_length"), Some(&FieldValue::UInt8(4)));
-        assert_eq!(
-            result.get("scid"),
-            Some(&FieldValue::OwnedString(CompactString::new("eeff0011")))
-        );
+        assert_eq!(result.get("scid"), Some(&FieldValue::Str("eeff0011")));
     }
 
     #[test]
@@ -713,9 +707,7 @@ mod tests {
         );
         assert_eq!(
             result.get("version_name"),
-            Some(&FieldValue::OwnedString(CompactString::new(
-                "Version Negotiation"
-            )))
+            Some(&FieldValue::Str("Version Negotiation"))
         );
     }
 
@@ -738,7 +730,7 @@ mod tests {
         );
         assert_eq!(
             result.get("version_name"),
-            Some(&FieldValue::OwnedString(CompactString::new("0xdeadbeef")))
+            Some(&FieldValue::Str("0xdeadbeef"))
         );
     }
 

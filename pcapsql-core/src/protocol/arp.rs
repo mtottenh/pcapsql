@@ -1,10 +1,9 @@
 //! ARP protocol parser.
 
-use smallvec::SmallVec;
-
 use super::ethernet::ethertype;
 use super::{
-    Cond, Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult, Protocol,
+    Cond, Dispatch, DispatchRule, FieldSink, FieldValue, HintKey, Hints, ParseContext, Parsed,
+    Protocol,
 };
 use crate::schema::{DataKind, FieldDescriptor};
 
@@ -46,13 +45,19 @@ impl Protocol for ArpProtocol {
         }
     }
 
-    fn parse<'a>(&self, data: &'a [u8], _context: &ParseContext) -> ParseResult<'a> {
+    fn parse_into<'a>(
+        &self,
+        data: &'a [u8],
+        _context: &ParseContext,
+        fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
         // ARP for Ethernet/IPv4 is 28 bytes
         if data.len() < 28 {
-            return ParseResult::error(format!("ARP packet too short: {} bytes", data.len()), data);
+            return Parsed::error(
+                fields.text_fmt(format_args!("ARP packet too short: {} bytes", data.len())),
+                data,
+            );
         }
-
-        let mut fields = SmallVec::new();
 
         let hardware_type = u16::from_be_bytes([data[0], data[1]]);
         let protocol_type = u16::from_be_bytes([data[2], data[3]]);
@@ -87,7 +92,7 @@ impl Protocol for ArpProtocol {
         }
 
         // ARP doesn't have payload protocols
-        ParseResult::success(fields, &data[28..], Hints::new())
+        Parsed::ok(&data[28..], Hints::new())
     }
 
     fn schema_fields(&self) -> Vec<FieldDescriptor> {
