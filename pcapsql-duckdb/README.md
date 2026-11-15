@@ -638,6 +638,33 @@ the extension reads:
 | `pcap_views()` | One row per packets view, sorted by name: `name`, `description`, `protocol` (the table the view has one row per row of), `column_count` |
 | `pcap_schema(protocol)` | One row per column of the table or view, in order: `column_name`, `column_type` (the DuckDB type), `nullable`. The name is matched in any case; an unknown one is an error |
 
+A table function that summarizes captures, and three macros over it
+(`src/engine/table/time_range.rs`, `src/engine/macros.rs`):
+
+| Function | Result |
+|---|---|
+| `pcap_time_range(files, strict := false)` | One row per file: `filename`, `start_time` and `end_time` (`TIMESTAMP_NS`: the smallest and largest timestamp of a frame, NULL without frames), `frames`, `duration` (seconds), `link_type` (of the capture's header), `truncated` |
+| `start_time(files)`, `end_time(files)` | The smallest `start_time` and the largest `end_time` of the files |
+| `relative_time(ts, files)` | Seconds from `start_time(files)` to `ts`, a `DOUBLE` |
+
+These are the DataFusion engine's `start_time()`, `end_time()` and
+`relative_time(ts)`. There the capture is the session's; DuckDB has no
+capture of the session, so here it is an argument, with the forms of the
+files argument of a scan. A row of `pcap_time_range` is one pass over the
+records of its file through core's packet reader: every record is read, none
+is parsed, and several files are read on several threads. The extension
+keeps no index of a capture between statements, so nothing knows the range
+before that pass. A truncated capture gives the row of its complete frames
+with `truncated` set, or an error with `strict := true`. Each macro is a
+scalar subquery that does not depend on the row, which DuckDB 2.0.0 plans as
+one common subplan however often the macro is written with the same files:
+a query that uses `relative_time` in its projection and its filter reads
+the files once for the range. Differences from the DataFusion functions:
+the timestamps are `TIMESTAMP_NS`, so `relative_time` keeps the nanoseconds
+of a capture that has them (on microsecond timestamps the two agree to the
+last bit), and a capture without frames gives NULL where DataFusion answers
+the Unix epoch.
+
 The tables are `frames`, the 27 protocol tables and the 4 stream tables: the
 whole catalogue. The views are not rows of `pcap_protocols()`, which lists
 tables; they have a function of their own because a view is not a table (it
@@ -719,9 +746,10 @@ The integer arguments have exactly the type of the column they are meant for.
 A literal that fits is accepted (`ip_proto_name(6)`); a column of another
 integer type needs a cast (`ip4_to_string(x::UINTEGER)`).
 
-Six macros, registered by the extension like the functions (they are not
+Nine macros, registered by the extension like the functions (they are not
 `CREATE MACRO` statements run on a connection, and are not stored in a
-database file):
+database file): the three of the capture time, above, and six that format
+addresses:
 
 | Macro | Definition |
 |---|---|
@@ -883,6 +911,12 @@ Tests, in `itest/`:
   and `pcap_schema()` of a view. (That the definitions are DataFusion's views
   is checked on that side: `packets_views_equal_the_shared_fused_scans` in
   `pcapsql-datafusion/tests/golden_corpus.rs`.)
+- `tests/time_range.rs` compares `pcap_time_range` with what a scan of the
+  frames finds over the captures of the fuzzing corpus and generated ones
+  (nanoseconds, gzip and zstd, pcapng, frames out of time order, no frames,
+  a broken tail, several files on one and four threads), checks the macros
+  and their errors, and counts the `PCAP_TIME_RANGE` scans in the plan of a
+  query that uses `relative_time` in its projection and its filter: one.
 - `tests/golden_differential.rs` runs the queries of the DataFusion golden
   corpus over the same captures and compares with the snapshots committed in
   `pcapsql-datafusion/tests/golden/`, the queries over `*_packets` views

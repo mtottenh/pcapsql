@@ -23,13 +23,16 @@
 //! SELECT ip4_to_string(3232235777);        -- 192.168.1.1
 //! SELECT ip_in_cidr(ip4('10.1.2.3'), '10.0.0.0/8'), tcp_flags_str(18), ip_proto_name(6);
 //! SELECT format_mac(mac('aabbccddeeff'));  -- aa:bb:cc:dd:ee:ff
+//! SELECT * FROM pcap_time_range('logs/*.pcap');  -- filename, start_time, end_time, frames, ...
+//! SELECT relative_time(timestamp, 'capture.pcap') FROM read_tcp('capture.pcap');
 //! COPY (SELECT * FROM read_frames('a.pcap') WHERE length > 1000) TO 'b.pcap' (FORMAT pcap);
 //! ```
 //!
 //! That is the scan functions (`read_pcap`, one `read_<table>` per table, the four stream
 //! tables among them, and one `read_<proto>_packets` per packets view), `pcap_protocols()`,
 //! `pcap_views()` and
-//! `pcap_schema()`, the forty scalar functions, the six `format_*` macros and the copy format
+//! `pcap_schema()`, `pcap_time_range()` and the macros over it (`start_time`, `end_time`,
+//! `relative_time`), the forty scalar functions, the six `format_*` macros and the copy format
 //! `pcap`; the README
 //! lists them. None of them has logic of its own. The scan functions run the shared scan layer,
 //! `pcapsql_core::scan`, which the DataFusion engine runs too: the tables and columns are those

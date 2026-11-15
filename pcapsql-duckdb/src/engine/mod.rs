@@ -32,7 +32,7 @@ pub fn register(extension: &Extension) -> Result<()> {
     // After `read_pcap`, which it answers with.
     replacement::register(extension)?;
     scalar::register(extension)?;
-    // After the scalars: the macro bodies call them.
+    // After the scalars and `pcap_time_range`: the macro bodies call them.
     macros::register(extension)?;
     copy::register(extension)
 }

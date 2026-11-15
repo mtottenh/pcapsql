@@ -560,7 +560,10 @@ What it offers:
 - Forty scalar functions and six macros for addresses, TCP flags and
   protocol numbers (`ip4_to_string`, `ip_in_cidr`, `is_private_ip`,
   `icmp_type_name`, `format_mac`, ...).
-
+- `pcap_time_range(files)`: the first and last timestamp and the number of
+  frames of each capture, from one pass over its records; and over it the
+  time functions of the command-line tool with the capture as an argument,
+  `start_time(files)`, `end_time(files)` and `relative_time(ts, files)`.
 - The stream tables (`read_tcp_connections`, `read_tls_sessions`,
   `read_http_messages`, `read_http2`), and TLS decryption with a key log:
   `read_http2('capture.pcap', keylog := 'keys.log')`, or
@@ -571,9 +574,8 @@ What it offers:
   `PRECISION 'us'` is given. Not pcapng, and not compressed.
 
 What it does not have yet, of the SQL functions of the command-line tool:
-the capture-relative time functions (`start_time`, `end_time`,
-`relative_time`) and the `hdr_*` histogram functions. For its date and time
-functions (`epoch`, `strftime`, ...) DuckDB has its own.
+the `hdr_*` histogram functions. For its date and time functions (`epoch`,
+`strftime`, ...) DuckDB has its own.
 
 **Requirements.** DuckDB 2.0.0, on Linux (x86-64, arm64) or macOS (arm64).
 The extension uses DuckDB's C API v2, which is not stable yet, so a build

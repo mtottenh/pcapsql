@@ -11,8 +11,9 @@
 //! # What is compared
 //!
 //! Every corpus query over the per-packet tables, the stream tables and the `*_packets` views
-//! the extension has: [`COMPARED`]. A query runs unchanged unless DuckDB's SQL means something else by it; the
-//! two that do are rewritten, with the reason. A view here is one fused scan
+//! the extension has: [`COMPARED`]. A query runs unchanged unless DuckDB's SQL means something else by it, or
+//! it calls a function that takes the capture here (the time functions); those
+//! are rewritten, with the reason. A view here is one fused scan
 //! (`read_<proto>_packets`), where the snapshot was made by DataFusion from its SQL view: that
 //! the two agree is what `tests/packets_views.rs` and the DataFusion frontend's own test show
 //! in general, and this shows on the queries users were given as examples.
@@ -123,19 +124,37 @@ const COMPARED: &[(&str, Option<(&str, &str)>)] = &[
     ("u04_stream_join_packet", None),
     ("u05_http2_empty", None),
     ("u09_http_vs_http_messages", None),
+    // The time functions, which here take the capture: `{capture}` is its path.
+    (
+        "q24_time_udfs",
+        Some((
+            "SELECT frame_number, relative_time(timestamp, '{capture}') AS rel, \
+             start_time('{capture}') AS t0, end_time('{capture}') AS t1 \
+             FROM frames ORDER BY frame_number LIMIT 2",
+            TIME_FUNCTIONS,
+        )),
+    ),
+    (
+        "q25_time_range_only",
+        Some((
+            "SELECT start_time('{capture}') AS t0, end_time('{capture}') AS t1",
+            TIME_FUNCTIONS,
+        )),
+    ),
 ];
+
+/// Why the queries of the time functions are rewritten.
+const TIME_FUNCTIONS: &str = "the DataFusion frontend has one capture per session and its time \
+                              functions take none; the extension's take the capture files";
 
 const VIEW: &str = "reads `packets` or `tunneled_packets`, views of the DataFusion frontend that \
                     join across encapsulation levels; the extension does not offer them";
-const TIME_UDF: &str = "calls a time function only the DataFusion frontend has";
 const WINDOW: &str = "calls a window table function only the DataFusion frontend has";
 const UNORDERED: &str = "its rows depend on an order the query does not fix";
 
 /// The corpus queries that are not compared, each with the reason.
 const NOT_COMPARED: &[(&str, &str)] = &[
     ("q27_packets_view_vxlan_levels", VIEW),
-    ("q24_time_udfs", TIME_UDF),
-    ("q25_time_range_only", TIME_UDF),
     ("q30_tumble", WINDOW),
     ("q31_hop", WINDOW),
     ("q32_session", WINDOW),
@@ -295,8 +314,8 @@ fn without_d5_timestamp(mut actual: Table, expected: &Table) -> (Table, bool) {
 }
 
 /// A database with a view of every scan table and of every packets view over one corpus
-/// capture.
-fn database(fixture: &Fixture, capture: &str) -> Result<Connection> {
+/// capture, and the path of that capture.
+fn database(fixture: &Fixture, capture: &str) -> Result<(Connection, String)> {
     let connection = connect()?;
     let path = fixture.write(&format!("{capture}.pcap"), &golden::capture(capture));
     let relations = "SELECT name FROM pcap_protocols() UNION ALL SELECT name FROM pcap_views()";
@@ -306,7 +325,7 @@ fn database(fixture: &Fixture, capture: &str) -> Result<Connection> {
             Parameters::None,
         )?;
     }
-    Ok(connection)
+    Ok((connection, path))
 }
 
 #[test]
@@ -386,9 +405,11 @@ fn duckdb_returns_what_the_datafusion_snapshots_hold() -> Result<()> {
     let mut timestamps_dropped = Vec::new();
     for (name, rewritten) in COMPARED {
         let query = queries[name];
+        let (connection, path) = &databases[query.capture];
         let sql = rewritten.map_or(query.sql, |(sql, _why)| sql);
+        let sql = &sql.replace("{capture}", path);
         let expected = parse_snapshot(name, &golden::snapshot(name));
-        let actual = match duckdb_table(&databases[query.capture], sql) {
+        let actual = match duckdb_table(connection, sql) {
             Ok(actual) => actual,
             Err(error) => {
                 failures.push(format!("{name}: {sql}\n  {error}"));
