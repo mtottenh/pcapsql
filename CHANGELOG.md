@@ -25,6 +25,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Pause::Before` leaves it to be delivered again by the next call, with the
   same frame number. A consumer with a bounded output (a fixed-size chunk)
   can therefore stop exactly where it ran out of room.
+- **`pcapsql-core`: the table catalogue.** `scan::Catalog::builtin()` lists
+  every table with its columns: name, kind (`ColKind`), nullability and where
+  the value comes from (`ColumnSource`: the packet record, the parse context,
+  a parser field, or stream analysis). It has no Arrow types, so a second SQL
+  frontend (the DuckDB extension) gets the same tables, column order and
+  typing as the DataFusion one. Timestamp columns are declared in
+  microseconds and an engine picks its unit (`TimestampUnit`). Protocol
+  tables carry a `timestamp` column marked as opt-in (`ColumnDef::default`
+  is `false`) for engines that cannot fuse a join against `frames`. The
+  `scan` module is unstable API.
 
 ### Changed
 

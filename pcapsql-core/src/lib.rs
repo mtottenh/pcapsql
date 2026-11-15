@@ -91,6 +91,7 @@ pub mod format;
 pub mod io;
 pub mod prelude;
 pub mod protocol;
+pub mod scan;
 pub mod schema;
 pub mod stream;
 pub mod tls;
