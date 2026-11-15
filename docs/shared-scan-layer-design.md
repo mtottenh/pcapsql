@@ -725,7 +725,7 @@ Since then (`protocol/layers.rs`):
   `LayerBuf` did (collecting an emptied `vec::IntoIter` in place): there is
   no `unsafe`.
 - A parser writes its fields through a `FieldSink` (`push`; `str`,
-  `format`, `bytes`, `list`, `ListBuilder` and `TextBuilder` for what it
+  `format`, `list`, `ListBuilder` and `TextBuilder` for what it
   constructs, all in the arena) and returns a
   `Parsed { remaining, child_hints, status }`. `Status::Error` makes the
   walk truncate the field vector back to where the layer began;

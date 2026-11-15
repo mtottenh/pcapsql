@@ -180,7 +180,7 @@ fn finish<'a>(
         Err(e) => {
             let error = fields.text_fmt(format_args!("HTTP {kind} parse error: {e}"));
             // `is_request` alone means nothing of the start line was read.
-            if fields.len() <= 1 {
+            if fields.as_slice().len() <= 1 {
                 return Parsed::error(error, data);
             }
             fields.push(("headers_complete", FieldValue::Bool(false)));

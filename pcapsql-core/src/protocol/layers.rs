@@ -25,8 +25,8 @@ use super::{FieldEntry, FieldSet, FieldValue, HintKey, Hints, ParseContext, Prot
 /// [`push`](Self::push) appends a field. A value that exists in the packet
 /// is borrowed from it (`FieldValue::Str`, `FieldValue::Bytes`); one that has
 /// to be constructed is put in the packet's arena with [`str`](Self::str),
-/// [`format`](Self::format), [`bytes`](Self::bytes), [`list`](Self::list) or
-/// a [`ListBuilder`], and lives as long as the packet's layers do.
+/// [`format`](Self::format), [`list`](Self::list), a [`ListBuilder`] or a
+/// [`TextBuilder`], and lives as long as the packet's layers do.
 pub struct FieldSink<'s, 'a> {
     fields: &'s mut Vec<FieldEntry<'a>>,
     /// The index in `fields` of the layer's first field.
@@ -45,18 +45,6 @@ impl<'a> FieldSink<'_, 'a> {
     #[inline]
     pub fn as_slice(&self) -> &[FieldEntry<'a>] {
         &self.fields[self.start..]
-    }
-
-    /// The number of fields written to the layer so far.
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.fields.len() - self.start
-    }
-
-    /// Whether no field was written to the layer yet.
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
     }
 
     /// `text`, copied into the arena.
@@ -99,12 +87,6 @@ impl<'a> FieldSink<'_, 'a> {
         }
     }
 
-    /// A bytes value, copied into the arena.
-    #[inline]
-    pub fn bytes(&self, bytes: &[u8]) -> FieldValue<'a> {
-        FieldValue::Bytes(self.bump.alloc_slice_copy(bytes))
-    }
-
     /// A list value, built in the arena from items whose number is known.
     #[inline]
     pub fn list<I>(&self, items: I) -> FieldValue<'a>
@@ -138,18 +120,6 @@ impl<'a> ListBuilder<'a> {
         self.items.push(item);
     }
 
-    /// The number of items so far.
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.items.len()
-    }
-
-    /// Whether the list has no item yet.
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.items.is_empty()
-    }
-
     /// The list.
     #[inline]
     pub fn finish(self) -> FieldValue<'a> {
@@ -177,16 +147,10 @@ impl<'a> TextBuilder<'a> {
         self.text.is_empty()
     }
 
-    /// The text.
-    #[inline]
-    pub fn finish_text(self) -> &'a str {
-        self.text.into_bump_str()
-    }
-
-    /// The text as a string value.
+    /// The text, as a string value.
     #[inline]
     pub fn finish(self) -> FieldValue<'a> {
-        FieldValue::Str(self.finish_text())
+        FieldValue::Str(self.text.into_bump_str())
     }
 }
 
@@ -265,15 +229,6 @@ impl<'a> Parsed<'a> {
     #[inline]
     pub fn is_ok(&self) -> bool {
         self.status == Status::Ok
-    }
-
-    /// The error the parse ended with, if any.
-    #[inline]
-    pub fn error_text(&self) -> Option<&'a str> {
-        match self.status {
-            Status::Ok => None,
-            Status::Partial(error) | Status::Error(error) => Some(error),
-        }
     }
 }
 
@@ -431,14 +386,6 @@ impl<'a> PacketLayers<'_, 'a> {
         (self.fields.as_ptr().addr(), self.layers.as_ptr().addr())
     }
 
-    /// Forget the layers, keeping the storage. (The values the parsers
-    /// constructed stay in the arena until the buffer's next packet.)
-    #[inline]
-    pub fn clear(&mut self) {
-        self.layers.clear();
-        self.fields.clear();
-    }
-
     #[inline]
     fn layer_ref<'l>(&'l self, layer: &Layer<'a>) -> LayerRef<'l, 'a> {
         LayerRef {
@@ -592,12 +539,6 @@ impl<'l, 'a> LayerRef<'l, 'a> {
             payload: &[],
             error: None,
         }
-    }
-
-    /// The layer, with `payload` as the bytes its parser left.
-    pub fn with_payload(mut self, payload: &'a [u8]) -> Self {
-        self.payload = payload;
-        self
     }
 
     /// The layer, as found at tunnel depth `encap_depth` in a tunnel of
