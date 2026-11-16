@@ -1,5 +1,5 @@
 //! The scalar functions other than `ip4` and `ip4_to_string` (see `extension.rs` for those),
-//! queried in-process.
+//! queried in-process. `differential.rs` has every function against its kernel.
 //!
 //! The expected values are those of the DataFusion engine. Where the extension for DuckDB 1.x
 //! answered differently, the test says so.
@@ -26,59 +26,127 @@ fn create_constants(connection: &Connection) -> Result<()> {
              18::USMALLINT AS flags, 'syn' AS flag, 6::UTINYINT AS proto, 28::USMALLINT AS qtype,
              3::USMALLINT AS rcode, 2048::USMALLINT AS ethertype,
              '\\xDE\\xAD'::BLOB AS bytes, 'dead' AS hex_text,
-             NULL::VARCHAR AS null_text, NULL::BLOB AS null_bytes, NULL::USMALLINT AS null_u16",
+             3::UTINYINT AS icmp_type, 1::UTINYINT AS icmp_code, 46::UTINYINT AS dscp,
+             771::USMALLINT AS tls_version, ip6('fe80::1') AS link_local,
+             NULL::VARCHAR AS null_text, NULL::BLOB AS null_bytes, NULL::USMALLINT AS null_u16,
+             NULL::UTINYINT AS null_u8, NULL::UINTEGER AS null_u32",
         Parameters::None,
     )?;
     Ok(())
 }
 
+/// Every scalar function of the extension: its parameters, their types and its return type.
+const SIGNATURES: [(&str, &str, &str, &str); 40] = [
+    (
+        "bgp_message_type_name",
+        "[message_type]",
+        "[UTINYINT]",
+        "VARCHAR",
+    ),
+    ("bgp_origin_name", "[origin]", "[UTINYINT]", "VARCHAR"),
+    ("dns_class_name", "[class]", "[USMALLINT]", "VARCHAR"),
+    ("dns_rcode_name", "[rcode]", "[USMALLINT]", "VARCHAR"),
+    ("dns_type_name", "[qtype]", "[USMALLINT]", "VARCHAR"),
+    ("dscp_name", "[dscp]", "[UTINYINT]", "VARCHAR"),
+    ("ecn_name", "[ecn]", "[UTINYINT]", "VARCHAR"),
+    ("ethertype_name", "[ethertype]", "[USMALLINT]", "VARCHAR"),
+    (
+        "gtp_message_type_name",
+        "[message_type]",
+        "[UTINYINT]",
+        "VARCHAR",
+    ),
+    (
+        "has_tcp_flag",
+        "[flags, flag]",
+        "[USMALLINT, VARCHAR]",
+        "BOOLEAN",
+    ),
+    (
+        "icmp_code_name",
+        "[type, code]",
+        "[UTINYINT, UTINYINT]",
+        "VARCHAR",
+    ),
+    ("icmp_type_name", "[type]", "[UTINYINT]", "VARCHAR"),
+    (
+        "icmpv6_code_name",
+        "[type, code]",
+        "[UTINYINT, UTINYINT]",
+        "VARCHAR",
+    ),
+    ("icmpv6_type_name", "[type]", "[UTINYINT]", "VARCHAR"),
+    ("ip4", "[address]", "[VARCHAR]", "UINTEGER"),
+    ("ip4_to_string", "[address]", "[UINTEGER]", "VARCHAR"),
+    ("ip6", "[address]", "[VARCHAR]", "BLOB"),
+    (
+        "ip6_in_cidr",
+        "[address, cidr]",
+        "[BLOB, VARCHAR]",
+        "BOOLEAN",
+    ),
+    ("ip6_to_string", "[address]", "[BLOB]", "VARCHAR"),
+    (
+        "ip_in_cidr",
+        "[address, cidr]",
+        "[UINTEGER, VARCHAR]",
+        "BOOLEAN",
+    ),
+    ("ip_proto_name", "[protocol]", "[UTINYINT]", "VARCHAR"),
+    ("is_link_local_ip6", "[address]", "[BLOB]", "BOOLEAN"),
+    ("is_loopback_ip", "[address]", "[UINTEGER]", "BOOLEAN"),
+    ("is_multicast_ip", "[address]", "[UINTEGER]", "BOOLEAN"),
+    ("is_multicast_ip6", "[address]", "[BLOB]", "BOOLEAN"),
+    ("is_private_ip", "[address]", "[UINTEGER]", "BOOLEAN"),
+    ("mac", "[address]", "[VARCHAR]", "BLOB"),
+    ("mac_is_broadcast", "[address]", "[BLOB]", "BOOLEAN"),
+    ("mac_is_local", "[address]", "[BLOB]", "BOOLEAN"),
+    ("mac_is_multicast", "[address]", "[BLOB]", "BOOLEAN"),
+    ("mac_to_string", "[address]", "[BLOB]", "VARCHAR"),
+    ("ntp_mode_name", "[mode]", "[UTINYINT]", "VARCHAR"),
+    ("ntp_stratum_name", "[stratum]", "[UTINYINT]", "VARCHAR"),
+    ("ospf_lsa_type_name", "[lsa_type]", "[UTINYINT]", "VARCHAR"),
+    (
+        "ospf_packet_type_name",
+        "[packet_type]",
+        "[UTINYINT]",
+        "VARCHAR",
+    ),
+    ("pcap_hex", "[bytes]", "[BLOB]", "VARCHAR"),
+    ("pcap_unhex", "[hex]", "[VARCHAR]", "BLOB"),
+    ("tcp_flags_str", "[flags]", "[USMALLINT]", "VARCHAR"),
+    (
+        "tls_record_type_name",
+        "[record_type]",
+        "[UTINYINT]",
+        "VARCHAR",
+    ),
+    ("tls_version_name", "[version]", "[USMALLINT]", "VARCHAR"),
+];
+
 #[test]
 fn signatures() -> Result<()> {
     let connection = connect()?;
+    let names: Vec<String> = SIGNATURES
+        .iter()
+        .map(|(name, ..)| format!("'{name}'"))
+        .collect();
+    let expected: Vec<Vec<String>> = SIGNATURES
+        .iter()
+        .map(|(name, parameters, types, returns)| row(&[name, parameters, types, returns]))
+        .collect();
     assert_eq!(
         rows(
             &connection,
-            "SELECT function_name, parameters::VARCHAR, parameter_types::VARCHAR, return_type
-             FROM duckdb_functions()
-             WHERE function_type = 'scalar' AND function_name IN (
-                 'ip4', 'ip4_to_string', 'ip6', 'ip6_to_string', 'mac', 'mac_to_string',
-                 'ip_in_cidr', 'ip6_in_cidr', 'tcp_flags_str', 'has_tcp_flag', 'dns_type_name',
-                 'dns_rcode_name', 'ip_proto_name', 'ethertype_name', 'pcap_hex', 'pcap_unhex')
-             ORDER BY function_name",
+            &format!(
+                "SELECT function_name, parameters::VARCHAR, parameter_types::VARCHAR, return_type
+                 FROM duckdb_functions()
+                 WHERE function_type = 'scalar' AND function_name IN ({})
+                 ORDER BY function_name",
+                names.join(", ")
+            ),
         )?,
-        [
-            row(&["dns_rcode_name", "[rcode]", "[USMALLINT]", "VARCHAR"]),
-            row(&["dns_type_name", "[qtype]", "[USMALLINT]", "VARCHAR"]),
-            row(&["ethertype_name", "[ethertype]", "[USMALLINT]", "VARCHAR"]),
-            row(&[
-                "has_tcp_flag",
-                "[flags, flag]",
-                "[USMALLINT, VARCHAR]",
-                "BOOLEAN"
-            ]),
-            row(&["ip4", "[address]", "[VARCHAR]", "UINTEGER"]),
-            row(&["ip4_to_string", "[address]", "[UINTEGER]", "VARCHAR"]),
-            row(&["ip6", "[address]", "[VARCHAR]", "BLOB"]),
-            row(&[
-                "ip6_in_cidr",
-                "[address, cidr]",
-                "[BLOB, VARCHAR]",
-                "BOOLEAN"
-            ]),
-            row(&["ip6_to_string", "[address]", "[BLOB]", "VARCHAR"]),
-            row(&[
-                "ip_in_cidr",
-                "[address, cidr]",
-                "[UINTEGER, VARCHAR]",
-                "BOOLEAN"
-            ]),
-            row(&["ip_proto_name", "[protocol]", "[UTINYINT]", "VARCHAR"]),
-            row(&["mac", "[address]", "[VARCHAR]", "BLOB"]),
-            row(&["mac_to_string", "[address]", "[BLOB]", "VARCHAR"]),
-            row(&["pcap_hex", "[bytes]", "[BLOB]", "VARCHAR"]),
-            row(&["pcap_unhex", "[hex]", "[VARCHAR]", "BLOB"]),
-            row(&["tcp_flags_str", "[flags]", "[USMALLINT]", "VARCHAR"]),
-        ]
+        expected
     );
     Ok(())
 }
@@ -830,6 +898,40 @@ fn constant_vectors() -> Result<()> {
         ("ethertype_name(ethertype)", "IPv4"),
         ("pcap_hex(bytes)", "dead"),
         ("hex(pcap_unhex(hex_text))", "DEAD"),
+        ("dns_class_name(rcode)", "CH"),
+        ("dscp_name(dscp)", "EF"),
+        ("ecn_name(icmp_type)", "CE"),
+        ("icmp_type_name(icmp_type)", "Destination Unreachable"),
+        ("icmpv6_type_name(icmp_type)", "Time Exceeded"),
+        ("icmp_code_name(icmp_type, icmp_code)", "Host Unreachable"),
+        ("icmp_code_name(icmp_type, 3)", "Port Unreachable"),
+        (
+            "icmp_code_name(11, icmp_code)",
+            "Fragment Reassembly Time Exceeded",
+        ),
+        (
+            "icmpv6_code_name(icmp_code, icmp_type)",
+            "Address Unreachable",
+        ),
+        ("bgp_message_type_name(icmp_type)", "NOTIFICATION"),
+        ("bgp_origin_name(icmp_code)", "EGP"),
+        ("ospf_packet_type_name(icmp_type)", "Link State Request"),
+        ("ospf_lsa_type_name(icmp_code)", "Router-LSA"),
+        ("gtp_message_type_name(icmp_code)", "Echo Request"),
+        ("ntp_mode_name(icmp_type)", "Client"),
+        ("ntp_stratum_name(icmp_type)", "Secondary (stratum 3)"),
+        ("ntp_stratum_name(dscp)", "Reserved (46)"),
+        ("tls_record_type_name(proto)", "Unknown (6)"),
+        ("tls_version_name(tls_version)", "TLS 1.2"),
+        ("tls_version_name(qtype)", "Unknown (0x001c)"),
+        ("is_private_ip(ip4_value)", "true"),
+        ("is_loopback_ip(ip4_value)", "false"),
+        ("is_multicast_ip(ip4_value)", "false"),
+        ("is_multicast_ip6(ip6_bytes)", "false"),
+        ("is_link_local_ip6(link_local)", "true"),
+        ("mac_is_broadcast(mac_bytes)", "false"),
+        ("mac_is_multicast(mac_bytes)", "false"),
+        ("mac_is_local(mac_bytes)", "true"),
     ] {
         assert_eq!(
             rows(
@@ -886,12 +988,44 @@ fn constant_vectors() -> Result<()> {
         "ethertype_name(null_u16)",
         "pcap_hex(null_bytes)",
         "pcap_unhex(null_text)",
+        "dns_class_name(null_u16)",
+        "dscp_name(null_u8)",
+        "ecn_name(null_u8)",
+        "icmp_type_name(null_u8)",
+        "icmpv6_type_name(null_u8)",
+        "icmp_code_name(null_u8, icmp_code)",
+        "icmp_code_name(icmp_type, null_u8)",
+        "icmp_code_name(null_u8, (i % 256)::UTINYINT)",
+        "icmp_code_name((i % 256)::UTINYINT, null_u8)",
+        "icmpv6_code_name(null_u8, null_u8)",
+        "bgp_message_type_name(null_u8)",
+        "bgp_origin_name(null_u8)",
+        "ospf_packet_type_name(null_u8)",
+        "ospf_lsa_type_name(null_u8)",
+        "gtp_message_type_name(null_u8)",
+        "ntp_mode_name(null_u8)",
+        "ntp_stratum_name(null_u8)",
+        "tls_record_type_name(null_u8)",
+        "tls_version_name(null_u16)",
+        "is_private_ip(null_u32)",
+        "is_loopback_ip(null_u32)",
+        "is_multicast_ip(null_u32)",
+        "is_multicast_ip6(null_bytes)",
+        "is_link_local_ip6(null_bytes)",
+        "mac_is_broadcast(null_bytes)",
+        "mac_is_multicast(null_bytes)",
+        "mac_is_local(null_bytes)",
         // A constant that is not a pattern, or not an address.
         "ip_in_cidr(i::UINTEGER, mac_text)",
         "ip6_in_cidr(ip6_bytes, cidr4)",
         "ip6_in_cidr(mac_bytes, cidr6)",
         "ip6_to_string(mac_bytes)",
         "mac_to_string(ip6_bytes)",
+        "is_multicast_ip6(mac_bytes)",
+        "is_link_local_ip6(mac_bytes)",
+        "mac_is_broadcast(ip6_bytes)",
+        "mac_is_multicast(ip6_bytes)",
+        "mac_is_local(link_local)",
         "ip6(mac_text)",
         "mac(ip6_text)",
         "pcap_unhex(mac_text)",
@@ -942,6 +1076,29 @@ fn dictionary_vectors() -> Result<()> {
         // Of the 2000 joined rows, half have a network in `cidr`, and every address is below
         // 128.0.0.0.
         [row(&["2000", "2000", "2000", "2000", "2000", "2000", "2000", "1000", "500"])]
+    );
+    // The new functions against themselves over the same value computed from the row number,
+    // which is not behind the selection; `differential.rs` has each against its kernel.
+    assert_eq!(
+        rows(
+            &connection,
+            &format!(
+                "SELECT count(*) FILTER (
+                            dscp_name((flags % 256)::UTINYINT) = dscp_name((i % 256)::UTINYINT)),
+                        count(*) FILTER (
+                            icmp_code_name((flags % 256)::UTINYINT, (flags % 16)::UTINYINT)
+                            = icmp_code_name((i % 256)::UTINYINT, (i % 16)::UTINYINT)),
+                        count(*) FILTER (tls_version_name(flags) = tls_version_name((i % 512)::USMALLINT)),
+                        count(*) FILTER (is_private_ip(ip) = (i BETWEEN 2560 AND 2815)),
+                        count(*) FILTER (is_private_ip(ip)),
+                        count(*) FILTER (mac_is_local(mac_bytes) = ((i >> 40) & 2 = 2)),
+                        count(*) FILTER (is_multicast_ip6(mac_bytes) IS NULL)
+                 {from}"
+            ),
+        )?,
+        // The address of row `i` is `i` twice, in its high and its low half: 10.x.x.x is `i`
+        // from 2560 to 2815, a third of which are joined.
+        [row(&["2000", "2000", "2000", "2000", "86", "2000", "2000"])]
     );
     Ok(())
 }
@@ -1110,6 +1267,45 @@ fn check_flat(connection: &Connection, context: &str) -> Result<()> {
     Ok(())
 }
 
+/// The numbers of rows of the tests of a flat chunk: around a word of the validity mask and
+/// around a chunk.
+const CHUNK_SIZES: [usize; 13] = [0, 1, 2, 63, 64, 65, 127, 128, 129, 2047, 2048, 2049, 4097];
+
+/// The NULLs of the tests of a flat chunk: a name, and the rows that are NULL as an expression
+/// of the row number `i` and the number of rows `n`.
+const NULLS: [(&str, &str); 21] = [
+    ("none", "false"),
+    ("first", "i = 0"),
+    ("last", "i = n - 1"),
+    ("first of each word", "i % 64 = 0"),
+    ("last of each word", "i % 64 = 63"),
+    ("word edges", "i % 64 IN (0, 63)"),
+    ("all but the first of each word", "i % 64 <> 0"),
+    ("all but the last of each word", "i % 64 <> 63"),
+    ("chunk edges", "i IN (2047, 2048)"),
+    ("alternate rows", "i % 2 = 0"),
+    ("alternate words", "i // 64 % 2 = 0"),
+    ("the other alternate words", "i // 64 % 2 = 1"),
+    ("some", "i % 7 = 3"),
+    (
+        "one of each word, and one word in five",
+        "i % 64 = 3 OR i // 64 % 5 = 0",
+    ),
+    (
+        "one of each word but one word in five",
+        "i % 64 = 3 AND i // 64 % 5 <> 0",
+    ),
+    (
+        "one of each word but one word in three",
+        "i % 64 = 3 AND i // 64 % 3 <> 0",
+    ),
+    ("1% at random", "hash(i) % 100 < 1"),
+    ("50% at random", "hash(i) % 100 < 50"),
+    ("99% at random", "hash(i) % 100 < 99"),
+    ("all but one", "i <> n / 2"),
+    ("all", "true"),
+];
+
 /// `ip_in_cidr` and `has_tcp_flag` with a literal pattern read the values of a flat chunk as
 /// slices, of the rows of the 64-row words of the validity mask that have no NULL, and the rows
 /// of the other words a row at a time or not at all; a chunk with NULLs in most of its words,
@@ -1124,40 +1320,8 @@ fn check_flat(connection: &Connection, context: &str) -> Result<()> {
 #[test]
 fn a_constant_pattern_answers_like_the_per_row_path() -> Result<()> {
     let connection = connect()?;
-    let nulls = [
-        ("none", "false"),
-        ("first", "i = 0"),
-        ("last", "i = n - 1"),
-        ("first of each word", "i % 64 = 0"),
-        ("last of each word", "i % 64 = 63"),
-        ("word edges", "i % 64 IN (0, 63)"),
-        ("all but the first of each word", "i % 64 <> 0"),
-        ("all but the last of each word", "i % 64 <> 63"),
-        ("chunk edges", "i IN (2047, 2048)"),
-        ("alternate rows", "i % 2 = 0"),
-        ("alternate words", "i // 64 % 2 = 0"),
-        ("the other alternate words", "i // 64 % 2 = 1"),
-        ("some", "i % 7 = 3"),
-        (
-            "one of each word, and one word in five",
-            "i % 64 = 3 OR i // 64 % 5 = 0",
-        ),
-        (
-            "one of each word but one word in five",
-            "i % 64 = 3 AND i // 64 % 5 <> 0",
-        ),
-        (
-            "one of each word but one word in three",
-            "i % 64 = 3 AND i // 64 % 3 <> 0",
-        ),
-        ("1% at random", "hash(i) % 100 < 1"),
-        ("50% at random", "hash(i) % 100 < 50"),
-        ("99% at random", "hash(i) % 100 < 99"),
-        ("all but one", "i <> n / 2"),
-        ("all", "true"),
-    ];
-    for n in [0, 1, 2, 63, 64, 65, 127, 128, 129, 2047, 2048, 2049, 4097] {
-        for (name, null) in nulls {
+    for n in CHUNK_SIZES {
+        for (name, null) in NULLS {
             create_flat(&connection, n, null)?;
             check_flat(&connection, &format!("{n} rows, NULLs: {name}"))?;
         }
@@ -1219,4 +1383,479 @@ fn a_constant_pattern_answers_around_runs_of_nulls() -> Result<()> {
         [row(&[&n.to_string(), "20100", "20100"])]
     );
     check_flat(&connection, "runs of NULLs")
+}
+
+/// `expected` for each expression, then NULL for a NULL argument of each function named.
+fn check_values(connection: &Connection, values: &[(&str, &str)]) -> Result<()> {
+    for (expression, expected) in values {
+        assert_eq!(eval(connection, expression)?, *expected, "{expression}");
+    }
+    Ok(())
+}
+
+#[test]
+fn names_of_ip_and_icmp_numbers() -> Result<()> {
+    let connection = connect()?;
+    check_values(
+        &connection,
+        &[
+            ("dscp_name(0)", "CS0/BE"),
+            ("dscp_name(8)", "CS1"),
+            ("dscp_name(10)", "AF11"),
+            ("dscp_name(46)", "EF"),
+            ("dscp_name(44)", "VA"),
+            ("dscp_name(1)", "LE"),
+            // A code point without a name.
+            ("dscp_name(63)", "DSCP63"),
+            // Only the low six bits are the code point.
+            ("dscp_name(110)", "EF"),
+            ("dscp_name(255)", "DSCP63"),
+            ("ecn_name(0)", "Not-ECT"),
+            ("ecn_name(1)", "ECT(1)"),
+            ("ecn_name(2)", "ECT(0)"),
+            ("ecn_name(3)", "CE"),
+            // Only the low two bits.
+            ("ecn_name(7)", "CE"),
+            ("ecn_name(252)", "Not-ECT"),
+            ("icmp_type_name(0)", "Echo Reply"),
+            ("icmp_type_name(3)", "Destination Unreachable"),
+            ("icmp_type_name(8)", "Echo Request"),
+            ("icmp_type_name(11)", "Time Exceeded"),
+            ("icmp_type_name(200)", "Type 200"),
+            ("icmpv6_type_name(1)", "Destination Unreachable"),
+            ("icmpv6_type_name(128)", "Echo Request"),
+            ("icmpv6_type_name(135)", "Neighbor Solicitation"),
+            (
+                "icmpv6_type_name(143)",
+                "Version 2 Multicast Listener Report",
+            ),
+            ("icmpv6_type_name(250)", "Type 250"),
+            // The code is named for its type.
+            ("icmp_code_name(3, 3)", "Port Unreachable"),
+            (
+                "icmp_code_name(3, 13)",
+                "Communication Administratively Prohibited",
+            ),
+            ("icmp_code_name(3, 99)", "Destination Unreachable (code 99)"),
+            ("icmp_code_name(11, 0)", "TTL Exceeded in Transit"),
+            ("icmp_code_name(5, 1)", "Redirect for Host"),
+            ("icmp_code_name(8, 0)", "No Code"),
+            ("icmp_code_name(8, 7)", "Code 7"),
+            ("icmp_code_name(40, 2)", "Code 2"),
+            ("icmpv6_code_name(1, 0)", "No Route to Destination"),
+            ("icmpv6_code_name(1, 4)", "Port Unreachable"),
+            (
+                "icmpv6_code_name(1, 77)",
+                "Destination Unreachable (code 77)",
+            ),
+            (
+                "icmpv6_code_name(3, 1)",
+                "Fragment Reassembly Time Exceeded",
+            ),
+            ("icmpv6_code_name(135, 0)", "No Code"),
+            ("icmpv6_code_name(135, 5)", "Code 5"),
+            ("icmpv6_code_name(138, 1)", "Router Renumbering Result"),
+            ("icmpv6_code_name(139, 9)", "NI Query (code 9)"),
+            ("dscp_name(NULL)", "NULL"),
+            ("ecn_name(NULL)", "NULL"),
+            ("icmp_type_name(NULL)", "NULL"),
+            ("icmpv6_type_name(NULL)", "NULL"),
+            // NULL when either argument is.
+            ("icmp_code_name(NULL, 0)", "NULL"),
+            ("icmp_code_name(3, NULL)", "NULL"),
+            ("icmp_code_name(NULL, NULL)", "NULL"),
+            ("icmpv6_code_name(NULL, 0)", "NULL"),
+            ("icmpv6_code_name(1, NULL)", "NULL"),
+            ("typeof(icmp_code_name(3, 3))", "VARCHAR"),
+            ("typeof(ecn_name(0))", "VARCHAR"),
+        ],
+    )?;
+    // The arguments are UTINYINT.
+    for expression in [
+        "dscp_name(256)",
+        "ecn_name(-1)",
+        "icmp_type_name(256)",
+        "icmp_code_name(3, 256)",
+        "icmp_code_name(256, 3)",
+        "icmpv6_code_name(1, -1)",
+    ] {
+        assert!(eval(&connection, expression).is_err(), "{expression}");
+    }
+    assert_eq!(
+        rows(
+            &connection,
+            "SELECT icmp_type_name(t), icmp_code_name(t, c), icmpv6_code_name(t, c), ecn_name(c)
+             FROM (VALUES (3::UTINYINT, 1::UTINYINT), (NULL, 1), (3, NULL), (8, 0), (1, 200),
+                          (NULL, NULL)) v(t, c)",
+        )?,
+        [
+            row(&[
+                "Destination Unreachable",
+                "Host Unreachable",
+                "Fragment Reassembly Time Exceeded",
+                "ECT(1)"
+            ]),
+            row(&["NULL", "NULL", "NULL", "ECT(1)"]),
+            row(&["Destination Unreachable", "NULL", "NULL", "NULL"]),
+            row(&["Echo Request", "No Code", "No Code", "Not-ECT"]),
+            row(&[
+                "Type 1",
+                "Code 200",
+                "Destination Unreachable (code 200)",
+                "Not-ECT"
+            ]),
+            row(&["NULL", "NULL", "NULL", "NULL"]),
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn names_of_application_protocol_numbers() -> Result<()> {
+    let connection = connect()?;
+    check_values(
+        &connection,
+        &[
+            ("dns_class_name(1)", "IN"),
+            ("dns_class_name(3)", "CH"),
+            ("dns_class_name(4)", "HS"),
+            ("dns_class_name(254)", "NONE"),
+            ("dns_class_name(255)", "ANY"),
+            ("dns_class_name(2)", "CLASS2"),
+            ("dns_class_name(65535)", "CLASS65535"),
+            ("bgp_message_type_name(1)", "OPEN"),
+            ("bgp_message_type_name(2)", "UPDATE"),
+            ("bgp_message_type_name(3)", "NOTIFICATION"),
+            ("bgp_message_type_name(4)", "KEEPALIVE"),
+            ("bgp_message_type_name(5)", "ROUTE-REFRESH"),
+            ("bgp_message_type_name(0)", "Unknown (0)"),
+            ("bgp_message_type_name(9)", "Unknown (9)"),
+            ("bgp_origin_name(0)", "IGP"),
+            ("bgp_origin_name(1)", "EGP"),
+            ("bgp_origin_name(2)", "INCOMPLETE"),
+            ("bgp_origin_name(3)", "Unknown (3)"),
+            ("ospf_packet_type_name(1)", "Hello"),
+            ("ospf_packet_type_name(2)", "Database Description"),
+            ("ospf_packet_type_name(3)", "Link State Request"),
+            ("ospf_packet_type_name(4)", "Link State Update"),
+            ("ospf_packet_type_name(5)", "Link State Acknowledgment"),
+            ("ospf_packet_type_name(0)", "Unknown (0)"),
+            ("ospf_packet_type_name(6)", "Unknown (6)"),
+            ("ospf_lsa_type_name(1)", "Router-LSA"),
+            ("ospf_lsa_type_name(2)", "Network-LSA"),
+            ("ospf_lsa_type_name(3)", "Summary-LSA-Network"),
+            ("ospf_lsa_type_name(5)", "AS-External-LSA"),
+            ("ospf_lsa_type_name(7)", "NSSA-External-LSA"),
+            ("ospf_lsa_type_name(11)", "Opaque-AS-LSA"),
+            ("ospf_lsa_type_name(0)", "Unknown (0)"),
+            ("ospf_lsa_type_name(12)", "Unknown (12)"),
+            ("gtp_message_type_name(1)", "Echo Request"),
+            ("gtp_message_type_name(16)", "Create PDP Context Request"),
+            ("gtp_message_type_name(26)", "Error Indication"),
+            ("gtp_message_type_name(100)", "Delete Bearer Response"),
+            ("gtp_message_type_name(255)", "G-PDU"),
+            ("gtp_message_type_name(0)", "Unknown (0)"),
+            ("ntp_mode_name(0)", "Reserved"),
+            ("ntp_mode_name(1)", "Symmetric Active"),
+            ("ntp_mode_name(3)", "Client"),
+            ("ntp_mode_name(4)", "Server"),
+            ("ntp_mode_name(5)", "Broadcast"),
+            ("ntp_mode_name(7)", "Private"),
+            // The mode is three bits of the header; the function takes a byte.
+            ("ntp_mode_name(8)", "Unknown (8)"),
+            ("ntp_stratum_name(0)", "Unspecified"),
+            ("ntp_stratum_name(1)", "Primary Reference"),
+            ("ntp_stratum_name(2)", "Secondary (stratum 2)"),
+            ("ntp_stratum_name(15)", "Secondary (stratum 15)"),
+            ("ntp_stratum_name(16)", "Unsynchronized"),
+            ("ntp_stratum_name(17)", "Reserved (17)"),
+            ("ntp_stratum_name(255)", "Reserved (255)"),
+            ("tls_record_type_name(20)", "ChangeCipherSpec"),
+            ("tls_record_type_name(21)", "Alert"),
+            ("tls_record_type_name(22)", "Handshake"),
+            ("tls_record_type_name(23)", "ApplicationData"),
+            ("tls_record_type_name(24)", "Heartbeat"),
+            ("tls_record_type_name(0)", "Unknown (0)"),
+            ("tls_record_type_name(25)", "Unknown (25)"),
+            ("tls_version_name(768)", "SSL 3.0"),
+            ("tls_version_name(769)", "TLS 1.0"),
+            ("tls_version_name(770)", "TLS 1.1"),
+            ("tls_version_name(771)", "TLS 1.2"),
+            ("tls_version_name(772)", "TLS 1.3"),
+            // A version without a name is the value in hex.
+            ("tls_version_name(0)", "Unknown (0x0000)"),
+            ("tls_version_name(773)", "Unknown (0x0305)"),
+            ("tls_version_name(65535)", "Unknown (0xffff)"),
+            ("dns_class_name(NULL)", "NULL"),
+            ("bgp_message_type_name(NULL)", "NULL"),
+            ("bgp_origin_name(NULL)", "NULL"),
+            ("ospf_packet_type_name(NULL)", "NULL"),
+            ("ospf_lsa_type_name(NULL)", "NULL"),
+            ("gtp_message_type_name(NULL)", "NULL"),
+            ("ntp_mode_name(NULL)", "NULL"),
+            ("ntp_stratum_name(NULL)", "NULL"),
+            ("tls_record_type_name(NULL)", "NULL"),
+            ("tls_version_name(NULL)", "NULL"),
+        ],
+    )?;
+    // The arguments are UTINYINT, and USMALLINT for a DNS class and a TLS version.
+    for expression in [
+        "bgp_message_type_name(256)",
+        "ntp_stratum_name(-1)",
+        "tls_record_type_name(256)",
+        "dns_class_name(65536)",
+        "tls_version_name(65536)",
+    ] {
+        assert!(eval(&connection, expression).is_err(), "{expression}");
+    }
+    // Text made of the number between names, in one chunk: each row gets its own.
+    assert_eq!(
+        column(
+            &connection,
+            "SELECT bgp_message_type_name(x) FROM (VALUES
+                 (200::UTINYINT), (1), (NULL), (7), (2), (201), (NULL), (4)) t(x)",
+        )?,
+        [
+            "Unknown (200)",
+            "OPEN",
+            "NULL",
+            "Unknown (7)",
+            "UPDATE",
+            "Unknown (201)",
+            "NULL",
+            "KEEPALIVE"
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn ip4_addresses_are_classified() -> Result<()> {
+    let connection = connect()?;
+    check_values(
+        &connection,
+        &[
+            ("typeof(is_private_ip(0))", "BOOLEAN"),
+            ("is_private_ip(ip4('10.0.0.0'))", "true"),
+            ("is_private_ip(ip4('10.255.255.255'))", "true"),
+            ("is_private_ip(ip4('9.255.255.255'))", "false"),
+            ("is_private_ip(ip4('11.0.0.0'))", "false"),
+            ("is_private_ip(ip4('172.16.0.0'))", "true"),
+            ("is_private_ip(ip4('172.31.255.255'))", "true"),
+            ("is_private_ip(ip4('172.15.255.255'))", "false"),
+            ("is_private_ip(ip4('172.32.0.0'))", "false"),
+            ("is_private_ip(ip4('192.168.0.0'))", "true"),
+            ("is_private_ip(ip4('192.168.255.255'))", "true"),
+            ("is_private_ip(ip4('192.169.0.0'))", "false"),
+            ("is_private_ip(ip4('8.8.8.8'))", "false"),
+            // RFC 1918 only: not the loopback, link-local or shared address space.
+            ("is_private_ip(ip4('127.0.0.1'))", "false"),
+            ("is_private_ip(ip4('169.254.1.1'))", "false"),
+            ("is_private_ip(ip4('100.64.0.1'))", "false"),
+            ("is_loopback_ip(ip4('127.0.0.0'))", "true"),
+            ("is_loopback_ip(ip4('127.0.0.1'))", "true"),
+            ("is_loopback_ip(ip4('127.255.255.255'))", "true"),
+            ("is_loopback_ip(ip4('126.255.255.255'))", "false"),
+            ("is_loopback_ip(ip4('128.0.0.0'))", "false"),
+            ("is_multicast_ip(ip4('224.0.0.0'))", "true"),
+            ("is_multicast_ip(ip4('224.0.0.251'))", "true"),
+            ("is_multicast_ip(ip4('239.255.255.255'))", "true"),
+            ("is_multicast_ip(ip4('223.255.255.255'))", "false"),
+            ("is_multicast_ip(ip4('240.0.0.0'))", "false"),
+            ("is_multicast_ip(ip4('255.255.255.255'))", "false"),
+            // A literal that fits UINTEGER is an address.
+            ("is_private_ip(167772161)", "true"),
+            ("is_private_ip(NULL)", "NULL"),
+            ("is_loopback_ip(NULL)", "NULL"),
+            ("is_multicast_ip(NULL)", "NULL"),
+            // Text that is not an address is NULL from `ip4`, and stays NULL.
+            ("is_private_ip(ip4('10.0.0'))", "NULL"),
+        ],
+    )?;
+    // The argument is UINTEGER: not text, and not a number that is no address.
+    for expression in [
+        "is_private_ip('10.0.0.1')",
+        "is_private_ip(4294967296)",
+        "is_loopback_ip(-1)",
+        "is_multicast_ip(ip6('ff02::1'))",
+    ] {
+        assert!(eval(&connection, expression).is_err(), "{expression}");
+    }
+    assert_eq!(
+        rows(
+            &connection,
+            "SELECT is_private_ip(ip4(x)), is_loopback_ip(ip4(x)), is_multicast_ip(ip4(x))
+             FROM (VALUES ('192.168.1.1'), (NULL), ('127.0.0.1'), ('224.0.0.1'), ('bogus'),
+                          ('1.1.1.1')) t(x)",
+        )?,
+        [
+            row(&["true", "false", "false"]),
+            row(&["NULL", "NULL", "NULL"]),
+            row(&["false", "true", "false"]),
+            row(&["false", "false", "true"]),
+            row(&["NULL", "NULL", "NULL"]),
+            row(&["false", "false", "false"]),
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn ip6_and_mac_addresses_are_classified() -> Result<()> {
+    let connection = connect()?;
+    check_values(
+        &connection,
+        &[
+            ("typeof(is_multicast_ip6(ip6('::')))", "BOOLEAN"),
+            ("is_multicast_ip6(ip6('ff02::1'))", "true"),
+            ("is_multicast_ip6(ip6('ff00::'))", "true"),
+            ("is_multicast_ip6(ip6('fe80::1'))", "false"),
+            ("is_multicast_ip6(ip6('::ffff:224.0.0.1'))", "false"),
+            ("is_link_local_ip6(ip6('fe80::1'))", "true"),
+            ("is_link_local_ip6(ip6('febf:ffff::1'))", "true"),
+            ("is_link_local_ip6(ip6('fec0::1'))", "false"),
+            ("is_link_local_ip6(ip6('fe7f::1'))", "false"),
+            ("is_link_local_ip6(ip6('::1'))", "false"),
+            ("mac_is_broadcast(mac('ff:ff:ff:ff:ff:ff'))", "true"),
+            ("mac_is_broadcast(mac('ff:ff:ff:ff:ff:fe'))", "false"),
+            ("mac_is_broadcast(mac('00:00:00:00:00:00'))", "false"),
+            ("mac_is_multicast(mac('01:00:5e:00:00:fb'))", "true"),
+            ("mac_is_multicast(mac('33:33:00:00:00:01'))", "true"),
+            // The broadcast address is a group address.
+            ("mac_is_multicast(mac('ff:ff:ff:ff:ff:ff'))", "true"),
+            ("mac_is_multicast(mac('00:11:22:33:44:55'))", "false"),
+            ("mac_is_multicast(mac('02:11:22:33:44:55'))", "false"),
+            ("mac_is_local(mac('02:00:00:00:00:01'))", "true"),
+            ("mac_is_local(mac('fe:ff:ff:ff:ff:ff'))", "true"),
+            ("mac_is_local(mac('00:11:22:33:44:55'))", "false"),
+            ("mac_is_local(mac('01:00:5e:00:00:fb'))", "false"),
+            ("is_multicast_ip6(NULL)", "NULL"),
+            ("is_link_local_ip6(NULL)", "NULL"),
+            ("mac_is_broadcast(NULL)", "NULL"),
+            ("mac_is_multicast(NULL)", "NULL"),
+            ("mac_is_local(NULL)", "NULL"),
+            // A blob that is not 16 bytes is not an IPv6 address, and one that is not 6 is not
+            // a MAC address, whatever its first bytes are.
+            ("is_multicast_ip6('\\xFF'::BLOB)", "NULL"),
+            ("is_multicast_ip6(mac('ff:ff:ff:ff:ff:ff'))", "NULL"),
+            ("is_multicast_ip6(''::BLOB)", "NULL"),
+            ("is_multicast_ip6(from_hex(repeat('ff', 17)))", "NULL"),
+            ("is_link_local_ip6('\\xFE\\x80'::BLOB)", "NULL"),
+            ("is_link_local_ip6(mac('fe:80:00:00:00:01'))", "NULL"),
+            ("mac_is_broadcast(ip6('ffff:ffff:ffff::'))", "NULL"),
+            ("mac_is_broadcast(from_hex(repeat('ff', 5)))", "NULL"),
+            ("mac_is_broadcast(from_hex(repeat('ff', 7)))", "NULL"),
+            ("mac_is_multicast('\\x01'::BLOB)", "NULL"),
+            ("mac_is_multicast(ip6('ff02::1'))", "NULL"),
+            ("mac_is_local('\\x02'::BLOB)", "NULL"),
+            ("mac_is_local(''::BLOB)", "NULL"),
+        ],
+    )?;
+    // The argument is a BLOB: not an IPv4 address.
+    assert!(eval(&connection, "is_multicast_ip6(ip4('224.0.0.1'))").is_err());
+    assert!(eval(&connection, "mac_is_local(2)").is_err());
+    assert_eq!(
+        rows(
+            &connection,
+            "SELECT is_multicast_ip6(x), is_link_local_ip6(x), mac_is_broadcast(x),
+                    mac_is_multicast(x), mac_is_local(x)
+             FROM (VALUES (ip6('ff02::fb')), (NULL), (mac('ff:ff:ff:ff:ff:ff')), (ip6('fe80::1')),
+                          ('\\x03'::BLOB), (mac('03:00:00:00:00:00')), (ip6('2001:db8::1')))
+                  t(x)",
+        )?,
+        [
+            row(&["true", "false", "NULL", "NULL", "NULL"]),
+            row(&["NULL", "NULL", "NULL", "NULL", "NULL"]),
+            row(&["NULL", "NULL", "true", "true", "true"]),
+            row(&["false", "true", "NULL", "NULL", "NULL"]),
+            row(&["NULL", "NULL", "NULL", "NULL", "NULL"]),
+            row(&["NULL", "NULL", "false", "true", "true"]),
+            row(&["false", "false", "NULL", "NULL", "NULL"]),
+        ]
+    );
+    Ok(())
+}
+
+/// What the three tests of an IPv4 address answer for `address`, in SQL.
+const CLASS_SQL: [(&str, &str); 3] = [
+    (
+        "is_private_ip",
+        "(address >> 24) = 10 OR (address >> 20) = 2753 OR (address >> 16) = 49320",
+    ),
+    ("is_loopback_ip", "(address >> 24) = 127"),
+    ("is_multicast_ip", "(address >> 28) = 14"),
+];
+
+/// The tests of an IPv4 address read the values of a flat chunk as `ip_in_cidr` with a literal
+/// pattern does (`a_constant_pattern_answers_like_the_per_row_path`): they answer what the
+/// expression in SQL does, and their NULLs are those of the addresses, for the same sizes of
+/// chunk and the same NULLs, for the rows behind the selection of a hash join, and for a
+/// constant vector.
+#[test]
+fn a_test_of_an_address_answers_like_sql_whatever_the_nulls() -> Result<()> {
+    let connection = connect()?;
+    for n in CHUNK_SIZES {
+        for (name, null) in NULLS {
+            create_flat(&connection, n, null)?;
+            // The 300 values of `ip`, spread over the address space: some of every class.
+            connection.execute(
+                "CREATE OR REPLACE TABLE addresses AS
+                 SELECT i, (ip * 14316557)::UINTEGER AS address FROM flat",
+                Parameters::None,
+            )?;
+            for from in [
+                "FROM addresses",
+                "FROM addresses JOIN (SELECT i FROM range(0, 40000, 3) t(i)) USING (i)",
+            ] {
+                for (function, sql) in CLASS_SQL {
+                    assert_eq!(
+                        rows(
+                            &connection,
+                            &format!(
+                                "SELECT count(*) FILTER ({function}(address) IS DISTINCT FROM ({sql})),
+                                        count({function}(address)) = count(address)
+                                 {from}"
+                            ),
+                        )?,
+                        [row(&["0", "true"])],
+                        "{function}, {n} rows, NULLs: {name}, {from}"
+                    );
+                }
+            }
+        }
+        // One address for every row of the chunk: a constant vector.
+        let all = n.to_string();
+        assert_eq!(
+            rows(
+                &connection,
+                &format!(
+                    "SELECT count(*),
+                            count(*) FILTER (is_private_ip(private)),
+                            count(*) FILTER (NOT is_private_ip(loopback)),
+                            count(*) FILTER (is_loopback_ip(loopback)),
+                            count(*) FILTER (NOT is_multicast_ip(loopback)),
+                            count(is_private_ip(missing)) + count(is_loopback_ip(missing))
+                                + count(is_multicast_ip(missing))
+                     FROM (SELECT ip4('10.1.2.3') AS private, ip4('127.0.0.1') AS loopback,
+                                  NULL::UINTEGER AS missing) one,
+                          range({n}) t(i)"
+                ),
+            )?,
+            [row(&[&all, &all, &all, &all, &all, "0"])],
+            "{n} rows, constant"
+        );
+    }
+    // Every class is among the addresses.
+    create_flat(&connection, 300, "false")?;
+    assert_eq!(
+        rows(
+            &connection,
+            "SELECT count(*) FILTER (is_private_ip(address)) > 0,
+                    count(*) FILTER (is_loopback_ip(address)) > 0,
+                    count(*) FILTER (is_multicast_ip(address)) > 0
+             FROM (SELECT (ip * 14316557)::UINTEGER AS address FROM flat)",
+        )?,
+        [row(&["true", "true", "true"])]
+    );
+    Ok(())
 }

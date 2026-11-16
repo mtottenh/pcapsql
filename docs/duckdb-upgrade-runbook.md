@@ -136,7 +136,7 @@ so that is where the changes are. Expect them, by how exposed each file is:
 | `engine/table/` | Table function callbacks (`mod.rs`), bind arguments and the file system's glob (`args.rs`), batch indices |
 | `engine/writer.rs` | Vector layout: data pointers, validity, string and list storage, chunk capacity |
 | `engine/fs.rs` | The file API |
-| `engine/scalar.rs`, `macros.rs`, `settings.rs`, `replacement.rs`, `listing.rs` | Registration builders |
+| `engine/scalar/`, `macros.rs`, `settings.rs`, `replacement.rs`, `listing.rs` | Registration builders |
 
 Nothing outside `pcapsql-duckdb/` should change. If the shared scan layer
 (`pcapsql_core::scan`) has to change to fit a new DuckDB API, that is a

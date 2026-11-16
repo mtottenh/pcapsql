@@ -47,6 +47,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `read_http_messages` and `read_http2`.
 - DuckDB extension: TLS decryption with a key log (`SSLKEYLOGFILE` format).
   Use the `keylog := 'path'` parameter or the `pcapsql_keylog` setting.
+- DuckDB extension: 24 more scalar functions from the CLI. There are 16
+  protocol name functions, for example `icmp_type_name` and
+  `tls_version_name`. There are 8 address checks, for example
+  `is_private_ip` and `mac_is_broadcast`.
 
 ### Changed
 

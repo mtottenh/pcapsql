@@ -546,16 +546,19 @@ What it offers:
 - Files are opened through DuckDB's file system.
 - Projection pushdown, filter pushdown on `frame_number` and `timestamp`,
   and parallel scans of large uncompressed captures, in capture order.
-- Sixteen scalar functions and six macros for addresses, TCP flags and
-  protocol numbers (`ip4_to_string`, `ip_in_cidr`, `format_mac`, ...).
+- Forty scalar functions and six macros for addresses, TCP flags and
+  protocol numbers (`ip4_to_string`, `ip_in_cidr`, `is_private_ip`,
+  `icmp_type_name`, `format_mac`, ...).
 
 - The stream tables (`read_tcp_connections`, `read_tls_sessions`,
   `read_http_messages`, `read_http2`), and TLS decryption with a key log:
   `read_http2('capture.pcap', keylog := 'keys.log')`, or
   `SET pcapsql_keylog = 'keys.log'`.
 
-What it does not have yet: the SQL functions of the command-line tool beyond
-those sixteen.
+What it does not have yet, of the SQL functions of the command-line tool:
+the capture-relative time functions (`start_time`, `end_time`,
+`relative_time`) and the `hdr_*` histogram functions. For its date and time
+functions (`epoch`, `strftime`, ...) DuckDB has its own.
 
 **Requirements.** DuckDB 2.0.0, on Linux (x86-64, arm64) or macOS (arm64).
 The extension uses DuckDB's C API v2, which is not stable yet, so a build
