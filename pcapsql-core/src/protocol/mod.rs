@@ -259,7 +259,9 @@ impl ParseScope {
 
     /// Restrict the fields extracted for one protocol to `fields`. With no
     /// field, the protocol's layers are parsed for what the layers after
-    /// them need and carry no field.
+    /// them need and carry no field. A protocol whose parser has no field
+    /// list ([`Protocol::field_names`]) has no projected parse: its layers
+    /// carry every field, whatever the projection.
     pub fn with_projection(mut self, protocol: impl Into<String>, fields: HashSet<String>) -> Self {
         self.projections.insert(protocol.into(), fields);
         self.resolved = OnceLock::new();
@@ -274,7 +276,9 @@ impl ParseScope {
     }
 
     /// The field projections, by protocol. A protocol without an entry is
-    /// parsed with all its fields.
+    /// parsed with all its fields, and so is one whose parser has no field
+    /// list, whatever its entry; the scope a scan plan compiles gives those
+    /// no entry.
     pub fn projections(&self) -> &HashMap<String, HashSet<String>> {
         &self.projections
     }

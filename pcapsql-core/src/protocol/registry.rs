@@ -253,7 +253,9 @@ pub trait Protocol: Send + Sync {
     /// The names of the fields [`parse`](Self::parse) can write: the
     /// list whose positions a [`FieldSet`] given to
     /// [`parse_projected`](Self::parse_projected) holds. Empty (the
-    /// default) for a parser without a projected parse.
+    /// default) for a parser without a projected parse. A parser is only
+    /// ever projected with a list: one that overrides `parse_projected`
+    /// must give its `field_names` too, or it runs `parse` in every scope.
     fn field_names(&self) -> &'static [&'static str] {
         &[]
     }

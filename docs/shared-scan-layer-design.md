@@ -780,9 +780,11 @@ it parses the fields that something reads. What reads a layer's fields is
 Nothing else does: the encapsulation columns, the joins and the tunnel
 context come from the layer and the hints, not from fields. Every other
 protocol of the scope is there only to reach the ones that are read (the
-`ethernet` and `ipv4` under a scan of `udp`, and the tunnels that may carry
-it): its projection is empty, and its layers are parsed for their hints,
-their payload and whether they are layers at all.
+`ethernet` and `ipv4` under a scan of `udp`): its projection is empty, and
+its layers are parsed for their hints, their payload and whether they are
+layers at all. A protocol whose parser has no projected parse (the tunnels
+that may carry the table's protocol, the application protocols) gets no
+projection, read or not: its layers carry every field.
 
 A parser with a projected parse declares its field list (`field_list!` in
 `protocol/projection.rs`, `Protocol::field_names`): an enum with a variant

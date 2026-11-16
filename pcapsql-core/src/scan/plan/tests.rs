@@ -81,13 +81,19 @@ fn set(names: &[&str]) -> HashSet<String> {
 
 /// The protocols of `scope` whose fields something reads, each with those
 /// fields (`None`: all of them). Every other protocol the scope parses is
-/// checked to be projected to no field: it is a layer on the way.
+/// checked to be projected to no field: it is a layer on the way. A
+/// protocol whose parser has no projected parse is checked to have no
+/// projection, and is left out.
 fn read_fields(scope: &ParseScope) -> HashMap<String, Option<HashSet<String>>> {
     let registry = default_registry();
     let mut read = HashMap::new();
     for name in scope.required().expect("a scoped parse") {
-        if registry.get_parser(name).is_none() {
+        let Some(parser) = registry.get_parser(name) else {
             continue; // `frames`
+        };
+        if parser.field_names().is_empty() {
+            assert!(!scope.projections().contains_key(name), "{name}");
+            continue;
         }
         match scope.projections().get(name) {
             None => {
@@ -202,8 +208,13 @@ fn scope_is_the_dependency_closure_with_field_projections() {
         read_fields(scope),
         reads(&[("tcp", Some(&["dst_port"])), ("dns", None)])
     );
-    for transit in ["ethernet", "ipv4", "ipv6", "udp", "vlan", "vxlan"] {
+    for transit in ["ethernet", "ipv4", "ipv6", "udp", "vlan"] {
         assert_eq!(scope.projections().get(transit), Some(&HashSet::new()));
+    }
+    // The tunnels on the way have no projected parse: no projection.
+    for tunnel in ["vxlan", "gre", "gtp", "mpls"] {
+        assert!(scope.required().unwrap().contains(tunnel), "{tunnel}");
+        assert_eq!(scope.projections().get(tunnel), None, "{tunnel}");
     }
 }
 
@@ -219,6 +230,27 @@ fn a_scan_without_field_columns_projects_no_fields() {
     assert_eq!(projections.get("udp"), Some(&HashSet::new()));
     assert_eq!(projections.get("tcp"), Some(&HashSet::new()));
     assert!(compiled.outputs()[0].columns.is_empty());
+}
+
+/// A parser without a projected parse extracts every field whatever is
+/// read, so its protocol gets no projection, as a table or on the way:
+/// the scope says what is parsed.
+#[test]
+fn a_protocol_without_a_projected_parse_is_not_projected() {
+    let registry = default_registry();
+    let tls = registry.get_parser("tls").unwrap();
+    assert!(tls.field_names().is_empty());
+    for columns in [&[][..], &["record_type"][..]] {
+        let plan = ScanPlan {
+            tables: vec![scan("tls", columns)],
+            ..ScanPlan::default()
+        };
+        let compiled = compile(&plan).unwrap();
+        let projections = compiled.scope().projections();
+        assert!(!projections.contains_key("tls"), "{columns:?}");
+        assert_eq!(projections.get("tcp"), Some(&HashSet::new()));
+        assert_eq!(read_fields(compiled.scope()), reads(&[]));
+    }
 }
 
 #[test]

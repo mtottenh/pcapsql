@@ -759,6 +759,9 @@ const STREAM_PROTOCOLS: [&str; 3] = ["tcp", "ipv4", "ipv6"];
 /// pass, stream analysis (all of `tcp`, `ipv4` and `ipv6`). A protocol that
 /// none of them reads is in the scope only to reach the protocols that
 /// are: its layers are parsed for their hints and payload, with no field.
+/// A protocol whose parser has no projected parse (no field list) gets no
+/// projection: its layers carry every field whatever reads them, and the
+/// scope says so.
 fn parse_scope(
     catalog: &Catalog,
     registry: &ProtocolRegistry,
@@ -771,9 +774,13 @@ fn parse_scope(
     }
     let mut scope = ParseScope::for_tables(&names, registry);
     let parsed = scope.required().cloned().unwrap_or_default();
-    for name in registry.all_parsers().map(|parser| parser.name()) {
+    for parser in registry.all_parsers() {
+        let name = parser.name();
         if !parsed.contains(name) {
             continue;
+        }
+        if parser.field_names().is_empty() {
+            continue; // no projected parse: its layers carry every field
         }
         if streams && STREAM_PROTOCOLS.contains(&name) {
             continue; // stream analysis needs these layers' full fields

@@ -150,7 +150,11 @@ fn a_view_is_one_fused_output_that_parses_what_its_columns_need() {
     let plan = compiled("tls_packets", &[usize::MAX]);
     assert!(plan.outputs()[0].columns.is_empty());
     let protocols = parsed_protocols(&plan);
-    assert!(protocols.contains("tls (no fields)"), "{protocols}");
+    // `tls` has no projected parse: its layers carry every field.
+    assert!(
+        protocols.split(", ").any(|protocol| protocol == "tls"),
+        "{protocols}"
+    );
     assert!(protocols.contains("tcp (no fields)"), "{protocols}");
 }
 
