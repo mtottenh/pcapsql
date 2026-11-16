@@ -333,9 +333,10 @@ fn work_is_spread_across_files_and_within_them() -> Result<()> {
     let rows_of = |capture: &[u8]| reference_rows(capture, "udp").1.len();
     let expected = 2 * rows_of(&small) + 2 * rows_of(&large);
 
-    // Split wherever a file is 1000 frames or more. The plain large file is most of the scan's
-    // bytes and is split for three of the four threads; the small ones are not a thread's
-    // worth, so nobody looks for a place to split them at, and the compressed one has none.
+    // Split wherever a file is 1000 frames or more. The compressed file cannot be split and
+    // takes no share of the threads; the plain large file is nearly all of the bytes of the
+    // others and is split for all four threads. The small ones are not a thread's worth, so
+    // nobody looks for a place to split them at.
     partitioned(&connection, 4, 1000);
     logged(&connection, "DEBUG");
     assert_eq!(
@@ -363,7 +364,7 @@ fn work_is_spread_across_files_and_within_them() -> Result<()> {
             ),
             (
                 "large.pcap",
-                "3 (of 4000 frames, cut at checkpoints 1000 frames apart)"
+                "4 (of 4000 frames, cut at checkpoints 1000 frames apart)"
             ),
             ("large.pcap.gz", "1 (a compressed capture cannot be split)"),
             (
@@ -372,7 +373,7 @@ fn work_is_spread_across_files_and_within_them() -> Result<()> {
             ),
         ]
     );
-    // Each of the six partitions was scanned to its end once, and the record says of which
+    // Each of the seven partitions was scanned to its end once, and the record says of which
     // file it is.
     let mut finished: Vec<(usize, String)> = records
         .iter()
@@ -381,7 +382,7 @@ fn work_is_spread_across_files_and_within_them() -> Result<()> {
             let mut words = rest.split(' ');
             let partition = words.next().unwrap().parse().unwrap();
             assert_eq!(words.next(), Some("of"));
-            assert_eq!(words.next(), Some("6"), "{rest}");
+            assert_eq!(words.next(), Some("7"), "{rest}");
             let file = rest.split('\'').nth(1).unwrap().rsplit_once('/').unwrap().1;
             (partition, file.to_owned())
         })
@@ -390,7 +391,7 @@ fn work_is_spread_across_files_and_within_them() -> Result<()> {
     let files: Vec<&str> = finished.iter().map(|(_, file)| file.as_str()).collect();
     assert_eq!(
         finished.iter().map(|(p, _)| *p).collect::<Vec<_>>(),
-        [1, 2, 3, 4, 5, 6]
+        [1, 2, 3, 4, 5, 6, 7]
     );
     assert_eq!(
         files,
@@ -399,11 +400,12 @@ fn work_is_spread_across_files_and_within_them() -> Result<()> {
             "large.pcap",
             "large.pcap",
             "large.pcap",
+            "large.pcap",
             "large.pcap.gz",
             "small.pcap"
         ]
     );
-    assert_eq!(records.len(), 4 + 6, "{records:#?}");
+    assert_eq!(records.len(), 4 + 7, "{records:#?}");
 
     // Files that are a thread's worth each are the partitions: none is split, so none is
     // read once for its record boundaries before the scan. With fewer files than threads

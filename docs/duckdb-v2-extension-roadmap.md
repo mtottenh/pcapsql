@@ -276,8 +276,9 @@ As built (P4, and section 8.2): there is no index cache and no
 `pcapsql_index_cache_dir`, so the index of a capture that is split is built
 by a pass over it at the start of every scan. Because that pass is on one
 thread, a file of several is split only for its share of the threads (its
-share of the bytes, rounded: files of one size on as many threads are not
-split), and with an upper bound on `frame_number` the pass ends at the bound.
+share of the bytes of the files that can be split, rounded: files of one size
+on as many threads are not split, and a compressed or remote file takes no
+share), and with an upper bound on `frame_number` the pass ends at the bound.
 
 ### 6.5 Filter pushdown
 

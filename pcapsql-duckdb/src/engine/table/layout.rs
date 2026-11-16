@@ -51,9 +51,17 @@ impl Layout {
     }
 }
 
+/// Whether a file can be split at all: it is read through the local file system, and it is
+/// not compressed. A file that cannot is one partition, whatever its size, and its bytes are
+/// not part of the `scan_bytes` the others share the threads by ([`thread_share`]).
+pub(super) fn can_split(remote: bool, header: &StreamHeader) -> bool {
+    !remote && !header.compression.is_compressed()
+}
+
 /// How many of a scan's `threads` one file of `size` bytes is split for, when the files of
-/// the scan have `scan_bytes` together: its share by size, rounded. A file that is the whole
-/// scan gets them all; four files of one size on four threads get one each, and are not split.
+/// the scan that can be split ([`can_split`]) have `scan_bytes` together: its share by size,
+/// rounded. A file that is the only one that can be split gets them all; four files of one
+/// size on four threads get one each, and are not split.
 pub(super) fn thread_share(threads: usize, size: u64, scan_bytes: u64) -> usize {
     if scan_bytes <= size {
         return threads;
@@ -66,7 +74,8 @@ pub(super) fn thread_share(threads: usize, size: u64, scan_bytes: u64) -> usize 
 impl PcapScan {
     /// Decide the partitions of one file of a scan (see the module documentation).
     ///
-    /// `scan_bytes` is the size of all files of the scan together, as `bind` found them.
+    /// `scan_bytes` is the size of the files of the scan that can be split ([`can_split`])
+    /// together, as `bind` found them.
     pub(super) fn layout(
         &self,
         context: &Context,
@@ -100,7 +109,7 @@ impl PcapScan {
         // again.
         let mut file = DuckFile::open(context, path)?;
         let header = self.probe(&mut file, path)?;
-        if header.compression.is_compressed() {
+        if !can_split(false, &header) {
             return Ok(Layout::sequential("a compressed capture cannot be split"));
         }
         let size = file.size()?;

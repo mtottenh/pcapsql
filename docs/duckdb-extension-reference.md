@@ -697,9 +697,10 @@ a protocol repays it two to three times over on four threads; a query that
 needs little of the capture does not:
 
 - A capture is split for its share of DuckDB's threads: its share of the
-  bytes of all files of the call, rounded. Four captures of one size on four
-  threads are read one per thread and none is split; a large capture beside
-  small ones is split for nearly all the threads.
+  bytes of the files of the call that can be split, rounded (a compressed or
+  remote file is read on one thread and takes no share). Four captures of one
+  size on four threads are read one per thread and none is split; a large
+  capture beside small ones is split for nearly all the threads.
 - With an upper bound on `frame_number` in the `WHERE` clause the pass ends
   at the last frame the bound admits (unless `strict := true`, which looks at
   the end of the capture).

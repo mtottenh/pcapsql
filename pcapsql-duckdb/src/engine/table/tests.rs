@@ -3,7 +3,7 @@ use pcapsql_core::scan::FramePredicate;
 
 use super::args::DEFAULT_PROTOCOL;
 use super::function::has_wildcard;
-use super::layout::thread_share;
+use super::layout::{can_split, thread_share};
 use super::report::parsed_protocols;
 use super::*;
 
@@ -12,6 +12,7 @@ fn bound(relation: &str) -> BindData {
     BindData {
         files: Box::new(["x.pcap".to_owned()]),
         total_size: 0,
+        split_size: 0,
         relation,
         columns: relation.columns().len(),
         filename: None,
@@ -406,4 +407,19 @@ fn a_file_is_split_for_its_share_of_the_threads() {
         usize::MAX - 1
     );
     assert_eq!(thread_share(1, GB, 4 * GB), 0);
+}
+
+/// Only a local, uncompressed file can be split, and only such files share the threads.
+#[test]
+fn only_local_uncompressed_files_can_be_split() {
+    let header = |compression| StreamHeader {
+        compression,
+        format: pcapsql_core::io::PcapFormat::LegacyLeMicro,
+        link_type: 1,
+        snaplen: 65535,
+        header_len: 24,
+    };
+    assert!(can_split(false, &header(Compression::None)));
+    assert!(!can_split(false, &header(Compression::Gzip)));
+    assert!(!can_split(true, &header(Compression::None)));
 }

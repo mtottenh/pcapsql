@@ -93,8 +93,10 @@
 //! (roadmap, section 8.2), so it is avoided where it buys nothing:
 //!
 //! - A file is split for its share of DuckDB's threads: its share of the bytes of the scan's
-//!   files, rounded. Four captures of one size on four threads are four partitions and no
-//!   pass; one large capture among small ones is split for nearly all threads.
+//!   files that can be split, rounded. Four captures of one size on four threads are four
+//!   partitions and no pass; one large capture among small ones is split for nearly all
+//!   threads. A compressed or remote file is one partition whatever its size and takes no
+//!   share, so a capture beside a large `.gz` is split for all of them.
 //! - With an upper bound on `frame_number` (below) the pass ends at the last frame the bound
 //!   admits, unless the scan is `strict` (which looks at the capture's end). The index is then
 //!   that of the capture's beginning, which `plan_ranges` and the scan treat as the index of a
@@ -258,10 +260,10 @@ use pcapsql_core::{default_registry, ProtocolRegistry};
 
 use self::function::CaptureFunction;
 use self::keylog::Keys;
-use self::layout::{estimated_rows, Layout};
+use self::layout::{can_split, estimated_rows, Layout};
 use self::reader::Scanning;
 use super::{
-    fs::DuckFile,
+    fs::{self, DuckFile},
     guard,
     pushdown::Pushed,
     relation::{self, FrameColumn, Relation},
@@ -345,6 +347,10 @@ struct BindData {
     files: Box<[String]>,
     /// The sum of the sizes of the files at bind.
     total_size: u64,
+    /// The sum of the sizes at bind of the files that can be split (`layout::can_split`): what
+    /// they share DuckDB's threads by. A compressed or remote file is one partition and takes
+    /// no share.
+    split_size: u64,
     /// The table or view the call reads.
     relation: Relation,
     /// The number of columns of `relation` declared to DuckDB, in the order of
@@ -471,12 +477,15 @@ impl TableFunctionCallbacks for PcapScan {
         // Open and probe every file now, so that one that is missing, out of bounds for the
         // session or not a capture fails the statement at bind, with its path in the message.
         let mut files = Vec::new();
-        let (mut total_size, mut rows) = (0_u64, 0_usize);
+        let (mut total_size, mut split_size, mut rows) = (0_u64, 0_u64, 0_usize);
         for path in self.files(context, &entries)? {
             let mut file = DuckFile::open(context, &path)?;
             let size = file.size()?;
             let header = self.probe(&mut file, &path)?;
             total_size = total_size.saturating_add(size);
+            if can_split(fs::is_remote(context, &path)?, &header) {
+                split_size = split_size.saturating_add(size);
+            }
             rows = rows.saturating_add(estimated_rows(size, &header));
             files.push(path);
         }
@@ -490,6 +499,7 @@ impl TableFunctionCallbacks for PcapScan {
         Ok(BindData {
             files: files.into(),
             total_size,
+            split_size,
             relation,
             columns,
             filename,
@@ -531,7 +541,7 @@ impl TableFunctionCallbacks for PcapScan {
                     context,
                     &settings,
                     path,
-                    bound.total_size,
+                    bound.split_size,
                     bound.strict,
                     &frames,
                 )?
