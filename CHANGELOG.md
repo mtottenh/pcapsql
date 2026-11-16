@@ -51,6 +51,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   protocol name functions, for example `icmp_type_name` and
   `tls_version_name`. There are 8 address checks, for example
   `is_private_ip` and `mac_is_broadcast`.
+- DuckDB extension: `COPY (query) TO 'out.pcap' (FORMAT pcap)` writes the
+  rows of a query as a pcap file. The query needs the columns `raw_data`
+  and `timestamp`. The options are `LINKTYPE`, `SNAPLEN` and `PRECISION`.
+- `pcapsql-core`: `io::PcapWriter` writes classic pcap files.
 
 ### Changed
 

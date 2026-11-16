@@ -19,6 +19,10 @@
 //!
 //! A host that opens the bytes itself (another engine's file system, a
 //! buffer) skips the source traits and builds a [`ReadPacketReader`] directly.
+//!
+//! ## Writing
+//!
+//! [`PcapWriter`] writes a classic pcap file to any [`Write`](std::io::Write).
 
 #[cfg(feature = "cloud")]
 mod cloud;
@@ -27,6 +31,7 @@ mod index;
 #[cfg(feature = "mmap")]
 mod mmap;
 mod pcap_stream;
+mod pcap_write;
 mod probe;
 mod read_source;
 mod source;
@@ -43,6 +48,10 @@ pub use index::{
 pub use mmap::{MmapPacketReader, MmapPacketSource};
 pub use pcap_stream::{
     Delivered, GenericPcapReader, InterfaceInfo, InterfaceState, Pause, PcapFormat,
+};
+pub use pcap_write::{
+    link_type_from_name, PcapWriteError, PcapWriteOptions, PcapWriter, TimestampPrecision,
+    DEFAULT_SNAPLEN,
 };
 pub use probe::StreamHeader;
 pub use read_source::ReadPacketReader;

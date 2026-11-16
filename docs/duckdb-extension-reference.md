@@ -1,13 +1,16 @@
 # pcapsql DuckDB extension: function reference
 
 Everything the `pcapsql` extension registers in DuckDB: table functions and
-their parameters, scalar functions, macros, settings, and the replacement scan.
+their parameters, scalar functions, macros, settings, the replacement scan,
+and the copy format.
 
 This page describes the extension as built from this tree, for DuckDB 2.0.0.
 `make check_reference_release` in `pcapsql-duckdb/` compares it with what the
 built artifact registers in the DuckDB shell and fails when a function, a
 parameter or a setting is missing here, or is named here and not registered
-(`pcapsql-duckdb/scripts/check-reference.sh`).
+(`pcapsql-duckdb/scripts/check-reference.sh`). DuckDB lists no copy
+functions, so the check asks the copy format itself: the format and each of
+its options must be named here.
 
 How the extension behaves beyond its signatures (file handling, filter
 pushdown, parallel scans, truncated captures, stream tables and TLS key logs)
@@ -24,6 +27,7 @@ is described in
 | Macros | 6 | `format_ip4`, `format_ip6`, `format_mac`, `format_ip4_list`, `format_ip6_list`, `format_mac_list` |
 | Settings | 5 | `pcapsql_parallel_scan`, `pcapsql_parallel_min_file_size`, `pcapsql_index_stride`, `pcapsql_filter_pushdown`, `pcapsql_keylog` |
 | Replacement scan | 1 | `FROM 'capture.pcap'` |
+| Copy format | 1 | `FORMAT pcap`, for `COPY ... TO`, with the options `LINKTYPE`, `SNAPLEN` and `PRECISION` |
 
 ## Scan table functions
 
@@ -441,6 +445,123 @@ SELECT * FROM 'captures/*.pcapng.gz' WHERE length > 1400;
 
 A table, view or common table expression of that name takes precedence. Any
 other table, `strict`, `filename` and `keylog` need the function.
+
+## Copy format: `COPY ... TO 'x.pcap' (FORMAT pcap)`
+
+Writes the rows of a query as a classic libpcap file: a row is a packet.
+
+```sql
+COPY (SELECT * FROM read_frames('in.pcapng') WHERE length > 1000 ORDER BY frame_number)
+  TO 'out.pcap' (FORMAT pcap);
+COPY (SELECT f.* FROM read_frames('in.pcap') f JOIN read_dns('in.pcap') d USING (frame_number)
+      ORDER BY frame_number)
+  TO 'dns.pcap' (FORMAT pcap, PRECISION 'us', SNAPLEN 65535);
+```
+
+Read back with `read_frames`, the file has the `timestamp`, `length`,
+`original_length`, `link_type` and `raw_data` of the rows, in their order.
+Only `COPY ... TO` exists: a capture is read with the table functions.
+
+### Columns
+
+The columns of a packet are found by name, in any letter case, not by
+position. They are those of the `frames` table, so `SELECT *` of
+`read_frames` is a valid input:
+
+| Column | Type | | |
+|---|---|---|---|
+| `raw_data` | `BLOB` | required | The bytes of the packet |
+| `timestamp` | `TIMESTAMP_NS`, `TIMESTAMP`, `TIMESTAMP_MS`, `TIMESTAMP_S` or `TIMESTAMPTZ` | required | When it was captured. A value is an instant in UTC |
+| `original_length` | an integer of at most 64 bits | optional | The length on the wire. NULL or no such column: the length of `raw_data` |
+| `link_type` | an integer of at most 64 bits | optional | The link-layer type. NULL or no such column: that of the file |
+
+Every other column is ignored, `frame_number` and `length` among them: the
+captured length of a record is the length of its `raw_data`. A query without
+a required column, or with one of these columns in another type, is refused
+when the statement is bound, with a message that says what is needed; nothing
+is read or written.
+
+A row that is not a packet fails the statement, and the message names the row
+by its position in the output, counted from 1: NULL in `raw_data` or
+`timestamp`, a `timestamp` before 1970-01-01 or after 2106-02-07 06:28:15 UTC
+(a pcap record counts seconds in 32 unsigned bits), an `original_length` that
+is negative or above 4294967295, a `link_type` that is not between 0 and 65535.
+An `original_length` below the length of `raw_data` is written as it is.
+
+### Options
+
+| Option | Default | Meaning |
+|---|---|---|
+| `LINKTYPE` | the `link_type` of the first row; Ethernet (1) when it has none, or when there is no row | The link-layer type in the header of the file: a number (`LINKTYPE 113`) or one of the names `NULL`, `ETHERNET` (also `EN10MB`), `PPP`, `PPP_ETHER`, `RAW`, `C_HDLC`, `IEEE802_11`, `LOOP`, `LINUX_SLL`, `PFLOG`, `IEEE802_11_RADIOTAP`, `BLUETOOTH_HCI_H4`, `USB_LINUX`, `CAN_SOCKETCAN`, `IPV4`, `IPV6`, `NFLOG`, `USBPCAP`, `NETLINK`, `LINUX_SLL2`, in any letter case, with or without `LINKTYPE_` in front. Any other type by its number |
+| `SNAPLEN` | `262144` | The snapshot length in the header, from 1 to 4294967295. A packet longer than this is cut to it; its record keeps the original length |
+| `PRECISION` | the unit of the `timestamp` column: `'ns'` for `TIMESTAMP_NS`, `'us'` for the other types | The unit of the timestamps in the file: `'ns'` (magic number `0xa1b23c4d`) or `'us'` (`0xa1b2c3d4`). `'us'` for a `TIMESTAMP_NS` column drops what a timestamp has below the microsecond; it is the only way a timestamp loses precision |
+
+Any other option that is not DuckDB's own is refused.
+
+A pcap file has one link type. A row whose `link_type` is not that of the
+file fails the statement: select the rows of one link type, or write a file
+per link type with DuckDB's `PARTITION_BY`:
+
+```sql
+COPY (SELECT * FROM read_frames('mixed.pcapng'))
+  TO 'by_link_type' (FORMAT pcap, PARTITION_BY (link_type), WRITE_PARTITION_COLUMNS);
+-- by_link_type/link_type=1/data_0.pcap, by_link_type/link_type=113/data_0.pcap
+```
+
+`WRITE_PARTITION_COLUMNS` is needed: without it DuckDB takes the column away
+before the format sees it, and every file says Ethernet. DuckDB 2.0.0 logs a
+deprecation warning about identifiers for `PARTITION_BY` with a format of an
+extension, however the column is written; the statement works.
+
+### The file
+
+- Classic pcap, version 2.4, little-endian, time zone offset and accuracy 0,
+  one link type. pcapng is not written.
+- Since `read_frames` returns `TIMESTAMP_NS`, a copy of its rows is a
+  nanosecond pcap file unless `PRECISION 'us'` is given.
+- The copy of a little-endian microsecond pcap file, whole and in order, with
+  `PRECISION 'us'` and the `SNAPLEN` of its header, is that file byte for
+  byte, provided the file is well-formed (a record whose microseconds field
+  is a million or more is written with the seconds carried). A big-endian or
+  pcapng input is not: the copy is little-endian classic pcap.
+- A result without rows is a valid capture without packets: the 24 bytes of
+  the header. `WRITE_EMPTY_FILE false` writes no file.
+- The file is not compressed, and a file name that says it is (`.gz`, `.zst`,
+  `.zstd`, `.bz2`, `.xz`, `.lz4`) is refused. DuckDB chooses this format by
+  itself for a file named `x.pcap`, so `COPY ... TO 'x.pcap'` needs no
+  `FORMAT`. A name ending in `.pcapng` or `.cap` does not select it: DuckDB
+  writes CSV there unless the statement says `FORMAT pcap`.
+- The file is written through DuckDB's file system, in buffers of 1 MiB (4 MiB
+  for a remote path), so it can be anywhere DuckDB can write. No remote path
+  has been written in a test.
+- `RETURN_STATS` reports the rows and the size of each file.
+  `PER_THREAD_OUTPUT` and `PARTITION_BY` write several files, each a capture
+  of its own. DuckDB 2.0.0 refuses `FILE_SIZE_BYTES` for a format of an
+  extension.
+
+### Order
+
+The file has the rows in the order the query produces them. With `ORDER BY`
+that is the order asked for, on any number of threads. Without one SQL
+promises no order. What DuckDB 2.0.0 does: it runs the copy function of an
+extension on one thread and hands it the chunks of the query as they come,
+and a scan that feeds a copy directly then runs on one thread too, so
+`COPY (SELECT * FROM read_frames('x.pcap') WHERE ...) TO ...` writes the
+frames in capture order. A join or an aggregation between the scan and the
+copy has no such order. Say `ORDER BY frame_number` (or `timestamp`) when the
+order matters: it costs a sort and does not depend on the plan. With
+`PER_THREAD_OUTPUT` or `PARTITION_BY` the order within a file is DuckDB's.
+
+### Failure
+
+The statement fails on the first error and writes no more. DuckDB removes a
+file the statement created; an existing local file is replaced only when the
+statement succeeds, because DuckDB writes a temporary file beside it
+(`tmp_<name>`) and moves it into place at the end. With `USE_TMP_FILE false`
+an existing file is written over in place, and a failed statement leaves it
+holding the packets written until then. DuckDB uses no temporary file on a
+remote file system either; what a failed statement leaves there has not been
+tried.
 
 ## DuckDB facilities the extension uses
 

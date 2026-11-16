@@ -536,6 +536,56 @@ per partition, with the worker that scanned it, its file, the number of
 packets it read and, under a filter, how many of them the filter rejected
 unparsed.
 
+**Writing a capture.** `COPY ... TO 'x.pcap' (FORMAT pcap)` writes the rows
+of a query as a classic pcap file, a packet per row. The columns it takes
+are those of `frames`, found by name, so the natural query is over
+`read_frames`, filtered or joined with a protocol table:
+
+```sql
+-- The DNS traffic of a capture, as a capture
+COPY (SELECT f.* FROM read_frames('in.pcapng') f
+      WHERE frame_number IN (SELECT frame_number FROM read_dns('in.pcapng'))
+      ORDER BY frame_number)
+  TO 'dns.pcap' (FORMAT pcap);
+
+-- An hour of several captures, in time order
+COPY (SELECT * FROM read_frames('day/*.pcap.gz')
+      WHERE timestamp >= TIMESTAMP '2024-03-01 12:00:00' AND timestamp < TIMESTAMP '2024-03-01 13:00:00'
+      ORDER BY timestamp)
+  TO 'noon.pcap' (FORMAT pcap);
+```
+
+`raw_data` (`BLOB`) and `timestamp` are required; `original_length` and
+`link_type` are used when the query has them; every other column is ignored.
+The options are `LINKTYPE` (a number or a name such as `LINUX_SLL`; the
+default is the link type of the first row, or Ethernet), `SNAPLEN` (default
+262144; a longer packet is cut and keeps its original length) and
+`PRECISION` (`'ns'` or `'us'`). The reference has the details; in short:
+
+- The file is little-endian classic pcap. Its timestamps are in the unit of
+  the `timestamp` column unless `PRECISION` says otherwise, so a copy of
+  `read_frames`, whose timestamps are `TIMESTAMP_NS`, is a nanosecond pcap
+  file and loses nothing. `PRECISION 'us'` writes the microsecond format and
+  drops what is below a microsecond.
+- With `PRECISION 'us'` and the `SNAPLEN` of the input's header, the copy of
+  a whole little-endian microsecond pcap file is that file, byte for byte.
+- A pcap file has one link type. A row with another one fails the statement
+  with a message that names the row; `PARTITION_BY (link_type)` with
+  `WRITE_PARTITION_COLUMNS` writes a file per link type.
+- NULL in `raw_data` or `timestamp`, and a timestamp outside 1970 to 2106,
+  fail the statement and name the row. A result without rows is a capture
+  without packets.
+- The rows are written in the order the query produces them: say `ORDER BY`.
+  Without one DuckDB 2.0.0 happens to feed a copy from one thread, so a scan
+  and a filter keep capture order, but that is the plan's doing, not a
+  promise.
+- A statement that fails leaves no file behind, and leaves an existing file
+  as it was (DuckDB writes to a temporary file first, unless
+  `USE_TMP_FILE false`).
+- Not there: pcapng output, compressed output (a name ending in `.gz` or
+  `.zst` is refused, not written uncompressed), and `COPY ... FROM`, which
+  the table functions cover.
+
 ## What is registered
 
 [`docs/duckdb-extension-reference.md`](../docs/duckdb-extension-reference.md)
@@ -561,6 +611,10 @@ order.
 
 A replacement scan, which answers a table name that is a capture path
 (`FROM 'x.pcap'`, see "Usage") with `read_pcap` of it.
+
+A copy format, `pcap`, for `COPY ... TO` (see "Writing a capture"). The
+DataFusion engine has no counterpart; the file is written by
+`pcapsql_core::io::PcapWriter`.
 
 Five settings: `pcapsql_parallel_scan`, `pcapsql_parallel_min_file_size` and
 `pcapsql_index_stride`, described under "Parallel scans" above,
@@ -686,7 +740,8 @@ the DuckDB side of it.
 | `settings.rs` | The four settings, and what a scan reads of DuckDB's (`threads`) |
 | `types.rs` | The DuckDB logical type of each column kind of the catalogue (the table above), and the name DuckDB prints for it |
 | `writer.rs` | `ChunkWriter`: stores the rows the shared scan layer produces (`pcapsql_core::scan::RowSink`) in the output chunk of one `exec` call |
-| `fs.rs` | `DuckFile`: a buffered `std::io::Read` over a file opened through DuckDB's file system, for core's `ReadPacketReader` |
+| `fs.rs` | `DuckFile`: a buffered `std::io::Read` over a file opened through DuckDB's file system, for core's `ReadPacketReader`. `DuckSink`: the `std::io::Write` of a file created through it, for core's `PcapWriter` |
+| `copy.rs` | The copy format `pcap` (`COPY ... TO`): which columns of a query are a packet, the options, and the rows of each batch given to core's `PcapWriter` |
 
 `ChunkWriter` writes each value straight into the DuckDB vector of its column:
 fixed-width values through the vector's data pointer, strings and blobs inline
@@ -723,9 +778,46 @@ one, never more than the file holds. `DuckFile::open` starts at the first
 byte, `DuckFile::open_at` at a byte offset (a partition of a capture), and
 `seek` moves within an open file. An open that DuckDB does not allow
 (`enable_external_access = false`, a path outside `allowed_directories`)
-fails with DuckDB's error.
+fails with DuckDB's error. `DuckSink` is the `std::io::Write` of a file the
+extension writes; `DuckSink::create` opens it behind a buffer of the same
+sizes.
+
+`copy.rs` has the DuckDB side of `COPY ... TO (FORMAT pcap)` and no knowledge
+of the file format, which is `pcapsql_core::io::PcapWriter`'s (a writer to
+any `std::io::Write`, with its own tests in core). `bind` finds the columns
+of a packet among those of the query and reads the options; `init` opens the
+output; `flush` scans the batch DuckDB hands it and gives each row to the
+writer; `finalize` closes the file. The file header is written with the
+first row, which may say the link type, or by `finalize` for a result
+without rows. Nothing is prepared in the `batch` callback: DuckDB 2.0.0 runs
+a copy function of the C API as a sink that is not parallel
+(`PhysicalCopyToFile`, `parallel = false`: the C API sets no execution
+mode), so one thread hands it the chunks of the query in their order, a
+batch per chunk, and there is nothing to run ahead. The state of an output
+file is behind a `Mutex` because DuckDB wants it `Sync`; with
+`PER_THREAD_OUTPUT` and `PARTITION_BY` several files are written at once,
+each with its own state, and DuckDB never flushes two batches of one file
+at the same time.
 
 Tests, in `itest/`:
+
+- `tests/copy_pcap.rs` copies the frames of every capture of the fuzzing
+  corpus (classic pcap of both byte orders, pcapng; Ethernet, Linux cooked,
+  NFLOG, netlink) and of generated ones (gzip, zstd, pcapng, nanosecond
+  timestamps) and compares what `read_frames` returns for the copy with what
+  it returns for the input; with the unit and the snapshot length of the
+  input, the copy of each little-endian microsecond capture of the corpus is
+  the input byte for byte. It also covers filtered and joined queries, an
+  empty result, every timestamp type and both units, columns in another
+  order, case and integer type, NULL in each column, the link type of the
+  file and a row with another, the snapshot length, the errors of bind and
+  of a row (and that a failed statement leaves no file and does not touch an
+  existing one), a capture of 60,000 frames scanned in partitions on four
+  threads and copied in three orders, `RETURN_STATS`, `PER_THREAD_OUTPUT`
+  and `PARTITION_BY`.
+- `tests/guard_copy.rs` panics in each callback of a copy function
+  registered through `guard::copy_function` and checks that the statement
+  fails with an ordinary error and the connection keeps working.
 
 - `tests/scan.rs` compares what every scan function returns, cell by cell and
   in order, with the same capture read by the shared scan layer alone

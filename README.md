@@ -534,6 +534,10 @@ GROUP BY ALL;
 
 -- What can be read
 SELECT name, description FROM pcap_protocols();
+
+-- The frames a query selects, written as a capture
+COPY (SELECT * FROM read_frames('capture.pcapng') WHERE length > 1000 ORDER BY frame_number)
+  TO 'large.pcap' (FORMAT pcap);
 ```
 
 What it offers:
@@ -554,6 +558,10 @@ What it offers:
   `read_http_messages`, `read_http2`), and TLS decryption with a key log:
   `read_http2('capture.pcap', keylog := 'keys.log')`, or
   `SET pcapsql_keylog = 'keys.log'`.
+- `COPY ... TO 'x.pcap' (FORMAT pcap)`: the rows of a query (`raw_data`,
+  `timestamp`, and `original_length` and `link_type` when it has them)
+  written as a classic pcap file, with nanosecond timestamps unless
+  `PRECISION 'us'` is given. Not pcapng, and not compressed.
 
 What it does not have yet, of the SQL functions of the command-line tool:
 the capture-relative time functions (`start_time`, `end_time`,

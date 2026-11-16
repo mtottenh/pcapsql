@@ -23,18 +23,21 @@
 //! SELECT ip4_to_string(3232235777);        -- 192.168.1.1
 //! SELECT ip_in_cidr(ip4('10.1.2.3'), '10.0.0.0/8'), tcp_flags_str(18), ip_proto_name(6);
 //! SELECT format_mac(mac('aabbccddeeff'));  -- aa:bb:cc:dd:ee:ff
+//! COPY (SELECT * FROM read_frames('a.pcap') WHERE length > 1000) TO 'b.pcap' (FORMAT pcap);
 //! ```
 //!
 //! That is the scan functions (`read_pcap`, one `read_<table>` per table, the four stream
 //! tables among them, and one `read_<proto>_packets` per packets view), `pcap_protocols()`,
 //! `pcap_views()` and
-//! `pcap_schema()`, the forty scalar functions and the six `format_*` macros; the README
+//! `pcap_schema()`, the forty scalar functions, the six `format_*` macros and the copy format
+//! `pcap`; the README
 //! lists them. None of them has logic of its own. The scan functions run the shared scan layer,
 //! `pcapsql_core::scan`, which the DataFusion engine runs too: the tables and columns are those
 //! of `pcapsql_core::scan::Catalog`, the views those of `pcapsql_core::scan::PacketsView` (each
 //! a join the scan layer evaluates frame by frame, in the same pass), and its driver decides
 //! what every row holds. The scalar functions are loops over the kernels of
-//! `pcapsql_core::format`.
+//! `pcapsql_core::format`, and the copy format gives the rows of a query to
+//! `pcapsql_core::io::PcapWriter` (`engine::copy`, through [`engine::fs::DuckSink`]).
 //!
 //! What is here is the DuckDB side: `engine::table` is the table function behind every scan
 //! function, [`engine::writer::ChunkWriter`] stores the rows of the scan layer in a DuckDB
