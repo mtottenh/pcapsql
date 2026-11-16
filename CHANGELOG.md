@@ -64,6 +64,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `Proto 200`, not `PROTO200`.
 - DuckDB extension: the error for a truncated capture names the last
   complete frame.
+- `pcapsql-core` builds for Windows.
+- Each crate declares its minimum Rust version: 1.87 for `pcapsql-core` and
+  1.88 for the CLI. An older compiler gives a clear error.
+
+### Fixed
+
+- A streaming query without `ORDER BY` could return rows out of capture
+  order.
 
 ## [0.4.1] - 2026-10-24
 
