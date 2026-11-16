@@ -333,8 +333,10 @@ fn work_is_spread_across_files_and_within_them() -> Result<()> {
     let rows_of = |capture: &[u8]| reference_rows(capture, "udp").1.len();
     let expected = 2 * rows_of(&small) + 2 * rows_of(&large);
 
-    // Split wherever a file is 1000 frames or more: the plain large file is four partitions on
-    // four threads, the compressed one and the small ones are one each.
+    // Split wherever a file is 1000 frames or more. The compressed file cannot be split and
+    // takes no share of the threads; the plain large file is nearly all of the bytes of the
+    // others and is split for all four threads. The small ones are not a thread's worth, so
+    // nobody looks for a place to split them at.
     partitioned(&connection, 4, 1000);
     logged(&connection, "DEBUG");
     assert_eq!(
@@ -358,7 +360,7 @@ fn work_is_spread_across_files_and_within_them() -> Result<()> {
         [
             (
                 "small.pcap",
-                "1 (40 frames give no place to split at, with a checkpoint every 1000 frames)"
+                "1 (the other files of the scan keep DuckDB's 4 threads busy)"
             ),
             (
                 "large.pcap",
@@ -367,7 +369,7 @@ fn work_is_spread_across_files_and_within_them() -> Result<()> {
             ("large.pcap.gz", "1 (a compressed capture cannot be split)"),
             (
                 "small.pcap",
-                "1 (40 frames give no place to split at, with a checkpoint every 1000 frames)"
+                "1 (the other files of the scan keep DuckDB's 4 threads busy)"
             ),
         ]
     );
@@ -404,6 +406,42 @@ fn work_is_spread_across_files_and_within_them() -> Result<()> {
         ]
     );
     assert_eq!(records.len(), 4 + 7, "{records:#?}");
+
+    // Files that are a thread's worth each are the partitions: none is split, so none is
+    // read once for its record boundaries before the scan. With fewer files than threads
+    // each is split for its share.
+    let layouts_of = |files: &str| -> Result<Vec<String>> {
+        logged(&connection, "DEBUG");
+        let copies = files.matches(".pcap'").count();
+        assert_eq!(
+            value(
+                &connection,
+                &format!("SELECT count(*) FROM read_udp({files})")
+            )?,
+            (copies * rows_of(&large)).to_string()
+        );
+        Ok(logged(&connection, "DEBUG")
+            .iter()
+            .filter_map(|record| record.split_once("': partitions: "))
+            .map(|(_, rest)| rest.split("; columns: ").next().unwrap().to_owned())
+            .collect())
+    };
+    assert_eq!(
+        layouts_of(&list(&[large_path.as_str(); 4]))?,
+        ["1 (the other files of the scan keep DuckDB's 4 threads busy)"; 4]
+    );
+    assert_eq!(
+        layouts_of(&list(&[large_path.as_str(); 6]))?,
+        ["1 (the other files of the scan keep DuckDB's 4 threads busy)"; 6]
+    );
+    assert_eq!(
+        layouts_of(&list(&[large_path.as_str(); 2]))?,
+        ["2 (of 4000 frames, cut at checkpoints 1000 frames apart)"; 2]
+    );
+    assert_eq!(
+        layouts_of(&list(&[large_path.as_str()]))?,
+        ["4 (of 4000 frames, cut at checkpoints 1000 frames apart)"]
+    );
     Ok(())
 }
 

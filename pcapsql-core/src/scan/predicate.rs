@@ -465,6 +465,19 @@ impl FramePredicate {
         !below(&self.frames.1, &frame_number)
     }
 
+    /// The largest frame number that can match, when the frame range has an
+    /// upper bound: a scan in frame order ends with this frame, and nothing
+    /// after it need be read or indexed. `None` without such a bound, and
+    /// for a bound below frame 1 (the predicate [is empty](Self::is_empty)).
+    pub fn last_frame(&self) -> Option<u64> {
+        match self.frames.1 {
+            Bound::Unbounded => None,
+            Bound::Included(bound) => Some(bound),
+            Bound::Excluded(bound) => bound.checked_sub(1),
+        }
+        .filter(|last| *last >= 1)
+    }
+
     /// Whether any packet of `range` can match. `time_ns` is the smallest
     /// and largest timestamp of the range's packets when the caller knows
     /// them (from an index), `None` otherwise. `false` is exact: no packet

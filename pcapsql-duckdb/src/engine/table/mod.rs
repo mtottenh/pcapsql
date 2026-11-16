@@ -80,13 +80,27 @@
 //!   (a compressed stream has no place to start reading but its beginning), when DuckDB's file
 //!   system reads it over a network (the pass that finds the record boundaries would read all
 //!   of it first), when it is smaller than `pcapsql_parallel_min_file_size`, when DuckDB has one
-//!   thread, or when `pcapsql_parallel_scan` is off. This is the scan as it was before there
-//!   were partitions.
-//! - Otherwise as many partitions as DuckDB has threads (`partition_target`), cut at the
+//!   thread, when `pcapsql_parallel_scan` is off, or when the scan has other files that keep
+//!   the threads busy (below). This is the scan as it was before there were partitions.
+//! - Otherwise as many partitions as the file has threads (`partition_target`), cut at the
 //!   checkpoints of a `BoundaryIndex` that one pass over the record headers of the capture
-//!   builds (`build_boundary_index`). If that pass fails (a damaged record), the capture is read
-//!   as one partition and the scan reports the damage where it reads it, after the rows before
-//!   it, as it always did.
+//!   builds (`build_boundary_index_to`). If that pass fails (a damaged record), the capture is
+//!   read as one partition and the scan reports the damage where it reads it, after the rows
+//!   before it, as it always did.
+//!
+//! The pass reads the capture on one thread before any worker starts, and nothing of it is
+//! kept for the next statement. It costs about what counting the capture's frames costs
+//! (roadmap, section 8.2), so it is avoided where it buys nothing:
+//!
+//! - A file is split for its share of DuckDB's threads: its share of the bytes of the scan's
+//!   files that can be split, rounded. Four captures of one size on four threads are four
+//!   partitions and no pass; one large capture among small ones is split for nearly all
+//!   threads. A compressed or remote file is one partition whatever its size and takes no
+//!   share, so a capture beside a large `.gz` is split for all of them.
+//! - With an upper bound on `frame_number` (below) the pass ends at the last frame the bound
+//!   admits, unless the scan is `strict` (which looks at the capture's end). The index is then
+//!   that of the capture's beginning, which `plan_ranges` and the scan treat as the index of a
+//!   capture that has grown since.
 //!
 //! The partitions of all files are in one `PartitionQueue`, those of the first file first and
 //! each file's in capture order ([`Shared::owners`] says which file a partition is of). A
@@ -203,11 +217,12 @@
 //!
 //! `strict := true` is about the whole capture, whatever the query reads of it, so that
 //! whether a strict scan fails does not depend on the threads or the file's size. A strict
-//! scan of several partitions reads the tail of the capture when it starts and fails there.
-//! A strict scan of one partition whose read a frame bound ended reads on to the end of the
-//! file (`read_to_the_end`: the record headers, nothing parsed) and fails there. That costs
-//! the rest of the file, which is what the split scan's index pass costs too. A `LIMIT` is the
-//! one exception: DuckDB stops calling a scan once it has its rows, so a strict scan of one
+//! scan of several partitions reads the tail of the capture when it starts and fails there
+//! (its index pass goes to the end of the file, whatever the frame bound). A strict scan of
+//! one partition whose read a frame bound ended reads on to the end of the file
+//! (`read_to_the_end`: the record headers, nothing parsed) and fails there. That costs the
+//! rest of the file, which is what the split scan's index pass costs too. A `LIMIT` is the one
+//! exception: DuckDB stops calling a scan once it has its rows, so a strict scan of one
 //! partition under a `LIMIT` that ends before the tail returns its rows.
 
 mod args;
@@ -245,10 +260,10 @@ use pcapsql_core::{default_registry, ProtocolRegistry};
 
 use self::function::CaptureFunction;
 use self::keylog::Keys;
-use self::layout::{estimated_rows, Layout};
+use self::layout::{can_split, estimated_rows, Layout};
 use self::reader::Scanning;
 use super::{
-    fs::DuckFile,
+    fs::{self, DuckFile},
     guard,
     pushdown::Pushed,
     relation::{self, FrameColumn, Relation},
@@ -332,6 +347,10 @@ struct BindData {
     files: Box<[String]>,
     /// The sum of the sizes of the files at bind.
     total_size: u64,
+    /// The sum of the sizes at bind of the files that can be split (`layout::can_split`): what
+    /// they share DuckDB's threads by. A compressed or remote file is one partition and takes
+    /// no share.
+    split_size: u64,
     /// The table or view the call reads.
     relation: Relation,
     /// The number of columns of `relation` declared to DuckDB, in the order of
@@ -458,12 +477,15 @@ impl TableFunctionCallbacks for PcapScan {
         // Open and probe every file now, so that one that is missing, out of bounds for the
         // session or not a capture fails the statement at bind, with its path in the message.
         let mut files = Vec::new();
-        let (mut total_size, mut rows) = (0_u64, 0_usize);
+        let (mut total_size, mut split_size, mut rows) = (0_u64, 0_u64, 0_usize);
         for path in self.files(context, &entries)? {
             let mut file = DuckFile::open(context, &path)?;
             let size = file.size()?;
             let header = self.probe(&mut file, &path)?;
             total_size = total_size.saturating_add(size);
+            if can_split(fs::is_remote(context, &path)?, &header) {
+                split_size = split_size.saturating_add(size);
+            }
             rows = rows.saturating_add(estimated_rows(size, &header));
             files.push(path);
         }
@@ -477,6 +499,7 @@ impl TableFunctionCallbacks for PcapScan {
         Ok(BindData {
             files: files.into(),
             total_size,
+            split_size,
             relation,
             columns,
             filename,
@@ -514,7 +537,14 @@ impl TableFunctionCallbacks for PcapScan {
             let layout = if plan.requires_single_partition() {
                 Layout::in_order()
             } else {
-                self.layout(context, &settings, path, bound.strict, &frames)?
+                self.layout(
+                    context,
+                    &settings,
+                    path,
+                    bound.split_size,
+                    bound.strict,
+                    &frames,
+                )?
             };
             // What the scan will do, for whoever asks DuckDB's log (`enable_logging`) why a
             // query is slow. As for the truncation warning, the log is not worth failing a

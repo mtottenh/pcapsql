@@ -1044,3 +1044,41 @@ fn malformed_computed_columns_and_filters_are_errors() {
     );
     assert!(compile(&filtered(1, col("tcp", "dst_port"))).is_ok());
 }
+
+/// A table is projected to the fields its columns read, however many: only
+/// every field of the table is no projection. A projection costs a bit
+/// test per field, so even most of a table's fields cost about what the
+/// full parse does.
+#[test]
+fn a_projection_of_any_but_every_field_is_applied() {
+    for table in ["tcp", "udp", "dns", "ipv4"] {
+        let (_, def) = catalog().table(table).unwrap();
+        let fields: Vec<ColId> = def
+            .columns()
+            .filter(|(_, column)| matches!(column.source, ColumnSource::Field(_)))
+            .map(|(col, _)| col)
+            .collect();
+        let other: Vec<ColId> = def
+            .columns()
+            .filter(|(_, column)| !matches!(column.source, ColumnSource::Field(_)))
+            .map(|(col, _)| col)
+            .collect();
+        assert!(!other.is_empty(), "{table}");
+        // The fields the parser of `table` is asked for with the first
+        // `count` field columns, and every column that is not a field.
+        let projected = |count: usize| {
+            let mut columns = fields[..count].to_vec();
+            columns.extend(&other);
+            let plan = ScanPlan {
+                tables: vec![TableScan::new(id(table), columns)],
+                ..ScanPlan::default()
+            };
+            let compiled = compile(&plan).unwrap();
+            compiled.scope().projections().get(table).map(HashSet::len)
+        };
+        for count in 0..fields.len() {
+            assert_eq!(projected(count), Some(count), "{table}: {count} fields");
+        }
+        assert_eq!(projected(fields.len()), None, "{table}");
+    }
+}

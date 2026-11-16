@@ -2,7 +2,7 @@
 
 use duckdb_neo::{connection::Context, Result};
 use pcapsql_core::io::{
-    build_boundary_index, BoundaryIndex, PacketPosition, PacketRange, PacketReader,
+    build_boundary_index_to, BoundaryIndex, PacketPosition, PacketRange, PacketReader,
     ReadPacketReader, SeekCost, StreamHeader,
 };
 use pcapsql_core::scan::{partition_target, plan_ranges, FramePredicate, PartitionPolicy};
@@ -51,13 +51,37 @@ impl Layout {
     }
 }
 
+/// Whether a file can be split at all: it is read through the local file system, and it is
+/// not compressed. A file that cannot is one partition, whatever its size, and its bytes are
+/// not part of the `scan_bytes` the others share the threads by ([`thread_share`]).
+pub(super) fn can_split(remote: bool, header: &StreamHeader) -> bool {
+    !remote && !header.compression.is_compressed()
+}
+
+/// How many of a scan's `threads` one file of `size` bytes is split for, when the files of
+/// the scan that can be split ([`can_split`]) have `scan_bytes` together: its share by size,
+/// rounded. A file that is the only one that can be split gets them all; four files of one
+/// size on four threads get one each, and are not split.
+pub(super) fn thread_share(threads: usize, size: u64, scan_bytes: u64) -> usize {
+    if scan_bytes <= size {
+        return threads;
+    }
+    let share =
+        (threads as u128 * u128::from(size) + u128::from(scan_bytes) / 2) / u128::from(scan_bytes);
+    usize::try_from(share).unwrap_or(threads)
+}
+
 impl PcapScan {
     /// Decide the partitions of one file of a scan (see the module documentation).
+    ///
+    /// `scan_bytes` is the size of the files of the scan that can be split ([`can_split`])
+    /// together, as `bind` found them.
     pub(super) fn layout(
         &self,
         context: &Context,
         settings: &ScanSettings,
         path: &str,
+        scan_bytes: u64,
         strict: bool,
         frames: &FramePredicate,
     ) -> Result<Layout> {
@@ -85,7 +109,7 @@ impl PcapScan {
         // again.
         let mut file = DuckFile::open(context, path)?;
         let header = self.probe(&mut file, path)?;
-        if header.compression.is_compressed() {
+        if !can_split(false, &header) {
             return Ok(Layout::sequential("a compressed capture cannot be split"));
         }
         let size = file.size()?;
@@ -93,25 +117,42 @@ impl PcapScan {
             cheap_min_bytes: settings.min_file_size,
             ..PartitionPolicy::default()
         };
-        let want = partition_target(SeekCost::Cheap, size, None, settings.threads, &policy);
-        if want <= 1 {
+        if partition_target(SeekCost::Cheap, size, None, settings.threads, &policy) <= 1 {
             return Ok(Layout::sequential(format_args!(
                 "{size} bytes is less than {} = {}",
                 settings::PARALLEL_MIN_FILE_SIZE,
                 settings.min_file_size
             )));
         }
+        // The pass below reads the whole file on this one thread before any worker starts, so
+        // it is only worth its time where the threads would otherwise have nothing to do: the
+        // files of a scan are partitions already, and a file is split for its share of the
+        // threads only.
+        let threads = thread_share(settings.threads, size, scan_bytes);
+        let want = partition_target(SeekCost::Cheap, size, None, threads, &policy);
+        if want <= 1 {
+            return Ok(Layout::sequential(format_args!(
+                "the other files of the scan keep DuckDB's {} threads busy",
+                settings.threads
+            )));
+        }
 
         // One pass over the record headers. Nothing is kept of the index beyond this scan, so
-        // what would tell a later reader that the file has changed is left out.
+        // what would tell a later reader that the file has changed is left out. Frames past
+        // an upper bound on `frame_number` are not looked for: the index is then that of the
+        // capture's beginning, which is what an index is of a capture that has grown since,
+        // and `plan_ranges` and the scan treat it as that. A strict scan needs the pass to
+        // reach the end, where the capture may be cut off.
+        let last_frame = if strict { None } else { frames.last_frame() };
         file.seek(0)?;
-        let built = build_boundary_index(
+        let built = build_boundary_index_to(
             &mut file,
             header.format,
             settings.index_stride,
             size,
             None,
             0,
+            last_frame,
         );
         let index = match built {
             Ok(index) => index,
@@ -123,10 +164,16 @@ impl PcapScan {
                 )))
             }
         };
+        // What the pass counted: the frames of the capture, or those up to the filter's last.
+        let counted = if last_frame.is_some_and(|last| index.packet_count >= last) {
+            "the first "
+        } else {
+            ""
+        };
         let whole = plan_ranges(Some(&index), want, &FramePredicate::all()).len();
         if whole <= 1 {
             return Ok(Layout::sequential(format_args!(
-                "{} frames give no place to split at, with a checkpoint every {} frames",
+                "{counted}{} frames give no place to split at, with a checkpoint every {} frames",
                 index.packet_count, index.stride
             )));
         }
@@ -161,7 +208,7 @@ impl PcapScan {
         };
         Ok(Layout {
             note: format!(
-                "{} (of {} frames, cut at checkpoints {} frames apart{filtered})",
+                "{} (of {counted}{} frames, cut at checkpoints {} frames apart{filtered})",
                 ranges.len(),
                 index.packet_count,
                 index.stride

@@ -515,6 +515,39 @@ fn past_end_follows_the_upper_frame_bound_only() {
     assert!(!time_only.past_end(u64::MAX));
 }
 
+/// `last_frame` is the frame before the first that is `past_end`.
+#[test]
+fn last_frame_is_the_last_frame_the_upper_bound_admits() {
+    let upper = |bound| FramePredicate {
+        frames: (Bound::Included(5), bound),
+        time_ns: (Bound::Unbounded, Bound::Included(0)),
+    };
+    assert_eq!(upper(Bound::Unbounded).last_frame(), None);
+    assert_eq!(upper(Bound::Included(20)).last_frame(), Some(20));
+    assert_eq!(upper(Bound::Excluded(20)).last_frame(), Some(19));
+    assert_eq!(
+        upper(Bound::Included(u64::MAX)).last_frame(),
+        Some(u64::MAX)
+    );
+    // No frame at all: frame numbers start at 1.
+    assert_eq!(upper(Bound::Included(0)).last_frame(), None);
+    assert_eq!(upper(Bound::Excluded(1)).last_frame(), None);
+    assert_eq!(upper(Bound::Excluded(0)).last_frame(), None);
+    for bound in [Bound::Included(1), Bound::Excluded(2), Bound::Included(7)] {
+        let predicate = upper(bound);
+        let last = predicate.last_frame().unwrap();
+        assert!(!predicate.past_end(last), "{bound:?}");
+        assert!(predicate.past_end(last + 1), "{bound:?}");
+    }
+    // A time bound says nothing of frame numbers.
+    assert_eq!(
+        FramePredicate::timestamp_ns(CmpOp::Lt, 5)
+            .unwrap()
+            .last_frame(),
+        None
+    );
+}
+
 /// `past_end(n)` implies that no frame from `n` on is accepted.
 #[test]
 fn is_empty_means_no_packet_matches() {
