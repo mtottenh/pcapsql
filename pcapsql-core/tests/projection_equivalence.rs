@@ -3,20 +3,25 @@
 //! Every parser with a projected parse (a field list,
 //! `Protocol::field_names`) is held to it for every layer it parses in the
 //! packets of the fuzz corpus (`common/fuzz_corpus.rs`) and of the golden
-//! captures (`pcapsql_testgen::corpus`): asked for no field, and for each of
-//! its fields alone, it leaves the same bytes, the same hints for the layer
-//! after and the same status and error as its full parse, and of the full
-//! parse's fields it writes exactly those asked for, in their order.
+//! captures (`pcapsql_testgen::corpus`): asked for no field, for each of its
+//! fields alone, for every field but one, and for a few subsets drawn at
+//! random (from the layer's bytes, so the same on every run), it leaves the
+//! same bytes, the same hints for the layer after and the same status and
+//! error as its full parse, and of the full parse's fields it writes
+//! exactly those asked for, in their order. The subsets of several fields
+//! are the ones that show the order of the fields, and a field that depends
+//! on work done for another.
 //!
 //! And a scope that projects these parsers, to no field (as the layers
-//! under a queried table are parsed) or to one field each, gives every
-//! packet the full parse's layers: the same parsers, tunnel context,
-//! payloads and errors, with the fields restricted to the projection.
+//! under a queried table are parsed), to one field each or to every field
+//! but one, gives every packet the full parse's layers: the same parsers,
+//! tunnel context, payloads and errors, with the fields restricted to the
+//! projection.
 
 #[path = "common/fuzz_corpus.rs"]
 mod fuzz_corpus;
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::io::Cursor;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -44,18 +49,73 @@ const PROJECTED: [&str; 9] = [
     "vlan",
 ];
 
-/// A scope, with the field each parser it projects is asked for (`None`:
-/// no field). The parsers it does not project write all their fields.
-type Projecting = (ParseScope, BTreeMap<&'static str, Option<&'static str>>);
+/// How many subsets drawn at random each layer is also asked for.
+const RANDOM_SUBSETS: usize = 4;
 
-/// The scopes compared with the full parse.
-struct Scopes {
-    /// Every parser with a projected parse projected to no field.
-    transit: Projecting,
-    /// Scope `j` projects each of those parsers to its field `j` (modulo
-    /// its number of fields): over consecutive packets, every field alone.
-    single: Vec<Projecting>,
+/// Every field of a list of `len`, as a mask of positions.
+fn all_of(len: usize) -> u64 {
+    if len >= 64 {
+        u64::MAX
+    } else {
+        (1 << len) - 1
+    }
 }
+
+/// The names of `names` at the positions of the bits of `mask`.
+fn names_in(names: &'static [&'static str], mask: u64) -> impl Iterator<Item = &'static str> {
+    names
+        .iter()
+        .enumerate()
+        .filter(move |(position, _)| mask >> position & 1 != 0)
+        .map(|(_, name)| *name)
+}
+
+/// The next number of a splitmix64 sequence.
+fn next_random(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// A seed from the bytes a layer is parsed from (FNV-1a over its length and
+/// its first bytes): the same subsets on every run, whatever thread or
+/// order the layer is compared in.
+fn seed_of(parser: &str, data: &[u8]) -> u64 {
+    let length = data.len().to_le_bytes();
+    let bytes = parser
+        .bytes()
+        .chain(length)
+        .chain(data.iter().take(64).copied());
+    bytes.fold(0xCBF2_9CE4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01B3)
+    })
+}
+
+/// The projections a layer of a parser with `len` fields is compared in, as
+/// masks of positions: no field, each field alone, every field but one, and
+/// [`RANDOM_SUBSETS`] drawn from `seed`.
+fn subsets(len: usize, seed: u64) -> Vec<u64> {
+    let all = all_of(len);
+    let mut subsets = vec![0];
+    subsets.extend((0..len).map(|j| 1 << j));
+    subsets.extend((0..len).map(|j| all & !(1 << j)));
+    let mut state = seed;
+    subsets.extend((0..RANDOM_SUBSETS).map(|_| next_random(&mut state) & all));
+    subsets
+}
+
+/// A scope, with the fields each parser it projects is asked for (a mask of
+/// positions in its list). The parsers it does not project write all their
+/// fields.
+type Projecting = (ParseScope, BTreeMap<&'static str, u64>);
+
+/// The scopes compared with the full parse, one per packet in turn: every
+/// parser with a projected parse projected to no field, then each to its
+/// field `j` (modulo its number of fields), then each to every field but
+/// that one; over consecutive packets, every one of those.
+struct Scopes(Vec<Projecting>);
 
 impl Scopes {
     fn new(registry: &ProtocolRegistry) -> Self {
@@ -64,38 +124,31 @@ impl Scopes {
                 .all_parsers()
                 .filter(|parser| !parser.field_names().is_empty())
         };
-        let mut transit = (ParseScope::full(), BTreeMap::new());
-        for parser in projected() {
-            transit.0 = transit.0.with_projection(parser.name(), HashSet::new());
-            transit.1.insert(parser.name(), None);
-        }
         let most = projected()
             .map(|parser| parser.field_names().len())
             .max()
             .expect("parsers with a projected parse");
-        let single = (0..most)
-            .map(|j| {
-                let mut scope = ParseScope::full();
-                let mut fields = BTreeMap::new();
-                for parser in projected() {
-                    let names = parser.field_names();
-                    let field = names[j % names.len()];
-                    scope = scope.with_projection(parser.name(), HashSet::from([field.into()]));
-                    fields.insert(parser.name(), Some(field));
-                }
-                (scope, fields)
-            })
-            .collect();
-        Self { transit, single }
+        let scope = |mask: &dyn Fn(usize) -> u64| {
+            let mut scope = ParseScope::full();
+            let mut masks = BTreeMap::new();
+            for parser in projected() {
+                let names = parser.field_names();
+                let mask = mask(names.len());
+                let fields = names_in(names, mask).map(String::from).collect();
+                scope = scope.with_projection(parser.name(), fields);
+                masks.insert(parser.name(), mask);
+            }
+            (scope, masks)
+        };
+        let mut scopes = vec![scope(&|_| 0)];
+        scopes.extend((0..most).map(|j| scope(&|len| 1 << (j % len))));
+        scopes.extend((0..most).map(|j| scope(&|len| all_of(len) & !(1 << (j % len)))));
+        Self(scopes)
     }
 
-    /// The scope packet number `packet` is compared in: in turn the
-    /// transit scope and each single-field one.
+    /// The scope packet number `packet` is compared in.
     fn for_packet(&self, packet: usize) -> &Projecting {
-        match packet % (self.single.len() + 1) {
-            0 => &self.transit,
-            j => &self.single[j - 1],
-        }
+        &self.0[packet % self.0.len()]
     }
 }
 
@@ -123,12 +176,25 @@ fn context_of<'a>(layer: &LayerRef<'_, 'a>) -> Context<'a> {
     )
 }
 
-/// Which of a full parse's fields a projected parse writes.
+/// Per field of `full`, its bit in the list `names` (0 for a field the
+/// list does not have).
+fn field_bits(names: &[&str], full: &[FieldEntry<'_>]) -> Vec<u64> {
+    full.iter()
+        .map(|(key, _)| {
+            names
+                .iter()
+                .position(|name| name == key)
+                .map_or(0, |p| 1 << p)
+        })
+        .collect()
+}
+
+/// Which of a full parse's fields a projected parse writes: all of them,
+/// or those whose bit ([`field_bits`]) is in a mask.
 #[derive(Debug, Clone, Copy)]
-enum Wanted<'n> {
+enum Wanted<'b> {
     All,
-    Nothing,
-    Only(&'n str),
+    Masked(&'b [u64], u64),
 }
 
 /// Panics unless `got` is `full` restricted to `wanted`, in order.
@@ -138,13 +204,18 @@ fn assert_restricted(
     wanted: Wanted<'_>,
     at: impl Fn() -> String,
 ) {
-    let kept = |(key, _): &&FieldEntry<'_>| match wanted {
+    let kept = |i: usize| match wanted {
         Wanted::All => true,
-        Wanted::Nothing => false,
-        Wanted::Only(name) => *key == name,
+        Wanted::Masked(bits, mask) => bits[i] & mask != 0,
     };
-    if !got.iter().eq(full.iter().filter(kept)) {
-        let expected: Vec<_> = full.iter().filter(kept).collect();
+    let expected = || {
+        full.iter()
+            .enumerate()
+            .filter(move |(i, _)| kept(*i))
+            .map(|(_, field)| field)
+    };
+    if !got.iter().eq(expected()) {
+        let expected: Vec<_> = expected().collect();
         panic!("{}: fields {got:?}, expected {expected:?}", at());
     }
 }
@@ -181,6 +252,8 @@ struct Checker<'s> {
     scopes: &'s Scopes,
     full: ParseBuf,
     projected: ParseBuf,
+    /// The projections already resolved, by field list and mask.
+    resolved: HashMap<(usize, u64), FieldSet>,
     coverage: Coverage,
 }
 
@@ -191,6 +264,7 @@ impl<'s> Checker<'s> {
             scopes,
             full: ParseBuf::new(),
             projected: ParseBuf::new(),
+            resolved: HashMap::new(),
             coverage: Coverage::default(),
         }
     }
@@ -203,8 +277,8 @@ impl<'s> Checker<'s> {
     }
 
     /// Every layer of `data`, walked parser by parser: each parser with a
-    /// projected parse, asked for no field and for each field alone,
-    /// against its full parse.
+    /// projected parse, asked for each of its [`subsets`], against its full
+    /// parse.
     fn layers(&mut self, link_type: u16, data: &[u8], what: &dyn Fn() -> String) {
         let mut full = self.full.for_packet();
         let mut context = ParseContext::new(link_type);
@@ -230,13 +304,19 @@ impl<'s> Checker<'s> {
                         fields[position] += 1;
                     }
                 }
-                let asked = std::iter::once(None).chain(names.iter().copied().map(Some));
-                for field in asked {
-                    let projection = FieldSet::resolve(names, field);
+                let bits = field_bits(names, full_fields);
+                for mask in subsets(names.len(), seed_of(parser.name(), remaining)) {
+                    let projection = *self
+                        .resolved
+                        .entry((names.as_ptr() as usize, mask))
+                        .or_insert_with(|| FieldSet::resolve(names, names_in(names, mask)));
                     let mut layers = self.projected.for_packet();
                     let projected =
                         layers.parse_layer(parser, remaining, &context, Some(projection));
-                    let at = || format!("{}: {} asked for {field:?}", what(), parser.name());
+                    let at = || {
+                        let fields: Vec<_> = names_in(names, mask).collect();
+                        format!("{}: {} asked for {fields:?}", what(), parser.name())
+                    };
                     assert!(
                         std::ptr::eq(projected.remaining, parsed.remaining),
                         "{}: remaining bytes",
@@ -246,8 +326,7 @@ impl<'s> Checker<'s> {
                     assert_eq!(projected.status, parsed.status, "{}", at());
                     assert_eq!(layers.len() == 1, kept, "{}: kept as a layer", at());
                     let got = layers.last().map_or(&[][..], |layer| layer.fields());
-                    let wanted = field.map_or(Wanted::Nothing, Wanted::Only);
-                    assert_restricted(got, full_fields, wanted, at);
+                    assert_restricted(got, full_fields, Wanted::Masked(&bits, mask), at);
                 }
             }
             if !parsed.is_ok() {
@@ -283,12 +362,15 @@ impl<'s> Checker<'s> {
         for (i, (expected, got)) in full.iter().zip(projected.iter()).enumerate() {
             assert_eq!(context_of(&got), context_of(&expected), "{}", at(i));
             // A parser the scope does not project writes every field.
-            let fields = match wanted.get(expected.name()) {
-                None => Wanted::All,
-                Some(None) => Wanted::Nothing,
-                Some(Some(name)) => Wanted::Only(name),
-            };
-            assert_restricted(got.fields(), expected.fields(), fields, || at(i));
+            match wanted.get(expected.name()) {
+                None => assert_restricted(got.fields(), expected.fields(), Wanted::All, || at(i)),
+                Some(&mask) => {
+                    let names = registry.get_parser(expected.name()).unwrap().field_names();
+                    let bits = field_bits(names, expected.fields());
+                    let fields = Wanted::Masked(&bits, mask);
+                    assert_restricted(got.fields(), expected.fields(), fields, || at(i));
+                }
+            }
         }
     }
 
