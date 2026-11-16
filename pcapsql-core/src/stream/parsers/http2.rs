@@ -198,15 +198,6 @@ impl FrameHeader {
     }
 }
 
-/// Priority data for HEADERS and PRIORITY frames
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct PriorityData {
-    pub exclusive: bool,
-    pub stream_dependency: u32,
-    pub weight: u8,
-}
-
 /// HTTP/2 stream state (RFC 7540 Section 5.1)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamState {
@@ -272,23 +263,6 @@ impl Http2Stream {
             request_frame: None,
             response_frame: None,
         }
-    }
-
-    /// Extract common header value
-    #[allow(dead_code)]
-    pub fn get_header(&self, name: &str) -> Option<&str> {
-        // Check request headers first, then response
-        for (n, v) in &self.request_headers {
-            if n.eq_ignore_ascii_case(name) {
-                return Some(v);
-            }
-        }
-        for (n, v) in &self.response_headers {
-            if n.eq_ignore_ascii_case(name) {
-                return Some(v);
-            }
-        }
-        None
     }
 }
 

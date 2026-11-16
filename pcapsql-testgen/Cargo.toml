@@ -1,7 +1,8 @@
 [package]
 name = "pcapsql-testgen"
 version.workspace = true
-edition = "2021"
+edition.workspace = true
+rust-version = "1.73"
 authors.workspace = true
 license.workspace = true
 repository.workspace = true

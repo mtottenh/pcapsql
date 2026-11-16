@@ -12,20 +12,15 @@ pub mod next_header {
     pub const HOP_BY_HOP: u8 = 0;
     /// IPv4 encapsulated in IPv6 (IP-in-IP)
     pub const IPIP: u8 = 4;
-    #[allow(dead_code)] // RFC constant for protocol identification
     pub const TCP: u8 = 6;
-    #[allow(dead_code)] // RFC constant for protocol identification
     pub const UDP: u8 = 17;
     /// IPv6 encapsulated in IPv6 (IPv6-in-IPv6)
     pub const IPV6_IN_IP: u8 = 41;
     pub const ROUTING: u8 = 43;
     pub const FRAGMENT: u8 = 44;
-    #[allow(dead_code)] // RFC constant for ESP extension header
     pub const ESP: u8 = 50;
     pub const AH: u8 = 51;
-    #[allow(dead_code)] // RFC constant for ICMPv6
     pub const ICMPV6: u8 = 58;
-    #[allow(dead_code)] // RFC constant for no next header
     pub const NO_NEXT_HEADER: u8 = 59;
     pub const DESTINATION: u8 = 60;
     pub const MOBILITY: u8 = 135;

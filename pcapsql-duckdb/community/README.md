@@ -22,7 +22,7 @@ community-extensions on 2026-11-15.
 | `extension.language`, `build` | `Rust`, `cargo` | As for DuckDB's Rust template (`rusty_quack`) |
 | `extension.requires_toolchains` | `rust;python3` | Rust for the build; Python for the metadata footer and the SQL test runner |
 | `extension.version` | the workspace version | `scripts/check-pins.sh` fails if it differs from `Cargo.toml` |
-| `extension.excluded_platforms` | Windows and WebAssembly | `pcapsql-core` does not compile for Windows; WebAssembly is not shown to build (roadmap section 10, U10 and U13). The same list as `exclude_archs` of `.github/workflows/duckdb-dist.yml` |
+| `extension.excluded_platforms` | `windows_amd64_mingw` and WebAssembly | `extension-ci-tools` skips the SQL tests for MinGW; WebAssembly is not shown to build (roadmap section 10, U10 and U13). The same list as `exclude_archs` of `.github/workflows/duckdb-dist.yml` |
 | `extension.maintainers` | `mtottenh` | GitHub account names. This is the owner of the repository; confirm before submitting |
 | `repo.github` | `mtottenh/pcapsql` | |
 | `repo.ref` | a placeholder | The commit community-extensions builds. Set at submission |
@@ -37,8 +37,8 @@ will pass.
 ## Submitting
 
 1. Release pcapsql as usual (tag `vX.Y.Z`). `duckdb-dist.yml` runs for the
-   tag; check that it is green for `linux_amd64`, `linux_arm64` and
-   `osx_arm64`.
+   tag; check that it is green for `linux_amd64`, `linux_arm64`,
+   `osx_arm64` and `windows_amd64`.
 2. Copy `description.yml` to `extensions/pcapsql/description.yml` in a fork
    of `duckdb/community-extensions`. Replace `repo.ref` with the full SHA of
    the tagged commit (`git rev-parse vX.Y.Z^{commit}`), and check that
