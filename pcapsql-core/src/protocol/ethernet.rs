@@ -1,11 +1,10 @@
 //! Ethernet II protocol parser.
 
-use smallvec::SmallVec;
-
 use etherparse::Ethernet2HeaderSlice;
 
 use super::{
-    Cond, Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult, Protocol,
+    field_list, Cond, Dispatch, DispatchRule, FieldSet, FieldSink, FieldValue, HintKey, Hints,
+    ParseContext, Parsed, Protocol,
 };
 use crate::schema::{DataKind, FieldDescriptor};
 
@@ -97,6 +96,52 @@ pub mod ethertype {
     pub const VERITAS_LLT: u16 = 0xCAFE;
 }
 
+field_list! {
+    /// The fields of an `ethernet` layer, in the order the parser writes
+    /// them.
+    enum Field {
+        SrcMac = "src_mac",
+        DstMac = "dst_mac",
+        Ethertype = "ethertype",
+    }
+}
+
+/// The Ethernet II header at the start of `data`: the fields of `want` (all
+/// of them for [`FieldSet::ALL`]) to `fields`, the payload and the hints for
+/// the layer above.
+#[inline(always)]
+fn parse_ethernet<'a>(
+    data: &'a [u8],
+    want: FieldSet,
+    fields: &mut FieldSink<'_, 'a>,
+) -> Parsed<'a> {
+    let eth = match Ethernet2HeaderSlice::from_slice(data) {
+        Ok(eth) => eth,
+        Err(e) => {
+            return Parsed::error(
+                fields.text_fmt(format_args!("Ethernet parse error: {e}")),
+                data,
+            )
+        }
+    };
+    let ether_type = eth.ether_type().0;
+    if want.has(Field::SrcMac) {
+        fields.push(("src_mac", FieldValue::mac(&eth.source())));
+    }
+    if want.has(Field::DstMac) {
+        fields.push(("dst_mac", FieldValue::mac(&eth.destination())));
+    }
+    if want.has(Field::Ethertype) {
+        fields.push(("ethertype", FieldValue::UInt16(ether_type)));
+    }
+
+    let mut child_hints = Hints::new();
+    child_hints.insert(HintKey::EtherType, ether_type as u64);
+
+    let header_len = eth.slice().len();
+    Parsed::ok(&data[header_len..], child_hints)
+}
+
 /// Ethernet II protocol parser.
 #[derive(Debug, Clone, Copy)]
 pub struct EthernetProtocol;
@@ -145,23 +190,13 @@ impl Protocol for EthernetProtocol {
         None
     }
 
-    fn parse<'a>(&self, data: &'a [u8], _context: &ParseContext) -> ParseResult<'a> {
-        match Ethernet2HeaderSlice::from_slice(data) {
-            Ok(eth) => {
-                let mut fields = SmallVec::new();
-
-                fields.push(("src_mac", FieldValue::mac(&eth.source())));
-                fields.push(("dst_mac", FieldValue::mac(&eth.destination())));
-                fields.push(("ethertype", FieldValue::UInt16(eth.ether_type().0)));
-
-                let mut child_hints = Hints::new();
-                child_hints.insert(HintKey::EtherType, eth.ether_type().0 as u64);
-
-                let header_len = eth.slice().len();
-                ParseResult::success(fields, &data[header_len..], child_hints)
-            }
-            Err(e) => ParseResult::error(format!("Ethernet parse error: {e}"), data),
-        }
+    fn parse<'a>(
+        &self,
+        data: &'a [u8],
+        _context: &ParseContext,
+        fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
+        parse_ethernet(data, FieldSet::ALL, fields)
     }
 
     fn schema_fields(&self) -> Vec<FieldDescriptor> {
@@ -183,11 +218,26 @@ impl Protocol for EthernetProtocol {
     fn dependencies(&self) -> &'static [&'static str] {
         &["vxlan", "gre"]
     }
+
+    fn field_names(&self) -> &'static [&'static str] {
+        Field::NAMES
+    }
+
+    fn parse_projected<'a>(
+        &self,
+        data: &'a [u8],
+        _context: &ParseContext,
+        projection: FieldSet,
+        fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
+        parse_ethernet(data, projection, fields)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::test_utils::ParseLayer as _;
 
     #[test]
     fn test_parse_ethernet() {
@@ -201,7 +251,7 @@ mod tests {
 
         let parser = EthernetProtocol;
         let context = ParseContext::new(LINKTYPE_ETHERNET);
-        let result = parser.parse(&frame, &context);
+        let result = parser.parse_layer(&frame, &context);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -225,7 +275,7 @@ mod tests {
 
         let parser = EthernetProtocol;
         let context = ParseContext::new(LINKTYPE_ETHERNET);
-        let result = parser.parse(&frame, &context);
+        let result = parser.parse_layer(&frame, &context);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -249,7 +299,7 @@ mod tests {
 
         let parser = EthernetProtocol;
         let context = ParseContext::new(LINKTYPE_ETHERNET);
-        let result = parser.parse(&frame, &context);
+        let result = parser.parse_layer(&frame, &context);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -282,7 +332,7 @@ mod tests {
 
         let parser = EthernetProtocol;
         let context = ParseContext::new(LINKTYPE_ETHERNET);
-        let result = parser.parse(&short_frame, &context);
+        let result = parser.parse_layer(&short_frame, &context);
 
         assert!(!result.is_ok());
         assert!(result.error.is_some());
@@ -298,7 +348,7 @@ mod tests {
 
         let parser = EthernetProtocol;
         let context = ParseContext::new(LINKTYPE_ETHERNET);
-        let result = parser.parse(&frame, &context);
+        let result = parser.parse_layer(&frame, &context);
 
         assert!(result.is_ok());
 

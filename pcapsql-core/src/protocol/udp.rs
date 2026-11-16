@@ -1,17 +1,60 @@
 //! UDP protocol parser.
 
-use smallvec::SmallVec;
-
 use etherparse::UdpHeaderSlice;
 
 use super::{
-    Cond, Dispatch, DispatchRule, FieldSet, FieldValue, HintKey, Hints, ParseContext, ParseResult,
-    Protocol,
+    field_list, Cond, Dispatch, DispatchRule, FieldSet, FieldSink, FieldValue, HintKey, Hints,
+    ParseContext, Parsed, Protocol,
 };
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// IP protocol number for UDP.
 pub const IP_PROTO_UDP: u8 = 17;
+
+field_list! {
+    /// The fields of a `udp` layer, in the order the parser writes them.
+    enum Field {
+        SrcPort = "src_port",
+        DstPort = "dst_port",
+        Length = "length",
+        Checksum = "checksum",
+    }
+}
+
+/// The UDP header at the start of `data`: the fields of `want` (all of
+/// them for [`FieldSet::ALL`]) to `fields`, the payload and the hints for
+/// the layer above.
+#[inline(always)]
+fn parse_udp<'a>(data: &'a [u8], want: FieldSet, fields: &mut FieldSink<'_, 'a>) -> Parsed<'a> {
+    let udp = match UdpHeaderSlice::from_slice(data) {
+        Ok(udp) => udp,
+        Err(e) => {
+            return Parsed::error(fields.text_fmt(format_args!("UDP parse error: {e}")), data)
+        }
+    };
+    let src_port = udp.source_port();
+    let dst_port = udp.destination_port();
+    if want.has(Field::SrcPort) {
+        fields.push(("src_port", FieldValue::UInt16(src_port)));
+    }
+    if want.has(Field::DstPort) {
+        fields.push(("dst_port", FieldValue::UInt16(dst_port)));
+    }
+    if want.has(Field::Length) {
+        fields.push(("length", FieldValue::UInt16(udp.length())));
+    }
+    if want.has(Field::Checksum) {
+        fields.push(("checksum", FieldValue::UInt16(udp.checksum())));
+    }
+
+    let mut child_hints = Hints::new();
+    child_hints.insert(HintKey::SrcPort, src_port as u64);
+    child_hints.insert(HintKey::DstPort, dst_port as u64);
+    child_hints.insert(HintKey::Transport, IP_PROTO_UDP as u64);
+
+    // UDP header is always 8 bytes
+    Parsed::ok(&data[8..], child_hints)
+}
 
 /// UDP protocol parser.
 #[derive(Debug, Clone, Copy)]
@@ -45,26 +88,13 @@ impl Protocol for UdpProtocol {
         }
     }
 
-    fn parse<'a>(&self, data: &'a [u8], _context: &ParseContext) -> ParseResult<'a> {
-        match UdpHeaderSlice::from_slice(data) {
-            Ok(udp) => {
-                let mut fields = SmallVec::new();
-
-                fields.push(("src_port", FieldValue::UInt16(udp.source_port())));
-                fields.push(("dst_port", FieldValue::UInt16(udp.destination_port())));
-                fields.push(("length", FieldValue::UInt16(udp.length())));
-                fields.push(("checksum", FieldValue::UInt16(udp.checksum())));
-
-                let mut child_hints = Hints::new();
-                child_hints.insert(HintKey::SrcPort, udp.source_port() as u64);
-                child_hints.insert(HintKey::DstPort, udp.destination_port() as u64);
-                child_hints.insert(HintKey::Transport, 17); // UDP
-
-                // UDP header is always 8 bytes
-                ParseResult::success(fields, &data[8..], child_hints)
-            }
-            Err(e) => ParseResult::error(format!("UDP parse error: {e}"), data),
-        }
+    fn parse<'a>(
+        &self,
+        data: &'a [u8],
+        _context: &ParseContext,
+        fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
+        parse_udp(data, FieldSet::ALL, fields)
     }
 
     fn schema_fields(&self) -> Vec<FieldDescriptor> {
@@ -84,51 +114,18 @@ impl Protocol for UdpProtocol {
         &["ipv4", "ipv6"]
     }
 
+    fn field_names(&self) -> &'static [&'static str] {
+        Field::NAMES
+    }
+
     fn parse_projected<'a>(
         &self,
         data: &'a [u8],
         _context: &ParseContext,
-        fields: Option<&FieldSet>,
-    ) -> ParseResult<'a> {
-        // If no projection, use full parse
-        let fields = match fields {
-            None => return self.parse(data, _context),
-            Some(f) if f.is_empty() => return self.parse(data, _context),
-            Some(f) => f,
-        };
-
-        match UdpHeaderSlice::from_slice(data) {
-            Ok(udp) => {
-                let mut result_fields = SmallVec::new();
-
-                // Always extract ports for child hints
-                let src_port = udp.source_port();
-                let dst_port = udp.destination_port();
-
-                // Only insert requested fields
-                if fields.contains("src_port") {
-                    result_fields.push(("src_port", FieldValue::UInt16(src_port)));
-                }
-                if fields.contains("dst_port") {
-                    result_fields.push(("dst_port", FieldValue::UInt16(dst_port)));
-                }
-                if fields.contains("length") {
-                    result_fields.push(("length", FieldValue::UInt16(udp.length())));
-                }
-                if fields.contains("checksum") {
-                    result_fields.push(("checksum", FieldValue::UInt16(udp.checksum())));
-                }
-
-                let mut child_hints = Hints::new();
-                child_hints.insert(HintKey::SrcPort, src_port as u64);
-                child_hints.insert(HintKey::DstPort, dst_port as u64);
-                child_hints.insert(HintKey::Transport, 17); // UDP
-
-                // UDP header is always 8 bytes
-                ParseResult::success(result_fields, &data[8..], child_hints)
-            }
-            Err(e) => ParseResult::error(format!("UDP parse error: {e}"), data),
-        }
+        projection: FieldSet,
+        fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
+        parse_udp(data, projection, fields)
     }
 
     fn cheap_fields(&self) -> &'static [&'static str] {
@@ -145,6 +142,7 @@ impl Protocol for UdpProtocol {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::test_utils::ParseLayer as _;
 
     #[test]
     fn test_parse_udp() {
@@ -162,7 +160,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 17);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("src_port"), Some(&FieldValue::UInt16(53)));
@@ -186,7 +184,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 17);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("src_port"), Some(&FieldValue::UInt16(50000)));
@@ -207,7 +205,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 17);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("src_port"), Some(&FieldValue::UInt16(68)));
@@ -241,7 +239,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 17);
 
-        let result = parser.parse(&short_header, &context);
+        let result = parser.parse_layer(&short_header, &context);
 
         assert!(!result.is_ok());
         assert!(result.error.is_some());
@@ -260,7 +258,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 17);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.hint(HintKey::SrcPort), Some(4660u64));
@@ -282,7 +280,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 17);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("length"), Some(&FieldValue::UInt16(8)));
@@ -303,11 +301,7 @@ mod tests {
         context.insert_hint(HintKey::IpProtocol, 17);
 
         // Project to only ports
-        let fields: FieldSet = ["src_port", "dst_port"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        let result = parser.parse_projected(&header, &context, Some(&fields));
+        let result = parser.parse_layer_fields(&header, &context, &["src_port", "dst_port"]);
 
         assert!(result.is_ok());
         // Requested fields are present
@@ -319,5 +313,13 @@ mod tests {
         // Child hints are still populated
         assert_eq!(result.hint(HintKey::SrcPort), Some(53u64));
         assert_eq!(result.hint(HintKey::DstPort), Some(49152u64));
+
+        // A projection of no field (a row count) extracts none, and is
+        // otherwise the same parse.
+        let none = parser.parse_layer_projected(&header, &context, Some(FieldSet::NONE));
+        assert!(none.is_ok());
+        assert!(none.fields.is_empty());
+        assert_eq!(none.remaining, result.remaining);
+        assert_eq!(none.child_hints, result.child_hints);
     }
 }

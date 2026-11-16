@@ -1,12 +1,66 @@
 //! IEEE 802.1Q VLAN tag parser.
 
-use smallvec::SmallVec;
-
 use super::ethernet::ethertype;
 use super::{
-    Cond, Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult, Protocol,
+    field_list, Cond, Dispatch, DispatchRule, FieldSet, FieldSink, FieldValue, HintKey, Hints,
+    ParseContext, Parsed, Protocol,
 };
 use crate::schema::{DataKind, FieldDescriptor};
+
+field_list! {
+    /// The fields of a `vlan` layer, in the order the parser writes them.
+    enum Field {
+        Priority = "priority",
+        Dei = "dei",
+        VlanId = "vlan_id",
+        InnerEthertype = "inner_ethertype",
+    }
+}
+
+/// The VLAN tag at the start of `data`: the fields of `want` (all of them
+/// for [`FieldSet::ALL`]) to `fields`, the payload and the hints for the
+/// layer above.
+#[inline(always)]
+fn parse_vlan<'a>(data: &'a [u8], want: FieldSet, fields: &mut FieldSink<'_, 'a>) -> Parsed<'a> {
+    // VLAN tag is 4 bytes total, but the TPID (2 bytes) was already
+    // consumed by the Ethernet parser, so we just have TCI (2 bytes)
+    // and the inner EtherType (2 bytes).
+    if data.len() < 4 {
+        return Parsed::error("VLAN tag too short", data);
+    }
+
+    // TCI (Tag Control Information) - 2 bytes
+    let tci = u16::from_be_bytes([data[0], data[1]]);
+    // VID (VLAN Identifier) - bits 0-11 (12 bits)
+    let vlan_id = tci & 0x0FFF;
+    // Inner EtherType - 2 bytes
+    let inner_ethertype = u16::from_be_bytes([data[2], data[3]]);
+
+    if want.has(Field::Priority) {
+        // PCP (Priority Code Point) - bits 13-15 (3 bits)
+        let priority = (tci >> 13) & 0x07;
+        fields.push(("priority", FieldValue::UInt8(priority as u8)));
+    }
+    if want.has(Field::Dei) {
+        // DEI (Drop Eligible Indicator) - bit 12 (1 bit)
+        let dei = (tci >> 12) & 0x01;
+        fields.push(("dei", FieldValue::Bool(dei != 0)));
+    }
+    if want.has(Field::VlanId) {
+        fields.push(("vlan_id", FieldValue::UInt16(vlan_id)));
+    }
+    if want.has(Field::InnerEthertype) {
+        fields.push(("inner_ethertype", FieldValue::UInt16(inner_ethertype)));
+    }
+
+    // Set up child hints for the next layer
+    let mut child_hints = Hints::new();
+    child_hints.insert(HintKey::EtherType, inner_ethertype as u64);
+    child_hints.insert(HintKey::VlanId, vlan_id as u64);
+
+    // VLAN tag is 4 bytes
+    Parsed::ok(&data[4..], child_hints)
+}
 
 /// 802.1Q VLAN tag parser.
 #[derive(Debug, Clone, Copy)]
@@ -45,42 +99,13 @@ impl Protocol for VlanProtocol {
         }
     }
 
-    fn parse<'a>(&self, data: &'a [u8], _context: &ParseContext) -> ParseResult<'a> {
-        // VLAN tag is 4 bytes total, but the TPID (2 bytes) was already
-        // consumed by the Ethernet parser, so we just have TCI (2 bytes)
-        // and the inner EtherType (2 bytes).
-        if data.len() < 4 {
-            return ParseResult::error("VLAN tag too short".to_string(), data);
-        }
-
-        let mut fields = SmallVec::new();
-
-        // TCI (Tag Control Information) - 2 bytes
-        let tci = u16::from_be_bytes([data[0], data[1]]);
-
-        // PCP (Priority Code Point) - bits 13-15 (3 bits)
-        let priority = (tci >> 13) & 0x07;
-        fields.push(("priority", FieldValue::UInt8(priority as u8)));
-
-        // DEI (Drop Eligible Indicator) - bit 12 (1 bit)
-        let dei = (tci >> 12) & 0x01;
-        fields.push(("dei", FieldValue::Bool(dei != 0)));
-
-        // VID (VLAN Identifier) - bits 0-11 (12 bits)
-        let vlan_id = tci & 0x0FFF;
-        fields.push(("vlan_id", FieldValue::UInt16(vlan_id)));
-
-        // Inner EtherType - 2 bytes
-        let inner_ethertype = u16::from_be_bytes([data[2], data[3]]);
-        fields.push(("inner_ethertype", FieldValue::UInt16(inner_ethertype)));
-
-        // Set up child hints for the next layer
-        let mut child_hints = Hints::new();
-        child_hints.insert(HintKey::EtherType, inner_ethertype as u64);
-        child_hints.insert(HintKey::VlanId, vlan_id as u64);
-
-        // VLAN tag is 4 bytes
-        ParseResult::success(fields, &data[4..], child_hints)
+    fn parse<'a>(
+        &self,
+        data: &'a [u8],
+        _context: &ParseContext,
+        fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
+        parse_vlan(data, FieldSet::ALL, fields)
     }
 
     fn schema_fields(&self) -> Vec<FieldDescriptor> {
@@ -99,11 +124,26 @@ impl Protocol for VlanProtocol {
     fn dependencies(&self) -> &'static [&'static str] {
         &["ethernet", "vlan"] // Can follow Ethernet or another VLAN (QinQ)
     }
+
+    fn field_names(&self) -> &'static [&'static str] {
+        Field::NAMES
+    }
+
+    fn parse_projected<'a>(
+        &self,
+        data: &'a [u8],
+        _context: &ParseContext,
+        projection: FieldSet,
+        fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
+        parse_vlan(data, projection, fields)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::test_utils::ParseLayer as _;
 
     /// Create a VLAN tag with the given parameters.
     fn create_vlan_tag(vlan_id: u16, priority: u8, dei: bool, inner_ethertype: u16) -> Vec<u8> {
@@ -128,7 +168,7 @@ mod tests {
         context.insert_hint(HintKey::EtherType, ethertype::VLAN as u64);
         context.parent_protocol = Some("ethernet");
 
-        let result = parser.parse(&tag, &context);
+        let result = parser.parse_layer(&tag, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("vlan_id"), Some(&FieldValue::UInt16(100)));
@@ -150,7 +190,7 @@ mod tests {
         context.insert_hint(HintKey::EtherType, ethertype::VLAN as u64);
         context.parent_protocol = Some("ethernet");
 
-        let result = parser.parse(&tag, &context);
+        let result = parser.parse_layer(&tag, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("vlan_id"), Some(&FieldValue::UInt16(200)));
@@ -171,7 +211,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::EtherType, ethertype::VLAN as u64);
 
-        let result = parser.parse(&tag, &context);
+        let result = parser.parse_layer(&tag, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("vlan_id"), Some(&FieldValue::UInt16(4095)));
@@ -210,7 +250,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::EtherType, ethertype::VLAN as u64);
 
-        let result = parser.parse(&short_tag, &context);
+        let result = parser.parse_layer(&short_tag, &context);
 
         assert!(!result.is_ok());
         assert!(result.error.is_some());
@@ -225,7 +265,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::EtherType, ethertype::VLAN as u64);
 
-        let result = parser.parse(&tag, &context);
+        let result = parser.parse_layer(&tag, &context);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -245,7 +285,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::EtherType, ethertype::VLAN as u64);
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.remaining.len(), 4); // IPv4 header bytes

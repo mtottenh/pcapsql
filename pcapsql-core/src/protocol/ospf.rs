@@ -6,11 +6,9 @@
 //! RFC 2328: OSPF Version 2
 //! RFC 5340: OSPF for IPv6
 
-use compact_str::CompactString;
-use smallvec::SmallVec;
-
 use super::{
-    Cond, Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult, Protocol,
+    Cond, Dispatch, DispatchRule, FieldSink, FieldValue, HintKey, Hints, ParseContext, Parsed,
+    Protocol,
 };
 use crate::schema::{DataKind, FieldDescriptor};
 
@@ -115,13 +113,16 @@ impl Protocol for OspfProtocol {
         }
     }
 
-    fn parse<'a>(&self, data: &'a [u8], _context: &ParseContext) -> ParseResult<'a> {
+    fn parse<'a>(
+        &self,
+        data: &'a [u8],
+        _context: &ParseContext,
+        fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
         // OSPF header is 24 bytes minimum
         if data.len() < 24 {
-            return ParseResult::error("OSPF header too short".to_string(), data);
+            return Parsed::error("OSPF header too short", data);
         }
-
-        let mut fields = SmallVec::new();
 
         // Byte 0: Version
         let version = data[0];
@@ -141,17 +142,11 @@ impl Protocol for OspfProtocol {
 
         // Bytes 4-7: Router ID
         let router_id = format!("{}.{}.{}.{}", data[4], data[5], data[6], data[7]);
-        fields.push((
-            "router_id",
-            FieldValue::OwnedString(CompactString::new(router_id)),
-        ));
+        fields.push(("router_id", fields.str(&router_id)));
 
         // Bytes 8-11: Area ID
         let area_id = format!("{}.{}.{}.{}", data[8], data[9], data[10], data[11]);
-        fields.push((
-            "area_id",
-            FieldValue::OwnedString(CompactString::new(area_id)),
-        ));
+        fields.push(("area_id", fields.str(&area_id)));
 
         // Bytes 12-13: Checksum
         let checksum = u16::from_be_bytes([data[12], data[13]]);
@@ -177,16 +172,16 @@ impl Protocol for OspfProtocol {
 
         match (msg_type, version) {
             (packet_type::HELLO, 2) => {
-                self.parse_hello_v2(packet_data, &mut fields);
+                self.parse_hello_v2(packet_data, fields);
             }
             (packet_type::DATABASE_DESCRIPTION, 2) => {
-                self.parse_db_description_v2(packet_data, &mut fields);
+                self.parse_db_description_v2(packet_data, fields);
             }
             (packet_type::LINK_STATE_UPDATE, 2) => {
-                self.parse_ls_update_v2(packet_data, &mut fields);
+                self.parse_ls_update_v2(packet_data, fields);
             }
             (packet_type::LINK_STATE_ACK, 2) => {
-                self.parse_ls_ack_v2(packet_data, &mut fields);
+                self.parse_ls_ack_v2(packet_data, fields);
             }
             _ => {
                 // Unknown packet type or version
@@ -195,7 +190,7 @@ impl Protocol for OspfProtocol {
 
         // Calculate remaining data
         let consumed = std::cmp::min(length as usize, data.len());
-        ParseResult::success(fields, &data[consumed..], Hints::new())
+        Parsed::ok(&data[consumed..], Hints::new())
     }
 
     fn schema_fields(&self) -> Vec<FieldDescriptor> {
@@ -246,7 +241,7 @@ impl Protocol for OspfProtocol {
 
 impl OspfProtocol {
     /// Parse OSPF v2 Hello packet.
-    fn parse_hello_v2(&self, data: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) {
+    fn parse_hello_v2(&self, data: &[u8], fields: &mut FieldSink<'_, '_>) {
         if data.len() < 20 {
             return;
         }
@@ -265,17 +260,11 @@ impl OspfProtocol {
 
         // Bytes 12-15: Designated Router
         let dr = format!("{}.{}.{}.{}", data[12], data[13], data[14], data[15]);
-        fields.push((
-            "designated_router",
-            FieldValue::OwnedString(CompactString::new(dr)),
-        ));
+        fields.push(("designated_router", fields.str(&dr)));
 
         // Bytes 16-19: Backup Designated Router
         let bdr = format!("{}.{}.{}.{}", data[16], data[17], data[18], data[19]);
-        fields.push((
-            "backup_dr",
-            FieldValue::OwnedString(CompactString::new(bdr)),
-        ));
+        fields.push(("backup_dr", fields.str(&bdr)));
 
         // Count neighbors (remaining data is list of neighbor router IDs)
         let neighbor_data = &data[20..];
@@ -286,11 +275,7 @@ impl OspfProtocol {
     }
 
     /// Parse OSPF v2 Database Description packet.
-    fn parse_db_description_v2(
-        &self,
-        data: &[u8],
-        fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
-    ) {
+    fn parse_db_description_v2(&self, data: &[u8], fields: &mut FieldSink<'_, '_>) {
         if data.len() < 8 {
             return;
         }
@@ -322,11 +307,7 @@ impl OspfProtocol {
     }
 
     /// Parse OSPF v2 LS Update packet.
-    fn parse_ls_update_v2(
-        &self,
-        data: &[u8],
-        fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
-    ) {
+    fn parse_ls_update_v2(&self, data: &[u8], fields: &mut FieldSink<'_, '_>) {
         if data.len() < 4 {
             return;
         }
@@ -343,11 +324,7 @@ impl OspfProtocol {
     }
 
     /// Parse OSPF v2 LS Acknowledgment packet.
-    fn parse_ls_ack_v2(
-        &self,
-        data: &[u8],
-        fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
-    ) {
+    fn parse_ls_ack_v2(&self, data: &[u8], fields: &mut FieldSink<'_, '_>) {
         // LS Ack contains a list of LSA headers (each 20 bytes)
         let lsa_count = (data.len() / 20) as u16;
         if lsa_count > 0 {
@@ -375,11 +352,7 @@ impl OspfProtocol {
     /// |         LS Checksum           |             Length            |
     /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
     /// ```
-    fn parse_lsa_header(
-        &self,
-        data: &[u8],
-        fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
-    ) {
+    fn parse_lsa_header(&self, data: &[u8], fields: &mut FieldSink<'_, '_>) {
         if data.len() < 20 {
             return;
         }
@@ -396,14 +369,11 @@ impl OspfProtocol {
 
         // Bytes 4-7: Link State ID
         let ls_id = format!("{}.{}.{}.{}", data[4], data[5], data[6], data[7]);
-        fields.push(("lsa_id", FieldValue::OwnedString(CompactString::new(ls_id))));
+        fields.push(("lsa_id", fields.str(&ls_id)));
 
         // Bytes 8-11: Advertising Router
         let adv_router = format!("{}.{}.{}.{}", data[8], data[9], data[10], data[11]);
-        fields.push((
-            "lsa_advertising_router",
-            FieldValue::OwnedString(CompactString::new(adv_router)),
-        ));
+        fields.push(("lsa_advertising_router", fields.str(&adv_router)));
 
         // Bytes 12-15: LS Sequence Number
         let ls_sequence = u32::from_be_bytes([data[12], data[13], data[14], data[15]]);
@@ -417,6 +387,7 @@ impl OspfProtocol {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::test_utils::ParseLayer as _;
 
     /// Create an OSPF v2 header.
     fn create_ospf_header(
@@ -520,7 +491,7 @@ mod tests {
 
         let pkt = create_ospf_header(2, packet_type::HELLO, 24, [192, 168, 1, 1], [0, 0, 0, 0]);
 
-        let result = parser.parse(&pkt, &context);
+        let result = parser.parse_layer(&pkt, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("version"), Some(&FieldValue::UInt8(2)));
@@ -540,13 +511,13 @@ mod tests {
 
         // OSPFv2
         let pkt_v2 = create_ospf_header(2, packet_type::HELLO, 24, [1, 1, 1, 1], [0, 0, 0, 0]);
-        let result_v2 = parser.parse(&pkt_v2, &context);
+        let result_v2 = parser.parse_layer(&pkt_v2, &context);
         assert!(result_v2.is_ok());
         assert_eq!(result_v2.get("version"), Some(&FieldValue::UInt8(2)));
 
         // OSPFv3
         let pkt_v3 = create_ospf_header(3, packet_type::HELLO, 24, [1, 1, 1, 1], [0, 0, 0, 0]);
-        let result_v3 = parser.parse(&pkt_v3, &context);
+        let result_v3 = parser.parse_layer(&pkt_v3, &context);
         assert!(result_v3.is_ok());
         assert_eq!(result_v3.get("version"), Some(&FieldValue::UInt8(3)));
     }
@@ -567,18 +538,18 @@ mod tests {
             [192, 168, 1, 2], // BDR
         );
 
-        let result = parser.parse(&pkt, &context);
+        let result = parser.parse_layer(&pkt, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("hello_interval"), Some(&FieldValue::UInt16(10)));
         assert_eq!(result.get("dead_interval"), Some(&FieldValue::UInt32(40)));
         assert_eq!(
             result.get("designated_router"),
-            Some(&FieldValue::OwnedString(CompactString::new("192.168.1.1")))
+            Some(&FieldValue::Str("192.168.1.1"))
         );
         assert_eq!(
             result.get("backup_dr"),
-            Some(&FieldValue::OwnedString(CompactString::new("192.168.1.2")))
+            Some(&FieldValue::Str("192.168.1.2"))
         );
     }
 
@@ -591,13 +562,10 @@ mod tests {
 
         let pkt = create_ospf_header(2, packet_type::HELLO, 24, [10, 0, 0, 1], [0, 0, 0, 0]);
 
-        let result = parser.parse(&pkt, &context);
+        let result = parser.parse_layer(&pkt, &context);
 
         assert!(result.is_ok());
-        assert_eq!(
-            result.get("router_id"),
-            Some(&FieldValue::OwnedString(CompactString::new("10.0.0.1")))
-        );
+        assert_eq!(result.get("router_id"), Some(&FieldValue::Str("10.0.0.1")));
     }
 
     // Test 6: Area ID extraction
@@ -609,21 +577,15 @@ mod tests {
 
         // Backbone area (0.0.0.0)
         let pkt1 = create_ospf_header(2, packet_type::HELLO, 24, [1, 1, 1, 1], [0, 0, 0, 0]);
-        let result1 = parser.parse(&pkt1, &context);
+        let result1 = parser.parse_layer(&pkt1, &context);
         assert!(result1.is_ok());
-        assert_eq!(
-            result1.get("area_id"),
-            Some(&FieldValue::OwnedString(CompactString::new("0.0.0.0")))
-        );
+        assert_eq!(result1.get("area_id"), Some(&FieldValue::Str("0.0.0.0")));
 
         // Non-backbone area
         let pkt2 = create_ospf_header(2, packet_type::HELLO, 24, [1, 1, 1, 1], [0, 0, 0, 1]);
-        let result2 = parser.parse(&pkt2, &context);
+        let result2 = parser.parse_layer(&pkt2, &context);
         assert!(result2.is_ok());
-        assert_eq!(
-            result2.get("area_id"),
-            Some(&FieldValue::OwnedString(CompactString::new("0.0.0.1")))
-        );
+        assert_eq!(result2.get("area_id"), Some(&FieldValue::Str("0.0.0.1")));
     }
 
     // Test 7: Message type name mapping
@@ -643,7 +605,7 @@ mod tests {
 
         for (pkt_type, name) in test_types {
             let pkt = create_ospf_header(2, pkt_type, 24, [1, 1, 1, 1], [0, 0, 0, 0]);
-            let result = parser.parse(&pkt, &context);
+            let result = parser.parse_layer(&pkt, &context);
 
             assert!(result.is_ok());
             assert_eq!(
@@ -665,7 +627,7 @@ mod tests {
         context.insert_hint(HintKey::IpProtocol, 89);
 
         let short_pkt = [2u8, 1, 0, 24]; // Only 4 bytes
-        let result = parser.parse(&short_pkt, &context);
+        let result = parser.parse_layer(&short_pkt, &context);
 
         assert!(!result.is_ok());
         assert!(result.error.is_some());
@@ -683,7 +645,7 @@ mod tests {
         pkt[14] = 0;
         pkt[15] = 2;
 
-        let result = parser.parse(&pkt, &context);
+        let result = parser.parse_layer(&pkt, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("auth_type"), Some(&FieldValue::UInt16(2)));
@@ -732,7 +694,7 @@ mod tests {
         pkt.push(0x07); // DD Flags (I/M/MS all set)
         pkt.extend_from_slice(&0x12345678u32.to_be_bytes()); // DD Sequence
 
-        let result = parser.parse(&pkt, &context);
+        let result = parser.parse_layer(&pkt, &context);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -779,7 +741,7 @@ mod tests {
         pkt.extend_from_slice(&[0x00, 0x00]); // LS Checksum
         pkt.extend_from_slice(&36u16.to_be_bytes()); // Length
 
-        let result = parser.parse(&pkt, &context);
+        let result = parser.parse_layer(&pkt, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("dd_lsa_count"), Some(&FieldValue::UInt16(1)));
@@ -823,7 +785,7 @@ mod tests {
         pkt.extend_from_slice(&[0x00, 0x00]); // LS Checksum
         pkt.extend_from_slice(&32u16.to_be_bytes()); // Length
 
-        let result = parser.parse(&pkt, &context);
+        let result = parser.parse_layer(&pkt, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("lsu_lsa_count"), Some(&FieldValue::UInt32(2)));
@@ -836,13 +798,10 @@ mod tests {
             result.get("lsa_type_name"),
             Some(&FieldValue::Str("Network-LSA"))
         );
-        assert_eq!(
-            result.get("lsa_id"),
-            Some(&FieldValue::OwnedString(CompactString::new("192.168.1.0")))
-        );
+        assert_eq!(result.get("lsa_id"), Some(&FieldValue::Str("192.168.1.0")));
         assert_eq!(
             result.get("lsa_advertising_router"),
-            Some(&FieldValue::OwnedString(CompactString::new("192.168.1.1")))
+            Some(&FieldValue::Str("192.168.1.1"))
         );
     }
 
@@ -882,7 +841,7 @@ mod tests {
         pkt.extend_from_slice(&[0x00, 0x00]); // LS Checksum
         pkt.extend_from_slice(&28u16.to_be_bytes()); // Length
 
-        let result = parser.parse(&pkt, &context);
+        let result = parser.parse_layer(&pkt, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("lsa_ack_count"), Some(&FieldValue::UInt16(2)));
@@ -934,7 +893,7 @@ mod tests {
             pkt.extend_from_slice(&[0x00, 0x00]); // LS Checksum
             pkt.extend_from_slice(&20u16.to_be_bytes()); // Length
 
-            let result = parser.parse(&pkt, &context);
+            let result = parser.parse_layer(&pkt, &context);
             assert!(result.is_ok());
             assert_eq!(result.get("lsa_type"), Some(&FieldValue::UInt8(ls_type)));
             assert_eq!(
@@ -972,7 +931,7 @@ mod tests {
         pkt.extend_from_slice(&[0x00, 0x00]); // LS Checksum
         pkt.extend_from_slice(&20u16.to_be_bytes()); // Length
 
-        let result = parser.parse(&pkt, &context);
+        let result = parser.parse_layer(&pkt, &context);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -1018,7 +977,7 @@ mod tests {
         pkt.extend_from_slice(&[192, 168, 1, 3]); // Neighbor 2
         pkt.extend_from_slice(&[192, 168, 1, 4]); // Neighbor 3
 
-        let result = parser.parse(&pkt, &context);
+        let result = parser.parse_layer(&pkt, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("neighbor_count"), Some(&FieldValue::UInt16(3)));
@@ -1040,7 +999,7 @@ mod tests {
         ];
 
         // Should not panic, should parse header fields
-        let result = parser.parse(&crash_input, &context);
+        let result = parser.parse_layer(&crash_input, &context);
         assert!(result.is_ok());
         assert_eq!(result.get("version"), Some(&FieldValue::UInt8(2)));
         assert_eq!(result.get("message_type"), Some(&FieldValue::UInt8(2)));
@@ -1075,7 +1034,7 @@ mod tests {
         pkt.extend_from_slice(&[0x00, 0x00]); // LS Checksum
         pkt.extend_from_slice(&20u16.to_be_bytes()); // Length
 
-        let result = parser.parse(&pkt, &context);
+        let result = parser.parse_layer(&pkt, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("lsa_age"), Some(&FieldValue::UInt16(1800)));

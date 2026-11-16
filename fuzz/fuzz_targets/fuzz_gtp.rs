@@ -9,7 +9,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use pcapsql_core::{default_registry, parse_packet, ParseScope};
+use pcapsql_core::{default_registry, parse_packet, ParseBuf, ParseScope};
 
 fuzz_target!(|data: &[u8]| {
     if data.is_empty() {
@@ -17,6 +17,8 @@ fuzz_target!(|data: &[u8]| {
     }
 
     let registry = default_registry();
+
+    let mut buf = ParseBuf::new();
 
     // Build frame: Ethernet (14) + IPv4 (20) + UDP (8) + GTP payload
     // Total header overhead: 42 bytes
@@ -52,10 +54,10 @@ fuzz_target!(|data: &[u8]| {
     frame.extend_from_slice(data);
 
     // Parse - GTP parser triggered by dst_port=2152
-    let _ = parse_packet(&registry, 1, &frame, &ParseScope::full());
+    let _ = parse_packet(&registry, 1, &frame, &ParseScope::full(), &mut buf);
 
     // Also test GTP-C port (2123)
     frame[36] = 0x08;
     frame[37] = 0x4b; // dst_port = 2123 (GTP-C)
-    let _ = parse_packet(&registry, 1, &frame, &ParseScope::full());
+    let _ = parse_packet(&registry, 1, &frame, &ParseScope::full(), &mut buf);
 });

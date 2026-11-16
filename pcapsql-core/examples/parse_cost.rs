@@ -1,13 +1,18 @@
 //! What parsing costs per packet, for a profiler and an allocation count.
 //!
 //! ```text
-//! parse_cost parse <kind> <packets>          # parse_packet, full scope
-//! parse_cost scan <table> <kind> <packets>   # PartitionScan into a sink that stores nothing
+//! parse_cost parse <kind> <packets>          # parse_packet, full scope, one ParseBuf
+//! parse_cost scan <table> <kind> <packets> [<columns>]
+//!                                            # PartitionScan into a sink that stores nothing
 //! ```
 //!
 //! `<kind>` is the frame that is repeated: `udp` (Ethernet/IPv4/UDP to a port
 //! without a parser), `tcp` (a segment with a timestamp option), `dns` (a
 //! response with one answer) or `http` (a `GET` request).
+//!
+//! `<columns>` are the columns the scan of `<table>` produces: `all` (the
+//! table's default columns, the default), `none` (a row count) or a
+//! comma-separated list of column names.
 //!
 //! The measured work is in functions named `measured_*` and nothing else is,
 //! so that callgrind can be told to count those alone, and a per-packet cost
@@ -33,10 +38,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use pcapsql_core::io::{ReadPacketReader, StreamHeader};
-use pcapsql_core::protocol::{parse_packet, ParseScope};
+use pcapsql_core::protocol::{parse_packet, ParseBuf, ParseScope};
 use pcapsql_core::scan::{
-    Catalog, Full, ListSink, OutCol, PartitionScan, RowSink, ScanPlan, Step, TableScan,
-    TimestampUnit,
+    Catalog, ColId, Full, ListSink, OutCol, PartitionScan, RowSink, ScanPlan, Step, TableDef,
+    TableScan, TimestampUnit,
 };
 use pcapsql_core::{default_registry, ProtocolRegistry};
 use pcapsql_testgen::{legacy_pcap, GenPacket, LegacyVariant};
@@ -227,34 +232,57 @@ impl ListSink for NullList {
     fn finish(self) {}
 }
 
-/// `parse_packet` over every frame; the number of fields it extracted.
+/// `parse_packet` over every frame, into one buffer; the number of fields it
+/// extracted.
 #[inline(never)]
 fn measured_parse(registry: &ProtocolRegistry, frames: &[Vec<u8>]) -> u64 {
     let scope = ParseScope::full();
+    let mut buf = ParseBuf::new();
     let mut fields = 0u64;
     for frame in frames {
-        let layers = parse_packet(registry, 1, black_box(frame), &scope);
+        let layers = parse_packet(registry, 1, black_box(frame), &scope, &mut buf);
         fields += layers
             .iter()
-            .map(|(_, layer)| layer.fields.len() as u64)
+            .map(|layer| layer.fields().len() as u64)
             .sum::<u64>();
         black_box(&layers);
     }
     fields
 }
 
-/// A scan of `table` over `capture`; the rows and cells written.
+/// The columns of `table` that `columns` names: `all` (the default
+/// columns), `none` or a comma-separated list.
+fn columns_of(table: &TableDef, columns: &str) -> Vec<ColId> {
+    match columns {
+        "all" => table.default_columns().map(|(c, _)| c).collect(),
+        "none" => Vec::new(),
+        names => names
+            .split(',')
+            .map(|name| {
+                table
+                    .column(name)
+                    .unwrap_or_else(|| panic!("{} has no column {name}", table.name))
+                    .0
+            })
+            .collect(),
+    }
+}
+
+/// A scan of `columns` of `table` over `capture`; the rows and cells
+/// written.
 #[inline(never)]
-fn measured_scan(registry: &Arc<ProtocolRegistry>, table: &str, capture: Vec<u8>) -> (u64, u64) {
+fn measured_scan(
+    registry: &Arc<ProtocolRegistry>,
+    table: &str,
+    columns: &str,
+    capture: Vec<u8>,
+) -> (u64, u64) {
     let catalog = Catalog::builtin();
     let (id, entry) = catalog
         .table(table)
         .unwrap_or_else(|| panic!("unknown table {table}"));
     let plan = ScanPlan {
-        tables: vec![TableScan::new(
-            id,
-            entry.default_columns().map(|(c, _)| c).collect(),
-        )],
+        tables: vec![TableScan::new(id, columns_of(entry, columns))],
         timestamps: TimestampUnit::Nanos,
         ..Default::default()
     };
@@ -300,7 +328,8 @@ fn main() {
                 format!("parse {kind}: {packets} packets, {fields} fields")
             });
         }
-        ["scan", table, kind, packets] => {
+        ["scan", table, kind, packets] | ["scan", table, kind, packets, _] => {
+            let columns = args.get(4).copied().unwrap_or("all");
             let count: usize = packets.parse().expect("a packet count");
             let packets: Vec<GenPacket> = (0..count)
                 .map(|i| {
@@ -317,13 +346,16 @@ fn main() {
             drop(packets);
             counted(&mut || {
                 let capture = capture.take().expect("one run");
-                let (rows, cells) = measured_scan(&registry, table, capture);
-                format!("scan {table} over {kind}: {count} packets, {rows} rows, {cells} cells")
+                let (rows, cells) = measured_scan(&registry, table, columns, capture);
+                format!(
+                    "scan {table} ({columns}) over {kind}: {count} packets, {rows} rows, \
+                     {cells} cells"
+                )
             });
         }
         _ => {
             eprintln!("usage: parse_cost parse <kind> <packets>");
-            eprintln!("       parse_cost scan <table> <kind> <packets>");
+            eprintln!("       parse_cost scan <table> <kind> <packets> [all|none|<column>,...]");
             std::process::exit(2);
         }
     }

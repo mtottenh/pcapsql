@@ -3,12 +3,13 @@
 //! Parses DHCP (Dynamic Host Configuration Protocol) messages used for
 //! network configuration. Matches on UDP ports 67/68 and the DHCP magic cookie.
 
-use compact_str::CompactString;
-use smallvec::SmallVec;
+use std::fmt::Write as _;
 
 use super::{
-    Cond, Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult, Protocol,
+    Cond, Dispatch, DispatchRule, FieldSink, FieldValue, HintKey, Hints, ParseContext, Parsed,
+    Protocol,
 };
+use crate::format::{mac_text, MAC_TEXT_LEN};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// DHCP server port.
@@ -69,21 +70,21 @@ impl Protocol for DhcpProtocol {
         }
     }
 
-    fn parse<'a>(&self, data: &'a [u8], _context: &ParseContext) -> ParseResult<'a> {
+    fn parse<'a>(
+        &self,
+        data: &'a [u8],
+        _context: &ParseContext,
+        fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
         // DHCP header is at least 236 bytes
         if data.len() < DHCP_MIN_HEADER_SIZE {
-            return ParseResult::error("DHCP header too short".to_string(), data);
+            return Parsed::error("DHCP header too short", data);
         }
 
         // Check for DHCP magic cookie at offset 236
         if data.len() >= 240 && data[236..240] != DHCP_MAGIC_COOKIE {
-            return ParseResult::error(
-                "DHCP magic cookie not found (might be BOOTP)".to_string(),
-                data,
-            );
+            return Parsed::error("DHCP magic cookie not found (might be BOOTP)", data);
         }
-
-        let mut fields = SmallVec::new();
 
         // Parse fixed header fields
         // Op (1 byte): 1 = BOOTREQUEST, 2 = BOOTREPLY
@@ -116,50 +117,35 @@ impl Protocol for DhcpProtocol {
 
         // Client IP address (4 bytes)
         let ciaddr = format_ip(&data[12..16]);
-        fields.push((
-            "ciaddr",
-            FieldValue::OwnedString(CompactString::new(ciaddr)),
-        ));
+        fields.push(("ciaddr", fields.str(&ciaddr)));
 
         // Your (client) IP address (4 bytes)
         let yiaddr = format_ip(&data[16..20]);
-        fields.push((
-            "yiaddr",
-            FieldValue::OwnedString(CompactString::new(yiaddr)),
-        ));
+        fields.push(("yiaddr", fields.str(&yiaddr)));
 
         // Server IP address (4 bytes)
         let siaddr = format_ip(&data[20..24]);
-        fields.push((
-            "siaddr",
-            FieldValue::OwnedString(CompactString::new(siaddr)),
-        ));
+        fields.push(("siaddr", fields.str(&siaddr)));
 
         // Gateway/relay IP address (4 bytes)
         let giaddr = format_ip(&data[24..28]);
-        fields.push((
-            "giaddr",
-            FieldValue::OwnedString(CompactString::new(giaddr)),
-        ));
+        fields.push(("giaddr", fields.str(&giaddr)));
 
         // Client hardware address (16 bytes, but only first hlen are valid)
         let chaddr_len = (hlen as usize).min(16);
-        let chaddr = format_mac(&data[28..28 + chaddr_len]);
-        fields.push((
-            "chaddr",
-            FieldValue::OwnedString(CompactString::new(chaddr)),
-        ));
+        let chaddr = hardware_address(&data[28..28 + chaddr_len], fields);
+        fields.push(("chaddr", chaddr));
 
         // Skip server host name (64 bytes) and boot file name (128 bytes)
         // These are at offsets 44 and 108 respectively
 
         // Parse options (starting at offset 240, after magic cookie)
         if data.len() > 240 {
-            parse_dhcp_options(&data[240..], &mut fields);
+            parse_dhcp_options(&data[240..], fields);
         }
 
         // No child protocols after DHCP
-        ParseResult::success(fields, &[], Hints::new())
+        Parsed::ok(&[], Hints::new())
     }
 
     fn schema_fields(&self) -> Vec<FieldDescriptor> {
@@ -203,17 +189,26 @@ fn format_ip(bytes: &[u8]) -> String {
     }
 }
 
-/// Format a MAC address from bytes.
-fn format_mac(bytes: &[u8]) -> String {
-    bytes
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<Vec<_>>()
-        .join(":")
+/// A client hardware address as text, in the packet's arena: its bytes in
+/// hex, colon-separated. Six bytes are a MAC address; `hlen` allows any
+/// number up to sixteen.
+fn hardware_address<'a>(bytes: &[u8], fields: &FieldSink<'_, 'a>) -> FieldValue<'a> {
+    if let Ok(mac) = <&[u8; 6]>::try_from(bytes) {
+        return fields.str(mac_text(mac, &mut [0; MAC_TEXT_LEN]));
+    }
+    let mut text = fields.text_builder();
+    for (index, byte) in bytes.iter().enumerate() {
+        if index > 0 {
+            text.push_str(":");
+        }
+        // Writing to an arena string does not fail.
+        let _ = write!(text, "{byte:02x}");
+    }
+    text.finish()
 }
 
 /// Parse DHCP options and add relevant fields.
-fn parse_dhcp_options(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) {
+fn parse_dhcp_options(data: &[u8], fields: &mut FieldSink<'_, '_>) {
     let mut offset = 0;
 
     while offset < data.len() {
@@ -245,18 +240,12 @@ fn parse_dhcp_options(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldVa
         match option_code {
             // Option 1: Subnet Mask
             1 if option_len == 4 => {
-                fields.push((
-                    "subnet_mask",
-                    FieldValue::OwnedString(CompactString::new(format_ip(option_data))),
-                ));
+                fields.push(("subnet_mask", fields.str(&format_ip(option_data))));
             }
             // Option 3: Router
             3 if option_len >= 4 => {
                 // Can have multiple routers, just use first one
-                fields.push((
-                    "router",
-                    FieldValue::OwnedString(CompactString::new(format_ip(&option_data[..4]))),
-                ));
+                fields.push(("router", fields.str(&format_ip(&option_data[..4]))));
             }
             // Option 6: DNS Servers
             6 if option_len >= 4 => {
@@ -265,10 +254,7 @@ fn parse_dhcp_options(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldVa
                     .filter(|chunk| chunk.len() == 4)
                     .map(format_ip)
                     .collect();
-                fields.push((
-                    "dns_servers",
-                    FieldValue::OwnedString(CompactString::new(dns_servers.join(","))),
-                ));
+                fields.push(("dns_servers", fields.str(&dns_servers.join(","))));
             }
             // Option 51: IP Address Lease Time
             51 if option_len == 4 => {
@@ -286,10 +272,7 @@ fn parse_dhcp_options(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldVa
             }
             // Option 54: Server Identifier
             54 if option_len == 4 => {
-                fields.push((
-                    "server_id",
-                    FieldValue::OwnedString(CompactString::new(format_ip(option_data))),
-                ));
+                fields.push(("server_id", fields.str(&format_ip(option_data))));
             }
             _ => {}
         }
@@ -314,6 +297,7 @@ pub mod message_type {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::test_utils::ParseLayer as _;
 
     /// Create a minimal DHCP Discover packet.
     fn create_dhcp_discover() -> Vec<u8> {
@@ -479,7 +463,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::DstPort, 67);
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("op"), Some(&FieldValue::UInt8(1)));
@@ -489,9 +473,7 @@ mod tests {
         assert_eq!(result.get("flags"), Some(&FieldValue::UInt16(0x8000)));
         assert_eq!(
             result.get("chaddr"),
-            Some(&FieldValue::OwnedString(CompactString::new(
-                "00:11:22:33:44:55"
-            )))
+            Some(&FieldValue::Str("00:11:22:33:44:55"))
         );
         assert_eq!(result.get("message_type"), Some(&FieldValue::UInt8(1)));
     }
@@ -504,25 +486,20 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::SrcPort, 67);
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("op"), Some(&FieldValue::UInt8(2)));
         assert_eq!(result.get("xid"), Some(&FieldValue::UInt32(0xABCDEF01)));
         assert_eq!(
             result.get("yiaddr"),
-            Some(&FieldValue::OwnedString(CompactString::new(
-                "192.168.1.100"
-            )))
+            Some(&FieldValue::Str("192.168.1.100"))
         );
-        assert_eq!(
-            result.get("siaddr"),
-            Some(&FieldValue::OwnedString(CompactString::new("192.168.1.1")))
-        );
+        assert_eq!(result.get("siaddr"), Some(&FieldValue::Str("192.168.1.1")));
         assert_eq!(result.get("message_type"), Some(&FieldValue::UInt8(2)));
         assert_eq!(
             result.get("server_id"),
-            Some(&FieldValue::OwnedString(CompactString::new("192.168.1.1")))
+            Some(&FieldValue::Str("192.168.1.1"))
         );
     }
 
@@ -534,7 +511,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::SrcPort, 67);
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("message_type"), Some(&FieldValue::UInt8(5)));
@@ -548,25 +525,18 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::SrcPort, 67);
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("lease_time"), Some(&FieldValue::UInt32(86400)));
         assert_eq!(
             result.get("subnet_mask"),
-            Some(&FieldValue::OwnedString(CompactString::new(
-                "255.255.255.0"
-            )))
+            Some(&FieldValue::Str("255.255.255.0"))
         );
-        assert_eq!(
-            result.get("router"),
-            Some(&FieldValue::OwnedString(CompactString::new("192.168.1.1")))
-        );
+        assert_eq!(result.get("router"), Some(&FieldValue::Str("192.168.1.1")));
         assert_eq!(
             result.get("dns_servers"),
-            Some(&FieldValue::OwnedString(CompactString::new(
-                "8.8.8.8,8.8.4.4"
-            )))
+            Some(&FieldValue::Str("8.8.8.8,8.8.4.4"))
         );
     }
 
@@ -592,7 +562,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::DstPort, 67);
 
-        let result = parser.parse(&short_packet, &context);
+        let result = parser.parse_layer(&short_packet, &context);
 
         assert!(!result.is_ok());
         assert!(result.error.is_some());

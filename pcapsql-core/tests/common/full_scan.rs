@@ -12,7 +12,7 @@
 
 use pcapsql_core::io::PacketReader;
 use pcapsql_core::protocol::{
-    parse_packet, HintKey, ParseContext, ParseScope, Protocol, TunnelType,
+    parse_packet, HintKey, ParseBuf, ParseContext, ParseScope, Protocol, TunnelType,
 };
 use pcapsql_core::ProtocolRegistry;
 
@@ -26,15 +26,18 @@ pub fn full_scan_chain(
     data: &[u8],
 ) -> Vec<ChainLayer> {
     let mut chain = Vec::new();
+    let mut buf = ParseBuf::new();
+    let mut layers = buf.for_packet();
     let mut context = ParseContext::new(link_type);
     let mut remaining = data;
     while !remaining.is_empty() {
         let Some(parser) = registry.find_parser(&context) else {
             break;
         };
-        let result = parser.parse(remaining, &context);
+        let before = layers.len();
+        let result = layers.parse_layer(parser, remaining, &context, None);
         // An error without fields is not a layer; any error ends the walk.
-        if result.error.is_none() || !result.fields.is_empty() {
+        if layers.len() > before {
             chain.push((
                 parser.name(),
                 context.encap_depth,
@@ -42,7 +45,7 @@ pub fn full_scan_chain(
                 context.current_tunnel_id(),
             ));
         }
-        if result.error.is_some() {
+        if !result.is_ok() {
             break;
         }
         if let Some(tunnel_type) = result.hint(HintKey::TunnelType) {
@@ -65,10 +68,17 @@ pub fn dispatched_chain(
     link_type: u16,
     data: &[u8],
 ) -> Vec<ChainLayer> {
-    parse_packet(registry, link_type, data, &ParseScope::full())
-        .iter()
-        .map(|(name, layer)| (*name, layer.encap_depth, layer.tunnel_type, layer.tunnel_id))
-        .collect()
+    let mut buf = ParseBuf::new();
+    let layers = parse_packet(registry, link_type, data, &ParseScope::full(), &mut buf);
+    let chain = layers.iter().map(|layer| {
+        (
+            layer.name(),
+            layer.encap_depth(),
+            layer.tunnel_type(),
+            layer.tunnel_id(),
+        )
+    });
+    chain.collect()
 }
 
 /// Panics unless `parse_packet` gives `data` the layers the full scan does.

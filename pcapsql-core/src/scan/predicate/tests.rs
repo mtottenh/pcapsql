@@ -2,22 +2,21 @@ use super::*;
 use crate::io::PacketPosition;
 use crate::scan::Catalog;
 use crate::TunnelType;
-use smallvec::SmallVec;
 use std::net::{IpAddr, Ipv4Addr};
 
-fn layer(fields: Vec<(&'static str, FieldValue<'static>)>) -> ParseResult<'static> {
-    ParseResult {
-        fields: SmallVec::from_vec(fields),
-        remaining: &[],
-        child_hints: crate::protocol::Hints::new(),
-        error: None,
-        encap_depth: 0,
-        tunnel_type: TunnelType::None,
-        tunnel_id: None,
-    }
+/// The fields of a hand-built row.
+type Row = Vec<(&'static str, FieldValue<'static>)>;
+
+fn layer(fields: Row) -> Row {
+    fields
 }
 
-fn tcp_layer() -> ParseResult<'static> {
+/// `row` as a layer outside any tunnel.
+fn of(row: &Row) -> LayerRef<'_, 'static> {
+    LayerRef::new("test", row)
+}
+
+fn tcp_layer() -> Row {
     layer(vec![
         ("src_port", FieldValue::UInt16(12345)),
         ("dst_port", FieldValue::UInt16(80)),
@@ -25,7 +24,7 @@ fn tcp_layer() -> ParseResult<'static> {
     ])
 }
 
-fn ipv4_layer() -> ParseResult<'static> {
+fn ipv4_layer() -> Row {
     layer(vec![
         (
             "src_ip",
@@ -58,9 +57,9 @@ fn int_compare_keeps_and_drops() {
     let tcp = table("tcp");
     let row = tcp_layer();
     let mut keep = compiled(tcp, "dst_port", CmpOp::Eq, 80).unwrap();
-    assert!(keep.keeps(&row));
+    assert!(keep.keeps(of(&row)));
     let mut drop = compiled(tcp, "dst_port", CmpOp::Eq, 443).unwrap();
-    assert!(!drop.keeps(&row));
+    assert!(!drop.keeps(of(&row)));
 }
 
 #[test]
@@ -77,7 +76,7 @@ fn every_operator_compares_integers_and_strings() {
     ] {
         for (literal, expected) in [(79, below), (80, equal), (81, above)] {
             let mut p = compiled(tcp, "dst_port", op, literal).unwrap();
-            assert_eq!(p.keeps(&row), expected, "80 {op:?} {literal}");
+            assert_eq!(p.keeps(of(&row)), expected, "80 {op:?} {literal}");
         }
     }
 
@@ -93,7 +92,7 @@ fn every_operator_compares_integers_and_strings() {
     ] {
         for (literal, expected) in [("a", below), ("m.example", equal), ("z", above)] {
             let mut p = compiled(dns, "query_name", op, literal).unwrap();
-            assert_eq!(p.keeps(&row), expected, "m.example {op:?} {literal}");
+            assert_eq!(p.keeps(of(&row)), expected, "m.example {op:?} {literal}");
         }
     }
 }
@@ -116,7 +115,7 @@ fn missing_field_keeps_the_row() {
     let row = tcp_layer();
     for op in [CmpOp::Eq, CmpOp::NotEq, CmpOp::Lt, CmpOp::Gt] {
         let mut p = compiled(tcp, "mss", op, 1460).unwrap();
-        assert!(p.keeps(&row), "{op:?}");
+        assert!(p.keeps(of(&row)), "{op:?}");
     }
 }
 
@@ -125,14 +124,16 @@ fn ipv4_compares_as_the_u32_its_column_stores() {
     let ipv4 = table("ipv4");
     let row = ipv4_layer();
     let ip = i64::from(u32::from(Ipv4Addr::new(192, 168, 1, 1)));
-    assert!(compiled(ipv4, "src_ip", CmpOp::Eq, ip).unwrap().keeps(&row));
+    assert!(compiled(ipv4, "src_ip", CmpOp::Eq, ip)
+        .unwrap()
+        .keeps(of(&row)));
     assert!(!compiled(ipv4, "src_ip", CmpOp::Eq, ip + 1)
         .unwrap()
-        .keeps(&row));
+        .keeps(of(&row)));
     // A string against the address is not confidently comparable: keep.
     assert!(compiled(ipv4, "src_ip", CmpOp::Eq, "10.0.0.1")
         .unwrap()
-        .keeps(&row));
+        .keeps(of(&row)));
 }
 
 #[test]
@@ -142,26 +143,29 @@ fn values_of_another_type_keep_the_row() {
     let row = layer(vec![("dst_port", FieldValue::Str("80"))]);
     assert!(compiled(tcp, "dst_port", CmpOp::Eq, 443)
         .unwrap()
-        .keeps(&row));
+        .keeps(of(&row)));
     let row = tcp_layer();
     assert!(compiled(tcp, "dst_port", CmpOp::Eq, "443")
         .unwrap()
-        .keeps(&row));
+        .keeps(of(&row)));
     // A u64 that does not fit i64 is undecided; one that fits compares.
     let row = layer(vec![("dst_port", FieldValue::UInt64(u64::MAX))]);
-    assert!(compiled(tcp, "dst_port", CmpOp::Eq, 1).unwrap().keeps(&row));
+    assert!(compiled(tcp, "dst_port", CmpOp::Eq, 1)
+        .unwrap()
+        .keeps(of(&row)));
     let row = layer(vec![("dst_port", FieldValue::UInt64(2))]);
-    assert!(!compiled(tcp, "dst_port", CmpOp::Eq, 1).unwrap().keeps(&row));
+    assert!(!compiled(tcp, "dst_port", CmpOp::Eq, 1)
+        .unwrap()
+        .keeps(of(&row)));
     // Booleans compare as 0 and 1, owned strings as strings.
     let row = layer(vec![("dst_port", FieldValue::Bool(true))]);
-    assert!(!compiled(tcp, "dst_port", CmpOp::Eq, 0).unwrap().keeps(&row));
-    let row = layer(vec![(
-        "dst_port",
-        FieldValue::OwnedString(compact_str::CompactString::new("x")),
-    )]);
+    assert!(!compiled(tcp, "dst_port", CmpOp::Eq, 0)
+        .unwrap()
+        .keeps(of(&row)));
+    let row = layer(vec![("dst_port", FieldValue::Str("x"))]);
     assert!(!compiled(tcp, "dst_port", CmpOp::Eq, "y")
         .unwrap()
-        .keeps(&row));
+        .keeps(of(&row)));
     // Null, bytes, MAC and IPv6 values are never compared.
     for value in [
         FieldValue::Null,
@@ -170,10 +174,12 @@ fn values_of_another_type_keep_the_row() {
         FieldValue::IpAddr(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)),
     ] {
         let row = layer(vec![("dst_port", value)]);
-        assert!(compiled(tcp, "dst_port", CmpOp::Eq, 1).unwrap().keeps(&row));
+        assert!(compiled(tcp, "dst_port", CmpOp::Eq, 1)
+            .unwrap()
+            .keeps(of(&row)));
         assert!(compiled(tcp, "dst_port", CmpOp::Eq, "1")
             .unwrap()
-            .keeps(&row));
+            .keeps(of(&row)));
     }
 }
 
@@ -193,8 +199,8 @@ fn and_needs_every_comparison() {
         .compile(tcp)
         .unwrap()
     };
-    assert!(both(10_000).keeps(&row));
-    assert!(!both(60_000).keeps(&row));
+    assert!(both(10_000).keeps(of(&row)));
+    assert!(!both(60_000).keeps(of(&row)));
 }
 
 #[test]
@@ -227,40 +233,38 @@ fn predicates_that_cannot_drop_a_row_compile_to_none() {
     ])
     .compile(tcp)
     .unwrap();
-    assert!(!mixed.keeps(&tcp_layer()));
+    assert!(!mixed.keeps(of(&tcp_layer())));
 }
 
 #[test]
 fn context_columns_compare_with_the_layer_context() {
     let tcp = table("tcp");
-    let mut inner = tcp_layer();
-    inner.encap_depth = 1;
-    inner.tunnel_type = TunnelType::Vxlan;
-    inner.tunnel_id = Some(42);
-    let outer = tcp_layer();
+    let row = tcp_layer();
+    let inner = of(&row).in_tunnel(1, TunnelType::Vxlan, Some(42));
+    let outer = of(&row);
 
     let mut depth0 = compiled(tcp, "encap_depth", CmpOp::Eq, 0).unwrap();
-    assert!(depth0.keeps(&outer));
-    assert!(!depth0.keeps(&inner));
+    assert!(depth0.keeps(outer));
+    assert!(!depth0.keeps(inner));
 
     let mut vxlan = compiled(tcp, "tunnel_type", CmpOp::Eq, "vxlan").unwrap();
-    assert!(vxlan.keeps(&inner));
+    assert!(vxlan.keeps(inner));
     // Outside a tunnel the column is NULL: undecided.
-    assert!(vxlan.keeps(&outer));
+    assert!(vxlan.keeps(outer));
     let mut gre = compiled(tcp, "tunnel_type", CmpOp::Eq, "gre").unwrap();
-    assert!(!gre.keeps(&inner));
-    assert!(gre.keeps(&outer));
+    assert!(!gre.keeps(inner));
+    assert!(gre.keeps(outer));
 
     let mut id = compiled(tcp, "tunnel_id", CmpOp::Eq, 42).unwrap();
-    assert!(id.keeps(&inner));
-    assert!(id.keeps(&outer));
+    assert!(id.keeps(inner));
+    assert!(id.keeps(outer));
     let mut other = compiled(tcp, "tunnel_id", CmpOp::NotEq, 42).unwrap();
-    assert!(!other.keeps(&inner));
-    assert!(other.keeps(&outer));
+    assert!(!other.keeps(inner));
+    assert!(other.keeps(outer));
     // An id above i64::MAX is undecided.
-    inner.tunnel_id = Some(u64::MAX);
-    assert!(id.keeps(&inner));
-    assert!(other.keeps(&inner));
+    let inner = of(&row).in_tunnel(1, TunnelType::Vxlan, Some(u64::MAX));
+    assert!(id.keeps(inner));
+    assert!(other.keeps(inner));
 }
 
 /// The hint follows a field that changes position between rows.
@@ -274,10 +278,10 @@ fn hinted_lookup_follows_a_moving_field() {
         ("src_port", FieldValue::UInt16(80)),
     ]);
     let absent = layer(vec![("src_port", FieldValue::UInt16(80))]);
-    assert!(p.keeps(&first));
-    assert!(!p.keeps(&moved));
-    assert!(p.keeps(&absent));
-    assert!(p.keeps(&first));
+    assert!(p.keeps(of(&first)));
+    assert!(!p.keeps(of(&moved)));
+    assert!(p.keeps(of(&absent)));
+    assert!(p.keeps(of(&first)));
 }
 
 #[test]

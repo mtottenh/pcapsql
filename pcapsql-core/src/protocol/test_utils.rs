@@ -4,7 +4,9 @@
 //! for validating parse results.
 
 use super::ethernet::ethertype;
-use super::{FieldValue, HintKey, ParseContext, ParseResult};
+use super::{
+    FieldEntry, FieldSet, FieldValue, HintKey, Hints, ParseBuf, ParseContext, Protocol, Status,
+};
 
 /// Builder for constructing Ethernet frames.
 #[derive(Debug, Clone)]
@@ -475,8 +477,88 @@ pub fn build_icmp_echo_request(src_ip: [u8; 4], dst_ip: [u8; 4], id: u16, seq: u
     EthernetBuilder::new().ipv4().payload(ipv4).build()
 }
 
+/// What one parser made of some bytes, with its fields: what a parser's unit
+/// test asserts on.
+#[derive(Debug, Clone)]
+pub struct ParsedLayer<'a> {
+    /// The fields the parser extracted; none when it failed outright.
+    pub fields: Vec<FieldEntry<'a>>,
+    /// The bytes the parser left.
+    pub remaining: &'a [u8],
+    /// The hints for the next layer.
+    pub child_hints: Hints,
+    /// The error the parse ended with, partial or not.
+    pub error: Option<String>,
+}
+
+impl<'a> ParsedLayer<'a> {
+    /// A field's value by name.
+    pub fn get(&self, name: &str) -> Option<&FieldValue<'a>> {
+        self.fields.iter().find(|(k, _)| *k == name).map(|(_, v)| v)
+    }
+
+    /// A child hint by key.
+    pub fn hint(&self, key: HintKey) -> Option<u64> {
+        self.child_hints.get(key)
+    }
+
+    /// Whether the parse ended without an error.
+    pub fn is_ok(&self) -> bool {
+        self.error.is_none()
+    }
+}
+
+/// Runs a parser on its own, outside a packet walk, and hands back what it
+/// wrote.
+pub trait ParseLayer: Protocol {
+    /// [`Protocol::parse`] of `data`, with the fields it wrote.
+    fn parse_layer<'a>(&self, data: &'a [u8], context: &ParseContext) -> ParsedLayer<'a> {
+        self.parse_layer_projected(data, context, None)
+    }
+
+    /// [`Protocol::parse_projected`] of `data` for the fields called
+    /// `names`, with the fields it wrote.
+    fn parse_layer_fields<'a>(
+        &self,
+        data: &'a [u8],
+        context: &ParseContext,
+        names: &[&str],
+    ) -> ParsedLayer<'a> {
+        let projection = FieldSet::resolve(self.field_names(), names);
+        self.parse_layer_projected(data, context, Some(projection))
+    }
+
+    /// [`Protocol::parse_projected`] of `data` (`None`: [`Protocol::parse`]),
+    /// with the fields it wrote.
+    fn parse_layer_projected<'a>(
+        &self,
+        data: &'a [u8],
+        context: &ParseContext,
+        projection: Option<FieldSet>,
+    ) -> ParsedLayer<'a> {
+        // The values may point into the buffer's arena, and the result is
+        // handed out without it: a test's buffer is never freed.
+        let buf: &'static mut ParseBuf = Box::leak(Box::default());
+        let mut layers = buf.for_packet();
+        let parsed = layers.parse_layer(self, data, context, projection);
+        ParsedLayer {
+            fields: layers
+                .last()
+                .map_or(Vec::new(), |layer| layer.fields().to_vec()),
+            remaining: parsed.remaining,
+            child_hints: parsed.child_hints,
+            error: match parsed.status {
+                Status::Ok => None,
+                Status::Partial(error) | Status::Error(error) => Some(error.to_string()),
+            },
+        }
+    }
+}
+
+impl<P: Protocol + ?Sized> ParseLayer for P {}
+
 /// Helper to assert a field value equals expected.
-pub fn assert_field_eq(result: &ParseResult, field: &str, expected: &FieldValue) {
+pub fn assert_field_eq(result: &ParsedLayer, field: &str, expected: &FieldValue) {
     let actual = result
         .get(field)
         .unwrap_or_else(|| panic!("Field '{}' not found in result", field));
@@ -488,7 +570,7 @@ pub fn assert_field_eq(result: &ParseResult, field: &str, expected: &FieldValue)
 }
 
 /// Helper to assert a field is present.
-pub fn assert_field_present(result: &ParseResult, field: &str) {
+pub fn assert_field_present(result: &ParsedLayer, field: &str) {
     assert!(
         result.get(field).is_some(),
         "Field '{}' not found in result",
@@ -497,7 +579,7 @@ pub fn assert_field_present(result: &ParseResult, field: &str) {
 }
 
 /// Helper to assert parsing succeeded.
-pub fn assert_parse_ok(result: &ParseResult) {
+pub fn assert_parse_ok(result: &ParsedLayer) {
     assert!(
         result.is_ok(),
         "Parse failed: {:?}",

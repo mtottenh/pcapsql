@@ -12,9 +12,9 @@ use std::collections::HashMap;
 use compact_str::CompactString;
 use httparse::{Request, Response, Status, EMPTY_HEADER};
 
-use crate::protocol::http::{header_field, starts_http_message, HTTP_PORTS};
-use crate::protocol::FieldValue;
+use crate::protocol::http::{header_field, starts_http_message, HeaderValue, HTTP_PORTS};
 use crate::schema::{DataKind, FieldDescriptor};
+use crate::stream::OwnedFieldValue;
 use crate::stream::{ParsedMessage, StreamContext, StreamParseResult, StreamParser};
 
 /// Maximum number of headers to parse per message.
@@ -34,11 +34,16 @@ impl HttpStreamParser {
     /// except `Set-Cookie`, where the first is kept.
     fn extract_headers(
         headers: &[httparse::Header],
-        fields: &mut HashMap<&'static str, FieldValue>,
+        fields: &mut HashMap<&'static str, OwnedFieldValue>,
     ) {
         for header in headers.iter().filter(|h| !h.name.is_empty()) {
             if let Some((column, value)) = header_field(header.name, header.value) {
-                let value = value.to_owned();
+                let value = match value {
+                    HeaderValue::Text(text) => {
+                        OwnedFieldValue::OwnedString(CompactString::new(text))
+                    }
+                    HeaderValue::Length(length) => OwnedFieldValue::UInt64(length),
+                };
                 if column == "set_cookie" {
                     fields.entry(column).or_insert(value);
                 } else {
@@ -49,7 +54,7 @@ impl HttpStreamParser {
     }
 
     /// Check if transfer encoding is chunked.
-    fn is_chunked(fields: &HashMap<&'static str, FieldValue>) -> bool {
+    fn is_chunked(fields: &HashMap<&'static str, OwnedFieldValue>) -> bool {
         fields
             .get("transfer_encoding")
             .and_then(|v| v.as_str())
@@ -58,9 +63,9 @@ impl HttpStreamParser {
     }
 
     /// Get Content-Length from fields.
-    fn get_content_length(fields: &HashMap<&'static str, FieldValue>) -> Option<usize> {
+    fn get_content_length(fields: &HashMap<&'static str, OwnedFieldValue>) -> Option<usize> {
         fields.get("content_length").and_then(|v| {
-            if let FieldValue::UInt64(len) = v {
+            if let OwnedFieldValue::UInt64(len) = v {
                 Some(*len as usize)
             } else {
                 None
@@ -142,24 +147,27 @@ impl StreamParser for HttpStreamParser {
 
         match req.parse(data) {
             Ok(Status::Complete(header_len)) => {
-                fields.insert("is_request", FieldValue::Bool(true));
+                fields.insert("is_request", OwnedFieldValue::Bool(true));
 
                 if let Some(method) = req.method {
                     fields.insert(
                         "method",
-                        FieldValue::OwnedString(CompactString::new(method)),
+                        OwnedFieldValue::OwnedString(CompactString::new(method)),
                     );
                 }
 
                 if let Some(path) = req.path {
-                    fields.insert("uri", FieldValue::OwnedString(CompactString::new(path)));
+                    fields.insert(
+                        "uri",
+                        OwnedFieldValue::OwnedString(CompactString::new(path)),
+                    );
                 }
 
                 if let Some(version) = req.version {
                     let version_str = format!("HTTP/1.{version}");
                     fields.insert(
                         "http_version",
-                        FieldValue::OwnedString(CompactString::new(version_str)),
+                        OwnedFieldValue::OwnedString(CompactString::new(version_str)),
                     );
                 }
 
@@ -222,24 +230,24 @@ impl StreamParser for HttpStreamParser {
 
         match resp.parse(data) {
             Ok(Status::Complete(header_len)) => {
-                fields.insert("is_request", FieldValue::Bool(false));
+                fields.insert("is_request", OwnedFieldValue::Bool(false));
 
                 if let Some(version) = resp.version {
                     let version_str = format!("HTTP/1.{version}");
                     fields.insert(
                         "http_version",
-                        FieldValue::OwnedString(CompactString::new(version_str)),
+                        OwnedFieldValue::OwnedString(CompactString::new(version_str)),
                     );
                 }
 
                 if let Some(code) = resp.code {
-                    fields.insert("status_code", FieldValue::UInt16(code));
+                    fields.insert("status_code", OwnedFieldValue::UInt16(code));
                 }
 
                 if let Some(reason) = resp.reason {
                     fields.insert(
                         "status_text",
-                        FieldValue::OwnedString(CompactString::new(reason)),
+                        OwnedFieldValue::OwnedString(CompactString::new(reason)),
                     );
                 }
 
@@ -376,11 +384,13 @@ mod tests {
                 let msg = &messages[0];
                 assert_eq!(
                     msg.fields.get("method"),
-                    Some(&FieldValue::OwnedString(CompactString::new("GET")))
+                    Some(&OwnedFieldValue::OwnedString(CompactString::new("GET")))
                 );
                 assert_eq!(
                     msg.fields.get("uri"),
-                    Some(&FieldValue::OwnedString(CompactString::new("/index.html")))
+                    Some(&OwnedFieldValue::OwnedString(CompactString::new(
+                        "/index.html"
+                    )))
                 );
             }
             _ => panic!("Expected Complete"),
@@ -407,7 +417,7 @@ mod tests {
                 assert_eq!(bytes_consumed, request.len());
                 assert_eq!(
                     messages[0].fields.get("method"),
-                    Some(&FieldValue::OwnedString(CompactString::new("POST")))
+                    Some(&OwnedFieldValue::OwnedString(CompactString::new("POST")))
                 );
             }
             _ => panic!("Expected Complete"),
@@ -433,11 +443,11 @@ mod tests {
             StreamParseResult::Complete { messages, .. } => {
                 assert_eq!(
                     messages[0].fields.get("status_code"),
-                    Some(&FieldValue::UInt16(200))
+                    Some(&OwnedFieldValue::UInt16(200))
                 );
                 assert_eq!(
                     messages[0].fields.get("is_request"),
-                    Some(&FieldValue::Bool(false))
+                    Some(&OwnedFieldValue::Bool(false))
                 );
             }
             _ => panic!("Expected Complete"),
@@ -497,7 +507,7 @@ mod tests {
             } => {
                 assert_eq!(
                     messages[0].fields.get("uri"),
-                    Some(&FieldValue::OwnedString(CompactString::new("/page1")))
+                    Some(&OwnedFieldValue::OwnedString(CompactString::new("/page1")))
                 );
 
                 // Second request (remaining bytes)
@@ -509,7 +519,7 @@ mod tests {
                     } => {
                         assert_eq!(
                             msgs2[0].fields.get("uri"),
-                            Some(&FieldValue::OwnedString(CompactString::new("/page2")))
+                            Some(&OwnedFieldValue::OwnedString(CompactString::new("/page2")))
                         );
                     }
                     _ => panic!("Expected Complete for second request"),
@@ -583,18 +593,20 @@ mod tests {
                 let msg = &messages[0];
                 assert_eq!(
                     msg.fields.get("status_code"),
-                    Some(&FieldValue::UInt16(302))
+                    Some(&OwnedFieldValue::UInt16(302))
                 );
                 assert_eq!(
                     msg.fields.get("location"),
-                    Some(&FieldValue::OwnedString(CompactString::new(
+                    Some(&OwnedFieldValue::OwnedString(CompactString::new(
                         "https://example.com/new"
                     )))
                 );
                 assert!(msg.fields.contains_key("set_cookie"));
                 assert_eq!(
                     msg.fields.get("cache_control"),
-                    Some(&FieldValue::OwnedString(CompactString::new("no-cache")))
+                    Some(&OwnedFieldValue::OwnedString(CompactString::new(
+                        "no-cache"
+                    )))
                 );
             }
             _ => panic!("Expected Complete"),
@@ -618,18 +630,20 @@ mod tests {
                 let msg = &messages[0];
                 assert_eq!(
                     msg.fields.get("cookie"),
-                    Some(&FieldValue::OwnedString(CompactString::new(
+                    Some(&OwnedFieldValue::OwnedString(CompactString::new(
                         "session=xyz789; user=john"
                     )))
                 );
                 // Auth should only contain the type
                 assert_eq!(
                     msg.fields.get("authorization"),
-                    Some(&FieldValue::OwnedString(CompactString::new("Bearer")))
+                    Some(&OwnedFieldValue::OwnedString(CompactString::new("Bearer")))
                 );
                 assert_eq!(
                     msg.fields.get("x_forwarded_for"),
-                    Some(&FieldValue::OwnedString(CompactString::new("10.0.0.1")))
+                    Some(&OwnedFieldValue::OwnedString(CompactString::new(
+                        "10.0.0.1"
+                    )))
                 );
             }
             _ => panic!("Expected Complete"),
@@ -647,7 +661,9 @@ mod tests {
             StreamParseResult::Complete { messages, .. } => {
                 assert_eq!(
                     messages[0].fields.get("http_version"),
-                    Some(&FieldValue::OwnedString(CompactString::new("HTTP/1.0")))
+                    Some(&OwnedFieldValue::OwnedString(CompactString::new(
+                        "HTTP/1.0"
+                    )))
                 );
             }
             _ => panic!("Expected Complete"),
@@ -665,7 +681,7 @@ mod tests {
             StreamParseResult::Complete { messages, .. } => {
                 assert_eq!(
                     messages[0].fields.get("method"),
-                    Some(&FieldValue::OwnedString(CompactString::new("HEAD")))
+                    Some(&OwnedFieldValue::OwnedString(CompactString::new("HEAD")))
                 );
             }
             _ => panic!("Expected Complete"),
@@ -683,7 +699,7 @@ mod tests {
             StreamParseResult::Complete { messages, .. } => {
                 assert_eq!(
                     messages[0].fields.get("method"),
-                    Some(&FieldValue::OwnedString(CompactString::new("OPTIONS")))
+                    Some(&OwnedFieldValue::OwnedString(CompactString::new("OPTIONS")))
                 );
             }
             _ => panic!("Expected Complete"),
@@ -704,7 +720,7 @@ mod tests {
             StreamParseResult::Complete { messages, .. } => {
                 assert_eq!(
                     messages[0].fields.get("status_code"),
-                    Some(&FieldValue::UInt16(100))
+                    Some(&OwnedFieldValue::UInt16(100))
                 );
             }
             _ => panic!("Expected Complete"),

@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use compact_str::CompactString;
 
-use crate::protocol::{FieldValue, OwnedFieldValue};
 use crate::schema::{DataKind, FieldDescriptor};
+use crate::stream::OwnedFieldValue;
 use crate::stream::{ParsedMessage, StreamContext, StreamParseResult, StreamParser};
 
 /// TLS content types.
@@ -117,7 +117,7 @@ impl TlsStreamParser {
     /// Parse ClientHello message.
     fn parse_client_hello(&self, data: &[u8]) -> HashMap<&'static str, OwnedFieldValue> {
         let mut fields = HashMap::new();
-        fields.insert("handshake_type", FieldValue::Str("ClientHello"));
+        fields.insert("handshake_type", OwnedFieldValue::Str("ClientHello"));
 
         if data.len() < 38 {
             return fields;
@@ -125,7 +125,7 @@ impl TlsStreamParser {
 
         // Client version (2 bytes)
         let version = u16::from_be_bytes([data[0], data[1]]);
-        fields.insert("client_version", FieldValue::UInt16(version));
+        fields.insert("client_version", OwnedFieldValue::UInt16(version));
 
         // Skip random (32 bytes) and session ID
         let mut pos = 34;
@@ -148,7 +148,7 @@ impl TlsStreamParser {
         let cipher_count = cipher_suites_len / 2;
         fields.insert(
             "cipher_suite_count",
-            FieldValue::UInt16(cipher_count as u16),
+            OwnedFieldValue::UInt16(cipher_count as u16),
         );
         pos += cipher_suites_len;
 
@@ -169,10 +169,13 @@ impl TlsStreamParser {
         if pos + ext_len <= data.len() {
             let extensions = &data[pos..pos + ext_len];
             if let Some(sni) = Self::extract_sni(extensions) {
-                fields.insert("sni", FieldValue::OwnedString(CompactString::new(sni)));
+                fields.insert("sni", OwnedFieldValue::OwnedString(CompactString::new(sni)));
             }
             if let Some(alpn) = Self::extract_alpn(extensions) {
-                fields.insert("alpn", FieldValue::OwnedString(CompactString::new(alpn)));
+                fields.insert(
+                    "alpn",
+                    OwnedFieldValue::OwnedString(CompactString::new(alpn)),
+                );
             }
         }
 
@@ -182,7 +185,7 @@ impl TlsStreamParser {
     /// Parse ServerHello message.
     fn parse_server_hello(&self, data: &[u8]) -> HashMap<&'static str, OwnedFieldValue> {
         let mut fields = HashMap::new();
-        fields.insert("handshake_type", FieldValue::Str("ServerHello"));
+        fields.insert("handshake_type", OwnedFieldValue::Str("ServerHello"));
 
         if data.len() < 38 {
             return fields;
@@ -190,7 +193,7 @@ impl TlsStreamParser {
 
         // Server version
         let version = u16::from_be_bytes([data[0], data[1]]);
-        fields.insert("server_version", FieldValue::UInt16(version));
+        fields.insert("server_version", OwnedFieldValue::UInt16(version));
 
         // Skip random (32 bytes) and session ID
         let mut pos = 34;
@@ -205,10 +208,10 @@ impl TlsStreamParser {
             return fields;
         }
         let cipher = u16::from_be_bytes([data[pos], data[pos + 1]]);
-        fields.insert("cipher_suite", FieldValue::UInt16(cipher));
+        fields.insert("cipher_suite", OwnedFieldValue::UInt16(cipher));
         fields.insert(
             "cipher_suite_name",
-            FieldValue::OwnedString(CompactString::new(cipher_suite_name(cipher))),
+            OwnedFieldValue::OwnedString(CompactString::new(cipher_suite_name(cipher))),
         );
         pos += 2;
 
@@ -223,7 +226,7 @@ impl TlsStreamParser {
         pos += 2;
         if pos + ext_len <= data.len() {
             if let Some(selected) = Self::extract_selected_version(&data[pos..pos + ext_len]) {
-                fields.insert("selected_version", FieldValue::UInt16(selected));
+                fields.insert("selected_version", OwnedFieldValue::UInt16(selected));
             }
         }
 
@@ -324,8 +327,8 @@ impl StreamParser for TlsStreamParser {
         }
 
         let mut fields = HashMap::new();
-        fields.insert("version", FieldValue::Str(Self::version_name(version)));
-        fields.insert("version_raw", FieldValue::UInt16(version));
+        fields.insert("version", OwnedFieldValue::Str(Self::version_name(version)));
+        fields.insert("version_raw", OwnedFieldValue::UInt16(version));
 
         match content_type {
             content_type::HANDSHAKE => {
@@ -344,7 +347,7 @@ impl StreamParser for TlsStreamParser {
                             handshake_type::SERVER_HELLO => self.parse_server_hello(hs_body),
                             _ => {
                                 let mut f = HashMap::new();
-                                f.insert("handshake_type_id", FieldValue::UInt8(hs_type));
+                                f.insert("handshake_type_id", OwnedFieldValue::UInt8(hs_type));
                                 f
                             }
                         };
@@ -353,20 +356,20 @@ impl StreamParser for TlsStreamParser {
                     }
                 }
 
-                fields.insert("record_type", FieldValue::Str("Handshake"));
+                fields.insert("record_type", OwnedFieldValue::Str("Handshake"));
             }
 
             content_type::APPLICATION_DATA => {
-                fields.insert("record_type", FieldValue::Str("ApplicationData"));
-                fields.insert("encrypted_length", FieldValue::UInt16(length));
+                fields.insert("record_type", OwnedFieldValue::Str("ApplicationData"));
+                fields.insert("encrypted_length", OwnedFieldValue::UInt16(length));
             }
 
             content_type::ALERT => {
-                fields.insert("record_type", FieldValue::Str("Alert"));
+                fields.insert("record_type", OwnedFieldValue::Str("Alert"));
             }
 
             content_type::CHANGE_CIPHER_SPEC => {
-                fields.insert("record_type", FieldValue::Str("ChangeCipherSpec"));
+                fields.insert("record_type", OwnedFieldValue::Str("ChangeCipherSpec"));
             }
 
             _ => {
@@ -567,7 +570,7 @@ mod tests {
                 assert_eq!(bytes_consumed, 15);
                 assert_eq!(
                     messages[0].fields.get("record_type"),
-                    Some(&FieldValue::Str("ApplicationData"))
+                    Some(&OwnedFieldValue::Str("ApplicationData"))
                 );
             }
             _ => panic!("Expected Complete"),

@@ -16,9 +16,11 @@ use std::ops::ControlFlow;
 use super::catalog::{ColKind, ColumnSource};
 use super::plan::{OutCol, OutColumn};
 use super::sink::{Full, ListSink, RowSink};
-use crate::format::address::{ipv4_text, mac_text, IPV4_TEXT_LEN, MAC_TEXT_LEN};
+use crate::format::address::{
+    ipv4_text, ipv6_text, mac_text, IPV4_TEXT_LEN, IPV6_TEXT_LEN, MAC_TEXT_LEN,
+};
 use crate::io::PacketRef;
-use crate::{FieldHint, FieldValue, ParseResult};
+use crate::{FieldHint, FieldValue, LayerRef};
 
 /// Write `value` to column `col` of kind `kind`.
 ///
@@ -36,9 +38,9 @@ use crate::{FieldHint, FieldValue, ParseResult};
 /// | `I64` | `Int64`, `Int8`, `UInt8/16/32`; `UInt64` if it fits | NULL |
 /// | `F64` | `Float64`; any integer | NULL |
 /// | `Bool` | `Bool` | NULL |
-/// | `Str` | `Str`, `OwnedString`; addresses, numbers and booleans as text | NULL |
-/// | `Bin` | `Bytes`, `OwnedBytes` | NULL |
-/// | `Fixed(n)` | `Bytes`/`OwnedBytes` of length `n`; a MAC address (`n` = 6); an IPv6 address (`n` = 16) | NULL, a wrong length included |
+/// | `Str` | `Str`; addresses, numbers and booleans as text | NULL |
+/// | `Bin` | `Bytes` | NULL |
+/// | `Fixed(n)` | `Bytes` of length `n`; a MAC address (`n` = 6); an IPv6 address (`n` = 16) | NULL, a wrong length included |
 /// | `TsMicros`, `TsNanos` | `Int64`; `UInt64` if it fits | NULL |
 /// | `ListU16` | a list; items `UInt16`, `UInt8` | a non-list is a NULL cell, any other item a NULL item |
 /// | `ListU32` | a list; items `UInt32`, `UInt8/16`, an IPv4 address | same |
@@ -163,7 +165,6 @@ fn coerce<S: RowSink>(sink: &mut S, col: OutCol, kind: ColKind, value: &FieldVal
         },
         ColKind::Str => match value {
             FieldValue::Str(v) => sink.str(col, v),
-            FieldValue::OwnedString(v) => sink.str(col, v.as_str()),
             other => {
                 if !with_text(other, |text| sink.str(col, text)) {
                     sink.null(col);
@@ -172,7 +173,6 @@ fn coerce<S: RowSink>(sink: &mut S, col: OutCol, kind: ColKind, value: &FieldVal
         },
         ColKind::Bin => match value {
             FieldValue::Bytes(v) => sink.bytes(col, v),
-            FieldValue::OwnedBytes(v) => sink.bytes(col, v.as_slice()),
             _ => sink.null(col),
         },
         ColKind::Fixed(n) => {
@@ -196,7 +196,7 @@ fn coerce<S: RowSink>(sink: &mut S, col: OutCol, kind: ColKind, value: &FieldVal
         ColKind::ListU16 => match value {
             FieldValue::List(items) => {
                 let mut list = sink.list(col);
-                for item in items {
+                for item in items.iter() {
                     match item {
                         FieldValue::UInt16(v) => list.u16(*v),
                         FieldValue::UInt8(v) => list.u16(u16::from(*v)),
@@ -210,7 +210,7 @@ fn coerce<S: RowSink>(sink: &mut S, col: OutCol, kind: ColKind, value: &FieldVal
         ColKind::ListU32 => match value {
             FieldValue::List(items) => {
                 let mut list = sink.list(col);
-                for item in items {
+                for item in items.iter() {
                     match item {
                         FieldValue::UInt32(v) => list.u32(*v),
                         FieldValue::UInt16(v) => list.u32(u32::from(*v)),
@@ -226,10 +226,9 @@ fn coerce<S: RowSink>(sink: &mut S, col: OutCol, kind: ColKind, value: &FieldVal
         ColKind::ListStr => match value {
             FieldValue::List(items) => {
                 let mut list = sink.list(col);
-                for item in items {
+                for item in items.iter() {
                     match item {
                         FieldValue::Str(v) => list.str(v),
-                        FieldValue::OwnedString(v) => list.str(v.as_str()),
                         other => {
                             if !with_text(other, |text| list.str(text)) {
                                 list.null();
@@ -244,7 +243,7 @@ fn coerce<S: RowSink>(sink: &mut S, col: OutCol, kind: ColKind, value: &FieldVal
         ColKind::ListFixed(n) => match value {
             FieldValue::List(items) => {
                 let mut list = sink.list(col);
-                for item in items {
+                for item in items.iter() {
                     let mut octets = [0u8; 16];
                     match fixed_bytes(item, usize::from(n), &mut octets) {
                         Some(v) => list.bytes(v),
@@ -271,7 +270,6 @@ fn fixed_bytes<'v>(
     let bytes: &[u8] = match value {
         FieldValue::MacAddr(mac) => mac.as_slice(),
         FieldValue::Bytes(v) => v,
-        FieldValue::OwnedBytes(v) => v.as_slice(),
         FieldValue::IpAddr(IpAddr::V6(v6)) => {
             *octets = v6.octets();
             octets.as_slice()
@@ -281,7 +279,7 @@ fn fixed_bytes<'v>(
     (bytes.len() == n).then_some(bytes)
 }
 
-/// A string assembled on the stack. Long enough for every address and
+/// A string assembled on the stack. Long enough for every
 /// integer; a longer text (a float with hundreds of digits) does not fit and
 /// the write fails.
 struct StackText {
@@ -324,11 +322,12 @@ fn with_display(text: impl fmt::Display, store: impl FnOnce(&str)) {
 fn with_text(value: &FieldValue<'_>, store: impl FnOnce(&str)) -> bool {
     match value {
         FieldValue::Str(v) => store(v),
-        FieldValue::OwnedString(v) => store(v.as_str()),
         FieldValue::IpAddr(IpAddr::V4(v4)) => {
             store(ipv4_text(u32::from(*v4), &mut [0; IPV4_TEXT_LEN]));
         }
-        FieldValue::IpAddr(v6 @ IpAddr::V6(_)) => with_display(v6, store),
+        FieldValue::IpAddr(IpAddr::V6(v6)) => {
+            store(ipv6_text(&v6.octets(), &mut [0; IPV6_TEXT_LEN]));
+        }
         FieldValue::MacAddr(mac) => store(mac_text(mac, &mut [0; MAC_TEXT_LEN])),
         FieldValue::UInt8(v) => with_display(v, store),
         FieldValue::UInt16(v) => with_display(v, store),
@@ -338,10 +337,7 @@ fn with_text(value: &FieldValue<'_>, store: impl FnOnce(&str)) -> bool {
         FieldValue::Int64(v) => with_display(v, store),
         FieldValue::Float64(v) => with_display(v, store),
         FieldValue::Bool(v) => store(if *v { "true" } else { "false" }),
-        FieldValue::Null
-        | FieldValue::Bytes(_)
-        | FieldValue::OwnedBytes(_)
-        | FieldValue::List(_) => return false,
+        FieldValue::Null | FieldValue::Bytes(_) | FieldValue::List(_) => return false,
     }
     true
 }
@@ -427,7 +423,7 @@ impl Cell {
         sink: &mut S,
         col: OutCol,
         packet: &PacketRef<'_>,
-        layer: &ParseResult<'_>,
+        layer: LayerRef<'_, '_>,
     ) {
         match self.source {
             Source::Field(name) => match layer.get_hinted(name, &mut self.hint) {
@@ -435,12 +431,12 @@ impl Cell {
                 None => sink.null(col),
             },
             Source::FrameNumber => sink.u64(col, packet.frame_number),
-            Source::EncapDepth => sink.u8(col, layer.encap_depth),
-            Source::TunnelType => match layer.tunnel_type.as_str() {
+            Source::EncapDepth => sink.u8(col, layer.encap_depth()),
+            Source::TunnelType => match layer.tunnel_type().as_str() {
                 Some(name) => sink.str(col, name),
                 None => sink.null(col),
             },
-            Source::TunnelId => match layer.tunnel_id {
+            Source::TunnelId => match layer.tunnel_id() {
                 Some(id) => sink.u64(col, id),
                 None => sink.null(col),
             },
@@ -484,7 +480,7 @@ impl Cell {
 ///
 /// A parser emits its fields in a fixed order, so a column's field is almost
 /// always where it was in the previous row; the resolver remembers that
-/// position per column ([`ParseResult::get_hinted`]). It therefore serves
+/// position per column ([`LayerRef::get_hinted`]). It therefore serves
 /// one stream of rows of one output: make one per output per partition.
 ///
 /// The packet-record and parse-context columns (`frame_number`, `timestamp`,
@@ -529,7 +525,7 @@ pub fn write_layer_row<S: RowSink>(
     sink: &mut S,
     resolver: &mut FieldResolver,
     packet: &PacketRef<'_>,
-    layer: &ParseResult<'_>,
+    layer: LayerRef<'_, '_>,
 ) -> ControlFlow<Full> {
     for (index, cell) in resolver.cells.iter_mut().enumerate() {
         let col = OutCol(index as u16);
@@ -539,12 +535,12 @@ pub fn write_layer_row<S: RowSink>(
                 None => sink.null(col),
             },
             Source::FrameNumber => sink.u64(col, packet.frame_number),
-            Source::EncapDepth => sink.u8(col, layer.encap_depth),
-            Source::TunnelType => match layer.tunnel_type.as_str() {
+            Source::EncapDepth => sink.u8(col, layer.encap_depth()),
+            Source::TunnelType => match layer.tunnel_type().as_str() {
                 Some(name) => sink.str(col, name),
                 None => sink.null(col),
             },
-            Source::TunnelId => match layer.tunnel_id {
+            Source::TunnelId => match layer.tunnel_id() {
                 Some(id) => sink.u64(col, id),
                 None => sink.null(col),
             },
@@ -675,7 +671,6 @@ mod tests {
         let s = |text: &str| C::Str(text.to_string());
         assert_eq!(cell(ColKind::Str, &V::Str("abc")), s("abc"));
         assert_eq!(cell(ColKind::Str, &V::Str("")), s(""));
-        assert_eq!(cell(ColKind::Str, &V::OwnedString("xyz".into())), s("xyz"));
         assert_eq!(cell(ColKind::Str, &v4()), s("192.0.2.1"));
         assert_eq!(cell(ColKind::Str, &v6()), s("2001:db8::1"));
         assert_eq!(cell(ColKind::Str, &MAC), s("02:00:00:00:00:01"));
@@ -687,7 +682,7 @@ mod tests {
         assert_eq!(cell(ColKind::Str, &V::Float64(1.5)), s("1.5"));
         assert_eq!(cell(ColKind::Str, &V::Bool(false)), s("false"));
         assert_eq!(cell(ColKind::Str, &V::Bytes(b"ab")), C::Null);
-        assert_eq!(cell(ColKind::Str, &V::List(vec![])), C::Null);
+        assert_eq!(cell(ColKind::Str, &V::List(&[])), C::Null);
         assert_eq!(cell(ColKind::Str, &V::Null), C::Null);
     }
 
@@ -724,7 +719,7 @@ mod tests {
             let expected = value.as_string().unwrap();
             assert_eq!(cell(ColKind::Str, value), C::Str(expected.clone()));
             assert_eq!(
-                cell(ColKind::ListStr, &V::List(vec![value.clone()])),
+                cell(ColKind::ListStr, &V::List(&[*value])),
                 C::List(vec![C::Str(expected)])
             );
         }
@@ -735,10 +730,6 @@ mod tests {
         use FieldValue as V;
         assert_eq!(cell(ColKind::Bin, &V::Bytes(&[1, 2])), C::Bytes(vec![1, 2]));
         assert_eq!(cell(ColKind::Bin, &V::Bytes(&[])), C::Bytes(vec![]));
-        assert_eq!(
-            cell(ColKind::Bin, &V::OwnedBytes(vec![3])),
-            C::Bytes(vec![3])
-        );
         assert_eq!(cell(ColKind::Bin, &MAC), C::Null);
         assert_eq!(cell(ColKind::Bin, &V::Str("ab")), C::Null);
     }
@@ -753,10 +744,6 @@ mod tests {
             cell(ColKind::Fixed(6), &V::Bytes(&[1, 2, 3, 4, 5, 6])),
             C::Bytes(vec![1, 2, 3, 4, 5, 6])
         );
-        assert_eq!(
-            cell(ColKind::Fixed(6), &V::OwnedBytes(vec![9; 6])),
-            C::Bytes(vec![9; 6])
-        );
         assert_eq!(cell(ColKind::Fixed(6), &V::Bytes(&[1, 2, 3])), C::Null);
         assert_eq!(cell(ColKind::Fixed(6), &V::Bytes(&[0; 16])), C::Null);
         assert_eq!(cell(ColKind::Fixed(6), &v6()), C::Null);
@@ -767,10 +754,7 @@ mod tests {
         octets[15] = 1;
         assert_eq!(cell(ColKind::Fixed(16), &v6()), C::Bytes(octets));
         assert_eq!(cell(ColKind::Fixed(16), &MAC), C::Null);
-        assert_eq!(
-            cell(ColKind::Fixed(16), &V::OwnedBytes(vec![1; 6])),
-            C::Null
-        );
+        assert_eq!(cell(ColKind::Fixed(16), &V::Bytes(&[1; 6])), C::Null);
         assert_eq!(cell(ColKind::Fixed(16), &V::Bytes(&[])), C::Null);
     }
 
@@ -795,20 +779,21 @@ mod tests {
     #[test]
     fn list_columns_keep_items_and_nulls() {
         use FieldValue as V;
-        let items = V::List(vec![
+        let items = [
             V::UInt16(7),
             V::UInt8(3),
             V::UInt32(9),
             V::Str("a.example"),
-            V::OwnedString("b".into()),
+            V::Str("b"),
             V::Bytes(&[0xAA; 16]),
-            V::OwnedBytes(vec![1, 2]),
+            V::Bytes(&[1, 2]),
             v4(),
             v6(),
             MAC,
             V::Bool(true),
             V::Null,
-        ]);
+        ];
+        let items = V::List(&items);
         let s = |text: &str| C::Str(text.to_string());
         let n = C::Null;
         assert_eq!(
@@ -878,22 +863,14 @@ mod tests {
             ColKind::ListStr,
             ColKind::ListFixed(16),
         ] {
-            assert_eq!(cell(kind, &V::List(vec![])), C::List(vec![]));
+            assert_eq!(cell(kind, &V::List(&[])), C::List(vec![]));
             assert_eq!(cell(kind, &V::Null), C::Null);
             assert_eq!(cell(kind, &V::UInt16(1)), C::Null);
         }
     }
 
-    fn layer<'a>(fields: &[(&'static str, FieldValue<'a>)]) -> ParseResult<'a> {
-        ParseResult {
-            fields: fields.iter().cloned().collect(),
-            remaining: &[],
-            child_hints: crate::protocol::Hints::new(),
-            error: None,
-            encap_depth: 0,
-            tunnel_type: TunnelType::None,
-            tunnel_id: None,
-        }
+    fn layer<'l, 'a>(fields: &'l [(&'static str, FieldValue<'a>)]) -> LayerRef<'l, 'a> {
+        LayerRef::new("udp", fields)
     }
 
     /// The columns of `table` (`columns` by name, or every default column)
@@ -984,17 +961,15 @@ mod tests {
             ("src_port", FieldValue::UInt16(50_000)),
             ("dst_port", FieldValue::UInt16(4789)),
         ]);
-        let mut inner = layer(&[
+        let inner = layer(&[
             // Another order, and one field more: the hints must follow.
             ("length", FieldValue::UInt16(20)),
             ("dst_port", FieldValue::UInt16(53)),
             ("src_port", FieldValue::UInt16(1234)),
-        ]);
-        inner.encap_depth = 1;
-        inner.tunnel_type = TunnelType::Vxlan;
-        inner.tunnel_id = Some(77);
+        ])
+        .in_tunnel(1, TunnelType::Vxlan, Some(77));
 
-        for l in [&outer, &inner, &outer] {
+        for l in [outer, inner, outer] {
             assert!(write_layer_row(&mut sink, &mut resolver, &PACKET, l).is_continue());
         }
         let outer_row = vec![
@@ -1036,7 +1011,7 @@ mod tests {
             let mut resolver = FieldResolver::new(&columns);
             let mut sink = RecordingSink::new(&columns, None);
             let l = layer(&[("src_port", FieldValue::UInt16(1))]);
-            let _ = write_layer_row(&mut sink, &mut resolver, &PACKET, &l);
+            let _ = write_layer_row(&mut sink, &mut resolver, &PACKET, l);
             assert_eq!(
                 sink.take_rows(),
                 vec![vec![C::Timestamp(expected), C::U16(1)]]
@@ -1076,7 +1051,7 @@ mod tests {
         assert!(resolver.is_empty());
         let mut sink = RecordingSink::new(&[], Some(2));
         assert!(write_frame_row(&mut sink, &mut resolver, &PACKET).is_continue());
-        assert!(write_layer_row(&mut sink, &mut resolver, &PACKET, &layer(&[])).is_break());
+        assert!(write_layer_row(&mut sink, &mut resolver, &PACKET, layer(&[])).is_break());
         assert_eq!(sink.take_rows(), vec![Vec::<C>::new(), vec![]]);
     }
 }

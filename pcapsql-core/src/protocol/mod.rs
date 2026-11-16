@@ -21,7 +21,7 @@
 //! ## Example
 //!
 //! ```rust
-//! use pcapsql_core::protocol::{default_registry, parse_packet, ParseScope};
+//! use pcapsql_core::protocol::{default_registry, parse_packet, ParseBuf, ParseScope};
 //!
 //! let registry = default_registry();
 //! // Ethernet frame with IP/TCP
@@ -33,15 +33,17 @@
 //!     // Minimal IPv4 header would follow...
 //! ];
 //!
-//! let results = parse_packet(&registry, 1, packet_data, &ParseScope::full());
-//! for (name, result) in results {
-//!     let field_names: Vec<_> = result.fields.iter().map(|(k, _)| *k).collect();
-//!     println!("Parsed {}: {:?}", name, field_names);
+//! let mut buf = ParseBuf::new();
+//! let layers = parse_packet(&registry, 1, packet_data, &ParseScope::full(), &mut buf);
+//! for layer in layers.iter() {
+//!     let field_names: Vec<_> = layer.fields().iter().map(|(k, _)| *k).collect();
+//!     println!("Parsed {}: {:?}", layer.name(), field_names);
 //! }
 //! ```
 
 mod context;
 mod field;
+mod layers;
 mod projection;
 mod pruning;
 mod registry;
@@ -79,13 +81,16 @@ mod vxlan;
 #[cfg(test)]
 pub mod test_utils;
 
-pub use context::{
-    FieldEntry, FieldHint, HintKey, Hints, ParseContext, ParseResult, TunnelLayer, TunnelType,
+pub use context::{FieldEntry, HintKey, Hints, ParseContext, TunnelLayer, TunnelType};
+pub use field::FieldValue;
+pub use layers::{
+    FieldHint, FieldSink, LayerRef, ListBuilder, PacketLayers, ParseBuf, Parsed, Status,
+    TextBuilder,
 };
-pub use field::{FieldValue, OwnedFieldValue};
 pub use projection::{
     chain_fields_for_protocol, merge_with_chain_fields, FieldSet, ProjectionConfig,
 };
+pub(crate) use projection::{field_list, ParserField};
 pub use pruning::{compute_required_protocols, should_run_parser};
 pub use registry::{
     BuiltinProtocol, Cond, Dispatch, DispatchRule, PayloadMode, Protocol, ProtocolRegistry,
@@ -229,9 +234,9 @@ struct ResolvedScope {
     /// Per parser: may it run (as [`should_run_parser`] decides)? `None`
     /// when nothing is pruned.
     runs: Option<Box<[bool]>>,
-    /// Per parser: its field projection (`None`: all fields). `None` for the
-    /// whole when the scope projects nothing, in which case parsers run
-    /// `parse` rather than `parse_projected`.
+    /// Per parser: the fields it extracts, resolved against its field list
+    /// (`None`: all of them, with `parse` rather than `parse_projected`).
+    /// `None` for the whole when the scope projects nothing.
     projections: Option<Box<[Option<FieldSet>]>>,
 }
 
@@ -252,7 +257,11 @@ impl ParseScope {
         }
     }
 
-    /// Restrict the fields extracted for one protocol.
+    /// Restrict the fields extracted for one protocol to `fields`. With no
+    /// field, the protocol's layers are parsed for what the layers after
+    /// them need and carry no field. A protocol whose parser has no field
+    /// list ([`Protocol::field_names`]) has no projected parse: its layers
+    /// carry every field, whatever the projection.
     pub fn with_projection(mut self, protocol: impl Into<String>, fields: HashSet<String>) -> Self {
         self.projections.insert(protocol.into(), fields);
         self.resolved = OnceLock::new();
@@ -267,7 +276,9 @@ impl ParseScope {
     }
 
     /// The field projections, by protocol. A protocol without an entry is
-    /// parsed with all its fields.
+    /// parsed with all its fields, and so is one whose parser has no field
+    /// list, whatever its entry; the scope a scan plan compiles gives those
+    /// no entry.
     pub fn projections(&self) -> &HashMap<String, HashSet<String>> {
         &self.projections
     }
@@ -293,7 +304,10 @@ impl ParseScope {
             projections: (!self.projections.is_empty()).then(|| {
                 registry
                     .all_parsers()
-                    .map(|p| self.projections.get(p.name()).map(FieldSet::from))
+                    .map(|p| {
+                        let names = self.projections.get(p.name())?;
+                        project(p.field_names(), names)
+                    })
                     .collect()
             }),
         }
@@ -312,73 +326,79 @@ impl ParseScope {
     }
 }
 
-/// Parse a packet through its protocol layers, scoped by `scope`.
+/// The fields `names` of a parser with the field list `fields`, for its
+/// projected parse; `None` when its full parse gives the same: it has no
+/// projected parse (no list), or every field of the list is asked for.
+fn project(fields: &[&str], names: &HashSet<String>) -> Option<FieldSet> {
+    if fields.is_empty() || fields.len() > FieldSet::CAPACITY {
+        return None;
+    }
+    let set = FieldSet::resolve(fields, names);
+    (set != FieldSet::all_of(fields.len())).then_some(set)
+}
+
+/// Parse a packet through its protocol layers, scoped by `scope`, into the
+/// storage of `buf`.
 ///
 /// With [`ParseScope::full`] every matching protocol is parsed with all
-/// fields. A scoped parse prunes the protocol walk (stopping once all
-/// required protocols have been seen, and never descending into branches
-/// that cannot reach one) and projects fields within parsers that support
-/// it. Intermediate layers on the path to a required protocol are still
-/// returned — they may be needed for joins.
+/// fields. A scoped parse prunes the protocol walk (never descending into
+/// branches that cannot reach a required protocol) and projects fields within
+/// parsers that support it. Intermediate layers on the path to a required
+/// protocol are still returned — they may be needed for joins.
 ///
 /// For tunneled traffic, encapsulation depth and tunnel context are tracked;
-/// each ParseResult carries encap_depth, tunnel_type, and tunnel_id. A tunnel
-/// is a protocol that carries a whole inner packet (VXLAN, GRE, GTP, IPsec,
-/// IP-in-IP); MPLS label switching is not one, so an MPLS stack neither
-/// increments `encap_depth` nor sets `tunnel_type` on the layers below it.
+/// each layer carries its `encap_depth`, `tunnel_type` and `tunnel_id`. A
+/// tunnel is a protocol that carries a whole inner packet (VXLAN, GRE, GTP,
+/// IPsec, IP-in-IP); MPLS label switching is not one, so an MPLS stack
+/// neither increments `encap_depth` nor sets `tunnel_type` on the layers
+/// below it.
 ///
 /// # Parse errors
 ///
-/// A parser that fails outright (`ParseResult::error`: a truncated or
-/// malformed header, no fields extracted) ends the walk and is *not* part of
-/// the returned layers: a table row with every column NULL would say nothing
-/// about the packet and would still be counted by `count(*)`. A parser that
-/// extracted some fields before failing (`ParseResult::partial`) is kept with
-/// those fields and ends the walk as well. The outer layers that were parsed
-/// successfully are always returned.
+/// A parser that fails outright ([`Status::Error`]: a truncated or malformed
+/// header) ends the walk and is *not* part of the returned layers: a table
+/// row with every column NULL would say nothing about the packet and would
+/// still be counted by `count(*)`. A parser that extracted some fields before
+/// failing ([`Status::Partial`]) is kept with those fields and ends the walk
+/// as well. The outer layers that were parsed successfully are always
+/// returned.
 ///
-/// A returned layer's `child_hints` are empty: they are the context of the
-/// layer that follows, not part of the layer.
+/// # Storage
 ///
-/// The layers come in a `Vec` of their own: one heap allocation for every
-/// packet that is parsed. A caller that parses packet after packet uses
-/// [`parse_packet_into`] with a [`LayerBuf`] instead.
-pub fn parse_packet<'a>(
+/// The layers live in `buf` and borrow it: they are read before the next
+/// packet is parsed into the same buffer. A caller that parses packet after
+/// packet keeps one [`ParseBuf`], and after the first packets nothing is
+/// allocated.
+#[inline]
+pub fn parse_packet<'buf, 'a>(
     registry: &ProtocolRegistry,
     link_type: u16,
     data: &'a [u8],
     scope: &ParseScope,
-) -> Layers<'a> {
-    let mut results = Vec::new();
-    parse_packet_into(registry, link_type, data, scope, &mut results);
-    results
+    buf: &'buf mut ParseBuf,
+) -> PacketLayers<'buf, 'a>
+where
+    'buf: 'a,
+{
+    let mut layers = buf.for_packet();
+    walk(registry, link_type, data, scope, &mut layers);
+    layers
 }
 
-/// [`parse_packet`] into storage the caller keeps: `out` is emptied, then
-/// holds the packet's layers. Its capacity is reused, so a caller that hands
-/// in the same storage for every packet (see [`LayerBuf`]) allocates for the
-/// first packets only.
-pub fn parse_packet_into<'a>(
+/// The walk of [`parse_packet`]: append the layers of `data` to `out`.
+fn walk<'a>(
     registry: &ProtocolRegistry,
     link_type: u16,
     data: &'a [u8],
     scope: &ParseScope,
-    out: &mut Layers<'a>,
+    out: &mut PacketLayers<'_, 'a>,
 ) {
-    out.clear();
     let scope = scope.resolved_for(registry);
 
     // A scope that needs no protocol table at all (`frames` only) parses
-    // nothing: the frame columns come from the record header. This is ahead
-    // of the reservation below, so that such a scan pays for no storage.
+    // nothing: the frame columns come from the record header.
     if scope.parses_nothing {
         return;
-    }
-
-    // Typical packet has 3-4 protocol layers (Eth/IP/TCP/App);
-    // tunneled packets may have more (up to ~8 for deep encapsulation).
-    if out.capacity() == 0 {
-        out.reserve(8);
     }
 
     let mut context = ParseContext::new(link_type);
@@ -406,158 +426,40 @@ pub fn parse_packet_into<'a>(
             }
         }
 
-        let mut result = match &scope.projections {
-            None => parser.parse(remaining, &context),
-            Some(projections) => {
-                parser.parse_projected(remaining, &context, projections[index].as_ref())
-            }
+        // The layer is recorded with the encapsulation state it was parsed
+        // in, before the context moves on. An error with no fields is not a
+        // layer of the packet (see the function docs); a partial result keeps
+        // the fields it got.
+        let projection = match &scope.projections {
+            None => None,
+            Some(projections) => projections[index],
         };
+        let parsed = out.parse_layer(parser, remaining, &context, projection);
         debug_assert!(
-            parser.child_hint_keys().is_none_or(|keys| result
+            parser.child_hint_keys().is_none_or(|keys| parsed
                 .child_hints
                 .iter()
                 .all(|(key, _)| keys.contains(&key))),
             "{name} emitted a hint missing from its child_hint_keys: {:?}",
-            result.child_hints
+            parsed.child_hints
         );
-
-        // Set encapsulation context on the result BEFORE updating context;
-        // this captures the encap state when this protocol was parsed.
-        result.set_encap_context(&context);
+        if !parsed.is_ok() {
+            break;
+        }
 
         // A tunnel boundary updates context for the inner layers.
-        if let Some(tunnel_type_val) = result.hint(HintKey::TunnelType) {
-            let tunnel_id = result.hint(HintKey::TunnelId);
+        if let Some(tunnel_type_val) = parsed.hint(HintKey::TunnelType) {
+            let tunnel_id = parsed.hint(HintKey::TunnelId);
             context.push_tunnel(TunnelType::from_u64(tunnel_type_val), tunnel_id);
         }
 
         // Update context for the next layer.
         context.parent_protocol = Some(name);
         parent = Some(index);
-        context.hints = result.child_hints;
-        result.child_hints.clear();
-        context.offset += remaining.len() - result.remaining.len();
-
-        let should_stop = result.error.is_some();
-        remaining = result.remaining;
-
-        // An error with no fields is not a layer of the packet (see the
-        // function docs); a partial result keeps the fields it got.
-        if result.error.is_none() || !result.fields.is_empty() {
-            out.push((name, result));
-        }
-
-        if should_stop {
-            break;
-        }
+        context.hints = parsed.child_hints;
+        context.offset += remaining.len() - parsed.remaining.len();
+        remaining = parsed.remaining;
     }
-}
-
-/// The layers of one packet, as [`parse_packet`] returns them.
-pub type Layers<'a> = Vec<(&'static str, ParseResult<'a>)>;
-
-/// Storage for the layers of one packet at a time, kept from packet to
-/// packet so that [`parse_packet_into`] does not allocate for each.
-///
-/// A layer borrows the packet it was parsed from and every packet has a
-/// lifetime of its own, so the storage cannot simply be a `Vec` of layers:
-/// its type would name one packet's lifetime. Between packets the buffer
-/// keeps the allocation as an empty `Vec` of `'static` layers;
-/// [`for_packet`](Self::for_packet) lends it out as an empty `Vec` of the
-/// lifetime the caller needs, and the guard puts it back, emptied, when it is
-/// dropped.
-///
-/// ```
-/// use pcapsql_core::protocol::{default_registry, parse_packet_into, LayerBuf, ParseScope};
-///
-/// let registry = default_registry();
-/// let scope = ParseScope::full();
-/// let mut buf = LayerBuf::new();
-/// for packet in [vec![0xffu8; 14], vec![0x00u8; 60]] {
-///     let mut layers = buf.for_packet();
-///     parse_packet_into(&registry, 1, &packet, &scope, &mut layers);
-///     for (name, layer) in layers.iter() {
-///         println!("{name}: {} fields", layer.fields.len());
-///     }
-/// }
-/// ```
-#[derive(Debug, Default)]
-pub struct LayerBuf {
-    /// Always empty: only its capacity matters.
-    spare: Layers<'static>,
-}
-
-impl LayerBuf {
-    /// A buffer without storage yet: the first packet with layers allocates.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// The buffer's storage as the (empty) layers of one packet. It returns
-    /// to the buffer when the guard is dropped.
-    #[inline]
-    pub fn for_packet<'a>(&mut self) -> PacketLayers<'_, 'a> {
-        let layers = recycle(std::mem::take(&mut self.spare));
-        PacketLayers { buf: self, layers }
-    }
-}
-
-/// The layers of one packet, in storage borrowed from a [`LayerBuf`]. It
-/// dereferences to the `Vec` that [`parse_packet_into`] fills.
-#[derive(Debug)]
-pub struct PacketLayers<'buf, 'a> {
-    buf: &'buf mut LayerBuf,
-    layers: Layers<'a>,
-}
-
-impl<'a> std::ops::Deref for PacketLayers<'_, 'a> {
-    type Target = Layers<'a>;
-
-    #[inline]
-    fn deref(&self) -> &Self::Target {
-        &self.layers
-    }
-}
-
-impl std::ops::DerefMut for PacketLayers<'_, '_> {
-    #[inline]
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.layers
-    }
-}
-
-impl Drop for PacketLayers<'_, '_> {
-    #[inline]
-    fn drop(&mut self) {
-        self.buf.spare = recycle(std::mem::take(&mut self.layers));
-    }
-}
-
-/// `layers` emptied, as the layers of another lifetime, in the same
-/// allocation.
-///
-/// There is no `unsafe` here. Collecting a `vec::IntoIter` into a `Vec` of
-/// elements with the same size and alignment reuses the source's allocation
-/// (the standard library's in-place collection), and two instantiations of
-/// one type that differ in a lifetime only are such elements. The iterator is
-/// empty, so no element is ever converted: the closure only gives the result
-/// its type. A standard library that did not collect in place would leave
-/// this correct and make it allocate once per packet, which
-/// `tests/parse_alloc.rs` counts and would fail on.
-#[inline(always)]
-fn recycle<'a, 'b>(mut layers: Layers<'a>) -> Layers<'b> {
-    // Nothing to keep: a scan that parses nothing (`frames` alone) never
-    // gives the buffer storage, and does not pay for the conversion below.
-    if layers.capacity() == 0 {
-        return Vec::new();
-    }
-    layers.clear();
-    layers
-        .into_iter()
-        .map(|_| -> (&'static str, ParseResult<'b>) {
-            unreachable!("the layers were cleared before they were recycled")
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -575,20 +477,16 @@ mod parse_packet_tests {
         EthernetBuilder::new().ipv4().payload(ip).build()
     }
 
-    /// The layers of each packet as `Debug` text: what there is to compare,
-    /// a `ParseResult` having no `PartialEq`.
-    fn described(layers: &Layers<'_>) -> Vec<String> {
-        layers
-            .iter()
-            .map(|(name, result)| format!("{name}: {result:?}"))
-            .collect()
+    /// The layers of a packet as `Debug` text.
+    fn described(layers: &PacketLayers<'_, '_>) -> Vec<String> {
+        layers.iter().map(|layer| format!("{layer:?}")).collect()
     }
 
-    /// A `LayerBuf` gives every packet the layers `parse_packet` returns,
-    /// whatever the packet before left in it, and keeps one allocation
-    /// throughout, also when a guard is dropped with layers in it.
+    /// A `ParseBuf` gives every packet the layers a fresh buffer gives it,
+    /// whatever the packet before left in it, and keeps its allocations
+    /// throughout.
     #[test]
-    fn layer_buf_gives_the_layers_of_parse_packet() {
+    fn parse_buf_is_reused_from_packet_to_packet() {
         let registry = default_registry();
         let full = ParseScope::full();
         let frames_only = ParseScope::for_tables(&["frames"], &registry);
@@ -600,32 +498,32 @@ mod parse_packet_tests {
             Vec::new(),
         ];
 
-        let mut buf = LayerBuf::new();
-        assert_eq!(buf.spare.capacity(), 0);
-        // As an address: a pointer type would name one packet's lifetime.
+        let mut buf = ParseBuf::new();
+        // As addresses: a pointer type would name one packet's lifetime.
         let mut storage = None;
         for round in 0..3 {
             for frame in &frames {
                 let frame = frame.clone(); // a lifetime of its own per packet
-                let mut layers = buf.for_packet();
-                assert!(layers.is_empty(), "the last packet's layers are gone");
-                parse_packet_into(&registry, 1, &frame, &full, &mut layers);
-                let expected = parse_packet(&registry, 1, &frame, &full);
-                assert_eq!(described(&layers), described(&expected), "round {round}");
+                let mut fresh = ParseBuf::new();
+                let expected = described(&parse_packet(&registry, 1, &frame, &full, &mut fresh));
+                let layers = parse_packet(&registry, 1, &frame, &full, &mut buf);
+                assert_eq!(described(&layers), expected, "round {round}");
+                let at = layers.storage();
                 if let Some(storage) = storage {
-                    assert_eq!(layers.as_ptr().addr(), storage, "the allocation is reused");
+                    assert_eq!(at, storage, "the allocations are reused");
                 }
-                storage = Some(layers.as_ptr().addr());
+                storage = Some(at);
+                drop(layers);
 
                 // A scope that parses nothing leaves no stale layer behind.
-                parse_packet_into(&registry, 1, &frame, &frames_only, &mut layers);
-                assert!(layers.is_empty());
-                parse_packet_into(&registry, 1, &frame, &full, &mut layers);
+                assert!(parse_packet(&registry, 1, &frame, &frames_only, &mut buf).is_empty());
             }
         }
-        assert!(buf.spare.is_empty());
-        assert!(buf.spare.capacity() >= 8);
-        assert_eq!(Some(buf.spare.as_ptr().addr()), storage);
+        let (fields, layers) = buf.capacity();
+        assert!(
+            fields >= 8 && layers >= 4,
+            "{fields} fields, {layers} layers"
+        );
     }
 
     /// `frames` alone asks for no storage at all.
@@ -634,10 +532,9 @@ mod parse_packet_tests {
         let registry = default_registry();
         let scope = ParseScope::for_tables(&["frames"], &registry);
         let frame = udp_frame(9999, vec![0xAB; 8]);
-        assert_eq!(parse_packet(&registry, 1, &frame, &scope).capacity(), 0);
-        let mut buf = LayerBuf::new();
-        parse_packet_into(&registry, 1, &frame, &scope, &mut buf.for_packet());
-        assert_eq!(buf.spare.capacity(), 0);
+        let mut buf = ParseBuf::new();
+        assert!(parse_packet(&registry, 1, &frame, &scope, &mut buf).is_empty());
+        assert_eq!(buf.capacity(), (0, 0));
     }
 
     /// A parser that fails without extracting anything is not a layer: the
@@ -645,20 +542,26 @@ mod parse_packet_tests {
     #[test]
     fn error_only_layer_produces_no_entry() {
         let registry = default_registry();
+        let mut buf = ParseBuf::new();
         // Four bytes to the GTP-U port: "GTP header too short".
         let frame = udp_frame(2152, vec![0x30, 0xff, 0x00, 0x00]);
-        let results = parse_packet(&registry, 1, &frame, &ParseScope::full());
-        let layers: Vec<&str> = results.iter().map(|(n, _)| *n).collect();
-        assert_eq!(layers, ["ethernet", "ipv4", "udp"]);
-        assert!(results.iter().all(|(_, r)| r.error.is_none()));
+        let layers = parse_packet(&registry, 1, &frame, &ParseScope::full(), &mut buf);
+        assert_eq!(
+            layers.names().collect::<Vec<_>>(),
+            ["ethernet", "ipv4", "udp"]
+        );
+        assert!(layers.iter().all(|layer| layer.error().is_none()));
+        drop(layers);
 
         // The same packet with a complete header is a gtp layer.
         let mut gtp = vec![0x30, 0x01, 0x00, 0x00]; // v1, PT=1, Echo Request, len 0
         gtp.extend_from_slice(&[0, 0, 0, 1]); // TEID
         let frame = udp_frame(2152, gtp);
-        let results = parse_packet(&registry, 1, &frame, &ParseScope::full());
-        let layers: Vec<&str> = results.iter().map(|(n, _)| *n).collect();
-        assert_eq!(layers, ["ethernet", "ipv4", "udp", "gtp"]);
+        let layers = parse_packet(&registry, 1, &frame, &ParseScope::full(), &mut buf);
+        assert_eq!(
+            layers.names().collect::<Vec<_>>(),
+            ["ethernet", "ipv4", "udp", "gtp"]
+        );
     }
 
     /// A partial result (fields extracted before the failure) is kept, with
@@ -671,14 +574,58 @@ mod parse_packet_tests {
         let mut dns = vec![0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0];
         dns.extend_from_slice(&[0x03, b'w', b'w']); // truncated label
         let frame = udp_frame(53, dns);
-        let results = parse_packet(&registry, 1, &frame, &ParseScope::full());
-        let (name, dns_layer) = results.last().expect("layers");
-        if *name == "dns" {
-            assert!(!dns_layer.fields.is_empty(), "partial results keep fields");
+        let mut buf = ParseBuf::new();
+        let layers = parse_packet(&registry, 1, &frame, &ParseScope::full(), &mut buf);
+        let dns_layer = layers.last().expect("layers");
+        if dns_layer.name() == "dns" {
+            assert!(
+                !dns_layer.fields().is_empty(),
+                "partial results keep fields"
+            );
+            assert!(dns_layer.error().is_some());
         } else {
             // The DNS parser rejected the packet outright: then no dns layer.
-            assert_eq!(*name, "udp");
+            assert_eq!(dns_layer.name(), "udp");
         }
+    }
+
+    /// A hand-built layer reads like a parsed one, and a hinted lookup
+    /// follows a field that moves.
+    #[test]
+    fn hinted_get_follows_the_field() {
+        let mut buf = ParseBuf::new();
+        let mut layers = buf.for_packet();
+        let row = |layers: &mut PacketLayers<'_, '_>, names: &[&'static str]| {
+            let fields: Vec<_> = names
+                .iter()
+                .enumerate()
+                .map(|(i, n)| (*n, FieldValue::UInt16(i as u16)))
+                .collect();
+            layers.push_layer(LayerRef::new("udp", &fields));
+        };
+        row(&mut layers, &["src_port", "dst_port", "length"]);
+        // The field moved (a projected parse, or another parser's layout).
+        row(&mut layers, &["dst_port", "length"]);
+        // Absent.
+        row(&mut layers, &["length"]);
+        let (a, b, c) = (
+            layers.get(0).unwrap(),
+            layers.get(1).unwrap(),
+            layers.get(2).unwrap(),
+        );
+        assert_eq!(a.fields().len(), 3);
+        assert_eq!(b.fields()[0].0, "dst_port");
+
+        let mut hint = FieldHint::default();
+        let one = FieldValue::UInt16(1);
+        let zero = FieldValue::UInt16(0);
+        assert_eq!(a.get_hinted("dst_port", &mut hint), Some(&one));
+        assert_eq!(a.get_hinted("dst_port", &mut hint), Some(&one));
+        assert_eq!(b.get_hinted("dst_port", &mut hint), Some(&zero));
+        // Absent: None, and the hint stays.
+        assert_eq!(c.get_hinted("dst_port", &mut hint), None);
+        assert_eq!(b.get_hinted("dst_port", &mut hint), Some(&zero));
+        assert_eq!(a.get_hinted("dst_port", &mut hint), Some(&one));
     }
 }
 

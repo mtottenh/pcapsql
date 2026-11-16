@@ -3157,6 +3157,7 @@ dependencies = [
 name = "pcapsql-core"
 version = "0.4.2"
 dependencies = [
+ "bumpalo",
  "bytes",
  "bzip2 0.4.4",
  "compact_str",
@@ -3201,7 +3202,6 @@ dependencies = [
  "clap_complete",
  "clap_mangen",
  "comfy-table",
- "compact_str",
  "criterion",
  "datafusion",
  "dirs",
@@ -3219,7 +3219,6 @@ dependencies = [
  "rusqlite",
  "rustyline",
  "serde_json",
- "smallvec",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",

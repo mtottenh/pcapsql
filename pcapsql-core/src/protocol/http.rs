@@ -14,13 +14,13 @@
 //! (`http_messages`, see `stream::parsers::http`), which shares the header
 //! mapping in this module.
 
-use compact_str::CompactString;
+use std::borrow::Cow;
+
 use httparse::{Request, Response, Status, EMPTY_HEADER};
-use smallvec::SmallVec;
 
 use super::{
-    Cond, Dispatch, DispatchRule, FieldEntry, FieldValue, HintKey, Hints, ParseContext,
-    ParseResult, Protocol, CONTENT_PRIORITY,
+    Cond, Dispatch, DispatchRule, FieldSink, FieldValue, HintKey, Hints, ParseContext, Parsed,
+    Protocol, CONTENT_PRIORITY,
 };
 use crate::schema::{DataKind, FieldDescriptor};
 
@@ -81,13 +81,26 @@ const HEADER_COLUMNS: &[(&str, &str)] = &[
     ("x-real-ip", "x_real_ip"),
 ];
 
+/// The value of a header that has an `http` column.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HeaderValue<'a> {
+    /// Text: borrowed from the message when it is valid UTF-8, a lossy copy
+    /// otherwise.
+    Text(Cow<'a, str>),
+    /// A `Content-Length`.
+    Length(u64),
+}
+
 /// Map one header to its `http` column and value, or `None` for a header
 /// that has no column.
 ///
 /// Values are zero-copy when valid UTF-8. `Content-Length` becomes a
-/// `UInt64` (an unparsable value yields no field). `Authorization` keeps
+/// number (an unparsable value yields no field). `Authorization` keeps
 /// only the scheme (`Bearer`, `Basic`), never the credentials.
-pub(crate) fn header_field<'a>(name: &str, value: &'a [u8]) -> Option<FieldEntry<'a>> {
+pub(crate) fn header_field<'a>(
+    name: &str,
+    value: &'a [u8],
+) -> Option<(&'static str, HeaderValue<'a>)> {
     let column = HEADER_COLUMNS
         .iter()
         .find(|(header, _)| name.eq_ignore_ascii_case(header))
@@ -100,49 +113,42 @@ pub(crate) fn header_field<'a>(name: &str, value: &'a [u8]) -> Option<FieldEntry
                 .trim()
                 .parse::<u64>()
                 .ok()
-                .map(|len| (column, FieldValue::UInt64(len)));
+                .map(|len| (column, HeaderValue::Length(len)));
         }
         "authorization" => match std::str::from_utf8(value) {
-            Ok(text) => FieldValue::Str(text.split_whitespace().next().unwrap_or(text)),
+            Ok(text) => Cow::Borrowed(text.split_whitespace().next().unwrap_or(text)),
             Err(_) => {
                 let lossy = String::from_utf8_lossy(value);
                 let scheme = lossy.split_whitespace().next().unwrap_or(&lossy);
-                FieldValue::OwnedString(CompactString::new(scheme))
+                Cow::Owned(scheme.to_string())
             }
         },
-        _ => text_value(value),
+        _ => String::from_utf8_lossy(value),
     };
-    Some((column, value))
-}
-
-/// A header value as a string field: borrowed when valid UTF-8.
-fn text_value(value: &[u8]) -> FieldValue<'_> {
-    match std::str::from_utf8(value) {
-        Ok(text) => FieldValue::Str(text),
-        Err(_) => FieldValue::OwnedString(CompactString::from(String::from_utf8_lossy(value))),
-    }
+    Some((column, HeaderValue::Text(value)))
 }
 
 /// HTTP/1.x packet parser (see the module documentation).
 #[derive(Debug, Clone, Copy)]
 pub struct HttpProtocol;
 
-type Fields<'a> = SmallVec<[FieldEntry<'a>; 16]>;
-
-/// Push a field unless the column is already set: the first occurrence of
-/// a repeated header wins (a row has one value per column).
-fn push_unique<'a>(fields: &mut Fields<'a>, entry: FieldEntry<'a>) {
-    if !fields.iter().any(|(name, _)| *name == entry.0) {
-        fields.push(entry);
-    }
-}
-
-/// Add the headers found so far (`EMPTY_HEADER` entries are unparsed).
-fn push_headers<'a>(fields: &mut Fields<'a>, headers: &[httparse::Header<'a>]) {
+/// Add the headers found so far (`EMPTY_HEADER` entries are unparsed). A
+/// column that is already set stays: the first occurrence of a repeated
+/// header wins (a row has one value per column).
+fn push_headers<'a>(fields: &mut FieldSink<'_, 'a>, headers: &[httparse::Header<'a>]) {
     for header in headers.iter().filter(|h| !h.name.is_empty()) {
-        if let Some(entry) = header_field(header.name, header.value) {
-            push_unique(fields, entry);
+        let Some((column, value)) = header_field(header.name, header.value) else {
+            continue;
+        };
+        if fields.as_slice().iter().any(|(name, _)| *name == column) {
+            continue;
         }
+        let value = match value {
+            HeaderValue::Text(Cow::Borrowed(text)) => FieldValue::Str(text),
+            HeaderValue::Text(Cow::Owned(text)) => fields.str(&text),
+            HeaderValue::Length(length) => FieldValue::UInt64(length),
+        };
+        fields.push((column, value));
     }
 }
 
@@ -163,28 +169,28 @@ fn version_str(minor: u8) -> &'static str {
 /// kept with `headers_complete = false` alongside the error; only a start
 /// line that yielded nothing is a fields-less error row.
 fn finish<'a>(
-    mut fields: Fields<'a>,
+    fields: &mut FieldSink<'_, 'a>,
     status: Result<Status<usize>, httparse::Error>,
     headers: &[httparse::Header<'a>],
     data: &'a [u8],
     kind: &str,
-) -> ParseResult<'a> {
+) -> Parsed<'a> {
     let status = match status {
         Ok(status) => status,
         Err(e) => {
-            let error = format!("HTTP {kind} parse error: {e}");
+            let error = fields.text_fmt(format_args!("HTTP {kind} parse error: {e}"));
             // `is_request` alone means nothing of the start line was read.
-            if fields.len() <= 1 {
-                return ParseResult::error(error, data);
+            if fields.as_slice().len() <= 1 {
+                return Parsed::error(error, data);
             }
             fields.push(("headers_complete", FieldValue::Bool(false)));
-            push_headers(&mut fields, headers);
-            return ParseResult::partial(fields, &data[data.len()..], error);
+            push_headers(fields, headers);
+            return Parsed::partial(&data[data.len()..], error);
         }
     };
     let complete = matches!(status, Status::Complete(_));
     fields.push(("headers_complete", FieldValue::Bool(complete)));
-    push_headers(&mut fields, headers);
+    push_headers(fields, headers);
     if let Status::Complete(header_len) = status {
         fields.push((
             "body_length",
@@ -192,10 +198,10 @@ fn finish<'a>(
         ));
     }
     // Terminal layer: the body is not parsed further.
-    ParseResult::success(fields, &data[data.len()..], Hints::new())
+    Parsed::ok(&data[data.len()..], Hints::new())
 }
 
-fn parse_request(data: &[u8]) -> ParseResult<'_> {
+fn parse_request<'a>(data: &'a [u8], fields: &mut FieldSink<'_, 'a>) -> Parsed<'a> {
     let mut headers = [EMPTY_HEADER; MAX_HEADERS];
     let mut req = Request::new(&mut headers);
     let status = req.parse(data);
@@ -203,7 +209,6 @@ fn parse_request(data: &[u8]) -> ParseResult<'_> {
     // header block is incomplete or malformed.
     let (method, path, version) = (req.method, req.path, req.version);
 
-    let mut fields = Fields::new();
     fields.push(("is_request", FieldValue::Bool(true)));
     if let Some(method) = method {
         fields.push(("method", FieldValue::Str(method)));
@@ -217,13 +222,12 @@ fn parse_request(data: &[u8]) -> ParseResult<'_> {
     finish(fields, status, &headers, data, "request")
 }
 
-fn parse_response(data: &[u8]) -> ParseResult<'_> {
+fn parse_response<'a>(data: &'a [u8], fields: &mut FieldSink<'_, 'a>) -> Parsed<'a> {
     let mut headers = [EMPTY_HEADER; MAX_HEADERS];
     let mut resp = Response::new(&mut headers);
     let status = resp.parse(data);
     let (version, code, reason) = (resp.version, resp.code, resp.reason);
 
-    let mut fields = Fields::new();
     fields.push(("is_request", FieldValue::Bool(false)));
     if let Some(version) = version {
         fields.push(("version", FieldValue::Str(version_str(version))));
@@ -275,11 +279,16 @@ impl Protocol for HttpProtocol {
         Some(CONTENT_PRIORITY)
     }
 
-    fn parse<'a>(&self, data: &'a [u8], _context: &ParseContext) -> ParseResult<'a> {
+    fn parse<'a>(
+        &self,
+        data: &'a [u8],
+        _context: &ParseContext,
+        fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
         if data.starts_with(b"HTTP/") {
-            parse_response(data)
+            parse_response(data, fields)
         } else {
-            parse_request(data)
+            parse_request(data, fields)
         }
     }
 
@@ -347,7 +356,8 @@ impl Protocol for HttpProtocol {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{default_registry, parse_packet, ParseScope};
+    use crate::protocol::test_utils::{ParseLayer as _, ParsedLayer};
+    use crate::protocol::{default_registry, parse_packet, ParseBuf, ParseScope};
 
     fn ctx(src_port: u64, dst_port: u64, sniffed: bool) -> ParseContext {
         let mut ctx = ParseContext::new(1);
@@ -360,12 +370,12 @@ mod tests {
         ctx
     }
 
-    fn parse(data: &[u8]) -> ParseResult<'_> {
-        HttpProtocol.parse(data, &ctx(40000, 80, true))
+    fn parse(data: &[u8]) -> ParsedLayer<'_> {
+        HttpProtocol.parse_layer(data, &ctx(40000, 80, true))
     }
 
-    fn text<'a>(result: &'a ParseResult<'_>, name: &str) -> Option<&'a str> {
-        result.get(name).and_then(|v| v.as_str())
+    fn text<'a>(value: Option<&'a FieldValue<'_>>) -> Option<&'a str> {
+        value.and_then(|v| v.as_str())
     }
 
     #[test]
@@ -426,15 +436,15 @@ mod tests {
             result.get("headers_complete"),
             Some(&FieldValue::Bool(true))
         );
-        assert_eq!(text(&result, "method"), Some("GET"));
-        assert_eq!(text(&result, "uri"), Some("/index.html"));
-        assert_eq!(text(&result, "version"), Some("HTTP/1.1"));
-        assert_eq!(text(&result, "host"), Some("example.test"));
-        assert_eq!(text(&result, "user_agent"), Some("pcapsql/1.0"));
-        assert_eq!(text(&result, "accept"), Some("text/plain"));
-        assert_eq!(text(&result, "cookie"), Some("a=1"));
+        assert_eq!(text(result.get("method")), Some("GET"));
+        assert_eq!(text(result.get("uri")), Some("/index.html"));
+        assert_eq!(text(result.get("version")), Some("HTTP/1.1"));
+        assert_eq!(text(result.get("host")), Some("example.test"));
+        assert_eq!(text(result.get("user_agent")), Some("pcapsql/1.0"));
+        assert_eq!(text(result.get("accept")), Some("text/plain"));
+        assert_eq!(text(result.get("cookie")), Some("a=1"));
         // Credentials never reach the table.
-        assert_eq!(text(&result, "authorization"), Some("Bearer"));
+        assert_eq!(text(result.get("authorization")), Some("Bearer"));
         assert_eq!(result.get("body_length"), Some(&FieldValue::UInt64(0)));
         assert!(result.get("status_code").is_none());
         assert!(result.remaining.is_empty());
@@ -451,15 +461,15 @@ mod tests {
             result.get("headers_complete"),
             Some(&FieldValue::Bool(true))
         );
-        assert_eq!(text(&result, "version"), Some("HTTP/1.1"));
+        assert_eq!(text(result.get("version")), Some("HTTP/1.1"));
         assert_eq!(result.get("status_code"), Some(&FieldValue::UInt16(200)));
-        assert_eq!(text(&result, "status_text"), Some("OK"));
-        assert_eq!(text(&result, "server"), Some("corpus"));
-        assert_eq!(text(&result, "content_type"), Some("text/plain"));
+        assert_eq!(text(result.get("status_text")), Some("OK"));
+        assert_eq!(text(result.get("server")), Some("corpus"));
+        assert_eq!(text(result.get("content_type")), Some("text/plain"));
         assert_eq!(result.get("content_length"), Some(&FieldValue::UInt64(5)));
         assert_eq!(result.get("body_length"), Some(&FieldValue::UInt64(5)));
         // Repeated header: the first value wins, and there is one entry.
-        assert_eq!(text(&result, "set_cookie"), Some("a=1"));
+        assert_eq!(text(result.get("set_cookie")), Some("a=1"));
         assert_eq!(
             result
                 .fields
@@ -474,11 +484,11 @@ mod tests {
     #[test]
     fn http10_version() {
         let result = parse(b"GET / HTTP/1.0\r\n\r\n");
-        assert_eq!(text(&result, "version"), Some("HTTP/1.0"));
+        assert_eq!(text(result.get("version")), Some("HTTP/1.0"));
         let result = parse(b"HTTP/1.0 302 Found\r\nLocation: /x\r\n\r\n");
-        assert_eq!(text(&result, "version"), Some("HTTP/1.0"));
+        assert_eq!(text(result.get("version")), Some("HTTP/1.0"));
         assert_eq!(result.get("status_code"), Some(&FieldValue::UInt16(302)));
-        assert_eq!(text(&result, "location"), Some("/x"));
+        assert_eq!(text(result.get("location")), Some("/x"));
     }
 
     #[test]
@@ -491,10 +501,10 @@ mod tests {
             result.get("headers_complete"),
             Some(&FieldValue::Bool(false))
         );
-        assert_eq!(text(&result, "method"), Some("POST"));
-        assert_eq!(text(&result, "uri"), Some("/api"));
-        assert_eq!(text(&result, "version"), Some("HTTP/1.1"));
-        assert_eq!(text(&result, "host"), Some("api.test"));
+        assert_eq!(text(result.get("method")), Some("POST"));
+        assert_eq!(text(result.get("uri")), Some("/api"));
+        assert_eq!(text(result.get("version")), Some("HTTP/1.1"));
+        assert_eq!(text(result.get("host")), Some("api.test"));
         assert!(result.get("content_length").is_none());
         assert!(result.get("body_length").is_none());
 
@@ -505,7 +515,7 @@ mod tests {
             result.get("headers_complete"),
             Some(&FieldValue::Bool(false))
         );
-        assert_eq!(text(&result, "version"), Some("HTTP/1.1"));
+        assert_eq!(text(result.get("version")), Some("HTTP/1.1"));
         assert!(result.get("status_code").is_none());
     }
 
@@ -522,7 +532,7 @@ mod tests {
         let result = parse(b"GET \xff\xfe\x00");
         assert!(result.error.is_some());
         assert_eq!(result.get("is_request"), Some(&FieldValue::Bool(true)));
-        assert_eq!(text(&result, "method"), Some("GET"));
+        assert_eq!(text(result.get("method")), Some("GET"));
         assert!(result.get("uri").is_none());
         assert_eq!(
             result.get("headers_complete"),
@@ -538,10 +548,10 @@ mod tests {
         let result = parse(b"GET /path HTTP/1.1\r\nHost: h\r\nBad Header: x\r\n\r\n");
         assert!(result.error.is_some(), "expected a parse error");
         assert_eq!(result.get("is_request"), Some(&FieldValue::Bool(true)));
-        assert_eq!(text(&result, "method"), Some("GET"));
-        assert_eq!(text(&result, "uri"), Some("/path"));
-        assert_eq!(text(&result, "version"), Some("HTTP/1.1"));
-        assert_eq!(text(&result, "host"), Some("h"));
+        assert_eq!(text(result.get("method")), Some("GET"));
+        assert_eq!(text(result.get("uri")), Some("/path"));
+        assert_eq!(text(result.get("version")), Some("HTTP/1.1"));
+        assert_eq!(text(result.get("host")), Some("h"));
         assert_eq!(
             result.get("headers_complete"),
             Some(&FieldValue::Bool(false))
@@ -552,8 +562,8 @@ mod tests {
         // A leading-space header line.
         let result = parse(b"GET / HTTP/1.1\r\n Host: x\r\n\r\n");
         assert!(result.error.is_some());
-        assert_eq!(text(&result, "method"), Some("GET"));
-        assert_eq!(text(&result, "uri"), Some("/"));
+        assert_eq!(text(result.get("method")), Some("GET"));
+        assert_eq!(text(result.get("uri")), Some("/"));
         assert_eq!(
             result.get("headers_complete"),
             Some(&FieldValue::Bool(false))
@@ -567,8 +577,8 @@ mod tests {
         data.extend_from_slice(b"\r\n");
         let result = parse(&data);
         assert!(result.error.is_some());
-        assert_eq!(text(&result, "method"), Some("GET"));
-        assert_eq!(text(&result, "uri"), Some("/many"));
+        assert_eq!(text(result.get("method")), Some("GET"));
+        assert_eq!(text(result.get("uri")), Some("/many"));
         assert_eq!(
             result.get("headers_complete"),
             Some(&FieldValue::Bool(false))
@@ -578,7 +588,7 @@ mod tests {
         let result = parse(b"HTTP/1.1  200 OK\r\n\r\n");
         assert!(result.error.is_some());
         assert_eq!(result.get("is_request"), Some(&FieldValue::Bool(false)));
-        assert_eq!(text(&result, "version"), Some("HTTP/1.1"));
+        assert_eq!(text(result.get("version")), Some("HTTP/1.1"));
         assert!(result.get("status_code").is_none());
         assert_eq!(
             result.get("headers_complete"),
@@ -588,7 +598,7 @@ mod tests {
         // A bad status code after a good version.
         let result = parse(b"HTTP/1.1 ok\r\n\r\n");
         assert!(result.error.is_some());
-        assert_eq!(text(&result, "version"), Some("HTTP/1.1"));
+        assert_eq!(text(result.get("version")), Some("HTTP/1.1"));
         assert!(result.get("status_code").is_none());
     }
 
@@ -596,29 +606,26 @@ mod tests {
     fn header_mapping_is_case_insensitive_and_scoped() {
         assert_eq!(
             header_field("HOST", b"a.test"),
-            Some(("host", FieldValue::Str("a.test")))
+            Some(("host", HeaderValue::Text("a.test".into())))
         );
         assert_eq!(
             header_field("Referrer", b"/r"),
-            Some(("referer", FieldValue::Str("/r")))
+            Some(("referer", HeaderValue::Text("/r".into())))
         );
         assert_eq!(
             header_field("content-length", b" 42 "),
-            Some(("content_length", FieldValue::UInt64(42)))
+            Some(("content_length", HeaderValue::Length(42)))
         );
         assert_eq!(header_field("Content-Length", b"many"), None);
         assert_eq!(
             header_field("Authorization", b"Basic dXNlcjpwYXNz"),
-            Some(("authorization", FieldValue::Str("Basic")))
+            Some(("authorization", HeaderValue::Text("Basic".into())))
         );
         assert_eq!(header_field("X-Unknown", b"v"), None);
         // Invalid UTF-8 is kept lossily instead of dropped.
         assert_eq!(
             header_field("Server", b"nginx\xff"),
-            Some((
-                "server",
-                FieldValue::OwnedString(CompactString::new("nginx\u{FFFD}"))
-            ))
+            Some(("server", HeaderValue::Text("nginx\u{FFFD}".into())))
         );
     }
 
@@ -665,10 +672,9 @@ mod tests {
 
     fn layer_names(frame: &[u8]) -> Vec<&'static str> {
         let registry = default_registry();
-        parse_packet(&registry, 1, frame, &ParseScope::full())
-            .into_iter()
-            .map(|(name, _)| name)
-            .collect()
+        let mut buf = ParseBuf::new();
+        let layers = parse_packet(&registry, 1, frame, &ParseScope::full(), &mut buf);
+        layers.names().collect()
     }
 
     #[test]
@@ -677,12 +683,13 @@ mod tests {
 
         // A request on port 80.
         let frame = tcp_frame(40000, 80, b"GET / HTTP/1.1\r\nHost: h\r\n\r\n");
-        let parsed = parse_packet(&registry, 1, &frame, &ParseScope::full());
-        let names: Vec<_> = parsed.iter().map(|(n, _)| *n).collect();
+        let mut buf = ParseBuf::new();
+        let parsed = parse_packet(&registry, 1, &frame, &ParseScope::full(), &mut buf);
+        let names: Vec<_> = parsed.names().collect();
         assert_eq!(names, ["ethernet", "ipv4", "tcp", "http"]);
-        let http = &parsed.iter().find(|(n, _)| *n == "http").unwrap().1;
-        assert_eq!(text(http, "host"), Some("h"));
-        assert_eq!(http.encap_depth, 0);
+        let http = parsed.find("http").unwrap();
+        assert_eq!(text(http.get("host")), Some("h"));
+        assert_eq!(http.encap_depth(), 0);
 
         // A response from port 8080.
         assert_eq!(
@@ -765,12 +772,13 @@ mod tests {
     fn content_sniff_outranks_port_only_parsers() {
         let registry = default_registry();
         let http = |frame: &[u8]| {
-            let parsed = parse_packet(&registry, 1, frame, &ParseScope::full());
-            let names: Vec<_> = parsed.iter().map(|(n, _)| *n).collect();
+            let mut buf = ParseBuf::new();
+            let parsed = parse_packet(&registry, 1, frame, &ParseScope::full(), &mut buf);
+            let names: Vec<_> = parsed.names().collect();
             assert_eq!(names, ["ethernet", "ipv4", "tcp", "http"], "{names:?}");
-            let http = &parsed.iter().find(|(n, _)| *n == "http").unwrap().1;
-            assert!(http.is_ok(), "{:?}", http.error);
-            assert_eq!(text(http, "method"), Some("GET"));
+            let http = parsed.find("http").unwrap();
+            assert_eq!(http.error(), None);
+            assert_eq!(text(http.get("method")), Some("GET"));
         };
 
         // Plaintext HTTP to a TLS port: `http`, not a `tls` error row.
@@ -789,42 +797,46 @@ mod tests {
 
         // A real TLS ClientHello on 8443 is still TLS.
         let frame = tcp_frame(40000, 8443, &tls_client_hello());
-        let parsed = parse_packet(&registry, 1, &frame, &ParseScope::full());
-        let names: Vec<_> = parsed.iter().map(|(n, _)| *n).collect();
+        let mut buf = ParseBuf::new();
+        let parsed = parse_packet(&registry, 1, &frame, &ParseScope::full(), &mut buf);
+        let names: Vec<_> = parsed.names().collect();
         assert_eq!(names, ["ethernet", "ipv4", "tcp", "tls"]);
-        let tls = &parsed.iter().find(|(n, _)| *n == "tls").unwrap().1;
-        assert!(tls.is_ok(), "{:?}", tls.error);
+        let tls = parsed.find("tls").unwrap();
+        assert_eq!(tls.error(), None);
         assert_eq!(tls.get("handshake_type"), Some(&FieldValue::UInt8(1)));
 
         // A QUIC Initial on UDP 443 is QUIC: the TLS port match no longer
         // claims UDP, so it does not shadow the lower-priority QUIC match.
         let frame = udp_frame(40000, 443, &quic_initial());
-        let parsed = parse_packet(&registry, 1, &frame, &ParseScope::full());
-        let names: Vec<_> = parsed.iter().map(|(n, _)| *n).collect();
+        let mut buf = ParseBuf::new();
+        let parsed = parse_packet(&registry, 1, &frame, &ParseScope::full(), &mut buf);
+        let names: Vec<_> = parsed.names().collect();
         assert_eq!(names, ["ethernet", "ipv4", "udp", "quic"]);
-        let quic = &parsed.iter().find(|(n, _)| *n == "quic").unwrap().1;
-        assert!(quic.is_ok(), "{:?}", quic.error);
-        assert_eq!(text(quic, "long_packet_type"), Some("Initial"));
+        let quic = parsed.find("quic").unwrap();
+        assert_eq!(quic.error(), None);
+        assert_eq!(text(quic.get("long_packet_type")), Some("Initial"));
         assert_eq!(quic.get("version"), Some(&FieldValue::UInt32(1)));
 
         // DNS over UDP 53 and over TCP 53 (two-byte length prefix) are DNS.
         let frame = udp_frame(40000, 53, &dns_query());
-        let parsed = parse_packet(&registry, 1, &frame, &ParseScope::full());
-        let names: Vec<_> = parsed.iter().map(|(n, _)| *n).collect();
+        let mut buf = ParseBuf::new();
+        let parsed = parse_packet(&registry, 1, &frame, &ParseScope::full(), &mut buf);
+        let names: Vec<_> = parsed.names().collect();
         assert_eq!(names, ["ethernet", "ipv4", "udp", "dns"]);
-        let dns = &parsed.iter().find(|(n, _)| *n == "dns").unwrap().1;
+        let dns = parsed.find("dns").unwrap();
         assert_eq!(dns.get("transaction_id"), Some(&FieldValue::UInt16(0x1234)));
 
         let mut over_tcp = (dns_query().len() as u16).to_be_bytes().to_vec();
         over_tcp.extend_from_slice(&dns_query());
         let frame = tcp_frame(40000, 53, &over_tcp);
-        let parsed = parse_packet(&registry, 1, &frame, &ParseScope::full());
-        let names: Vec<_> = parsed.iter().map(|(n, _)| *n).collect();
+        let mut buf = ParseBuf::new();
+        let parsed = parse_packet(&registry, 1, &frame, &ParseScope::full(), &mut buf);
+        let names: Vec<_> = parsed.names().collect();
         assert_eq!(names, ["ethernet", "ipv4", "tcp", "dns"]);
-        let dns = &parsed.iter().find(|(n, _)| *n == "dns").unwrap().1;
-        assert!(dns.is_ok(), "{:?}", dns.error);
+        let dns = parsed.find("dns").unwrap();
+        assert_eq!(dns.error(), None);
         assert_eq!(dns.get("transaction_id"), Some(&FieldValue::UInt16(0x1234)));
-        assert_eq!(text(dns, "query_name"), Some("a"));
+        assert_eq!(text(dns.get("query_name")), Some("a"));
 
         // A UDP datagram to a TCP-only service port is not that service
         // (no error row claims it), and vice versa.
@@ -843,17 +855,17 @@ mod tests {
         let registry = default_registry();
         let frame = tcp_frame(40000, 80, b"GET / HTTP/1.1\r\n\r\n");
         let scope = ParseScope::for_tables(&["http"], &registry);
-        let names: Vec<_> = parse_packet(&registry, 1, &frame, &scope)
-            .into_iter()
-            .map(|(n, _)| n)
+        let mut buf = ParseBuf::new();
+        let names: Vec<_> = parse_packet(&registry, 1, &frame, &scope, &mut buf)
+            .names()
             .collect();
         assert_eq!(names, ["ethernet", "ipv4", "tcp", "http"]);
 
         // A query on tcp alone does not pay for HTTP parsing.
         let scope = ParseScope::for_tables(&["tcp"], &registry);
-        let names: Vec<_> = parse_packet(&registry, 1, &frame, &scope)
-            .into_iter()
-            .map(|(n, _)| n)
+        let mut buf = ParseBuf::new();
+        let names: Vec<_> = parse_packet(&registry, 1, &frame, &scope, &mut buf)
+            .names()
             .collect();
         assert_eq!(names, ["ethernet", "ipv4", "tcp"]);
     }
@@ -864,14 +876,15 @@ mod tests {
 
         // First segment: the request line and one header, cut mid-header.
         let first = tcp_frame(40000, 80, b"GET /split HTTP/1.1\r\nHost: h\r\nUser-Ag");
-        let parsed = parse_packet(&registry, 1, &first, &ParseScope::full());
-        let names: Vec<_> = parsed.iter().map(|(n, _)| *n).collect();
+        let mut buf = ParseBuf::new();
+        let parsed = parse_packet(&registry, 1, &first, &ParseScope::full(), &mut buf);
+        let names: Vec<_> = parsed.names().collect();
         assert_eq!(names, ["ethernet", "ipv4", "tcp", "http"]);
-        let http = &parsed.iter().find(|(n, _)| *n == "http").unwrap().1;
-        assert!(http.is_ok(), "{:?}", http.error);
-        assert_eq!(text(http, "method"), Some("GET"));
-        assert_eq!(text(http, "uri"), Some("/split"));
-        assert_eq!(text(http, "host"), Some("h"));
+        let http = parsed.find("http").unwrap();
+        assert_eq!(http.error(), None);
+        assert_eq!(text(http.get("method")), Some("GET"));
+        assert_eq!(text(http.get("uri")), Some("/split"));
+        assert_eq!(text(http.get("host")), Some("h"));
         assert!(http.get("user_agent").is_none());
         assert_eq!(http.get("headers_complete"), Some(&FieldValue::Bool(false)));
         assert!(http.get("body_length").is_none());

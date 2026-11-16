@@ -15,7 +15,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use pcapsql_core::{default_registry, parse_packet, ParseScope};
+use pcapsql_core::{default_registry, parse_packet, ParseBuf, ParseScope};
 
 // Include generated frame wrappers
 include!("../src/frames.rs");
@@ -139,6 +139,8 @@ fuzz_target!(|data: &[u8]| {
 
     let registry = default_registry();
 
+    let mut buf = ParseBuf::new();
+
     // Use first byte to determine which protocol variant to test
     let selector = data[0] % 3;
     let payload = if data.len() > 1 { &data[1..] } else { &[] };
@@ -166,7 +168,7 @@ fuzz_target!(|data: &[u8]| {
 
             frame.extend_from_slice(&patched_header);
 
-            let _ = parse_packet(&registry, 1, &frame, &ParseScope::full());
+            let _ = parse_packet(&registry, 1, &frame, &ParseScope::full(), &mut buf);
         }
         1 => {
             // Test IPv6 with extension headers
@@ -174,7 +176,7 @@ fuzz_target!(|data: &[u8]| {
             let ipv6_header = build_ipv6_header(payload);
             frame.extend_from_slice(&ipv6_header);
 
-            let _ = parse_packet(&registry, 1, &frame, &ParseScope::full());
+            let _ = parse_packet(&registry, 1, &frame, &ParseScope::full(), &mut buf);
         }
         _ => {
             // Test both IPv4 and IPv6 with same fuzz data
@@ -193,7 +195,7 @@ fuzz_target!(|data: &[u8]| {
                 patched_header[3] = (total_len & 0xff) as u8;
                 frame.extend_from_slice(&patched_header);
 
-                let _ = parse_packet(&registry, 1, &frame, &ParseScope::full());
+                let _ = parse_packet(&registry, 1, &frame, &ParseScope::full(), &mut buf);
             }
 
             // IPv6 path
@@ -201,7 +203,7 @@ fuzz_target!(|data: &[u8]| {
             let ipv6_header = build_ipv6_header(payload);
             frame.extend_from_slice(&ipv6_header);
 
-            let _ = parse_packet(&registry, 1, &frame, &ParseScope::full());
+            let _ = parse_packet(&registry, 1, &frame, &ParseScope::full(), &mut buf);
         }
     }
 });

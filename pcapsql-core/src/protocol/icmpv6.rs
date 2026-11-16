@@ -1,13 +1,10 @@
 //! ICMPv6 protocol parser with NDP and MLD support.
 
-use std::net::Ipv6Addr;
-
-use compact_str::CompactString;
-use smallvec::SmallVec;
-
 use super::{
-    Cond, Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult, Protocol,
+    Cond, Dispatch, DispatchRule, FieldSink, FieldValue, HintKey, Hints, ParseContext, Parsed,
+    Protocol,
 };
+use crate::format::{ipv6_text, mac_text, IPV6_TEXT_LEN, MAC_TEXT_LEN};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// IP protocol number for ICMPv6.
@@ -115,16 +112,22 @@ impl Protocol for Icmpv6Protocol {
         }
     }
 
-    fn parse<'a>(&self, data: &'a [u8], _context: &ParseContext) -> ParseResult<'a> {
+    fn parse<'a>(
+        &self,
+        data: &'a [u8],
+        _context: &ParseContext,
+        fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
         // ICMPv6 header is at least 4 bytes
         if data.len() < 4 {
-            return ParseResult::error(
-                format!("ICMPv6 header too short: {} bytes", data.len()),
+            return Parsed::error(
+                fields.text_fmt(format_args!(
+                    "ICMPv6 header too short: {} bytes",
+                    data.len()
+                )),
                 data,
             );
         }
-
-        let mut fields = SmallVec::new();
 
         let icmpv6_type = data[0];
         let icmpv6_code = data[1];
@@ -140,11 +143,9 @@ impl Protocol for Icmpv6Protocol {
 
         // Parse type-specific fields
         let consumed = match icmpv6_type {
-            icmpv6_type::ECHO_REQUEST | icmpv6_type::ECHO_REPLY => {
-                parse_echo(&data[4..], &mut fields)
-            }
-            icmpv6_type::PACKET_TOO_BIG => parse_packet_too_big(&data[4..], &mut fields),
-            icmpv6_type::PARAMETER_PROBLEM => parse_parameter_problem(&data[4..], &mut fields),
+            icmpv6_type::ECHO_REQUEST | icmpv6_type::ECHO_REPLY => parse_echo(&data[4..], fields),
+            icmpv6_type::PACKET_TOO_BIG => parse_packet_too_big(&data[4..], fields),
+            icmpv6_type::PARAMETER_PROBLEM => parse_parameter_problem(&data[4..], fields),
             icmpv6_type::DESTINATION_UNREACHABLE | icmpv6_type::TIME_EXCEEDED => {
                 // These have 4 bytes of unused data before the invoking packet
                 if data.len() >= 8 {
@@ -154,26 +155,20 @@ impl Protocol for Icmpv6Protocol {
                 }
             }
             // NDP messages
-            icmpv6_type::ROUTER_SOLICITATION => parse_router_solicitation(&data[4..], &mut fields),
-            icmpv6_type::ROUTER_ADVERTISEMENT => {
-                parse_router_advertisement(&data[4..], &mut fields)
-            }
-            icmpv6_type::NEIGHBOR_SOLICITATION => {
-                parse_neighbor_solicitation(&data[4..], &mut fields)
-            }
-            icmpv6_type::NEIGHBOR_ADVERTISEMENT => {
-                parse_neighbor_advertisement(&data[4..], &mut fields)
-            }
-            icmpv6_type::REDIRECT => parse_redirect(&data[4..], &mut fields),
+            icmpv6_type::ROUTER_SOLICITATION => parse_router_solicitation(&data[4..], fields),
+            icmpv6_type::ROUTER_ADVERTISEMENT => parse_router_advertisement(&data[4..], fields),
+            icmpv6_type::NEIGHBOR_SOLICITATION => parse_neighbor_solicitation(&data[4..], fields),
+            icmpv6_type::NEIGHBOR_ADVERTISEMENT => parse_neighbor_advertisement(&data[4..], fields),
+            icmpv6_type::REDIRECT => parse_redirect(&data[4..], fields),
             // MLD messages
             icmpv6_type::MLD_QUERY | icmpv6_type::MLDV1_REPORT | icmpv6_type::MLDV1_DONE => {
-                parse_mldv1(&data[4..], &mut fields)
+                parse_mldv1(&data[4..], fields)
             }
-            icmpv6_type::MLDV2_REPORT => parse_mldv2_report(&data[4..], &mut fields),
+            icmpv6_type::MLDV2_REPORT => parse_mldv2_report(&data[4..], fields),
             _ => 4, // Just consume the header
         };
 
-        ParseResult::success(fields, &data[consumed..], Hints::new())
+        Parsed::ok(&data[consumed..], Hints::new())
     }
 
     fn schema_fields(&self) -> Vec<FieldDescriptor> {
@@ -246,7 +241,7 @@ fn get_type_name(icmpv6_type: u8) -> &'static str {
 }
 
 /// Parse Echo Request/Reply (types 128/129).
-fn parse_echo(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) -> usize {
+fn parse_echo(data: &[u8], fields: &mut FieldSink<'_, '_>) -> usize {
     if data.len() < 4 {
         return 4;
     }
@@ -258,10 +253,7 @@ fn parse_echo(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue); 16
 }
 
 /// Parse Packet Too Big (type 2).
-fn parse_packet_too_big(
-    data: &[u8],
-    fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
-) -> usize {
+fn parse_packet_too_big(data: &[u8], fields: &mut FieldSink<'_, '_>) -> usize {
     if data.len() < 4 {
         return 4;
     }
@@ -271,10 +263,7 @@ fn parse_packet_too_big(
 }
 
 /// Parse Parameter Problem (type 4).
-fn parse_parameter_problem(
-    data: &[u8],
-    fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
-) -> usize {
+fn parse_parameter_problem(data: &[u8], fields: &mut FieldSink<'_, '_>) -> usize {
     if data.len() < 4 {
         return 4;
     }
@@ -284,10 +273,7 @@ fn parse_parameter_problem(
 }
 
 /// Parse Router Solicitation (type 133).
-fn parse_router_solicitation(
-    data: &[u8],
-    fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
-) -> usize {
+fn parse_router_solicitation(data: &[u8], fields: &mut FieldSink<'_, '_>) -> usize {
     // Router Solicitation has 4 bytes reserved, then options
     if data.len() < 4 {
         return 4;
@@ -299,10 +285,7 @@ fn parse_router_solicitation(
 }
 
 /// Parse Router Advertisement (type 134).
-fn parse_router_advertisement(
-    data: &[u8],
-    fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
-) -> usize {
+fn parse_router_advertisement(data: &[u8], fields: &mut FieldSink<'_, '_>) -> usize {
     // RA has 12 bytes of fixed data after the ICMPv6 header
     if data.len() < 12 {
         return 4 + data.len();
@@ -330,21 +313,14 @@ fn parse_router_advertisement(
 }
 
 /// Parse Neighbor Solicitation (type 135).
-fn parse_neighbor_solicitation(
-    data: &[u8],
-    fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
-) -> usize {
+fn parse_neighbor_solicitation(data: &[u8], fields: &mut FieldSink<'_, '_>) -> usize {
     // NS has 4 bytes reserved + 16 bytes target address
     if data.len() < 20 {
         return 4 + data.len();
     }
 
     // Skip 4 bytes reserved
-    let target = format_ipv6(&data[4..20]);
-    fields.push((
-        "ndp_target_address",
-        FieldValue::OwnedString(CompactString::new(target)),
-    ));
+    fields.push(("ndp_target_address", ipv6_value(&data[4..20], fields)));
 
     // Parse options
     if data.len() > 20 {
@@ -355,10 +331,7 @@ fn parse_neighbor_solicitation(
 }
 
 /// Parse Neighbor Advertisement (type 136).
-fn parse_neighbor_advertisement(
-    data: &[u8],
-    fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
-) -> usize {
+fn parse_neighbor_advertisement(data: &[u8], fields: &mut FieldSink<'_, '_>) -> usize {
     // NA has 4 bytes flags + 16 bytes target address
     if data.len() < 20 {
         return 4 + data.len();
@@ -369,11 +342,7 @@ fn parse_neighbor_advertisement(
     fields.push(("ndp_solicited_flag", FieldValue::Bool((flags & 0x40) != 0)));
     fields.push(("ndp_override_flag", FieldValue::Bool((flags & 0x20) != 0)));
 
-    let target = format_ipv6(&data[4..20]);
-    fields.push((
-        "ndp_target_address",
-        FieldValue::OwnedString(CompactString::new(target)),
-    ));
+    fields.push(("ndp_target_address", ipv6_value(&data[4..20], fields)));
 
     // Parse options
     if data.len() > 20 {
@@ -384,18 +353,14 @@ fn parse_neighbor_advertisement(
 }
 
 /// Parse Redirect (type 137).
-fn parse_redirect(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) -> usize {
+fn parse_redirect(data: &[u8], fields: &mut FieldSink<'_, '_>) -> usize {
     // Redirect has 4 bytes reserved + 16 bytes target + 16 bytes destination
     if data.len() < 36 {
         return 4 + data.len();
     }
 
     // Skip 4 bytes reserved
-    let target = format_ipv6(&data[4..20]);
-    fields.push((
-        "ndp_target_address",
-        FieldValue::OwnedString(CompactString::new(target)),
-    ));
+    fields.push(("ndp_target_address", ipv6_value(&data[4..20], fields)));
 
     // Parse options
     if data.len() > 36 {
@@ -406,7 +371,7 @@ fn parse_redirect(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue)
 }
 
 /// Parse NDP options (TLV format).
-fn parse_ndp_options(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) {
+fn parse_ndp_options(data: &[u8], fields: &mut FieldSink<'_, '_>) {
     let mut offset = 0;
 
     while offset + 2 <= data.len() {
@@ -420,19 +385,17 @@ fn parse_ndp_options(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldVal
         match opt_type {
             ndp_option::SOURCE_LINK_LAYER_ADDR => {
                 if opt_len >= 8 {
-                    let mac = format_mac(&data[offset + 2..offset + 8]);
                     fields.push((
                         "ndp_source_mac",
-                        FieldValue::OwnedString(CompactString::new(mac)),
+                        mac_value(&data[offset + 2..offset + 8], fields),
                     ));
                 }
             }
             ndp_option::TARGET_LINK_LAYER_ADDR => {
                 if opt_len >= 8 {
-                    let mac = format_mac(&data[offset + 2..offset + 8]);
                     fields.push((
                         "ndp_target_mac",
-                        FieldValue::OwnedString(CompactString::new(mac)),
+                        mac_value(&data[offset + 2..offset + 8], fields),
                     ));
                 }
             }
@@ -440,12 +403,9 @@ fn parse_ndp_options(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldVal
                 // Prefix Information option is 32 bytes
                 if opt_len >= 32 {
                     let prefix_len = data[offset + 2];
-                    let prefix = format_ipv6(&data[offset + 16..offset + 32]);
+                    let prefix = ipv6_value(&data[offset + 16..offset + 32], fields);
                     fields.push(("ndp_prefix_length", FieldValue::UInt8(prefix_len)));
-                    fields.push((
-                        "ndp_prefix",
-                        FieldValue::OwnedString(CompactString::new(prefix)),
-                    ));
+                    fields.push(("ndp_prefix", prefix));
                 }
             }
             ndp_option::MTU if opt_len >= 8 => {
@@ -467,7 +427,7 @@ fn parse_ndp_options(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldVal
 }
 
 /// Parse MLDv1 message (types 130, 131, 132).
-fn parse_mldv1(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue); 16]>) -> usize {
+fn parse_mldv1(data: &[u8], fields: &mut FieldSink<'_, '_>) -> usize {
     // MLDv1 has 2 bytes max response delay + 2 bytes reserved + 16 bytes multicast address
     if data.len() < 20 {
         return 4 + data.len();
@@ -480,20 +440,13 @@ fn parse_mldv1(data: &[u8], fields: &mut SmallVec<[(&'static str, FieldValue); 1
     ));
 
     // Skip 2 bytes reserved
-    let multicast_addr = format_ipv6(&data[4..20]);
-    fields.push((
-        "mld_multicast_address",
-        FieldValue::OwnedString(CompactString::new(multicast_addr)),
-    ));
+    fields.push(("mld_multicast_address", ipv6_value(&data[4..20], fields)));
 
     4 + 20 // header + MLDv1 message body
 }
 
 /// Parse MLDv2 Report (type 143).
-fn parse_mldv2_report(
-    data: &[u8],
-    fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
-) -> usize {
+fn parse_mldv2_report(data: &[u8], fields: &mut FieldSink<'_, '_>) -> usize {
     // MLDv2 Report has 2 bytes reserved + 2 bytes number of group records
     if data.len() < 4 {
         return 4 + data.len();
@@ -509,32 +462,28 @@ fn parse_mldv2_report(
     4 + data.len() // Consume all remaining data
 }
 
-/// Format an IPv6 address from bytes.
-fn format_ipv6(bytes: &[u8]) -> String {
-    if bytes.len() >= 16 {
-        let mut arr = [0u8; 16];
-        arr.copy_from_slice(&bytes[..16]);
-        Ipv6Addr::from(arr).to_string()
-    } else {
-        "::".to_string()
+/// The text of the IPv6 address `bytes` starts with, in the packet's arena
+/// (`::` when there are fewer than sixteen bytes).
+fn ipv6_value<'a>(bytes: &[u8], fields: &FieldSink<'_, 'a>) -> FieldValue<'a> {
+    match bytes.first_chunk::<16>() {
+        Some(address) => fields.str(ipv6_text(address, &mut [0; IPV6_TEXT_LEN])),
+        None => FieldValue::Str("::"),
     }
 }
 
-/// Format a MAC address from bytes.
-fn format_mac(bytes: &[u8]) -> String {
-    if bytes.len() >= 6 {
-        format!(
-            "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5]
-        )
-    } else {
-        String::new()
+/// The text of the MAC address `bytes` starts with, in the packet's arena
+/// (empty when there are fewer than six bytes).
+fn mac_value<'a>(bytes: &[u8], fields: &FieldSink<'_, 'a>) -> FieldValue<'a> {
+    match bytes.first_chunk::<6>() {
+        Some(mac) => fields.str(mac_text(mac, &mut [0; MAC_TEXT_LEN])),
+        None => FieldValue::Str(""),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::test_utils::ParseLayer as _;
 
     fn create_context_icmpv6() -> ParseContext {
         let mut context = ParseContext::new(1);
@@ -580,7 +529,7 @@ mod tests {
             0x00, 0x02, // Sequence: 2
         ];
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("type"), Some(&FieldValue::UInt8(128)));
@@ -606,7 +555,7 @@ mod tests {
             0x00, 0x0a, // Sequence: 10
         ];
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("type"), Some(&FieldValue::UInt8(129)));
@@ -630,7 +579,7 @@ mod tests {
             0x00, 0x00, 0x00, 0x00, // Unused
         ];
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("type"), Some(&FieldValue::UInt8(1)));
@@ -653,7 +602,7 @@ mod tests {
             0x00, 0x00, 0x05, 0xdc, // MTU: 1500
         ];
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("type"), Some(&FieldValue::UInt8(2)));
@@ -676,7 +625,7 @@ mod tests {
             0x00, 0x00, 0x00, 0x00, // Unused
         ];
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("type"), Some(&FieldValue::UInt8(3)));
@@ -698,7 +647,7 @@ mod tests {
             0x00, 0x00, 0x00, 0x28, // Pointer: 40
         ];
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("type"), Some(&FieldValue::UInt8(4)));
@@ -717,7 +666,7 @@ mod tests {
 
         let data = [0x80, 0x00]; // Only 2 bytes
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(!result.is_ok());
         assert!(result.error.is_some());
@@ -755,7 +704,7 @@ mod tests {
             0x00, 0x11, 0x22, 0x33, 0x44, 0x55, // MAC
         ];
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("type"), Some(&FieldValue::UInt8(133)));
@@ -763,13 +712,10 @@ mod tests {
             result.get("type_name"),
             Some(&FieldValue::Str("Router Solicitation"))
         );
-        // For constructed strings like MAC addresses, we need to compare with OwnedString
+        // For constructed strings like MAC addresses, the value is a string in the arena
         match result.get("ndp_source_mac") {
-            Some(FieldValue::OwnedString(s)) if s.as_str() == "00:11:22:33:44:55" => {}
-            other => panic!(
-                "Expected OwnedString(\"00:11:22:33:44:55\"), got {:?}",
-                other
-            ),
+            Some(FieldValue::Str(s)) if *s == "00:11:22:33:44:55" => {}
+            other => panic!("Expected Str(\"00:11:22:33:44:55\"), got {:?}", other),
         }
     }
 
@@ -789,7 +735,7 @@ mod tests {
             0x00, 0x00, 0x00, 0x00, // Retrans Timer: 0
         ];
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("type"), Some(&FieldValue::UInt8(134)));
@@ -819,7 +765,7 @@ mod tests {
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         ];
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
         assert_eq!(
             result.get("ndp_managed_flag"),
             Some(&FieldValue::Bool(true))
@@ -832,7 +778,7 @@ mod tests {
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         ];
 
-        let result2 = parser.parse(&data2, &context);
+        let result2 = parser.parse_layer(&data2, &context);
         assert_eq!(
             result2.get("ndp_managed_flag"),
             Some(&FieldValue::Bool(false))
@@ -856,13 +802,13 @@ mod tests {
             0x00, 0x01,
         ];
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("type"), Some(&FieldValue::UInt8(135)));
         match result.get("ndp_target_address") {
-            Some(FieldValue::OwnedString(s)) if s.as_str() == "2001:db8::1" => {}
-            other => panic!("Expected OwnedString(\"2001:db8::1\"), got {:?}", other),
+            Some(FieldValue::Str(s)) if *s == "2001:db8::1" => {}
+            other => panic!("Expected Str(\"2001:db8::1\"), got {:?}", other),
         }
     }
 
@@ -882,7 +828,7 @@ mod tests {
             0x00, 0x01,
         ];
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("type"), Some(&FieldValue::UInt8(136)));
@@ -896,8 +842,8 @@ mod tests {
             Some(&FieldValue::Bool(false))
         );
         match result.get("ndp_target_address") {
-            Some(FieldValue::OwnedString(s)) if s.as_str() == "2001:db8::1" => {}
-            other => panic!("Expected OwnedString(\"2001:db8::1\"), got {:?}", other),
+            Some(FieldValue::Str(s)) if *s == "2001:db8::1" => {}
+            other => panic!("Expected Str(\"2001:db8::1\"), got {:?}", other),
         }
     }
 
@@ -913,7 +859,7 @@ mod tests {
             0x00, 0x01,
         ];
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
         assert_eq!(
             result.get("ndp_router_flag"),
             Some(&FieldValue::Bool(false))
@@ -944,13 +890,13 @@ mod tests {
         // Destination Address (16 bytes)
         data.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("type"), Some(&FieldValue::UInt8(137)));
         match result.get("ndp_target_address") {
-            Some(FieldValue::OwnedString(s)) if s.as_str() == "fe80::1" => {}
-            other => panic!("Expected OwnedString(\"fe80::1\"), got {:?}", other),
+            Some(FieldValue::Str(s)) if *s == "fe80::1" => {}
+            other => panic!("Expected Str(\"fe80::1\"), got {:?}", other),
         }
     }
 
@@ -968,15 +914,12 @@ mod tests {
         // Source Link-Layer option
         data.extend_from_slice(&[0x01, 0x01, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         match result.get("ndp_source_mac") {
-            Some(FieldValue::OwnedString(s)) if s.as_str() == "aa:bb:cc:dd:ee:ff" => {}
-            other => panic!(
-                "Expected OwnedString(\"aa:bb:cc:dd:ee:ff\"), got {:?}",
-                other
-            ),
+            Some(FieldValue::Str(s)) if *s == "aa:bb:cc:dd:ee:ff" => {}
+            other => panic!("Expected Str(\"aa:bb:cc:dd:ee:ff\"), got {:?}", other),
         }
     }
 
@@ -994,15 +937,12 @@ mod tests {
         // Target Link-Layer option
         data.extend_from_slice(&[0x02, 0x01, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         match result.get("ndp_target_mac") {
-            Some(FieldValue::OwnedString(s)) if s.as_str() == "11:22:33:44:55:66" => {}
-            other => panic!(
-                "Expected OwnedString(\"11:22:33:44:55:66\"), got {:?}",
-                other
-            ),
+            Some(FieldValue::Str(s)) if *s == "11:22:33:44:55:66" => {}
+            other => panic!("Expected Str(\"11:22:33:44:55:66\"), got {:?}", other),
         }
     }
 
@@ -1031,7 +971,7 @@ mod tests {
             0x00, 0x00,
         ]);
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -1039,8 +979,8 @@ mod tests {
             Some(&FieldValue::UInt8(64))
         );
         match result.get("ndp_prefix") {
-            Some(FieldValue::OwnedString(s)) if s.as_str() == "2001:db8::" => {}
-            other => panic!("Expected OwnedString(\"2001:db8::\"), got {:?}", other),
+            Some(FieldValue::Str(s)) if *s == "2001:db8::" => {}
+            other => panic!("Expected Str(\"2001:db8::\"), got {:?}", other),
         }
     }
 
@@ -1061,7 +1001,7 @@ mod tests {
         // Multicast Address (all-nodes: ff02::1)
         data.extend_from_slice(&[0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("type"), Some(&FieldValue::UInt8(130)));
@@ -1070,8 +1010,8 @@ mod tests {
             Some(&FieldValue::UInt16(10000))
         );
         match result.get("mld_multicast_address") {
-            Some(FieldValue::OwnedString(s)) if s.as_str() == "ff02::1" => {}
-            other => panic!("Expected OwnedString(\"ff02::1\"), got {:?}", other),
+            Some(FieldValue::Str(s)) if *s == "ff02::1" => {}
+            other => panic!("Expected Str(\"ff02::1\"), got {:?}", other),
         }
     }
 
@@ -1090,7 +1030,7 @@ mod tests {
         // Multicast Address
         data.extend_from_slice(&[0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x12]);
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("type"), Some(&FieldValue::UInt8(131)));
@@ -1112,7 +1052,7 @@ mod tests {
         // Multicast Address
         data.extend_from_slice(&[0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x12]);
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("type"), Some(&FieldValue::UInt8(132)));
@@ -1135,7 +1075,7 @@ mod tests {
             0x00, 0x03, // Number of Group Records: 3
         ];
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("type"), Some(&FieldValue::UInt8(143)));
@@ -1158,12 +1098,12 @@ mod tests {
         let mut data = vec![0x82, 0x00, 0x00, 0x00, 0x00, 0x64, 0x00, 0x00];
         data.extend_from_slice(&[0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x16]);
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         match result.get("mld_multicast_address") {
-            Some(FieldValue::OwnedString(s)) if s.as_str() == "ff02::16" => {}
-            other => panic!("Expected OwnedString(\"ff02::16\"), got {:?}", other),
+            Some(FieldValue::Str(s)) if *s == "ff02::16" => {}
+            other => panic!("Expected Str(\"ff02::16\"), got {:?}", other),
         }
     }
 
@@ -1178,7 +1118,7 @@ mod tests {
         ];
         data.extend_from_slice(&[0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
 
-        let result = parser.parse(&data, &context);
+        let result = parser.parse_layer(&data, &context);
 
         assert!(result.is_ok());
         assert_eq!(

@@ -4,10 +4,9 @@
 //! This format is used when capturing on the "any" interface or for
 //! protocols that don't have a native link-layer header.
 
-use smallvec::SmallVec;
-
 use super::{
-    Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult, Protocol,
+    field_list, Dispatch, DispatchRule, FieldSet, FieldSink, FieldValue, HintKey, Hints,
+    ParseContext, Parsed, Protocol,
 };
 use crate::schema::{DataKind, FieldDescriptor};
 
@@ -63,6 +62,103 @@ pub(super) fn arphrd_name(arphrd: u16) -> &'static str {
     }
 }
 
+field_list! {
+    /// The fields of a `linux_sll` layer, in the order the parser writes
+    /// them.
+    enum Field {
+        PacketType = "packet_type",
+        PacketTypeName = "packet_type_name",
+        ArphrdType = "arphrd_type",
+        ArphrdName = "arphrd_name",
+        AddrLen = "addr_len",
+        Addr = "addr",
+        Protocol = "protocol",
+    }
+}
+
+/// The Linux cooked capture header at the start of `data`: the fields of
+/// `want` (all of them for [`FieldSet::ALL`]) to `fields`, the payload and
+/// the hints for the layer above.
+#[inline(always)]
+fn parse_linux_sll<'a>(
+    data: &'a [u8],
+    want: FieldSet,
+    fields: &mut FieldSink<'_, 'a>,
+) -> Parsed<'a> {
+    // Linux SLL header is 16 bytes minimum
+    if data.len() < LINUX_SLL_HEADER_LEN {
+        return Parsed::error(
+            fields.text_fmt(format_args!(
+                "Linux SLL header too short: {} bytes",
+                data.len()
+            )),
+            data,
+        );
+    }
+
+    // Parse header fields (all big-endian)
+    let pkt_type = u16::from_be_bytes([data[0], data[1]]);
+    let arphrd_type = u16::from_be_bytes([data[2], data[3]]);
+    let addr_len = u16::from_be_bytes([data[4], data[5]]);
+    // addr is bytes 6-13 (8 bytes, but only addr_len are valid)
+    let protocol = u16::from_be_bytes([data[14], data[15]]);
+
+    if want.has(Field::PacketType) {
+        fields.push(("packet_type", FieldValue::UInt16(pkt_type)));
+    }
+    if want.has(Field::PacketTypeName) {
+        fields.push((
+            "packet_type_name",
+            FieldValue::Str(packet_type_name(pkt_type)),
+        ));
+    }
+    if want.has(Field::ArphrdType) {
+        fields.push(("arphrd_type", FieldValue::UInt16(arphrd_type)));
+    }
+    if want.has(Field::ArphrdName) {
+        fields.push(("arphrd_name", FieldValue::Str(arphrd_name(arphrd_type))));
+    }
+    if want.has(Field::AddrLen) {
+        fields.push(("addr_len", FieldValue::UInt16(addr_len)));
+    }
+
+    // Extract the valid portion of the link-layer address
+    let valid_addr_len = (addr_len as usize).min(8);
+    if valid_addr_len > 0 && want.has(Field::Addr) {
+        let addr_slice = &data[6..6 + valid_addr_len];
+        fields.push(("addr", FieldValue::Bytes(addr_slice)));
+    }
+
+    if want.has(Field::Protocol) {
+        fields.push(("protocol", FieldValue::UInt16(protocol)));
+    }
+
+    // Calculate remaining payload
+    let remaining = &data[LINUX_SLL_HEADER_LEN..];
+
+    // Set child hints based on ARPHRD type. Per the LINKTYPE_LINUX_SLL spec
+    // the protocol field is an ethertype for every ARPHRD type except
+    // NETLINK (netlink family), IPGRE (GRE protocol type),
+    // IEEE80211_RADIOTAP and FRAD, so tun/ppp/sit interfaces route to IP.
+    let mut child_hints = Hints::new();
+    child_hints.insert(HintKey::SllArphrd, arphrd_type as u64);
+
+    match arphrd_type {
+        arphrd::NETLINK => {
+            child_hints.insert(HintKey::NetlinkFamily, protocol as u64);
+            child_hints.insert(HintKey::IsNetlink, 1u64);
+        }
+        arphrd::IPGRE | arphrd::IEEE80211_RADIOTAP | arphrd::FRAD => {
+            child_hints.insert(HintKey::SllProtocol, protocol as u64);
+        }
+        _ => {
+            child_hints.insert(HintKey::EtherType, protocol as u64);
+        }
+    }
+
+    Parsed::ok(remaining, child_hints)
+}
+
 /// Linux SLL protocol parser.
 ///
 /// Parses the 16-byte Linux cooked capture header and routes to
@@ -105,66 +201,13 @@ impl Protocol for LinuxSllProtocol {
         None
     }
 
-    fn parse<'a>(&self, data: &'a [u8], _context: &ParseContext) -> ParseResult<'a> {
-        // Linux SLL header is 16 bytes minimum
-        if data.len() < LINUX_SLL_HEADER_LEN {
-            return ParseResult::error(
-                format!("Linux SLL header too short: {} bytes", data.len()),
-                data,
-            );
-        }
-
-        let mut fields = SmallVec::new();
-
-        // Parse header fields (all big-endian)
-        let pkt_type = u16::from_be_bytes([data[0], data[1]]);
-        let arphrd_type = u16::from_be_bytes([data[2], data[3]]);
-        let addr_len = u16::from_be_bytes([data[4], data[5]]);
-        // addr is bytes 6-13 (8 bytes, but only addr_len are valid)
-        let protocol = u16::from_be_bytes([data[14], data[15]]);
-
-        fields.push(("packet_type", FieldValue::UInt16(pkt_type)));
-        fields.push((
-            "packet_type_name",
-            FieldValue::Str(packet_type_name(pkt_type)),
-        ));
-        fields.push(("arphrd_type", FieldValue::UInt16(arphrd_type)));
-        fields.push(("arphrd_name", FieldValue::Str(arphrd_name(arphrd_type))));
-        fields.push(("addr_len", FieldValue::UInt16(addr_len)));
-
-        // Extract the valid portion of the link-layer address
-        let valid_addr_len = (addr_len as usize).min(8);
-        if valid_addr_len > 0 {
-            let addr_slice = &data[6..6 + valid_addr_len];
-            fields.push(("addr", FieldValue::Bytes(addr_slice)));
-        }
-
-        fields.push(("protocol", FieldValue::UInt16(protocol)));
-
-        // Calculate remaining payload
-        let remaining = &data[LINUX_SLL_HEADER_LEN..];
-
-        // Set child hints based on ARPHRD type. Per the LINKTYPE_LINUX_SLL
-        // spec the protocol field is an ethertype for every ARPHRD type except
-        // NETLINK (netlink family), IPGRE (GRE protocol type),
-        // IEEE80211_RADIOTAP and FRAD, so tun/ppp/sit interfaces route to IP.
-        let mut child_hints = Hints::new();
-        child_hints.insert(HintKey::SllArphrd, arphrd_type as u64);
-
-        match arphrd_type {
-            arphrd::NETLINK => {
-                child_hints.insert(HintKey::NetlinkFamily, protocol as u64);
-                child_hints.insert(HintKey::IsNetlink, 1u64);
-            }
-            arphrd::IPGRE | arphrd::IEEE80211_RADIOTAP | arphrd::FRAD => {
-                child_hints.insert(HintKey::SllProtocol, protocol as u64);
-            }
-            _ => {
-                child_hints.insert(HintKey::EtherType, protocol as u64);
-            }
-        }
-
-        ParseResult::success(fields, remaining, child_hints)
+    fn parse<'a>(
+        &self,
+        data: &'a [u8],
+        _context: &ParseContext,
+        fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
+        parse_linux_sll(data, FieldSet::ALL, fields)
     }
 
     fn schema_fields(&self) -> Vec<FieldDescriptor> {
@@ -188,11 +231,26 @@ impl Protocol for LinuxSllProtocol {
     fn dependencies(&self) -> &'static [&'static str] {
         &[] // Root protocol - no dependencies
     }
+
+    fn field_names(&self) -> &'static [&'static str] {
+        Field::NAMES
+    }
+
+    fn parse_projected<'a>(
+        &self,
+        data: &'a [u8],
+        _context: &ParseContext,
+        projection: FieldSet,
+        fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
+        parse_linux_sll(data, projection, fields)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::test_utils::ParseLayer as _;
 
     /// Helper to create a Linux SLL header (big-endian).
     fn create_sll_header(
@@ -261,7 +319,7 @@ mod tests {
         let parser = LinuxSllProtocol;
         let ctx = ParseContext::new(LINKTYPE_LINUX_SLL);
 
-        let result = parser.parse(&header, &ctx);
+        let result = parser.parse_layer(&header, &ctx);
 
         assert!(result.is_ok());
         assert_eq!(result.get("packet_type"), Some(&FieldValue::UInt16(0)));
@@ -292,7 +350,7 @@ mod tests {
         let parser = LinuxSllProtocol;
         let ctx = ParseContext::new(LINKTYPE_LINUX_SLL);
 
-        let result = parser.parse(&header, &ctx);
+        let result = parser.parse_layer(&header, &ctx);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -321,7 +379,7 @@ mod tests {
         let parser = LinuxSllProtocol;
         let ctx = ParseContext::new(LINKTYPE_LINUX_SLL);
 
-        let result = parser.parse(&short_data, &ctx);
+        let result = parser.parse_layer(&short_data, &ctx);
 
         assert!(!result.is_ok());
         assert!(result.error.is_some());
@@ -389,11 +447,11 @@ mod tests {
     #[test]
     fn test_unknown_arphrd_routes_by_ethertype() {
         let header = create_sll_header(packet_type::OUTGOING, 0xFFFE, 0, [0; 8], 0x86DD);
-        let result = LinuxSllProtocol.parse(&header, &ParseContext::new(LINKTYPE_LINUX_SLL));
+        let result = LinuxSllProtocol.parse_layer(&header, &ParseContext::new(LINKTYPE_LINUX_SLL));
         assert!(result.is_ok());
         assert_eq!(result.hint(HintKey::EtherType), Some(0x86DD));
         let header = create_sll_header(packet_type::OUTGOING, arphrd::IPGRE, 0, [0; 8], 0x0800);
-        let result = LinuxSllProtocol.parse(&header, &ParseContext::new(LINKTYPE_LINUX_SLL));
+        let result = LinuxSllProtocol.parse_layer(&header, &ParseContext::new(LINKTYPE_LINUX_SLL));
         assert!(result.hint(HintKey::EtherType).is_none());
     }
 
@@ -420,7 +478,7 @@ mod tests {
         let parser = LinuxSllProtocol;
         let ctx = ParseContext::new(LINKTYPE_LINUX_SLL);
 
-        let result = parser.parse(&data, &ctx);
+        let result = parser.parse_layer(&data, &ctx);
 
         assert!(result.is_ok());
         assert_eq!(result.remaining.len(), 4);

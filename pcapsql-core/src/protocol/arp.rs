@@ -1,10 +1,9 @@
 //! ARP protocol parser.
 
-use smallvec::SmallVec;
-
 use super::ethernet::ethertype;
 use super::{
-    Cond, Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult, Protocol,
+    Cond, Dispatch, DispatchRule, FieldSink, FieldValue, HintKey, Hints, ParseContext, Parsed,
+    Protocol,
 };
 use crate::schema::{DataKind, FieldDescriptor};
 
@@ -46,13 +45,19 @@ impl Protocol for ArpProtocol {
         }
     }
 
-    fn parse<'a>(&self, data: &'a [u8], _context: &ParseContext) -> ParseResult<'a> {
+    fn parse<'a>(
+        &self,
+        data: &'a [u8],
+        _context: &ParseContext,
+        fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
         // ARP for Ethernet/IPv4 is 28 bytes
         if data.len() < 28 {
-            return ParseResult::error(format!("ARP packet too short: {} bytes", data.len()), data);
+            return Parsed::error(
+                fields.text_fmt(format_args!("ARP packet too short: {} bytes", data.len())),
+                data,
+            );
         }
-
-        let mut fields = SmallVec::new();
 
         let hardware_type = u16::from_be_bytes([data[0], data[1]]);
         let protocol_type = u16::from_be_bytes([data[2], data[3]]);
@@ -87,7 +92,7 @@ impl Protocol for ArpProtocol {
         }
 
         // ARP doesn't have payload protocols
-        ParseResult::success(fields, &data[28..], Hints::new())
+        Parsed::ok(&data[28..], Hints::new())
     }
 
     fn schema_fields(&self) -> Vec<FieldDescriptor> {
@@ -113,6 +118,7 @@ impl Protocol for ArpProtocol {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::test_utils::ParseLayer as _;
     use std::net::IpAddr;
 
     #[test]
@@ -134,7 +140,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::EtherType, ethertype::ARP as u64);
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("operation"), Some(&FieldValue::UInt16(1)));
@@ -168,7 +174,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::EtherType, ethertype::ARP as u64);
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -216,7 +222,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::EtherType, ethertype::ARP as u64);
 
-        let result = parser.parse(&short_packet, &context);
+        let result = parser.parse_layer(&short_packet, &context);
 
         assert!(!result.is_ok());
         assert!(result.error.is_some());
@@ -240,7 +246,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::EtherType, ethertype::ARP as u64);
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("hardware_type"), Some(&FieldValue::UInt16(1)));
@@ -270,7 +276,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::EtherType, ethertype::ARP as u64);
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         // ARP doesn't have child protocols

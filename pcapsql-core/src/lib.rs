@@ -31,17 +31,20 @@
 //! let source = FilePacketSource::open("capture.pcap").unwrap();
 //! let mut reader = source.sequential_reader().unwrap();
 //!
-//! // Read and parse packets using callback pattern
+//! // Read and parse packets using callback pattern; the layers of each
+//! // packet are kept in one buffer, reused from packet to packet
+//! let mut buf = ParseBuf::new();
 //! reader.process_packets(1000, |packet| {
-//!     let results = pcapsql_core::parse_packet(
+//!     let layers = pcapsql_core::parse_packet(
 //!         &registry,
 //!         packet.link_type,
 //!         packet.data,
 //!         &pcapsql_core::ParseScope::full(),
+//!         &mut buf,
 //!     );
 //!
-//!     for (protocol_name, result) in results {
-//!         println!("{}: {} fields", protocol_name, result.fields.len());
+//!     for layer in layers.iter() {
+//!         println!("{}: {} fields", layer.name(), layer.fields().len());
 //!     }
 //!     Ok(())
 //! }).unwrap();
@@ -106,17 +109,17 @@ pub use io::{
 };
 #[cfg(feature = "mmap")]
 pub use io::{MmapPacketReader, MmapPacketSource};
-pub use protocol::OwnedFieldValue;
 pub use protocol::{
     chain_fields_for_protocol, compute_required_protocols, default_registry,
     merge_with_chain_fields, parse_packet, should_run_parser, BuiltinProtocol, FieldHint, FieldSet,
-    FieldValue, ParseContext, ParseResult, ParseScope, PayloadMode, ProjectionConfig, Protocol,
-    ProtocolRegistry, TunnelLayer, TunnelType,
+    FieldSink, FieldValue, LayerRef, PacketLayers, ParseBuf, ParseContext, ParseScope, Parsed,
+    PayloadMode, ProjectionConfig, Protocol, ProtocolRegistry, Status, TunnelLayer, TunnelType,
 };
 pub use schema::{DataKind, FieldDescriptor, ProtocolSchema};
 pub use stream::{
-    Connection, ConnectionState, ConnectionTracker, Direction, ParsedMessage, StreamConfig,
-    StreamContext, StreamManager, StreamParseResult, StreamParser, StreamRegistry, TcpFlags,
+    Connection, ConnectionState, ConnectionTracker, Direction, OwnedFieldValue, ParsedMessage,
+    StreamConfig, StreamContext, StreamManager, StreamParseResult, StreamParser, StreamRegistry,
+    TcpFlags,
 };
 pub use tls::{
     derive_tls12_keys, derive_tls13_keys, extract_tls13_inner_content_type, hash_for_cipher_suite,

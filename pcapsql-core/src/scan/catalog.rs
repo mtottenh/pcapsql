@@ -118,12 +118,12 @@ pub enum ColumnSource {
     LinkType,
     /// [`PacketRef::data`](crate::io::PacketRef::data).
     RawData,
-    /// [`ParseResult::encap_depth`](crate::ParseResult::encap_depth).
+    /// [`LayerRef::encap_depth`](crate::LayerRef::encap_depth).
     EncapDepth,
-    /// [`ParseResult::tunnel_type`](crate::ParseResult::tunnel_type), as its
+    /// [`LayerRef::tunnel_type`](crate::LayerRef::tunnel_type), as its
     /// name; NULL outside a tunnel.
     TunnelType,
-    /// [`ParseResult::tunnel_id`](crate::ParseResult::tunnel_id).
+    /// [`LayerRef::tunnel_id`](crate::LayerRef::tunnel_id).
     TunnelId,
     /// A field the table's parser extracted, by its short name (the
     /// descriptor name without the `protocol.` prefix).
@@ -479,6 +479,37 @@ mod tests {
             "descriptor / table schema drift:\n  {}",
             problems.join("\n  ")
         );
+    }
+
+    /// A parser with a projected parse lists its fields: its schema's, each
+    /// once. A projection is resolved against the list, so a field column
+    /// missing from it would never be extracted.
+    #[test]
+    fn field_lists_are_the_schema_fields() {
+        let catalog = Catalog::builtin();
+        let registry = default_registry();
+        for parser in registry.all_parsers() {
+            let mut names = parser.field_names().to_vec();
+            if names.is_empty() {
+                continue;
+            }
+            names.sort_unstable();
+            names.dedup();
+            assert_eq!(names.len(), parser.field_names().len(), "{}", parser.name());
+            let mut schema: Vec<&str> = parser
+                .schema_fields()
+                .iter()
+                .map(|fd| short_name(fd.name))
+                .collect();
+            schema.sort_unstable();
+            assert_eq!(names, schema, "{}", parser.name());
+            let (_, table) = catalog.table(parser.name()).expect("a table");
+            for column in table.columns.iter() {
+                if let ColumnSource::Field(field) = column.source {
+                    assert!(names.contains(&field), "{}.{field}", parser.name());
+                }
+            }
+        }
     }
 
     /// Table order is `SHOW TABLES` order and defines the `TableId`s.

@@ -614,8 +614,7 @@ mod tests {
         write_frame_row, write_layer_row, write_value, Catalog, ColumnSource, FieldResolver,
         ScanPlan, TableScan,
     };
-    use pcapsql_core::{FieldValue, ParseResult, TunnelType};
-    use smallvec::SmallVec;
+    use pcapsql_core::{FieldValue, LayerRef};
 
     const COL: OutCol = OutCol(0);
 
@@ -939,6 +938,33 @@ mod tests {
         let b3: &[u8] = &[1, 2, 3];
         let b6: &[u8] = &[1, 2, 3, 4, 5, 6];
         let b16: &[u8] = &[0xAA; 16];
+        // The labels are the snapshot's. `OwnedString` and `OwnedBytes` are
+        // the variants that held a constructed value before such a value
+        // became a slice of the packet's arena: the rows stay, to pin that it
+        // is stored as a borrowed one is.
+        let list0: [FieldValue<'_>; 0] = [];
+        let list1: [FieldValue<'_>; 1] = [FieldValue::Null];
+        let list2: [FieldValue<'_>; 4] = [
+            FieldValue::UInt8(1),
+            FieldValue::UInt16(2),
+            FieldValue::UInt32(3),
+            FieldValue::UInt64(4),
+        ];
+        let list3: [FieldValue<'_>; 3] = [
+            FieldValue::Str("a"),
+            FieldValue::Str("b"),
+            FieldValue::UInt16(5),
+        ];
+        let list4: [FieldValue<'_>; 3] = [
+            FieldValue::Bytes(b3),
+            FieldValue::Bytes(b16),
+            FieldValue::Bytes(b6),
+        ];
+        let list5: [FieldValue<'_>; 3] = [
+            FieldValue::IpAddr(v4),
+            FieldValue::IpAddr(v6),
+            FieldValue::MacAddr(mac),
+        ];
         let values = [
             ("Null", FieldValue::Null),
             ("Bool(true)", FieldValue::Bool(true)),
@@ -957,48 +983,31 @@ mod tests {
             ("Int64(5000000000)", FieldValue::Int64(5_000_000_000)),
             ("Float64(1.5)", FieldValue::Float64(1.5)),
             ("Str(abc)", FieldValue::Str("abc")),
-            ("OwnedString(xyz)", FieldValue::OwnedString("xyz".into())),
+            ("OwnedString(xyz)", FieldValue::Str("xyz")),
             ("Bytes(3)", FieldValue::Bytes(b3)),
             ("Bytes(6)", FieldValue::Bytes(b6)),
             ("Bytes(16)", FieldValue::Bytes(b16)),
-            ("OwnedBytes(6)", FieldValue::OwnedBytes(b6.to_vec())),
+            ("OwnedBytes(6)", FieldValue::Bytes(b6)),
             ("IpAddr(v4)", FieldValue::IpAddr(v4)),
             ("IpAddr(v6)", FieldValue::IpAddr(v6)),
             ("MacAddr", FieldValue::MacAddr(mac)),
-            ("List[]", FieldValue::List(vec![])),
-            ("List[Null]", FieldValue::List(vec![FieldValue::Null])),
+            ("List[]", FieldValue::List(&list0)),
+            ("List[Null]", FieldValue::List(&list1)),
             (
                 "List[UInt8(1), UInt16(2), UInt32(3), UInt64(4)]",
-                FieldValue::List(vec![
-                    FieldValue::UInt8(1),
-                    FieldValue::UInt16(2),
-                    FieldValue::UInt32(3),
-                    FieldValue::UInt64(4),
-                ]),
+                FieldValue::List(&list2),
             ),
             (
                 "List[Str(a), OwnedString(b), UInt16(5)]",
-                FieldValue::List(vec![
-                    FieldValue::Str("a"),
-                    FieldValue::OwnedString("b".into()),
-                    FieldValue::UInt16(5),
-                ]),
+                FieldValue::List(&list3),
             ),
             (
                 "List[Bytes(3), Bytes(16), OwnedBytes(6)]",
-                FieldValue::List(vec![
-                    FieldValue::Bytes(b3),
-                    FieldValue::Bytes(b16),
-                    FieldValue::OwnedBytes(b6.to_vec()),
-                ]),
+                FieldValue::List(&list4),
             ),
             (
                 "List[IpAddr(v4), IpAddr(v6), MacAddr]",
-                FieldValue::List(vec![
-                    FieldValue::IpAddr(v4),
-                    FieldValue::IpAddr(v6),
-                    FieldValue::MacAddr(mac),
-                ]),
+                FieldValue::List(&list5),
             ),
         ];
 
@@ -1100,7 +1109,7 @@ mod tests {
                 FieldValue::MacAddr([1, 2, 3, 4, 5, 6]),
                 FieldValue::Bytes(&[0xAA; 16]),
                 FieldValue::IpAddr("2001:db8::1".parse().unwrap()),
-                FieldValue::OwnedBytes(vec![9; 6]),
+                FieldValue::Bytes(&[9; 6]),
             ],
         );
         let a = a.as_any().downcast_ref::<FixedSizeBinaryArray>().unwrap();
@@ -1115,7 +1124,7 @@ mod tests {
             &[
                 FieldValue::MacAddr([1, 2, 3, 4, 5, 6]),
                 FieldValue::Bytes(&[0xAA; 16]),
-                FieldValue::OwnedBytes(vec![1, 2, 3]),
+                FieldValue::Bytes(&[1, 2, 3]),
             ],
         );
         let a = a.as_any().downcast_ref::<FixedSizeBinaryArray>().unwrap();
@@ -1127,16 +1136,14 @@ mod tests {
     /// It used to disappear, shortening the list and shifting what followed.
     #[test]
     fn wrong_length_fixed_binary_list_item_is_a_null_item() {
-        let a = column_of(
-            ColKind::ListFixed(16),
-            &[FieldValue::List(vec![
-                FieldValue::Bytes(&[1, 2, 3]),
-                FieldValue::Bytes(&[0xAA; 16]),
-                FieldValue::MacAddr([1, 2, 3, 4, 5, 6]),
-                FieldValue::IpAddr("2001:db8::1".parse().unwrap()),
-                FieldValue::OwnedBytes(vec![7; 15]),
-            ])],
-        );
+        let items = [
+            FieldValue::Bytes(&[1, 2, 3]),
+            FieldValue::Bytes(&[0xAA; 16]),
+            FieldValue::MacAddr([1, 2, 3, 4, 5, 6]),
+            FieldValue::IpAddr("2001:db8::1".parse().unwrap()),
+            FieldValue::Bytes(&[7; 15]),
+        ];
+        let a = column_of(ColKind::ListFixed(16), &[FieldValue::List(&items)]);
         let list = a.as_any().downcast_ref::<ListArray>().unwrap();
         let items = list.value(0);
         let items = items
@@ -1177,19 +1184,20 @@ mod tests {
     /// empty one.
     #[test]
     fn list_cells_keep_items_and_nulls() {
+        let items = [
+            FieldValue::UInt16(7),
+            FieldValue::UInt8(3),
+            FieldValue::Str("a.example"),
+            FieldValue::Str("b"),
+            FieldValue::Bytes(b"xy"),
+            FieldValue::Bytes(&[1, 2]),
+            FieldValue::IpAddr("10.0.0.1".parse().unwrap()),
+            FieldValue::Bool(true),
+        ];
         let cells = [
-            FieldValue::List(vec![
-                FieldValue::UInt16(7),
-                FieldValue::UInt8(3),
-                FieldValue::Str("a.example"),
-                FieldValue::OwnedString("b".into()),
-                FieldValue::Bytes(b"xy"),
-                FieldValue::OwnedBytes(vec![1, 2]),
-                FieldValue::IpAddr("10.0.0.1".parse().unwrap()),
-                FieldValue::Bool(true),
-            ]),
+            FieldValue::List(&items),
             FieldValue::Null,
-            FieldValue::List(vec![]),
+            FieldValue::List(&[]),
             FieldValue::UInt16(1),
         ];
         let render = |kind: ColKind| -> Vec<String> {
@@ -1229,22 +1237,16 @@ mod tests {
         );
     }
 
-    fn tcp_layer<'a>() -> ParseResult<'a> {
-        let mut fields = SmallVec::new();
-        fields.push(("src_port", FieldValue::UInt16(12345)));
-        fields.push(("dst_port", FieldValue::UInt16(80)));
-        fields.push(("seq", FieldValue::UInt32(100)));
-        fields.push(("ack", FieldValue::UInt32(0)));
-        fields.push(("flags", FieldValue::UInt16(0x02)));
-        ParseResult {
-            fields,
-            remaining: &[],
-            child_hints: pcapsql_core::protocol::Hints::new(),
-            error: None,
-            encap_depth: 0,
-            tunnel_type: TunnelType::None,
-            tunnel_id: None,
-        }
+    const TCP_FIELDS: [(&str, FieldValue<'static>); 5] = [
+        ("src_port", FieldValue::UInt16(12345)),
+        ("dst_port", FieldValue::UInt16(80)),
+        ("seq", FieldValue::UInt32(100)),
+        ("ack", FieldValue::UInt32(0)),
+        ("flags", FieldValue::UInt16(0x02)),
+    ];
+
+    fn tcp_layer() -> LayerRef<'static, 'static> {
+        LayerRef::new("tcp", &TCP_FIELDS)
     }
 
     fn packet(frame_number: u64) -> PacketRef<'static> {
@@ -1287,7 +1289,7 @@ mod tests {
         let columns = table_columns("tcp", None);
         let mut resolver = FieldResolver::new(&columns);
         let mut sink = ArrowSink::new(&columns, 10);
-        let _ = write_layer_row(&mut sink, &mut resolver, &packet(1), &tcp_layer());
+        let _ = write_layer_row(&mut sink, &mut resolver, &packet(1), tcp_layer());
         assert_eq!(sink.rows(), 1);
 
         let batch = sink.take_batch().unwrap().unwrap();
@@ -1313,7 +1315,7 @@ mod tests {
         assert!(sink.take_batch().unwrap().is_none());
         for round in 0..2 {
             for i in 1..=5 {
-                let flow = write_layer_row(&mut sink, &mut resolver, &packet(i), &tcp_layer());
+                let flow = write_layer_row(&mut sink, &mut resolver, &packet(i), tcp_layer());
                 assert_eq!(flow.is_break(), i == 5, "round {round} row {i}");
                 assert_eq!(sink.is_full(), i == 5);
             }

@@ -17,15 +17,14 @@
 //! This parser extracts `client_random`, `server_random`, and `session_id` fields
 //! which are essential for TLS decryption when used with SSLKEYLOGFILE.
 
-use compact_str::CompactString;
-use smallvec::SmallVec;
 use tls_parser::{
     parse_tls_extensions, parse_tls_plaintext, TlsCipherSuite, TlsExtension, TlsMessage,
     TlsMessageHandshake, TlsVersion,
 };
 
 use super::{
-    Cond, Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult, Protocol,
+    Cond, Dispatch, DispatchRule, FieldSink, FieldValue, HintKey, Hints, ParseContext, Parsed,
+    Protocol,
 };
 use crate::schema::{DataKind, FieldDescriptor};
 
@@ -158,13 +157,16 @@ impl Protocol for TlsProtocol {
         None
     }
 
-    fn parse<'a>(&self, data: &'a [u8], _context: &ParseContext) -> ParseResult<'a> {
+    fn parse<'a>(
+        &self,
+        data: &'a [u8],
+        _context: &ParseContext,
+        fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
         // TLS record header is 5 bytes minimum
         if data.len() < 5 {
-            return ParseResult::error("TLS record too short".to_string(), data);
+            return Parsed::error("TLS record too short", data);
         }
-
-        let mut fields = SmallVec::new();
 
         // Use tls-parser for zero-copy parsing
         match parse_tls_plaintext(data) {
@@ -174,25 +176,21 @@ impl Protocol for TlsProtocol {
                 fields.push(("record_version", FieldValue::UInt16(record.hdr.version.0)));
                 fields.push((
                     "version",
-                    FieldValue::OwnedString(CompactString::new(format_tls_version(
-                        record.hdr.version,
-                    ))),
+                    fields.str(&format_tls_version(record.hdr.version)),
                 ));
 
                 // Process messages in the record
                 for msg in &record.msg {
                     match msg {
                         TlsMessage::Handshake(handshake) => {
-                            parse_handshake(handshake, &mut fields);
+                            parse_handshake(handshake, fields);
                         }
                         TlsMessage::Alert(alert) => {
                             fields.push(("alert_level", FieldValue::UInt8(alert.severity.0)));
                             fields.push(("alert_description", FieldValue::UInt8(alert.code.0)));
                             fields.push((
                                 "alert_description_str",
-                                FieldValue::OwnedString(CompactString::new(
-                                    format_alert_description(alert.code.0),
-                                )),
+                                FieldValue::Str(format_alert_description(alert.code.0)),
                             ));
                         }
                         TlsMessage::Heartbeat(hb) => {
@@ -213,7 +211,7 @@ impl Protocol for TlsProtocol {
                     }
                 }
 
-                ParseResult::success(fields, remaining, Hints::new())
+                Parsed::ok(remaining, Hints::new())
             }
             Err(nom::Err::Incomplete(_)) => {
                 // Partial record - extract what we can from the header
@@ -222,14 +220,14 @@ impl Protocol for TlsProtocol {
 
                 let version = TlsVersion(u16::from_be_bytes([data[1], data[2]]));
                 fields.push(("record_version", FieldValue::UInt16(version.0)));
-                fields.push((
-                    "version",
-                    FieldValue::OwnedString(CompactString::new(format_tls_version(version))),
-                ));
+                fields.push(("version", fields.str(&format_tls_version(version))));
 
-                ParseResult::partial(fields, &data[5..], "TLS record incomplete".to_string())
+                Parsed::partial(&data[5..], "TLS record incomplete")
             }
-            Err(e) => ParseResult::error(format!("TLS parse error: {e:?}"), data),
+            Err(e) => Parsed::error(
+                fields.text_fmt(format_args!("TLS parse error: {e:?}")),
+                data,
+            ),
         }
     }
 
@@ -296,17 +294,14 @@ impl Protocol for TlsProtocol {
 }
 
 /// Parse a TLS handshake message.
-fn parse_handshake(
-    handshake: &TlsMessageHandshake,
-    fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
-) {
+fn parse_handshake<'a>(handshake: &TlsMessageHandshake<'a>, fields: &mut FieldSink<'_, 'a>) {
     match handshake {
         TlsMessageHandshake::ClientHello(ch) => {
             fields.push(("handshake_type", FieldValue::UInt8(1)));
             fields.push(("handshake_version", FieldValue::UInt16(ch.version.0)));
 
             // Decryption foundation: client_random (32 bytes)
-            fields.push(("client_random", FieldValue::OwnedBytes(ch.random.to_vec())));
+            fields.push(("client_random", FieldValue::Bytes(ch.random)));
 
             // Session ID (for session resumption tracking)
             if let Some(session_id) = ch.session_id {
@@ -315,7 +310,7 @@ fn parse_handshake(
                     FieldValue::UInt8(session_id.len() as u8),
                 ));
                 if !session_id.is_empty() {
-                    fields.push(("session_id", FieldValue::OwnedBytes(session_id.to_vec())));
+                    fields.push(("session_id", FieldValue::Bytes(session_id)));
                 }
             } else {
                 fields.push(("session_id_length", FieldValue::UInt8(0)));
@@ -336,10 +331,7 @@ fn parse_handshake(
                 .map(|c| cipher_suite_name(c.0))
                 .collect();
             if !cipher_names.is_empty() {
-                fields.push((
-                    "cipher_suites",
-                    FieldValue::OwnedString(CompactString::new(cipher_names.join(";"))),
-                ));
+                fields.push(("cipher_suites", fields.str(&cipher_names.join(";"))));
             }
 
             // Compression methods
@@ -349,10 +341,7 @@ fn parse_handshake(
                 .map(|c| format_compression_method(c.0))
                 .collect();
             if !comp_names.is_empty() {
-                fields.push((
-                    "compression_methods",
-                    FieldValue::OwnedString(CompactString::new(comp_names.join(";"))),
-                ));
+                fields.push(("compression_methods", fields.str(&comp_names.join(";"))));
             }
 
             // Parse extensions
@@ -366,14 +355,8 @@ fn parse_handshake(
                 // Compute JA3 fingerprint
                 let ja3_string = compute_ja3(ch);
                 let ja3_hash = format!("{:x}", md5::compute(&ja3_string));
-                fields.push((
-                    "ja3",
-                    FieldValue::OwnedString(CompactString::new(ja3_string)),
-                ));
-                fields.push((
-                    "ja3_hash",
-                    FieldValue::OwnedString(CompactString::new(ja3_hash)),
-                ));
+                fields.push(("ja3", fields.str(&ja3_string)));
+                fields.push(("ja3_hash", fields.str(&ja3_hash)));
             }
         }
         TlsMessageHandshake::ServerHello(sh) => {
@@ -381,7 +364,7 @@ fn parse_handshake(
             fields.push(("handshake_version", FieldValue::UInt16(sh.version.0)));
 
             // Decryption foundation: server_random (32 bytes)
-            fields.push(("server_random", FieldValue::OwnedBytes(sh.random.to_vec())));
+            fields.push(("server_random", FieldValue::Bytes(sh.random)));
 
             // Session ID
             if let Some(session_id) = sh.session_id {
@@ -390,7 +373,7 @@ fn parse_handshake(
                     FieldValue::UInt8(session_id.len() as u8),
                 ));
                 if !session_id.is_empty() {
-                    fields.push(("session_id", FieldValue::OwnedBytes(session_id.to_vec())));
+                    fields.push(("session_id", FieldValue::Bytes(session_id)));
                 }
             } else {
                 fields.push(("session_id_length", FieldValue::UInt8(0)));
@@ -398,10 +381,7 @@ fn parse_handshake(
 
             // Selected cipher suite - essential for decryption
             let cipher_name = cipher_suite_name(sh.cipher.0);
-            fields.push((
-                "selected_cipher",
-                FieldValue::OwnedString(CompactString::new(cipher_name)),
-            ));
+            fields.push(("selected_cipher", fields.str(&cipher_name)));
             fields.push(("selected_cipher_id", FieldValue::UInt16(sh.cipher.0)));
 
             // Selected compression
@@ -418,14 +398,8 @@ fn parse_handshake(
                 // Compute JA3S fingerprint
                 let ja3s_string = compute_ja3s(sh);
                 let ja3s_hash = format!("{:x}", md5::compute(&ja3s_string));
-                fields.push((
-                    "ja3s",
-                    FieldValue::OwnedString(CompactString::new(ja3s_string)),
-                ));
-                fields.push((
-                    "ja3s_hash",
-                    FieldValue::OwnedString(CompactString::new(ja3s_hash)),
-                ));
+                fields.push(("ja3s", fields.str(&ja3s_string)));
+                fields.push(("ja3s_hash", fields.str(&ja3s_hash)));
             }
         }
         TlsMessageHandshake::Certificate(cert) => {
@@ -482,11 +456,7 @@ fn parse_handshake(
 }
 
 /// Parse TLS extensions and extract relevant fields.
-fn parse_extensions(
-    ext_data: &[u8],
-    fields: &mut SmallVec<[(&'static str, FieldValue); 16]>,
-    _is_client: bool,
-) {
+fn parse_extensions(ext_data: &[u8], fields: &mut FieldSink<'_, '_>, _is_client: bool) {
     if let Ok((_, extensions)) = parse_tls_extensions(ext_data) {
         // Collect extension types for analysis
         let mut ext_types: Vec<u16> = Vec::new();
@@ -502,10 +472,7 @@ fn parse_extensions(
                         if name_type.0 == 0 {
                             // Hostname type
                             if let Ok(hostname) = std::str::from_utf8(name_data) {
-                                fields.push((
-                                    "sni",
-                                    FieldValue::OwnedString(CompactString::new(hostname)),
-                                ));
+                                fields.push(("sni", fields.str(hostname)));
                                 break;
                             }
                         }
@@ -517,20 +484,14 @@ fn parse_extensions(
                         .filter_map(|p| std::str::from_utf8(p).ok())
                         .collect();
                     if !protocols.is_empty() {
-                        fields.push((
-                            "alpn",
-                            FieldValue::OwnedString(CompactString::new(protocols.join(";"))),
-                        ));
+                        fields.push(("alpn", fields.str(&protocols.join(";"))));
                     }
                 }
                 TlsExtension::SupportedVersions(versions) => {
                     let vers: Vec<String> =
                         versions.iter().map(|v| format_tls_version(*v)).collect();
                     if !vers.is_empty() {
-                        fields.push((
-                            "supported_versions",
-                            FieldValue::OwnedString(CompactString::new(vers.join(";"))),
-                        ));
+                        fields.push(("supported_versions", fields.str(&vers.join(";"))));
                     }
                 }
                 TlsExtension::SignatureAlgorithms(algs) => {
@@ -539,30 +500,21 @@ fn parse_extensions(
                         .map(|a| format_signature_algorithm(*a))
                         .collect();
                     if !alg_names.is_empty() {
-                        fields.push((
-                            "signature_algorithms",
-                            FieldValue::OwnedString(CompactString::new(alg_names.join(";"))),
-                        ));
+                        fields.push(("signature_algorithms", fields.str(&alg_names.join(";"))));
                     }
                 }
                 TlsExtension::EllipticCurves(curves) => {
                     let curve_names: Vec<String> =
                         curves.iter().map(|c| format_named_group(c.0)).collect();
                     if !curve_names.is_empty() {
-                        fields.push((
-                            "supported_groups",
-                            FieldValue::OwnedString(CompactString::new(curve_names.join(";"))),
-                        ));
+                        fields.push(("supported_groups", fields.str(&curve_names.join(";"))));
                     }
                 }
                 TlsExtension::EcPointFormats(formats) => {
                     let format_names: Vec<String> =
                         formats.iter().map(|f| format_ec_point_format(*f)).collect();
                     if !format_names.is_empty() {
-                        fields.push((
-                            "ec_point_formats",
-                            FieldValue::OwnedString(CompactString::new(format_names.join(";"))),
-                        ));
+                        fields.push(("ec_point_formats", fields.str(&format_names.join(";"))));
                     }
                 }
                 _ => {}
@@ -572,10 +524,7 @@ fn parse_extensions(
         // Store extension types list
         if !ext_types.is_empty() {
             let types_str: Vec<String> = ext_types.iter().map(|t| t.to_string()).collect();
-            fields.push((
-                "extension_types",
-                FieldValue::OwnedString(CompactString::new(types_str.join(","))),
-            ));
+            fields.push(("extension_types", fields.str(&types_str.join(","))));
         }
     }
 }
@@ -873,6 +822,7 @@ fn format_alert_description(code: u8) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::test_utils::ParseLayer as _;
 
     /// Create a minimal TLS Client Hello with SNI.
     fn create_tls_client_hello() -> Vec<u8> {
@@ -1061,18 +1011,15 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::DstPort, 443);
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("record_type"), Some(&FieldValue::UInt8(22)));
-        assert_eq!(
-            result.get("version"),
-            Some(&FieldValue::OwnedString(CompactString::new("TLS 1.2")))
-        );
+        assert_eq!(result.get("version"), Some(&FieldValue::Str("TLS 1.2")));
         assert_eq!(result.get("handshake_type"), Some(&FieldValue::UInt8(1)));
 
         // Verify client_random is extracted (decryption foundation)
-        if let Some(FieldValue::OwnedBytes(random)) = result.get("client_random") {
+        if let Some(FieldValue::Bytes(random)) = result.get("client_random") {
             assert_eq!(random.len(), 32);
             assert_eq!(random[0], 0x01);
         } else {
@@ -1088,15 +1035,13 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::SrcPort, 443);
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("handshake_type"), Some(&FieldValue::UInt8(2)));
         assert_eq!(
             result.get("selected_cipher"),
-            Some(&FieldValue::OwnedString(CompactString::new(
-                "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
-            )))
+            Some(&FieldValue::Str("TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"))
         );
         assert_eq!(
             result.get("selected_cipher_id"),
@@ -1104,7 +1049,7 @@ mod tests {
         );
 
         // Verify server_random is extracted (decryption foundation)
-        if let Some(FieldValue::OwnedBytes(random)) = result.get("server_random") {
+        if let Some(FieldValue::Bytes(random)) = result.get("server_random") {
             assert_eq!(random.len(), 32);
             assert_eq!(random[0], 0x02);
         } else {
@@ -1120,15 +1065,10 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::DstPort, 443);
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
-        assert_eq!(
-            result.get("sni"),
-            Some(&FieldValue::OwnedString(CompactString::new(
-                "www.example.com"
-            )))
-        );
+        assert_eq!(result.get("sni"), Some(&FieldValue::Str("www.example.com")));
     }
 
     #[test]
@@ -1138,7 +1078,7 @@ mod tests {
         let parser = TlsProtocol;
         let context = ParseContext::new(1);
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("record_type"), Some(&FieldValue::UInt8(21)));
@@ -1149,9 +1089,7 @@ mod tests {
         );
         assert_eq!(
             result.get("alert_description_str"),
-            Some(&FieldValue::OwnedString(CompactString::new(
-                "handshake_failure"
-            )))
+            Some(&FieldValue::Str("handshake_failure"))
         );
     }
 
@@ -1197,7 +1135,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::DstPort, 443);
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         // Verify JA3 fields are present
@@ -1205,7 +1143,7 @@ mod tests {
         assert!(result.get("ja3_hash").is_some());
 
         // JA3 hash should be 32 hex characters (MD5)
-        if let Some(FieldValue::OwnedString(hash)) = result.get("ja3_hash") {
+        if let Some(FieldValue::Str(hash)) = result.get("ja3_hash") {
             assert_eq!(hash.len(), 32);
         }
     }
@@ -1243,7 +1181,7 @@ mod tests {
         let parser = TlsProtocol;
         let context = ParseContext::new(1);
 
-        let result = parser.parse(&short_packet, &context);
+        let result = parser.parse_layer(&short_packet, &context);
 
         assert!(!result.is_ok());
     }

@@ -22,11 +22,13 @@ This crate provides the core parsing functionality for pcapsql, without any SQL 
 
 ```rust
 use pcapsql_core::io::{FilePacketSource, PacketReader, PacketSource};
-use pcapsql_core::{default_registry, parse_packet, ParseScope};
+use pcapsql_core::{default_registry, parse_packet, ParseBuf, ParseScope};
 
 // A registry with every built-in parser; a scope that parses everything.
 let registry = default_registry();
 let scope = ParseScope::full();
+// Where a packet's layers are kept: reused from packet to packet.
+let mut buf = ParseBuf::new();
 
 // Open a capture (pcap or pcapng, optionally gzip/zstd compressed).
 let source = FilePacketSource::open("capture.pcap").unwrap();
@@ -36,9 +38,11 @@ let mut reader = source.sequential_reader().unwrap();
 loop {
     let processed = reader
         .process_packets(1000, |packet| {
-            let layers = parse_packet(&registry, packet.link_type, packet.data, &scope);
-            for (protocol, result) in &layers {
-                println!("frame {} {}: {} fields", packet.frame_number, protocol, result.fields.len());
+            let layers =
+                parse_packet(&registry, packet.link_type, packet.data, &scope, &mut buf);
+            for layer in layers.iter() {
+                let fields = layer.fields().len();
+                println!("frame {} {}: {fields} fields", packet.frame_number, layer.name());
             }
             Ok(())
         })

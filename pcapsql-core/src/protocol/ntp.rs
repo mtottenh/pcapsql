@@ -3,11 +3,9 @@
 //! Parses NTP (Network Time Protocol) messages used for time synchronization.
 //! Matches on UDP port 123.
 
-use compact_str::CompactString;
-use smallvec::SmallVec;
-
 use super::{
-    Cond, Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult, Protocol,
+    Cond, Dispatch, DispatchRule, FieldSink, FieldValue, HintKey, Hints, ParseContext, Parsed,
+    Protocol,
 };
 use crate::schema::{DataKind, FieldDescriptor};
 
@@ -57,13 +55,16 @@ impl Protocol for NtpProtocol {
         }
     }
 
-    fn parse<'a>(&self, data: &'a [u8], _context: &ParseContext) -> ParseResult<'a> {
+    fn parse<'a>(
+        &self,
+        data: &'a [u8],
+        _context: &ParseContext,
+        fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
         // NTP header is 48 bytes
         if data.len() < NTP_HEADER_SIZE {
-            return ParseResult::error("NTP header too short".to_string(), data);
+            return Parsed::error("NTP header too short", data);
         }
-
-        let mut fields = SmallVec::new();
 
         // First byte: LI (2 bits), VN (3 bits), Mode (3 bits)
         let first_byte = data[0];
@@ -105,15 +106,15 @@ impl Protocol for NtpProtocol {
         let ref_id_bytes = &data[12..16];
         let reference_id = if stratum == 0 || stratum == 1 {
             // For stratum 0-1, it's ASCII (e.g., "GPS", "PPS")
-            CompactString::new(String::from_utf8_lossy(ref_id_bytes).trim_end_matches('\0'))
+            fields.str(String::from_utf8_lossy(ref_id_bytes).trim_end_matches('\0'))
         } else {
             // For stratum 2+, it's an IP address
-            CompactString::new(format!(
+            fields.format(format_args!(
                 "{}.{}.{}.{}",
                 ref_id_bytes[0], ref_id_bytes[1], ref_id_bytes[2], ref_id_bytes[3]
             ))
         };
-        fields.push(("reference_id", FieldValue::OwnedString(reference_id)));
+        fields.push(("reference_id", reference_id));
 
         // Reference Timestamp (8 bytes) - NTP format
         let reference_ts = read_ntp_timestamp(&data[16..24]);
@@ -134,7 +135,7 @@ impl Protocol for NtpProtocol {
         // Any remaining data would be extension fields or authentication
         let remaining = &data[NTP_HEADER_SIZE..];
 
-        ParseResult::success(fields, remaining, Hints::new())
+        Parsed::ok(remaining, Hints::new())
     }
 
     fn schema_fields(&self) -> Vec<FieldDescriptor> {
@@ -213,6 +214,7 @@ pub mod stratum {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::test_utils::ParseLayer as _;
 
     /// Signed fields and fixed-point conversions: poll/precision are signed
     /// log2 seconds, root delay is a signed 16.16 fixed-point second count,
@@ -226,7 +228,7 @@ mod tests {
         packet[3] = 0xEC; // precision = -20
         packet[4..8].copy_from_slice(&(-0x0000_8000i32).to_be_bytes()); // -0.5 s
         packet[8..12].copy_from_slice(&0x0001_4000u32.to_be_bytes()); // 1.25 s
-        let result = NtpProtocol.parse(&packet, &ParseContext::new(1));
+        let result = NtpProtocol.parse_layer(&packet, &ParseContext::new(1));
         assert!(result.is_ok());
         assert_eq!(result.get("poll"), Some(&FieldValue::Int8(-6)));
         assert_eq!(result.get("precision"), Some(&FieldValue::Int8(-20)));
@@ -370,7 +372,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::DstPort, 123);
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("version"), Some(&FieldValue::UInt8(4)));
@@ -386,16 +388,13 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::SrcPort, 123);
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("version"), Some(&FieldValue::UInt8(4)));
         assert_eq!(result.get("mode"), Some(&FieldValue::UInt8(4))); // Server
         assert_eq!(result.get("stratum"), Some(&FieldValue::UInt8(1))); // Primary
-        assert_eq!(
-            result.get("reference_id"),
-            Some(&FieldValue::OwnedString(CompactString::new("GPS")))
-        );
+        assert_eq!(result.get("reference_id"), Some(&FieldValue::Str("GPS")));
     }
 
     #[test]
@@ -407,7 +406,7 @@ mod tests {
         let parser = NtpProtocol;
         let context = ParseContext::new(1);
 
-        let result = parser.parse(&packet, &context);
+        let result = parser.parse_layer(&packet, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("version"), Some(&FieldValue::UInt8(3)));
@@ -435,7 +434,7 @@ mod tests {
         let parser = NtpProtocol;
         let context = ParseContext::new(1);
 
-        let result = parser.parse(&short_packet, &context);
+        let result = parser.parse_layer(&short_packet, &context);
 
         assert!(!result.is_ok());
         assert!(result.error.is_some());

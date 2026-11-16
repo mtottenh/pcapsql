@@ -5,8 +5,8 @@ use smallvec::SmallVec;
 use etherparse::{TcpHeaderSlice, TcpOptionElement};
 
 use super::{
-    http, Cond, Dispatch, DispatchRule, FieldSet, FieldValue, HintKey, Hints, ParseContext,
-    ParseResult, PayloadMode, Protocol,
+    field_list, http, Cond, Dispatch, DispatchRule, FieldSet, FieldSink, FieldValue, HintKey,
+    Hints, ParseContext, Parsed, PayloadMode, Protocol,
 };
 use crate::schema::{DataKind, FieldDescriptor};
 
@@ -42,15 +42,18 @@ pub mod options {
 /// Uses zero-copy parsing via etherparse.
 #[derive(Debug, Clone, Default)]
 pub struct ParsedTcpOptions {
-    /// List of option names present (e.g., "MSS,WS,TS")
-    pub option_names: SmallVec<[&'static str; 4]>,
+    /// List of option names present (e.g., "MSS,WS,TS"). Twenty is the most a
+    /// header has room for (forty bytes of two-byte options), so the names
+    /// are never on the heap.
+    pub option_names: SmallVec<[&'static str; 20]>,
     /// Maximum Segment Size (option 2)
     pub mss: Option<u16>,
     /// Window Scale factor (option 3)
     pub window_scale: Option<u8>,
     /// SACK Permitted (option 4)
     pub sack_permitted: bool,
-    /// SACK block left edges (option 5) - parallel to sack_right_edges
+    /// SACK block left edges (option 5) - parallel to sack_right_edges. A
+    /// header has room for four blocks.
     pub sack_left_edges: SmallVec<[u32; 4]>,
     /// SACK block right edges (option 5) - parallel to sack_left_edges
     pub sack_right_edges: SmallVec<[u32; 4]>,
@@ -60,8 +63,30 @@ pub struct ParsedTcpOptions {
     pub ts_ecr: Option<u32>,
 }
 
+/// The `options` text: the names of the options present, comma-separated.
+/// A static string for the common combinations, assembled in the packet's
+/// arena for the others. `opts` has at least one name.
+fn options_text<'a>(opts: &ParsedTcpOptions, fields: &FieldSink<'_, 'a>) -> FieldValue<'a> {
+    if let Some(static_str) = get_options_static(opts) {
+        return FieldValue::Str(static_str); // Zero-copy static string
+    }
+    let mut text = fields.text_builder();
+    for (index, name) in opts.option_names.iter().enumerate() {
+        if index > 0 {
+            text.push_str(",");
+        }
+        text.push_str(name);
+    }
+    text.finish()
+}
+
+/// SACK block edges as a list value in the packet's arena.
+fn edges_list<'a>(edges: &[u32], fields: &FieldSink<'_, 'a>) -> FieldValue<'a> {
+    fields.list(edges.iter().map(|&edge| FieldValue::UInt32(edge)))
+}
+
 /// Get a static string for common TCP option combinations.
-/// Returns None for uncommon combinations, which fall back to dynamic allocation.
+/// Returns None for uncommon combinations, which are assembled in the arena.
 fn get_options_static(opts: &ParsedTcpOptions) -> Option<&'static str> {
     // Build bitmask: MSS=1, WS=2, SACK_PERM=4, SACK=8, TS=16
     let mut mask: u8 = 0;
@@ -160,6 +185,203 @@ fn child_hints(src_port: u16, dst_port: u16, payload: &[u8]) -> Hints {
     child_hints
 }
 
+field_list! {
+    /// The fields of a `tcp` layer, in the order the parser writes them.
+    enum Field {
+        SrcPort = "src_port",
+        DstPort = "dst_port",
+        Seq = "seq",
+        Ack = "ack",
+        DataOffset = "data_offset",
+        Flags = "flags",
+        FlagFin = "flag_fin",
+        FlagSyn = "flag_syn",
+        FlagRst = "flag_rst",
+        FlagPsh = "flag_psh",
+        FlagAck = "flag_ack",
+        FlagUrg = "flag_urg",
+        Window = "window",
+        Checksum = "checksum",
+        UrgentPtr = "urgent_ptr",
+        OptionsLength = "options_length",
+        Options = "options",
+        Mss = "mss",
+        WindowScale = "window_scale",
+        SackPermitted = "sack_permitted",
+        SackLeftEdges = "sack_left_edges",
+        SackRightEdges = "sack_right_edges",
+        TsVal = "ts_val",
+        TsEcr = "ts_ecr",
+    }
+    groups {
+        /// The fields read from the options, which are decoded only for
+        /// them.
+        OPTIONS = [
+            Options,
+            Mss,
+            WindowScale,
+            SackPermitted,
+            SackLeftEdges,
+            SackRightEdges,
+            TsVal,
+            TsEcr,
+        ];
+    }
+}
+
+/// The TCP header at the start of `data`: the fields of `want` (all of
+/// them for [`FieldSet::ALL`]) to `fields`, the payload and the hints for
+/// the layer above.
+#[inline(always)]
+fn parse_tcp<'a>(data: &'a [u8], want: FieldSet, fields: &mut FieldSink<'_, 'a>) -> Parsed<'a> {
+    let tcp = match TcpHeaderSlice::from_slice(data) {
+        Ok(tcp) => tcp,
+        Err(e) => {
+            return Parsed::error(fields.text_fmt(format_args!("TCP parse error: {e}")), data)
+        }
+    };
+    if want.has(Field::SrcPort) {
+        fields.push(("src_port", FieldValue::UInt16(tcp.source_port())));
+    }
+    if want.has(Field::DstPort) {
+        fields.push(("dst_port", FieldValue::UInt16(tcp.destination_port())));
+    }
+    if want.has(Field::Seq) {
+        fields.push(("seq", FieldValue::UInt32(tcp.sequence_number())));
+    }
+    if want.has(Field::Ack) {
+        fields.push(("ack", FieldValue::UInt32(tcp.acknowledgment_number())));
+    }
+    if want.has(Field::DataOffset) {
+        fields.push(("data_offset", FieldValue::UInt8(tcp.data_offset())));
+    }
+
+    if want.has(Field::Flags) {
+        // The flags as one value.
+        let mut tcp_flags: u16 = 0;
+        for (set, flag) in [
+            (tcp.fin(), flags::FIN),
+            (tcp.syn(), flags::SYN),
+            (tcp.rst(), flags::RST),
+            (tcp.psh(), flags::PSH),
+            (tcp.ack(), flags::ACK),
+            (tcp.urg(), flags::URG),
+            (tcp.ece(), flags::ECE),
+            (tcp.cwr(), flags::CWR),
+            (tcp.ns(), flags::NS),
+        ] {
+            if set {
+                tcp_flags |= flag;
+            }
+        }
+        fields.push(("flags", FieldValue::UInt16(tcp_flags)));
+    }
+    // Individual flag fields for convenience
+    if want.has(Field::FlagFin) {
+        fields.push(("flag_fin", FieldValue::Bool(tcp.fin())));
+    }
+    if want.has(Field::FlagSyn) {
+        fields.push(("flag_syn", FieldValue::Bool(tcp.syn())));
+    }
+    if want.has(Field::FlagRst) {
+        fields.push(("flag_rst", FieldValue::Bool(tcp.rst())));
+    }
+    if want.has(Field::FlagPsh) {
+        fields.push(("flag_psh", FieldValue::Bool(tcp.psh())));
+    }
+    if want.has(Field::FlagAck) {
+        fields.push(("flag_ack", FieldValue::Bool(tcp.ack())));
+    }
+    if want.has(Field::FlagUrg) {
+        fields.push(("flag_urg", FieldValue::Bool(tcp.urg())));
+    }
+
+    if want.has(Field::Window) {
+        fields.push(("window", FieldValue::UInt16(tcp.window_size())));
+    }
+    if want.has(Field::Checksum) {
+        fields.push(("checksum", FieldValue::UInt16(tcp.checksum())));
+    }
+    if want.has(Field::UrgentPtr) {
+        fields.push(("urgent_ptr", FieldValue::UInt16(tcp.urgent_pointer())));
+    }
+
+    let header_len = tcp.slice().len();
+    let options_len = header_len.saturating_sub(20);
+    if want.has(Field::OptionsLength) {
+        fields.push(("options_length", FieldValue::UInt8(options_len as u8)));
+    }
+
+    if want.has_any(Field::OPTIONS) {
+        // An absent option is NULL; so is every option of a header without
+        // any.
+        let opts = if options_len > 0 {
+            parse_tcp_options(&tcp)
+        } else {
+            ParsedTcpOptions::default()
+        };
+        if want.has(Field::Options) {
+            // Options list string - use static lookup for common combinations
+            let options = if opts.option_names.is_empty() {
+                FieldValue::Null
+            } else {
+                options_text(&opts, fields)
+            };
+            fields.push(("options", options));
+        }
+        if want.has(Field::Mss) {
+            fields.push(("mss", opts.mss.map_or(FieldValue::Null, FieldValue::UInt16)));
+        }
+        if want.has(Field::WindowScale) {
+            let scale = opts
+                .window_scale
+                .map_or(FieldValue::Null, FieldValue::UInt8);
+            fields.push(("window_scale", scale));
+        }
+        if want.has(Field::SackPermitted) {
+            let permitted = if opts.sack_permitted {
+                FieldValue::Bool(true)
+            } else {
+                FieldValue::Null
+            };
+            fields.push(("sack_permitted", permitted));
+        }
+        // SACK blocks as parallel lists
+        if want.has(Field::SackLeftEdges) {
+            let edges = if opts.sack_left_edges.is_empty() {
+                FieldValue::Null
+            } else {
+                edges_list(&opts.sack_left_edges, fields)
+            };
+            fields.push(("sack_left_edges", edges));
+        }
+        if want.has(Field::SackRightEdges) {
+            let edges = if opts.sack_left_edges.is_empty() {
+                FieldValue::Null
+            } else {
+                edges_list(&opts.sack_right_edges, fields)
+            };
+            fields.push(("sack_right_edges", edges));
+        }
+        if want.has(Field::TsVal) {
+            fields.push((
+                "ts_val",
+                opts.ts_val.map_or(FieldValue::Null, FieldValue::UInt32),
+            ));
+        }
+        if want.has(Field::TsEcr) {
+            fields.push((
+                "ts_ecr",
+                opts.ts_ecr.map_or(FieldValue::Null, FieldValue::UInt32),
+            ));
+        }
+    }
+
+    let payload = &data[header_len..];
+    let child_hints = child_hints(tcp.source_port(), tcp.destination_port(), payload);
+    Parsed::ok(payload, child_hints)
+}
+
 /// TCP protocol parser.
 #[derive(Debug, Clone, Copy)]
 pub struct TcpProtocol;
@@ -197,151 +419,13 @@ impl Protocol for TcpProtocol {
         }
     }
 
-    fn parse<'a>(&self, data: &'a [u8], _context: &ParseContext) -> ParseResult<'a> {
-        match TcpHeaderSlice::from_slice(data) {
-            Ok(tcp) => {
-                let mut fields = SmallVec::new();
-
-                fields.push(("src_port", FieldValue::UInt16(tcp.source_port())));
-                fields.push(("dst_port", FieldValue::UInt16(tcp.destination_port())));
-                fields.push(("seq", FieldValue::UInt32(tcp.sequence_number())));
-                fields.push(("ack", FieldValue::UInt32(tcp.acknowledgment_number())));
-                fields.push(("data_offset", FieldValue::UInt8(tcp.data_offset())));
-
-                // Compute flags as a combined value
-                let mut tcp_flags: u16 = 0;
-                if tcp.fin() {
-                    tcp_flags |= flags::FIN;
-                }
-                if tcp.syn() {
-                    tcp_flags |= flags::SYN;
-                }
-                if tcp.rst() {
-                    tcp_flags |= flags::RST;
-                }
-                if tcp.psh() {
-                    tcp_flags |= flags::PSH;
-                }
-                if tcp.ack() {
-                    tcp_flags |= flags::ACK;
-                }
-                if tcp.urg() {
-                    tcp_flags |= flags::URG;
-                }
-                if tcp.ece() {
-                    tcp_flags |= flags::ECE;
-                }
-                if tcp.cwr() {
-                    tcp_flags |= flags::CWR;
-                }
-                if tcp.ns() {
-                    tcp_flags |= flags::NS;
-                }
-                fields.push(("flags", FieldValue::UInt16(tcp_flags)));
-
-                // Individual flag fields for convenience
-                fields.push(("flag_fin", FieldValue::Bool(tcp.fin())));
-                fields.push(("flag_syn", FieldValue::Bool(tcp.syn())));
-                fields.push(("flag_rst", FieldValue::Bool(tcp.rst())));
-                fields.push(("flag_psh", FieldValue::Bool(tcp.psh())));
-                fields.push(("flag_ack", FieldValue::Bool(tcp.ack())));
-                fields.push(("flag_urg", FieldValue::Bool(tcp.urg())));
-
-                fields.push(("window", FieldValue::UInt16(tcp.window_size())));
-                fields.push(("checksum", FieldValue::UInt16(tcp.checksum())));
-                fields.push(("urgent_ptr", FieldValue::UInt16(tcp.urgent_pointer())));
-
-                // Options length
-                let header_len = tcp.slice().len();
-                let options_len = header_len.saturating_sub(20);
-                fields.push(("options_length", FieldValue::UInt8(options_len as u8)));
-
-                // Parse all TCP options
-                if options_len > 0 {
-                    let opts = parse_tcp_options(&tcp);
-
-                    // Options list string - use static lookup for common combinations
-                    if !opts.option_names.is_empty() {
-                        let options_str = if let Some(static_str) = get_options_static(&opts) {
-                            FieldValue::Str(static_str) // Zero-copy static string
-                        } else {
-                            FieldValue::OwnedString(opts.option_names.join(",").into())
-                        };
-                        fields.push(("options", options_str));
-                    } else {
-                        fields.push(("options", FieldValue::Null));
-                    }
-
-                    // MSS
-                    if let Some(mss) = opts.mss {
-                        fields.push(("mss", FieldValue::UInt16(mss)));
-                    } else {
-                        fields.push(("mss", FieldValue::Null));
-                    }
-
-                    // Window Scale
-                    if let Some(ws) = opts.window_scale {
-                        fields.push(("window_scale", FieldValue::UInt8(ws)));
-                    } else {
-                        fields.push(("window_scale", FieldValue::Null));
-                    }
-
-                    // SACK Permitted
-                    if opts.sack_permitted {
-                        fields.push(("sack_permitted", FieldValue::Bool(true)));
-                    } else {
-                        fields.push(("sack_permitted", FieldValue::Null));
-                    }
-
-                    // SACK Blocks as parallel lists
-                    if !opts.sack_left_edges.is_empty() {
-                        let left_edges: Vec<FieldValue> = opts
-                            .sack_left_edges
-                            .iter()
-                            .map(|&v| FieldValue::UInt32(v))
-                            .collect();
-                        let right_edges: Vec<FieldValue> = opts
-                            .sack_right_edges
-                            .iter()
-                            .map(|&v| FieldValue::UInt32(v))
-                            .collect();
-                        fields.push(("sack_left_edges", FieldValue::List(left_edges)));
-                        fields.push(("sack_right_edges", FieldValue::List(right_edges)));
-                    } else {
-                        fields.push(("sack_left_edges", FieldValue::Null));
-                        fields.push(("sack_right_edges", FieldValue::Null));
-                    }
-
-                    // Timestamps
-                    if let Some(ts_val) = opts.ts_val {
-                        fields.push(("ts_val", FieldValue::UInt32(ts_val)));
-                    } else {
-                        fields.push(("ts_val", FieldValue::Null));
-                    }
-                    if let Some(ts_ecr) = opts.ts_ecr {
-                        fields.push(("ts_ecr", FieldValue::UInt32(ts_ecr)));
-                    } else {
-                        fields.push(("ts_ecr", FieldValue::Null));
-                    }
-                } else {
-                    // No options - all null
-                    fields.push(("options", FieldValue::Null));
-                    fields.push(("mss", FieldValue::Null));
-                    fields.push(("window_scale", FieldValue::Null));
-                    fields.push(("sack_permitted", FieldValue::Null));
-                    fields.push(("sack_left_edges", FieldValue::Null));
-                    fields.push(("sack_right_edges", FieldValue::Null));
-                    fields.push(("ts_val", FieldValue::Null));
-                    fields.push(("ts_ecr", FieldValue::Null));
-                }
-
-                let payload = &data[header_len..];
-                let child_hints = child_hints(tcp.source_port(), tcp.destination_port(), payload);
-
-                ParseResult::success(fields, payload, child_hints)
-            }
-            Err(e) => ParseResult::error(format!("TCP parse error: {e}"), data),
-        }
+    fn parse<'a>(
+        &self,
+        data: &'a [u8],
+        _context: &ParseContext,
+        fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
+        parse_tcp(data, FieldSet::ALL, fields)
     }
 
     fn schema_fields(&self) -> Vec<FieldDescriptor> {
@@ -408,252 +492,18 @@ impl Protocol for TcpProtocol {
         &["ipv4", "ipv6"]
     }
 
+    fn field_names(&self) -> &'static [&'static str] {
+        Field::NAMES
+    }
+
     fn parse_projected<'a>(
         &self,
         data: &'a [u8],
         _context: &ParseContext,
-        fields: Option<&FieldSet>,
-    ) -> ParseResult<'a> {
-        // If no projection, use full parse
-        let fields = match fields {
-            None => return self.parse(data, _context),
-            Some(f) if f.is_empty() => return self.parse(data, _context),
-            Some(f) => f,
-        };
-
-        match TcpHeaderSlice::from_slice(data) {
-            Ok(tcp) => {
-                let mut result_fields = SmallVec::new();
-                let header_len = tcp.slice().len();
-
-                // Always extract ports for child hints (needed for protocol detection)
-                let src_port = tcp.source_port();
-                let dst_port = tcp.destination_port();
-
-                // Only insert requested fields
-                if fields.contains("src_port") {
-                    result_fields.push(("src_port", FieldValue::UInt16(src_port)));
-                }
-                if fields.contains("dst_port") {
-                    result_fields.push(("dst_port", FieldValue::UInt16(dst_port)));
-                }
-                if fields.contains("seq") {
-                    result_fields.push(("seq", FieldValue::UInt32(tcp.sequence_number())));
-                }
-                if fields.contains("ack") {
-                    result_fields.push(("ack", FieldValue::UInt32(tcp.acknowledgment_number())));
-                }
-                if fields.contains("data_offset") {
-                    result_fields.push(("data_offset", FieldValue::UInt8(tcp.data_offset())));
-                }
-
-                // Compute flags only if any flag field is requested
-                let need_flags = fields.contains("flags")
-                    || fields.contains("flag_fin")
-                    || fields.contains("flag_syn")
-                    || fields.contains("flag_rst")
-                    || fields.contains("flag_psh")
-                    || fields.contains("flag_ack")
-                    || fields.contains("flag_urg");
-
-                if need_flags {
-                    let mut tcp_flags: u16 = 0;
-                    if tcp.fin() {
-                        tcp_flags |= flags::FIN;
-                    }
-                    if tcp.syn() {
-                        tcp_flags |= flags::SYN;
-                    }
-                    if tcp.rst() {
-                        tcp_flags |= flags::RST;
-                    }
-                    if tcp.psh() {
-                        tcp_flags |= flags::PSH;
-                    }
-                    if tcp.ack() {
-                        tcp_flags |= flags::ACK;
-                    }
-                    if tcp.urg() {
-                        tcp_flags |= flags::URG;
-                    }
-                    if tcp.ece() {
-                        tcp_flags |= flags::ECE;
-                    }
-                    if tcp.cwr() {
-                        tcp_flags |= flags::CWR;
-                    }
-                    if tcp.ns() {
-                        tcp_flags |= flags::NS;
-                    }
-
-                    if fields.contains("flags") {
-                        result_fields.push(("flags", FieldValue::UInt16(tcp_flags)));
-                    }
-                    if fields.contains("flag_fin") {
-                        result_fields.push(("flag_fin", FieldValue::Bool(tcp.fin())));
-                    }
-                    if fields.contains("flag_syn") {
-                        result_fields.push(("flag_syn", FieldValue::Bool(tcp.syn())));
-                    }
-                    if fields.contains("flag_rst") {
-                        result_fields.push(("flag_rst", FieldValue::Bool(tcp.rst())));
-                    }
-                    if fields.contains("flag_psh") {
-                        result_fields.push(("flag_psh", FieldValue::Bool(tcp.psh())));
-                    }
-                    if fields.contains("flag_ack") {
-                        result_fields.push(("flag_ack", FieldValue::Bool(tcp.ack())));
-                    }
-                    if fields.contains("flag_urg") {
-                        result_fields.push(("flag_urg", FieldValue::Bool(tcp.urg())));
-                    }
-                }
-
-                if fields.contains("window") {
-                    result_fields.push(("window", FieldValue::UInt16(tcp.window_size())));
-                }
-                if fields.contains("checksum") {
-                    result_fields.push(("checksum", FieldValue::UInt16(tcp.checksum())));
-                }
-                if fields.contains("urgent_ptr") {
-                    result_fields.push(("urgent_ptr", FieldValue::UInt16(tcp.urgent_pointer())));
-                }
-                if fields.contains("options_length") {
-                    let options_len = header_len.saturating_sub(20);
-                    result_fields.push(("options_length", FieldValue::UInt8(options_len as u8)));
-                }
-
-                // Parse TCP options if any option field is requested
-                let need_options = fields.contains("options")
-                    || fields.contains("mss")
-                    || fields.contains("window_scale")
-                    || fields.contains("sack_permitted")
-                    || fields.contains("sack_left_edges")
-                    || fields.contains("sack_right_edges")
-                    || fields.contains("ts_val")
-                    || fields.contains("ts_ecr");
-
-                if need_options {
-                    let options_len = header_len.saturating_sub(20);
-                    if options_len > 0 {
-                        let opts = parse_tcp_options(&tcp);
-
-                        if fields.contains("options") {
-                            if !opts.option_names.is_empty() {
-                                let options_str =
-                                    if let Some(static_str) = get_options_static(&opts) {
-                                        FieldValue::Str(static_str)
-                                    } else {
-                                        FieldValue::OwnedString(opts.option_names.join(",").into())
-                                    };
-                                result_fields.push(("options", options_str));
-                            } else {
-                                result_fields.push(("options", FieldValue::Null));
-                            }
-                        }
-                        if fields.contains("mss") {
-                            if let Some(mss) = opts.mss {
-                                result_fields.push(("mss", FieldValue::UInt16(mss)));
-                            } else {
-                                result_fields.push(("mss", FieldValue::Null));
-                            }
-                        }
-                        if fields.contains("window_scale") {
-                            if let Some(ws) = opts.window_scale {
-                                result_fields.push(("window_scale", FieldValue::UInt8(ws)));
-                            } else {
-                                result_fields.push(("window_scale", FieldValue::Null));
-                            }
-                        }
-                        if fields.contains("sack_permitted") {
-                            if opts.sack_permitted {
-                                result_fields.push(("sack_permitted", FieldValue::Bool(true)));
-                            } else {
-                                result_fields.push(("sack_permitted", FieldValue::Null));
-                            }
-                        }
-                        let need_sack_edges = fields.contains("sack_left_edges")
-                            || fields.contains("sack_right_edges");
-                        if need_sack_edges {
-                            if !opts.sack_left_edges.is_empty() {
-                                if fields.contains("sack_left_edges") {
-                                    let left_edges: Vec<FieldValue> = opts
-                                        .sack_left_edges
-                                        .iter()
-                                        .map(|&v| FieldValue::UInt32(v))
-                                        .collect();
-                                    result_fields
-                                        .push(("sack_left_edges", FieldValue::List(left_edges)));
-                                }
-                                if fields.contains("sack_right_edges") {
-                                    let right_edges: Vec<FieldValue> = opts
-                                        .sack_right_edges
-                                        .iter()
-                                        .map(|&v| FieldValue::UInt32(v))
-                                        .collect();
-                                    result_fields
-                                        .push(("sack_right_edges", FieldValue::List(right_edges)));
-                                }
-                            } else {
-                                if fields.contains("sack_left_edges") {
-                                    result_fields.push(("sack_left_edges", FieldValue::Null));
-                                }
-                                if fields.contains("sack_right_edges") {
-                                    result_fields.push(("sack_right_edges", FieldValue::Null));
-                                }
-                            }
-                        }
-                        if fields.contains("ts_val") {
-                            if let Some(ts_val) = opts.ts_val {
-                                result_fields.push(("ts_val", FieldValue::UInt32(ts_val)));
-                            } else {
-                                result_fields.push(("ts_val", FieldValue::Null));
-                            }
-                        }
-                        if fields.contains("ts_ecr") {
-                            if let Some(ts_ecr) = opts.ts_ecr {
-                                result_fields.push(("ts_ecr", FieldValue::UInt32(ts_ecr)));
-                            } else {
-                                result_fields.push(("ts_ecr", FieldValue::Null));
-                            }
-                        }
-                    } else {
-                        // No options - all null
-                        if fields.contains("options") {
-                            result_fields.push(("options", FieldValue::Null));
-                        }
-                        if fields.contains("mss") {
-                            result_fields.push(("mss", FieldValue::Null));
-                        }
-                        if fields.contains("window_scale") {
-                            result_fields.push(("window_scale", FieldValue::Null));
-                        }
-                        if fields.contains("sack_permitted") {
-                            result_fields.push(("sack_permitted", FieldValue::Null));
-                        }
-                        if fields.contains("sack_left_edges") {
-                            result_fields.push(("sack_left_edges", FieldValue::Null));
-                        }
-                        if fields.contains("sack_right_edges") {
-                            result_fields.push(("sack_right_edges", FieldValue::Null));
-                        }
-                        if fields.contains("ts_val") {
-                            result_fields.push(("ts_val", FieldValue::Null));
-                        }
-                        if fields.contains("ts_ecr") {
-                            result_fields.push(("ts_ecr", FieldValue::Null));
-                        }
-                    }
-                }
-
-                // Child hints always needed for protocol chaining
-                let payload = &data[header_len..];
-                let child_hints = child_hints(src_port, dst_port, payload);
-
-                ParseResult::success(result_fields, payload, child_hints)
-            }
-            Err(e) => ParseResult::error(format!("TCP parse error: {e}"), data),
-        }
+        projection: FieldSet,
+        fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
+        parse_tcp(data, projection, fields)
     }
 
     fn cheap_fields(&self) -> &'static [&'static str] {
@@ -696,6 +546,7 @@ impl Protocol for TcpProtocol {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::test_utils::ParseLayer as _;
 
     #[test]
     fn test_options_static_lookup() {
@@ -739,7 +590,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 6);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("src_port"), Some(&FieldValue::UInt16(80)));
@@ -767,7 +618,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 6);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("flag_syn"), Some(&FieldValue::Bool(true)));
@@ -798,7 +649,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 6);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("flag_fin"), Some(&FieldValue::Bool(true)));
@@ -824,7 +675,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 6);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("flag_rst"), Some(&FieldValue::Bool(true)));
@@ -851,7 +702,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 6);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("src_port"), Some(&FieldValue::UInt16(443)));
@@ -888,7 +739,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 6);
 
-        let result = parser.parse(&short_header, &context);
+        let result = parser.parse_layer(&short_header, &context);
 
         assert!(!result.is_ok());
         assert!(result.error.is_some());
@@ -912,7 +763,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 6);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.hint(HintKey::SrcPort), Some(443u64));
@@ -939,11 +790,7 @@ mod tests {
         context.insert_hint(HintKey::IpProtocol, 6);
 
         // Project to only ports
-        let fields: FieldSet = ["src_port", "dst_port"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        let result = parser.parse_projected(&header, &context, Some(&fields));
+        let result = parser.parse_layer_fields(&header, &context, &["src_port", "dst_port"]);
 
         assert!(result.is_ok());
         // Requested fields are present
@@ -978,11 +825,8 @@ mod tests {
         context.insert_hint(HintKey::IpProtocol, 6);
 
         // Project to ports and specific flags
-        let fields: FieldSet = ["src_port", "flag_syn", "flag_ack"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        let result = parser.parse_projected(&header, &context, Some(&fields));
+        let result =
+            parser.parse_layer_fields(&header, &context, &["src_port", "flag_syn", "flag_ack"]);
 
         assert!(result.is_ok());
         assert_eq!(result.get("src_port"), Some(&FieldValue::UInt16(80)));
@@ -1014,7 +858,16 @@ mod tests {
         context.insert_hint(HintKey::IpProtocol, 6);
 
         // No projection - should return all fields
-        let result = parser.parse_projected(&header, &context, None);
+        let result = parser.parse_layer_projected(&header, &context, None);
+
+        // A projection of no field (a row count) extracts none, and is
+        // otherwise the same parse.
+        let none = parser.parse_layer_projected(&header, &context, Some(FieldSet::NONE));
+        assert!(none.is_ok());
+        assert!(none.fields.is_empty());
+        assert_eq!(none.remaining, result.remaining);
+        assert_eq!(none.child_hints, result.child_hints);
+        assert!(none.hint(HintKey::DstPort).is_some());
 
         assert!(result.is_ok());
         // All fields present
@@ -1054,7 +907,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 6);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("options_length"), Some(&FieldValue::UInt8(12)));
@@ -1081,7 +934,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 6);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("options_length"), Some(&FieldValue::UInt8(0)));
@@ -1111,15 +964,14 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 6);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("options_length"), Some(&FieldValue::UInt8(4)));
         assert_eq!(result.get("mss"), Some(&FieldValue::UInt16(1460)));
-        // Check options string contains MSS (may be static or owned)
+        // Check options string contains MSS (static, or in the arena)
         match result.get("options") {
             Some(FieldValue::Str(s)) => assert!(s.contains("MSS")),
-            Some(FieldValue::OwnedString(s)) => assert!(s.contains("MSS")),
             _ => panic!("Expected string for options"),
         }
     }
@@ -1147,7 +999,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 6);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("window_scale"), Some(&FieldValue::UInt8(7)));
@@ -1176,7 +1028,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 6);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("sack_permitted"), Some(&FieldValue::Bool(true)));
@@ -1209,7 +1061,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 6);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
 
@@ -1257,7 +1109,7 @@ mod tests {
         let mut context = ParseContext::new(1);
         context.insert_hint(HintKey::IpProtocol, 6);
 
-        let result = parser.parse(&header, &context);
+        let result = parser.parse_layer(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("mss"), Some(&FieldValue::UInt16(1460)));
@@ -1266,10 +1118,9 @@ mod tests {
         assert_eq!(result.get("ts_val"), Some(&FieldValue::UInt32(1)));
         assert_eq!(result.get("ts_ecr"), Some(&FieldValue::UInt32(0)));
 
-        // Check options string contains all options (may be static or owned)
+        // Check options string contains all options (static, or in the arena)
         let opts_str = match result.get("options") {
             Some(FieldValue::Str(s)) => *s,
-            Some(FieldValue::OwnedString(s)) => s.as_str(),
             _ => panic!("Expected string for options"),
         };
         assert!(
@@ -1321,8 +1172,7 @@ mod tests {
         context.insert_hint(HintKey::IpProtocol, 6);
 
         // Project to only timestamp fields
-        let fields: FieldSet = ["ts_val", "ts_ecr"].iter().map(|s| s.to_string()).collect();
-        let result = parser.parse_projected(&header, &context, Some(&fields));
+        let result = parser.parse_layer_fields(&header, &context, &["ts_val", "ts_ecr"]);
 
         assert!(result.is_ok());
         assert_eq!(result.get("ts_val"), Some(&FieldValue::UInt32(0xaabbccdd)));

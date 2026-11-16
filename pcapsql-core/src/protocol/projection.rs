@@ -133,79 +133,165 @@ impl ProjectionConfig {
     }
 }
 
-/// The fields one parser is asked to extract, as handed to
-/// [`Protocol::parse_projected`](super::Protocol::parse_projected).
+/// The fields one parser extracts in a projected parse
+/// ([`Protocol::parse_projected`](super::Protocol::parse_projected)).
 ///
-/// Parsers ask `contains("name")` once per field of every packet, so this is
-/// a short list with a bitmask of the names' lengths in front of it rather
-/// than a `HashSet` (which would hash the name on every call): most names a
-/// parser asks about have a length no requested field has, and the rest
-/// compare against the few names of that length.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// A set of positions in the parser's field list
+/// ([`Protocol::field_names`](super::Protocol::field_names)). The names a
+/// [`ParseScope`](super::ParseScope) asks for are resolved into it once per
+/// scope and parser; in the packet loop a parser asks about a field by its
+/// position, a constant, and the answer is a bit test however many fields
+/// are asked for. The empty set asks for no field: the layer is parsed for
+/// what the layers after it need (the hints, the remaining bytes, whether
+/// the bytes are a layer of the protocol at all) and writes nothing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FieldSet {
-    names: Box<[Box<str>]>,
-    /// Bit `n` is set when some name is `n` bytes long (names of 64 bytes or
-    /// more set bit 63).
-    lengths: u64,
+    bits: u64,
 }
 
 impl FieldSet {
-    fn length_bit(len: usize) -> u64 {
-        1u64 << len.min(63)
+    /// The longest field list a projected parse can have.
+    pub const CAPACITY: usize = 64;
+
+    /// No field.
+    pub const NONE: Self = Self { bits: 0 };
+
+    /// Every field, whatever the list: what a parser's full parse asks its
+    /// projected parse for.
+    pub(crate) const ALL: Self = Self { bits: u64::MAX };
+
+    /// The fields called `names` in the field list `fields` (a parser's
+    /// [`field_names`](super::Protocol::field_names), at most
+    /// [`CAPACITY`](Self::CAPACITY) long). A name the list does not have is
+    /// not a field the parser can write, and is left out.
+    pub fn resolve<S: AsRef<str>>(fields: &[&str], names: impl IntoIterator<Item = S>) -> Self {
+        debug_assert!(fields.len() <= Self::CAPACITY, "{} fields", fields.len());
+        let bits = names
+            .into_iter()
+            .filter_map(|name| fields.iter().position(|field| *field == name.as_ref()))
+            .filter(|&position| position < Self::CAPACITY)
+            .fold(0, |bits, position| bits | 1 << position);
+        Self { bits }
     }
 
-    /// Whether `name` is one of the fields.
+    /// Every field of a list of `len` fields (`len` at most
+    /// [`CAPACITY`](Self::CAPACITY)).
+    pub fn all_of(len: usize) -> Self {
+        debug_assert!(len <= Self::CAPACITY, "{len} fields");
+        let bits = if len >= Self::CAPACITY {
+            u64::MAX
+        } else {
+            (1 << len) - 1
+        };
+        Self { bits }
+    }
+
+    /// A set of the fields at the positions of the bits of `bits`.
+    pub(crate) const fn from_bits(bits: u64) -> Self {
+        Self { bits }
+    }
+
+    /// Whether `field` is in the set.
     #[inline]
-    pub fn contains(&self, name: &str) -> bool {
-        self.lengths & Self::length_bit(name.len()) != 0 && self.names.iter().any(|n| **n == *name)
+    pub(crate) fn has(self, field: impl ParserField) -> bool {
+        self.bits >> field.position() & 1 != 0
     }
 
-    /// The field names, in no particular order.
-    pub fn iter(&self) -> impl Iterator<Item = &str> {
-        self.names.iter().map(|n| &**n)
+    /// Whether any field of `fields` is in the set.
+    #[inline]
+    pub(crate) fn has_any(self, fields: FieldSet) -> bool {
+        self.bits & fields.bits != 0
+    }
+
+    /// Whether the field at `position` of the list is in the set.
+    #[inline]
+    pub fn contains(self, position: usize) -> bool {
+        position < Self::CAPACITY && self.bits >> position & 1 != 0
     }
 
     /// The number of fields.
-    pub fn len(&self) -> usize {
-        self.names.len()
+    pub fn len(self) -> usize {
+        self.bits.count_ones() as usize
     }
 
-    /// Whether there are no fields.
-    pub fn is_empty(&self) -> bool {
-        self.names.is_empty()
+    /// Whether there is no field.
+    pub fn is_empty(self) -> bool {
+        self.bits == 0
     }
 }
 
-impl<S: AsRef<str>> FromIterator<S> for FieldSet {
-    fn from_iter<I: IntoIterator<Item = S>>(iter: I) -> Self {
-        let mut names: Vec<Box<str>> = Vec::new();
-        for name in iter {
-            let name = name.as_ref();
-            if !names.iter().any(|n| **n == *name) {
-                names.push(name.into());
+/// A field of one parser's field list, by its position there: the variants
+/// of the enum [`field_list!`] declares.
+pub(crate) trait ParserField: Copy {
+    /// The field's position in the list.
+    fn position(self) -> u32;
+}
+
+/// Declares the field list of a parser with a projected parse.
+///
+/// ```ignore
+/// field_list! {
+///     /// The fields of a `udp` layer, in the order the parser writes them.
+///     enum Field {
+///         SrcPort = "src_port",
+///         DstPort = "dst_port",
+///     }
+///     groups {
+///         /// Both ports.
+///         PORTS = [SrcPort, DstPort];
+///     }
+/// }
+/// ```
+///
+/// gives the enum, with a variant per field at the position of its name in
+/// `Field::NAMES` (what the parser's
+/// [`field_names`](super::Protocol::field_names) returns), and a constant
+/// [`FieldSet`] per group. A parser asks the projection about a field with
+/// `projection.has(Field::SrcPort)` and about a group with
+/// `projection.has_any(Field::PORTS)`.
+macro_rules! field_list {
+    (
+        $(#[$meta:meta])*
+        enum $name:ident {
+            $($variant:ident = $field:literal,)+
+        }
+        $(
+            groups {
+                $(
+                    $(#[$group_meta:meta])*
+                    $group:ident = [$($member:ident),+ $(,)?];
+                )+
+            }
+        )?
+    ) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum $name {
+            $($variant,)+
+        }
+
+        impl $name {
+            /// The names of the fields, each at the position of its variant.
+            const NAMES: &'static [&'static str] = &[$($field,)+];
+            $($(
+                $(#[$group_meta])*
+                const $group: $crate::protocol::FieldSet = $crate::protocol::FieldSet::from_bits(
+                    0 $(| 1 << $name::$member as u32)+
+                );
+            )+)?
+        }
+
+        impl $crate::protocol::ParserField for $name {
+            #[inline]
+            fn position(self) -> u32 {
+                self as u32
             }
         }
-        let lengths = names
-            .iter()
-            .fold(0, |mask, n| mask | Self::length_bit(n.len()));
-        Self {
-            names: names.into_boxed_slice(),
-            lengths,
-        }
-    }
-}
 
-impl From<&HashSet<String>> for FieldSet {
-    fn from(fields: &HashSet<String>) -> Self {
-        fields.iter().collect()
-    }
+        const _: () = assert!($name::NAMES.len() <= $crate::protocol::FieldSet::CAPACITY);
+    };
 }
-
-impl From<HashSet<String>> for FieldSet {
-    fn from(fields: HashSet<String>) -> Self {
-        Self::from(&fields)
-    }
-}
+pub(crate) use field_list;
 
 /// Fields required for protocol chaining.
 ///
@@ -318,33 +404,45 @@ mod tests {
         assert!(!merged.contains("dst_port")); // Chain field NOT added
     }
 
+    field_list! {
+        /// A list of four fields.
+        enum Field {
+            A = "a",
+            B = "b",
+            C = "c",
+            D = "d",
+        }
+        groups {
+            /// Two of them.
+            BD = [B, D];
+        }
+    }
+
     #[test]
-    fn field_set_matches_hash_set() {
-        let names = [
-            "src_port",
-            "dst_port",
-            "ttl",
-            "a_very_long_field_name_that_is_longer_than_64_bytes_in_total_xx",
-        ];
-        let set: FieldSet = names.iter().collect();
-        assert_eq!(set.len(), names.len());
-        for name in names {
-            assert!(set.contains(name), "{name}");
-        }
-        for name in [
-            "src_por",
-            "src_portx",
-            "dst_porT",
-            "",
-            "tos",
-            "a_very_long_field_name_that_is_longer_than_64_bytes_in_total_xy",
-        ] {
-            assert!(!set.contains(name), "{name}");
-        }
-        assert!(FieldSet::default().is_empty());
-        assert!(!FieldSet::default().contains(""));
-        let dup: FieldSet = ["x", "x"].iter().collect();
-        assert_eq!(dup.len(), 1);
+    fn a_field_set_is_resolved_from_names_against_a_list() {
+        assert_eq!(Field::NAMES, ["a", "b", "c", "d"]);
+        let set = FieldSet::resolve(Field::NAMES, ["d", "b", "x", "b", ""]);
+        assert_eq!(set.len(), 2);
+        assert!(set.has(Field::B) && set.has(Field::D));
+        assert!(!set.has(Field::A) && !set.has(Field::C));
+        assert!(set.contains(1) && set.contains(3) && !set.contains(0));
+        assert!(!set.contains(64) && !set.contains(usize::MAX));
+        assert_eq!(set, Field::BD);
+        assert!(set.has_any(Field::BD));
+        assert!(!FieldSet::resolve(Field::NAMES, ["a", "c"]).has_any(Field::BD));
+
+        let none = FieldSet::resolve(Field::NAMES, ["x"]);
+        assert!(none.is_empty());
+        assert_eq!(none, FieldSet::NONE);
+        assert_eq!(FieldSet::default(), FieldSet::NONE);
+        assert!(!none.has(Field::A));
+
+        let all = FieldSet::all_of(Field::NAMES.len());
+        assert_eq!(all, FieldSet::resolve(Field::NAMES, Field::NAMES));
+        assert_eq!(all.len(), 4);
+        assert_eq!(FieldSet::all_of(0), FieldSet::NONE);
+        assert_eq!(FieldSet::all_of(64).len(), 64);
+        assert!(FieldSet::ALL.has(Field::A) && FieldSet::ALL.has(Field::D));
     }
 
     #[test]
