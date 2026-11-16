@@ -33,8 +33,8 @@
 //! progress and frees a slot; a consumer that instead parks on another table
 //! raises that table's waiting flag, which wakes the producer; a consumer
 //! that has finished drops its receivers, which also wakes it. The decision
-//! is taken by the batch set that owns all of a partition's senders
-//! (`NormalizedBatchSet`), not by one sender.
+//! is taken by the delivery that owns all of a partition's senders
+//! (`BatchDelivery`), not by one sender.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};

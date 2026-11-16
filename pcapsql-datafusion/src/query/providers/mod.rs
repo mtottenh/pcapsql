@@ -15,24 +15,51 @@
 //! ```
 //!
 //! A query joining N protocol tables therefore parses the capture once, not N
-//! times (#6), and that single pass is parallelized across partitions for
-//! seekable sources (#9).
+//! times (#6) — and only as much of it as the query needs — and that single
+//! pass is parallelized across partitions for seekable sources (#9).
+//!
+//! The pass, by module:
+//!
+//! | Module | Holds |
+//! |---|---|
+//! | `subscription` | what a pass must produce: [`ParseSubscription`], compiled once per pass into the scan layer's plan plus Arrow schemas |
+//! | `pass` | what every pass shares: [`PassOptions`], partitioning, and the push loop around `pcapsql_core::scan::PartitionScan` |
+//! | `delivery` | where a partition's batches go ([`BatchDelivery`]): accumulated, or sent through an exchange |
+//! | `materialized` | the pass that keeps its tables in memory ([`run_shared_parse`]); the only one with stream tables |
+//! | `streamed` | the pass that streams batches to the executing plan ([`run_streaming_parse`]) |
+//! | `exchange` | the bounded channel between a streaming producer and DataFusion |
+//! | `stats` | what a pass reports ([`ParseStats`], [`TableData`]) |
+//! | `protocol_provider`, `scan_exec` | the DataFusion table provider and scan operator over a query's prepared tables |
+//!
+//! Within a pass a table is its output's
+//! [`OutputId`](pcapsql_core::scan::OutputId): sinks, delivery slots,
+//! senders and per-partition statistics are vectors indexed by it. Names
+//! are for the engine, which asks for tables by name, and for reports.
 
+mod delivery;
 mod exchange;
+mod materialized;
+mod pass;
 mod protocol_provider;
 mod scan_exec;
-mod shared;
+mod stats;
+mod streamed;
+mod subscription;
 
+pub use delivery::{BatchDelivery, Delivered};
 pub use exchange::{BatchReceiver, BatchSender, OverflowStats, Pacer, STREAM_CHANNEL_CAPACITY};
+pub use materialized::{run_shared_parse, run_shared_parse_sequential, SharedParseState};
+pub use pass::{auto_target_partitions, PassOptions, ProgressFn};
 pub use protocol_provider::{
     column_names, CachedTable, PreparedTable, ProtocolTableProvider, QueryTables, TableCache,
 };
 pub use scan_exec::ProtocolScanExec;
-pub use shared::{
-    auto_target_partitions, run_shared_parse, run_shared_parse_sequential, run_streaming_parse,
-    run_streaming_parse_sequential, CompiledSubscription, FusedSubscription, ParseStats,
-    ParseSubscription, PartitionStat, ProgressFn, ServedFrom, SharedParseState, StreamingHandle,
-    SubscribedOutput, TableData, TableSubscription,
+pub use stats::{OutputStat, ParseStats, PartitionStat, ServedFrom, TableData};
+pub use streamed::{
+    run_streaming_parse, run_streaming_parse_sequential, StreamedTable, StreamingHandle,
+};
+pub use subscription::{
+    CompiledSubscription, FusedSubscription, ParseSubscription, SubscribedOutput, TableSubscription,
 };
 
 use std::sync::Arc;

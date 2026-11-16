@@ -181,7 +181,7 @@ pcapsql-core
     row.rs        write_value / write_layer_row / write_frame_row   (generic, #[inline])
     route.rs      route_frame: tables, caps, fused, resume cursors  (generic over S)
     fused.rs      FusedEval: per-frame join tuples                  (non-generic)
-    stream.rs     StreamObserver, StreamTables                      (non-generic + generic emit)
+    stream.rs     StreamAnalysis, StreamTables, StreamWriter        (non-generic + generic writer)
     partition.rs  partition_target, plan_ranges, PartitionQueue     (non-generic)
     driver.rs     PartitionScan<R>, Step, ScanStats
 
@@ -387,19 +387,13 @@ impl ScanPlan {
     /// (shared.rs:138-200 moved here), per-output column plans, layer routing.
     pub fn compile(&self, catalog: &Catalog, registry: &ProtocolRegistry)
         -> Result<CompiledScan, PlanError>;
-    /// Until the driver builds stream tables (S4c), `compile` refuses a plan
-    /// that has any (it would give them no rows), and a frontend that builds
-    /// them itself, from a `FrameObserver`, compiles with this.
-    pub fn compile_with_streams(&self, catalog: &Catalog, registry: &ProtocolRegistry)
-        -> Result<CompiledScan, PlanError>;
 }
 pub struct OutColumn { pub name: &'static str, pub kind: ColKind, pub nullable: bool, pub source: ColumnSource }
 pub struct OutputPlan { pub table: Option<TableId>, pub columns: Box<[OutColumn]> /* + private routing */ }
 pub struct CompiledScan { /* scope: ParseScope, outputs: Box<[OutputPlan]>, ... */ }
 impl CompiledScan {
     pub fn scope(&self) -> &ParseScope;
-    pub fn outputs(&self) -> &[OutputPlan];        // tables, then fused, in plan order
-    pub fn stream_outputs(&self) -> &[OutputPlan];
+    pub fn outputs(&self) -> &[OutputPlan];        // tables, fused, then streams, in plan order
     /// Stream tables need the capture in order (shared.rs:536-541).
     pub fn requires_single_partition(&self) -> bool;
 }
@@ -693,9 +687,10 @@ chunk.set_len(writer.rows());
 // Step::Flush => return, same partition next call.  Step::End => claim the next partition.
 ```
 
-A stream table in pull mode is a blocking source: the first `exec` runs the
-pass to `Step::End` with no table outputs, `finish()` yields `StreamTables`,
-and later calls drain it with a row cursor (section 3.8).
+A stream table in pull mode is a blocking source, and needs no code of its
+own (section 5.1.2): its output is one of the plan's, `step` returns `More`
+while the capture is read and then `Flush` for each chunk of the table's
+rows, with the same `ChunkWriter`.
 
 ### 3.6.1 Field storage as built
 
@@ -732,8 +727,8 @@ Since then (`protocol/layers.rs`):
   walk truncate the field vector back to where the layer began;
   `Status::Partial` keeps the fields and stops the walk.
 - `parse_packet(registry, link_type, data, scope, &mut buf)` returns the
-  `PacketLayers`. `FrameObserver::observe`, `Router::route_frame` and the
-  fused joins take `&PacketLayers`; `write_layer_row` and
+  `PacketLayers`. `Router::route_frame`, the fused joins and stream
+  analysis take `&PacketLayers`; `write_layer_row` and
   `CompiledPredicate::keeps` take a `LayerRef` (name, fields, `get`,
   `get_hinted`, `encap_depth`, `tunnel_type`, `tunnel_id`, `payload`,
   `error`). `LayerRef::new` and `PacketLayers::push_layer` build a layer by
@@ -775,8 +770,8 @@ it parses the fields that something reads. What reads a layer's fields is
   a `COALESCE` included) and its filter; a member with no column is parsed
   for its rows and reads no field;
 - stream analysis, when the pass has a stream table: every field of `tcp`,
-  `ipv4` and `ipv6` (the DataFusion frontend builds those tables from the
-  layers it is shown).
+  `ipv4` and `ipv6` (`scan/stream.rs` reads the addresses, ports,
+  sequence numbers and flags of the innermost IP and TCP layers).
 
 Nothing else does: the encapsulation columns, the joins and the tunnel
 context come from the layer and the hints, not from fields. Every other
@@ -891,6 +886,10 @@ straight-line code). It would remove the per-value jump, but needs parsers to
 emit typed structs and multiplies code size.
 
 ### 3.8 Stream tables and frame-join fusion
+
+The sketch of the stream tables below is what was proposed. What was built
+differs in where the tables are driven from (the driver, not the frontend):
+section 5.1.2.
 
 ```rust
 // scan/stream.rs  (stream_tables.rs:35-213, 245-350 moved; no Arrow)
@@ -1051,7 +1050,7 @@ benchmark numbers of S0.
 | **S5** Driver and partitioning | `PartitionScan`, `Step`; `parse_partition` and `stream_partition` become the push loop; `partition_target`, `PartitionQueue` | `engine_shared_parse.rs` (one pass, 1-vs-N, `streaming_limit_stops_scan_early`, `streaming_hash_join_completes_without_deadlock`, ordering tests at 499 and 575); `streaming_memory.rs`; `continuous.rs`; `stdin_source.rs` (timeouts, cancellation); S0 bench | pull-equivalence (5.3) | P2, P4 |
 | **S6** Kernels | Move the shared kernels to `core::format`; DataFusion UDFs call them | UDF unit tests in each `udf/*.rs`; golden corpus queries using UDFs | kernel unit tests move with the kernels | P2 ("port scalars") |
 | **S4b** Fused (**done**, see 5.1.1) | `scan/fused.rs`; delete `builders/fused.rs` | golden `f01`..`f06` and the view snapshots (fused under `RetentionPolicy::None` vs joins under `CacheOnTouch`) | conformance: fused rows at chunk capacity 1 | P8 only |
-| **S4c** Stream tables | `scan/stream.rs`; `stream_tables.rs` shrinks to the `ArrowSink` call | `e2e_tls_http2.rs`; `http2_stream_table_is_on_demand`; golden stream snapshots | none beyond conformance | P8 only |
+| **S4c** Stream tables (**done**, see 5.1.2) | `scan/stream.rs`; `stream_tables.rs` shrinks to the `ArrowSink` call | `e2e_tls_http2.rs`; `http2_stream_table_is_on_demand`; golden stream snapshots | none beyond conformance | P8 only |
 | **S7** Frame predicate and trimming | `plan_ranges` trimming; `FramePredicate` in the driver; optionally let DataFusion push `frame_number`/`timestamp` ranges on `frames` | golden corpus | results with trimming equal results without, over random ranges and strides | P6 |
 
 Order: S0, S1, S2, S3, S4a, S5 are sequential. S6 is independent and can
@@ -1108,6 +1107,95 @@ Status: done. What was built, and where it departs from the sketch in 3.8:
   joins against a nested-loop join over the tables' rows; sink capacities 1,
   2, 3, 7, 2048; partitions; row caps and frame predicates), unit tests in
   `scan/plan.rs` and `scan/views.rs`.
+
+### 5.1.2 S4c as built
+
+Status: done. The stream tables (`tcp_connections`, `tls_sessions`,
+`http_messages`, `http2`) are built by `pcapsql_core::scan` and written
+through `RowSink`; `pcapsql-datafusion/src/query/stream_tables.rs` is
+deleted, not shrunk. Where this departs from the sketch in 3.8:
+
+- **The driver builds them; no frontend drives anything.** 3.8 had the
+  frontend own a `StreamObserver`, call `finish()` and then `emit` each
+  table into its sink with a cursor. As built, a stream table is an output
+  of the plan like any other: `ScanPlan::compile` accepts `streams`
+  (`compile_with_streams` and `CompiledScan::stream_outputs` are gone),
+  `CompiledScan::outputs()` is the tables, the fused joins, then the stream
+  tables, and `sinks[i]` is the sink of output `i` for all of them.
+  `PartitionScan::step` feeds every frame to stream analysis while it reads
+  (once per frame, also for a frame shown again), and when the reader has
+  no more packets it writes the tables' rows: `Step::Flush(output)` each
+  time a sink is full, then `Step::End`. Row caps and `close_output` apply
+  to a stream output as to any other; a stream output that is not closed
+  keeps the scan from reporting `Step::Done`, so the capture is read to its
+  end whatever the caps of the per-packet tables. A push engine's loop and a
+  pull engine's `exec` therefore need no stream-specific code, and the
+  batch or chunk size is the sink's capacity, as for packet tables.
+- **`scan/stream.rs`** has three private types for the three phases:
+  `StreamAnalysis` (the `StreamManager` with the TLS, HTTP/1.x and HTTP/2
+  stream parsers, and the messages they produced), `StreamTables` (the rows
+  of the tables the plan asked for, in table order: connections by first
+  frame, sessions by ClientHello frame, messages in capture order) and
+  `StreamWriter` (the resumable writer: output index and row index).
+  Nothing of it is public; the public surface is `ScanPlan::streams`,
+  `PartitionScan::with_keylog` and `PlanError::StreamNotBuilt`.
+- **Cells.** A column is resolved by name when the plan is compiled
+  (`StreamPlan`, held by the `OutputPlan`), so a scan can take any subset of
+  a stream table's columns in any order, and a column the builders do not
+  know is a `PlanError`, not a NULL. Every cell goes through `write_value`,
+  like the cells of every other table. The values are those the Arrow
+  builders wrote (they read each message field with a getter of the
+  column's exact type; the stream parsers' field types are the columns'
+  kinds, so coercion changes nothing). Two things kept on purpose:
+  `http2.connection_id` is the parser's field of that name, which the
+  HTTP/2 parser does not set, so the column is NULL as it always was; and
+  the encapsulation columns are depth 0 and no tunnel.
+- **Timestamps.** The stream manager keeps microseconds. A `TsNanos` plan
+  (DuckDB) gets `tcp_connections.start_time` and `end_time` as those
+  microseconds times 1,000.
+- **The key log** is not part of the plan (a plan is data: comparable,
+  cloneable, compiled once and shared by the partitions). It is given to
+  the scan: `PartitionScan::new(reader, plan, registry).with_keylog(&keylog)`.
+- **`FrameObserver` and `NoObserver` are gone.** Stream reassembly was the
+  hook's only user. `PartitionScan` has one type parameter, the reader;
+  `step` fails with `pcapsql_core::Error`; `finish` returns the statistics
+  and the reader.
+- **An empty stream table** has no batch (as an empty packet table); the
+  Arrow builders gave it one empty batch.
+- **DataFusion** (`query/providers`): a stream table is one more
+  `SubscribedOutput` with an `ArrowSink`. `providers/shared.rs` (1,704
+  lines) is split into `subscription.rs`, `pass.rs` (options, partitioning,
+  the push loop), `delivery.rs` (`BatchDelivery`, which was
+  `builders::NormalizedBatchSet` and is no longer an observer),
+  `materialized.rs`, `streamed.rs` and `stats.rs`. Within a pass a table is
+  its `OutputId`: sinks, delivery slots, senders, per-partition batches and
+  statistics are vectors in output order; names remain where the engine
+  asks for a table and in `ParseStats`. The batch size, partition count,
+  progress callback, key log and flush interval of a pass are one
+  `PassOptions`.
+- Measured against the commit before (`c2b9fb7`). Instructions per packet
+  through `PartitionScan` into a sink that stores nothing
+  (`pcapsql-core/examples/parse_cost.rs`, callgrind, bench profile):
+  `frames` 593 to 555, `udp` 2,529 to 2,415, `tcp` 4,036 to 3,922, `dns`
+  7,135 to 7,029, `http` 7,959 to 7,844; the scan no longer carries an
+  observer. Instructions of one iteration of a scan benchmark (the bench
+  binary under cachegrind, `--test`, set-up subtracted): `udp/file/1`
+  -0.3%, `udp/mmap/1` 0.0%, `tcp_options/mmap/1` +0.1%, `vxlan/mmap/1`
+  -0.1%, `count_udp` +0.2%. Wall-clock times of the scan benchmark
+  (`cargo bench -p pcapsql-datafusion --bench scan`, thin LTO, the two
+  builds interleaved on a shared machine with a load of 1.3 to 1.8; seven
+  runs of the parse passes, three of the queries) do not separate the two:
+  the medians differ by -6.5% to +6.6% and every pair of ranges overlaps
+  (`udp/mmap/1` 8.75 ms against 8.41 ms, `tcp_options/mmap/1` 12.24
+  against 13.02, `vxlan/mmap/1` 17.07 against 18.20, with single builds
+  ranging over 16 to 21 ms; `count_udp` 4.97 against 5.24).
+- Tests: `pcapsql-core/tests/stream_tables.rs` (the rows of the stream
+  corpus capture cell by cell; sinks of capacity 1, 2, 3 and 2048 against
+  an unbounded scan, with the per-packet tables of the same pass; a frame
+  shown again is reassembled once; row caps, closed outputs, projected
+  columns, the timestamp unit), the unit tests of `scan/plan`, and on the
+  DataFusion side the golden stream snapshots, `e2e_tls_http2.rs` and
+  `http2_stream_table_is_on_demand`, all unchanged.
 
 ### 5.2 Mapping to the DuckDB roadmap phases
 

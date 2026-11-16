@@ -1020,7 +1020,8 @@ mod tests {
     }
 
     /// Every column of every per-packet table has a source its kind can
-    /// store: none falls back to NULL.
+    /// store: none falls back to NULL. (The columns of a stream table are
+    /// resolved by `scan/stream.rs` when a plan is compiled.)
     #[test]
     fn every_builtin_column_has_a_writable_source() {
         for (_, table) in Catalog::builtin().tables() {

@@ -37,19 +37,32 @@
 //!   the reader ([`Pause::Before`]); the next step is shown the same packet,
 //!   parses it again and writes the rows that are still missing. A frame may
 //!   have more rows than a sink holds.
-//! - **Side effects happen once per frame.** The [`FrameObserver`] sees a
+//! - **Side effects happen once per frame.** Stream reassembly sees a
 //!   frame once, however often it is shown; [`ScanStats::packets`] counts
 //!   the packets the reader consumed.
+//!
+//! # Stream tables
+//!
+//! A plan with [stream tables](super::TableKind::Stream) is scanned the
+//! same way, as one partition. While the packets are read, the scan feeds
+//! the TCP segment of every frame to stream analysis (reassembly, then the
+//! TLS and HTTP stream parsers; `scan/stream.rs`); a row cap on another
+//! output does not stop it. When the reader has no more packets the stream
+//! tables have their rows, and the steps from then on write them to the
+//! sinks of those outputs: [`Step::Flush`] whenever one is full, then
+//! [`Step::End`]. A pull engine therefore sees a stream table as a source
+//! that gives nothing ([`Step::More`]) until the capture is read, and a
+//! push engine needs no code for it at all.
+//! [`PartitionScan::with_keylog`] gives the analysis the keys to decrypt
+//! TLS with.
 //!
 //! # The frame predicate
 //!
 //! The plan's [`FramePredicate`](super::FramePredicate)
 //! ([`CompiledScan::frames`]) is enforced here, exactly: a packet gives rows
 //! if and only if the predicate accepts it. A packet it rejects is consumed
-//! from the reader and nothing else: it is not parsed, not routed, not shown
-//! to the [`FrameObserver`] and not counted against a row cap. (An observer
-//! therefore sees the accepted frames only. Stream reassembly needs every
-//! packet, and
+//! from the reader and nothing else: it is not parsed, not routed and not
+//! counted against a row cap. (Stream reassembly needs every packet, and
 //! [`ScanPlan::compile`](super::ScanPlan::compile) refuses a plan that has
 //! both stream tables and a frame predicate.)
 //!
@@ -72,9 +85,10 @@ use std::sync::Arc;
 use super::plan::{CompiledScan, OutputId};
 use super::route::{Routed, Router};
 use super::sink::RowSink;
-use crate::io::{PacketReader, PacketRef, Pause};
-use crate::protocol::{parse_packet, PacketLayers, ParseBuf};
-use crate::{Error, ProtocolRegistry};
+use super::stream::{StreamAnalysis, StreamWriter};
+use crate::io::{PacketReader, Pause};
+use crate::protocol::{parse_packet, ParseBuf};
+use crate::{Error, KeyLog, ProtocolRegistry};
 
 /// Why [`PartitionScan::step`] returned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,14 +102,15 @@ pub enum Step {
     /// last rows (possibly none). Empty the sink, then call `step` again:
     /// the scan writes to the sink again as soon as `step` is re-entered.
     Flush(OutputId),
-    /// Every output reached its row cap or was closed, and the observer
-    /// wants no further frame: nothing the scan could still produce would be
-    /// seen. The rest of the partition was not read.
+    /// Every output reached its row cap or was closed: nothing the scan
+    /// could still produce would be seen. The rest of the partition was not
+    /// read. (A stream table that is not closed keeps the scan reading: it
+    /// has no rows before the partition ends.)
     Done,
     /// The end of the partition, or of the frames the plan's
     /// [frame predicate](CompiledScan::frames) can accept in it (the rest of
-    /// the partition was not read). The sinks may hold rows that never
-    /// filled them.
+    /// the partition was not read), with the rows of the plan's stream
+    /// tables written. The sinks may hold rows that never filled them.
     End,
 }
 
@@ -147,90 +162,32 @@ impl Default for ScanStats {
     }
 }
 
-/// Sees every frame of a partition scan that the plan's frame predicate
-/// accepts (every frame, when there is none) once, parsed, before its rows
-/// are routed: the hook for what a frontend derives from frames besides the
-/// routed rows (stream reassembly).
-///
-/// It is a type parameter of [`PartitionScan`], so the call is static and a
-/// scan without an observer ([`NoObserver`]) pays nothing for the hook. The
-/// scan owns the observer; [`PartitionScan::observer_mut`] reaches it
-/// between steps and [`PartitionScan::finish`] gives it back.
-pub trait FrameObserver {
-    /// What [`observe`](Self::observe) fails with, and with it
-    /// [`PartitionScan::step`]: the frontend's own error type, so that a
-    /// failure of what it derives from the frames reaches it as it was
-    /// raised. A reader's error ([`enum@Error`]) converts into it.
-    type Error: From<Error>;
-
-    /// `packet` and its parsed `layers`, in the order
-    /// [`parse_packet`](crate::parse_packet) returns them (parsed with the
-    /// plan's scope).
-    ///
-    /// Called exactly once per frame, in capture order, also for a frame
-    /// that is shown to the scan several times because its rows did not fit
-    /// the sinks. An error stops the scan: [`PartitionScan::step`] returns
-    /// it, with the frame consumed.
-    fn observe(
-        &mut self,
-        packet: &PacketRef<'_>,
-        layers: &PacketLayers<'_, '_>,
-    ) -> Result<(), Self::Error>;
-
-    /// Whether the observer still needs frames once every routed output is
-    /// done. While it does, the scan does not report [`Step::Done`]. It is
-    /// asked at the start of each step, not per frame.
-    fn wants_frames(&self) -> bool {
-        true
-    }
-}
-
-/// The observer of a scan that has none.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct NoObserver;
-
-impl FrameObserver for NoObserver {
-    type Error = Error;
-
-    #[inline(always)]
-    fn observe(
-        &mut self,
-        _packet: &PacketRef<'_>,
-        _layers: &PacketLayers<'_, '_>,
-    ) -> Result<(), Error> {
-        Ok(())
-    }
-
-    #[inline(always)]
-    fn wants_frames(&self) -> bool {
-        false
-    }
-}
-
 /// One partition of a compiled scan, read step by step. What a step
 /// guarantees is written at the top of `scan/driver.rs`.
 ///
-/// The outputs it writes are the plan's per-packet outputs (what a
-/// [`Router`] routes): `frames`, the protocol tables and the fused joins.
-/// Stream tables are not built here yet; a frontend that has them builds
-/// them in its [`FrameObserver`], and compiles its plan with
-/// [`ScanPlan::compile_with_streams`](super::ScanPlan::compile_with_streams)
-/// to say so.
-pub struct PartitionScan<R: PacketReader, O: FrameObserver = NoObserver> {
+/// The outputs it writes are the plan's ([`CompiledScan::outputs`]):
+/// `frames`, the protocol tables and the fused joins packet by packet, and
+/// the stream tables when the partition ends.
+pub struct PartitionScan<R: PacketReader> {
     reader: R,
     plan: Arc<CompiledScan>,
     registry: Arc<ProtocolRegistry>,
     router: Router,
-    observer: O,
+    /// Stream reassembly, in a plan with stream tables, until the partition
+    /// ends.
+    analysis: Option<Box<StreamAnalysis>>,
+    /// What the analysis became: the stream tables' rows, being written.
+    writer: Option<Box<StreamWriter>>,
     /// Storage for the layers of the packet being routed, reused from one
     /// packet to the next.
     layers: ParseBuf,
-    /// The number of the last frame the observer saw (frames are numbered
-    /// from 1). A frame shown again has this number.
-    observed_frame: u64,
+    /// The number of the last frame that was parsed for the first time
+    /// (frames are numbered from 1). A frame shown again has this number.
+    seen_frame: u64,
     /// The plan has a frame predicate other than `all`.
     filtered: bool,
-    /// The frame predicate accepts no further frame of the partition.
+    /// No further packet is read: the partition ended, or the frame
+    /// predicate accepts no further frame of it.
     ended: bool,
     stats: ScanStats,
 }
@@ -239,35 +196,37 @@ impl<R: PacketReader> PartitionScan<R> {
     /// A scan of what `reader` delivers: a whole capture, or one range of
     /// it. `registry` must be the one `plan` was compiled for.
     pub fn new(reader: R, plan: Arc<CompiledScan>, registry: Arc<ProtocolRegistry>) -> Self {
-        Self::with_observer(reader, plan, registry, NoObserver)
-    }
-}
-
-impl<R: PacketReader, O: FrameObserver> PartitionScan<R, O> {
-    /// [`new`](PartitionScan::new), with an observer that is shown every
-    /// frame once.
-    pub fn with_observer(
-        reader: R,
-        plan: Arc<CompiledScan>,
-        registry: Arc<ProtocolRegistry>,
-        observer: O,
-    ) -> Self {
         let router = Router::new(&plan);
         let stats = ScanStats::new(plan.outputs().len());
         let filtered = !plan.frames().is_all();
         let ended = plan.frames().is_empty();
+        let analysis = plan
+            .requires_single_partition()
+            .then(|| Box::new(StreamAnalysis::new(None)));
         Self {
             reader,
             plan,
             registry,
             router,
-            observer,
+            analysis,
+            writer: None,
             layers: ParseBuf::new(),
-            observed_frame: 0,
+            seen_frame: 0,
             filtered,
             ended,
             stats,
         }
+    }
+
+    /// Decrypt TLS with `keylog` when building the plan's stream tables:
+    /// `tls_sessions.is_decrypted` and the rows of `http2` depend on it.
+    /// Nothing else does, and a scan without stream tables ignores it. To
+    /// be called before the first [`step`](Self::step).
+    pub fn with_keylog(mut self, keylog: &KeyLog) -> Self {
+        if let Some(analysis) = &mut self.analysis {
+            **analysis = StreamAnalysis::new(Some(keylog));
+        }
+        self
     }
 
     /// Read and route packets until an output must be taken
@@ -282,31 +241,27 @@ impl<R: PacketReader, O: FrameObserver> PartitionScan<R, O> {
     /// before the next call. When several outputs are waiting, each call
     /// returns one of them, before any packet is read.
     ///
-    /// An error is the reader's, as the observer's error type, or the
-    /// observer's own. The rows of packets consumed before it are in the
-    /// sinks and counted in [`stats`](PartitionScan::stats). Stepping again
-    /// is only meaningful when the reader says it can be read again: after a
-    /// read timeout ([`PacketReader::take_read_timeout`]) the next step
-    /// carries on where this one stopped. After any other reader error (a
-    /// malformed or truncated record, a failed read) or an observer error,
-    /// stop stepping the partition.
+    /// An error is the reader's or stream analysis's. The rows of packets
+    /// consumed before it are in the sinks and counted in
+    /// [`stats`](PartitionScan::stats). Stepping again is only meaningful
+    /// when the reader says it can be read again: after a read timeout
+    /// ([`PacketReader::take_read_timeout`]) the next step carries on where
+    /// this one stopped. After any other reader error (a malformed or
+    /// truncated record, a failed read) or an analysis error, stop
+    /// stepping the partition.
     ///
     /// # Panics
     ///
     /// If `sinks` is shorter than the outputs a frame has rows for.
     #[inline]
-    pub fn step<S: RowSink>(
-        &mut self,
-        sinks: &mut [S],
-        max_packets: usize,
-    ) -> Result<Step, O::Error> {
+    pub fn step<S: RowSink>(&mut self, sinks: &mut [S], max_packets: usize) -> Result<Step, Error> {
         if let Some(output) = self.router.take_flush() {
             return Ok(Step::Flush(output));
         }
         if self.ended {
-            return Ok(Step::End);
+            return Ok(self.end(sinks));
         }
-        if self.router.all_done() && !self.observer.wants_frames() {
+        if self.router.all_done() {
             return Ok(Step::Done);
         }
         if max_packets == 0 {
@@ -318,12 +273,13 @@ impl<R: PacketReader, O: FrameObserver> PartitionScan<R, O> {
             plan,
             registry,
             router,
-            observer,
+            analysis,
             layers,
-            observed_frame,
+            seen_frame,
             filtered,
             ended,
             stats,
+            ..
         } = self;
         let scope = plan.scope();
         let frames = plan.frames();
@@ -360,15 +316,17 @@ impl<R: PacketReader, O: FrameObserver> PartitionScan<R, O> {
             }
             // Per-packet link type is correct even for PCAPNG multi-interface.
             let layers = parse_packet(registry, packet.link_type, packet.data, scope, layers);
-            if packet.frame_number != *observed_frame {
+            if packet.frame_number != *seen_frame {
                 // The first time this frame is shown.
-                *observed_frame = packet.frame_number;
+                *seen_frame = packet.frame_number;
                 stats.min_ts_ns = stats.min_ts_ns.min(packet.timestamp_ns);
                 stats.max_ts_ns = stats.max_ts_ns.max(packet.timestamp_ns);
-                if let Err(error) = observer.observe(&packet, &layers) {
-                    consumed += 1;
-                    failed = Some(error);
-                    return ControlFlow::Break(Pause::After);
+                if let Some(analysis) = analysis {
+                    if let Err(error) = analysis.observe(&packet, &layers) {
+                        consumed += 1;
+                        failed = Some(error);
+                        return ControlFlow::Break(Pause::After);
+                    }
                 }
             }
             match router.route_frame(sinks, &packet, &layers) {
@@ -397,7 +355,7 @@ impl<R: PacketReader, O: FrameObserver> PartitionScan<R, O> {
             Ok(delivered) => delivered,
             Err(error) => {
                 stats.packets += consumed;
-                return Err(error.into());
+                return Err(error);
             }
         };
         stats.packets += delivered.consumed as u64;
@@ -407,10 +365,34 @@ impl<R: PacketReader, O: FrameObserver> PartitionScan<R, O> {
         if let Some(output) = router.take_flush() {
             return Ok(Step::Flush(output));
         }
-        if *ended || (delivered.consumed == 0 && delivered.paused.is_none()) {
-            return Ok(Step::End);
+        if delivered.consumed == 0 && delivered.paused.is_none() {
+            *ended = true;
+        }
+        if *ended {
+            return Ok(self.end(sinks));
         }
         Ok(Step::More)
+    }
+
+    /// No further packet is read. In a plan with stream tables their rows
+    /// are due now: write as many as fit.
+    #[cold]
+    fn end<S: RowSink>(&mut self, sinks: &mut [S]) -> Step {
+        if let Some(analysis) = self.analysis.take() {
+            let tables = analysis.finish(&self.plan);
+            self.writer = Some(Box::new(StreamWriter::new(tables)));
+        }
+        let Some(writer) = &mut self.writer else {
+            return Step::End;
+        };
+        let flush = writer.write(&self.plan, &mut self.router, sinks);
+        for (index, rows) in self.stats.rows.iter_mut().enumerate() {
+            *rows = self.router.rows(OutputId(index as u16));
+        }
+        match flush {
+            Some(output) => Step::Flush(output),
+            None => Step::End,
+        }
     }
 
     /// The consumer of `output` is gone: write nothing more to it. Rows its
@@ -441,31 +423,21 @@ impl<R: PacketReader, O: FrameObserver> PartitionScan<R, O> {
         &mut self.reader
     }
 
-    /// The scan's observer.
-    pub fn observer(&self) -> &O {
-        &self.observer
-    }
-
-    /// The scan's observer, between steps.
-    pub fn observer_mut(&mut self) -> &mut O {
-        &mut self.observer
-    }
-
     /// What was read and written so far, as of the last step.
     pub fn stats(&self) -> &ScanStats {
         &self.stats
     }
 
-    /// End the scan: its statistics and its observer.
-    pub fn finish(self) -> (ScanStats, O) {
-        (self.stats, self.observer)
+    /// End the scan: its statistics, and the reader it was given.
+    pub fn finish(self) -> (ScanStats, R) {
+        (self.stats, self.reader)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::io::{Delivered, PacketPosition};
+    use crate::io::{Delivered, PacketPosition, PacketRef};
     use crate::scan::testing::{Cell, RecordingSink};
     use crate::scan::{Catalog, FramePredicate, ScanPlan, TableScan};
     use std::ops::Bound;
@@ -617,17 +589,16 @@ mod tests {
         }
     }
 
-    /// A scan of `count` frames with a frame predicate and an observer.
+    /// A scan of `count` frames with a frame predicate.
     fn filtered(
         count: u8,
         tables: &[(&str, Option<u64>)],
         frames: FramePredicate,
-    ) -> PartitionScan<Frames, Seen> {
-        PartitionScan::with_observer(
+    ) -> PartitionScan<Frames> {
+        PartitionScan::new(
             Frames::new(count),
             plan_of(tables, frames),
             Arc::new(crate::default_registry()),
-            Seen::default(),
         )
     }
 
@@ -645,35 +616,6 @@ mod tests {
                 ref other => panic!("frame_number is {other:?}"),
             })
             .collect()
-    }
-
-    /// Counts what it is shown.
-    #[derive(Default)]
-    struct Seen {
-        frames: Vec<u64>,
-        fail_at: Option<u64>,
-        until: Option<u64>,
-    }
-
-    impl FrameObserver for Seen {
-        type Error = Error;
-
-        fn observe(
-            &mut self,
-            packet: &PacketRef<'_>,
-            _layers: &PacketLayers<'_, '_>,
-        ) -> Result<(), Error> {
-            self.frames.push(packet.frame_number);
-            if self.fail_at == Some(packet.frame_number) {
-                return Err(Error::Io(std::io::Error::other("observer")));
-            }
-            Ok(())
-        }
-
-        fn wants_frames(&self) -> bool {
-            self.until
-                .is_none_or(|until| self.frames.last().is_none_or(|last| *last < until))
-        }
     }
 
     fn scan(count: u8, tables: &[(&str, Option<u64>)]) -> PartitionScan<Frames> {
@@ -700,7 +642,7 @@ mod tests {
         assert_eq!(scan.step(&mut sinks, 2).unwrap(), Step::End);
         assert_eq!(scan.step(&mut sinks, 2).unwrap(), Step::End);
         assert_eq!(numbers(sinks[0].take_rows()), [1, 2, 3, 4, 5]);
-        let (stats, NoObserver) = scan.finish();
+        let (stats, _) = scan.finish();
         assert_eq!(stats.packets, 5);
         assert_eq!(stats.time_range_ns(), Some((1_000, 5_000)));
         assert_eq!(*stats.rows, [5]);
@@ -772,120 +714,6 @@ mod tests {
         assert_eq!(numbers(sinks[1].take_rows()), [1, 2]);
     }
 
-    /// The observer sees a frame once although the frame is shown to the
-    /// scan once per row that did not fit, and keeps the scan going after
-    /// the outputs are done for as long as it wants frames.
-    #[test]
-    fn the_observer_sees_each_frame_once() {
-        let observer = Seen {
-            until: Some(6),
-            ..Default::default()
-        };
-        let plan = plan(&[("frames", Some(4)), ("ethernet", Some(8))]);
-        let mut reader = Frames::new(0);
-        reader.frames = (0..9).map(tunnelled).collect();
-        let mut scan = PartitionScan::with_observer(
-            reader,
-            Arc::clone(&plan),
-            Arc::new(crate::default_registry()),
-            observer,
-        );
-        // A frame's second `ethernet` row does not fit: every frame that
-        // has rows is shown twice.
-        let mut sinks = sinks(&plan, Some(1));
-        let mut flushes = 0;
-        let last = loop {
-            match scan.step(&mut sinks, 1).unwrap() {
-                Step::Flush(OutputId(output)) => {
-                    sinks[usize::from(output)].take_rows();
-                    flushes += 1;
-                }
-                Step::More => {}
-                last => break last,
-            }
-        };
-        assert_eq!(last, Step::Done);
-        // Per frame: `frames`, and `ethernet` twice.
-        assert_eq!(flushes, 12);
-        assert_eq!(scan.observer().frames, [1, 2, 3, 4, 5, 6]);
-        let (stats, observer) = scan.finish();
-        assert_eq!(stats.packets, 6);
-        assert_eq!(*stats.rows, [4, 8]);
-        assert_eq!(observer.frames.len(), 6);
-    }
-
-    #[test]
-    fn an_observer_error_stops_the_step() {
-        let observer = Seen {
-            fail_at: Some(3),
-            ..Default::default()
-        };
-        let plan = plan(&[("frames", None)]);
-        let mut scan = PartitionScan::with_observer(
-            Frames::new(5),
-            Arc::clone(&plan),
-            Arc::new(crate::default_registry()),
-            observer,
-        );
-        let mut sinks = sinks(&plan, None);
-        let error = scan.step(&mut sinks, 100).unwrap_err();
-        assert!(error.to_string().contains("observer"), "{error}");
-        // The frame was consumed, and not routed.
-        assert_eq!(scan.stats().packets, 3);
-        assert_eq!(numbers(sinks[0].take_rows()), [1, 2]);
-    }
-
-    /// An observer fails with its own error type, and the step returns that
-    /// error as it was raised; a reader's error is converted into the type.
-    #[test]
-    fn a_step_fails_with_the_observer_s_error_type() {
-        #[derive(Debug, PartialEq)]
-        enum Failure {
-            Observer(u64),
-            Reader(String),
-        }
-        impl From<Error> for Failure {
-            fn from(error: Error) -> Self {
-                Failure::Reader(error.to_string())
-            }
-        }
-        struct FailsAt(u64);
-        impl FrameObserver for FailsAt {
-            type Error = Failure;
-
-            fn observe(
-                &mut self,
-                packet: &PacketRef<'_>,
-                _layers: &PacketLayers<'_, '_>,
-            ) -> Result<(), Failure> {
-                if packet.frame_number == self.0 {
-                    return Err(Failure::Observer(packet.frame_number));
-                }
-                Ok(())
-            }
-        }
-        let plan = plan(&[("frames", None)]);
-        let scan = |reader: Frames| {
-            PartitionScan::with_observer(
-                reader,
-                Arc::clone(&plan),
-                Arc::new(crate::default_registry()),
-                FailsAt(3),
-            )
-        };
-        let mut sinks = sinks(&plan, None);
-        assert_eq!(
-            scan(Frames::new(5)).step(&mut sinks, 100),
-            Err(Failure::Observer(3))
-        );
-        let mut reader = Frames::new(5);
-        reader.fail_before = Some(0);
-        assert!(matches!(
-            scan(reader).step(&mut sinks, 100),
-            Err(Failure::Reader(_))
-        ));
-    }
-
     /// A read error leaves the scan where it was: the next step carries on.
     #[test]
     fn a_step_can_be_retried_after_a_read_error() {
@@ -916,9 +744,9 @@ mod tests {
         assert_eq!(*scan.stats().rows, [2, 2]);
     }
 
-    /// A frame range gives the rows of exactly its frames, to every output
-    /// and to the observer; the frames before it are read and not parsed,
-    /// and nothing behind its last frame is read at all.
+    /// A frame range gives the rows of exactly its frames, to every
+    /// output; the frames before it are read and not parsed, and nothing
+    /// behind its last frame is read at all.
     #[test]
     fn a_frame_range_selects_frames_and_ends_the_scan() {
         let mut scan = filtered(
@@ -934,8 +762,7 @@ mod tests {
         // Frame 6 was never asked of the reader.
         assert_eq!(scan.reader().shown, 5);
         assert_eq!(scan.reader().position().frame_number, 5);
-        let (stats, seen) = scan.finish();
-        assert_eq!(seen.frames, [3, 4, 5]);
+        let (stats, _) = scan.finish();
         assert_eq!((stats.packets, stats.skipped), (5, 2));
         assert_eq!(stats.time_range_ns(), Some((3_000, 5_000)));
         assert_eq!(*stats.rows, [3, 3]);
@@ -977,8 +804,7 @@ mod tests {
         assert_eq!(scan.step(&mut sinks, 100).unwrap(), Step::End);
         assert_eq!(numbers(sinks[0].take_rows()), [1, 2]);
         assert_eq!(scan.reader().shown, 4);
-        let (stats, seen) = scan.finish();
-        assert_eq!(seen.frames, [1, 2]);
+        let (stats, _) = scan.finish();
         assert_eq!((stats.packets, stats.skipped), (4, 2));
         assert_eq!(stats.time_range_ns(), Some((1_000, 2_000)));
     }
@@ -997,8 +823,7 @@ mod tests {
         assert_eq!(scan.step(&mut sinks, 100).unwrap(), Step::End);
         assert_eq!(numbers(sinks[0].take_rows()), [2, 3]);
         assert_eq!(numbers(sinks[1].take_rows()), [2, 3]);
-        let (stats, seen) = scan.finish();
-        assert_eq!(seen.frames, [2, 3]);
+        let (stats, _) = scan.finish();
         assert_eq!((stats.packets, stats.skipped), (6, 4));
     }
 
@@ -1036,8 +861,7 @@ mod tests {
         assert_eq!(scan.step(&mut sinks, 100).unwrap(), Step::End);
         assert_eq!(sinks[0].rows(), 0);
         assert_eq!(scan.reader().position().frame_number, 3);
-        let (stats, seen) = scan.finish();
-        assert!(seen.frames.is_empty());
+        let (stats, _) = scan.finish();
         assert_eq!((stats.packets, stats.skipped), (0, 0));
     }
 
@@ -1106,8 +930,7 @@ mod tests {
         rows.extend(numbers(sinks[0].take_rows()));
         assert_eq!(rows, [2, 2, 3, 3]);
         assert_eq!(scan.reader().shown, 3);
-        let (stats, seen) = scan.finish();
-        assert_eq!(seen.frames, [2, 3]);
+        let (stats, _) = scan.finish();
         assert_eq!((stats.packets, stats.skipped), (3, 1));
     }
 }
