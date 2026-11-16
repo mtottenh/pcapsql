@@ -1408,7 +1408,7 @@ fn two_scans_of_one_capture_with_different_filters_keep_their_own_rows() -> Resu
 }
 
 #[test]
-fn a_filter_that_ends_a_read_early_does_not_find_the_capture_truncated() -> Result<()> {
+fn a_filter_that_ends_a_read_early_finds_the_capture_truncated_only_when_strict() -> Result<()> {
     let connection = connect()?;
     let fixture = Fixture::new();
     execute(&connection, "CALL enable_logging(level = 'warning')");
@@ -1425,42 +1425,60 @@ fn a_filter_that_ends_a_read_early_does_not_find_the_capture_truncated() -> Resu
         execute(&connection, "CALL truncate_duckdb_logs()");
         count.parse().unwrap()
     };
+    let truncated = |sql: &str| {
+        let error = rows(&connection, sql).expect_err(sql);
+        assert!(error.message.contains("is truncated"), "{sql}: {error}");
+        assert!(error.message.contains("frame 2999,"), "{sql}: {error}");
+    };
     pushdown(&connection, true);
 
-    // One partition: like a LIMIT, a frame bound that ends the read before the broken tail
-    // reports nothing, strict or not; a filter that reads to the end does.
-    unpartitioned(&connection, 4);
-    for path in [&plain, &gz] {
-        for strict in ["", ", strict := true"] {
-            let sql = format!(
-                "SELECT count(*) FROM read_udp('{path}'{strict}) WHERE frame_number <= 100"
-            );
+    // Read as one partition: on one thread, on four with the parallel scan off, and the
+    // compressed capture on four threads with it on. Like a LIMIT, a frame bound that ends the
+    // read before the broken tail reports nothing; a filter that reads to the end does. A
+    // strict scan is about the whole capture: it reads on to the end and fails, whatever the
+    // bound.
+    let one_partition: [(&dyn Fn(), &[&String]); 3] = [
+        (&|| partitioned(&connection, 1, 500), &[&plain, &gz]),
+        (&|| unpartitioned(&connection, 4), &[&plain, &gz]),
+        (&|| partitioned(&connection, 4, 500), &[&gz]),
+    ];
+    for (set_up, paths) in one_partition {
+        set_up();
+        for path in paths {
+            let sql = format!("SELECT count(*) FROM read_udp('{path}') WHERE frame_number <= 100");
             assert_eq!(value(&connection, &sql)?, "100", "{sql}");
             assert_eq!(warnings(), 0, "{sql}");
+            let to_the_end =
+                format!("SELECT count(*) FROM read_udp('{path}') WHERE frame_number > 100");
+            assert_eq!(value(&connection, &to_the_end)?, "2899");
+            assert_eq!(warnings(), 1);
+            for filter in [
+                "frame_number <= 100",
+                "frame_number > 100",
+                "frame_number = 1",
+            ] {
+                truncated(&format!(
+                    "SELECT count(*) FROM read_udp('{path}', strict := true) WHERE {filter}"
+                ));
+            }
         }
-        let to_the_end =
-            format!("SELECT count(*) FROM read_udp('{path}') WHERE frame_number > 100");
-        assert_eq!(value(&connection, &to_the_end)?, "2899");
-        assert_eq!(warnings(), 1);
-        let strict = format!(
-            "SELECT count(*) FROM read_udp('{path}', strict := true) WHERE frame_number > 100"
-        );
-        let error = rows(&connection, &strict).expect_err(&strict);
-        assert!(error.message.contains("is truncated"), "{error}");
     }
 
-    // Split: a strict scan looks at the tail when it starts, whatever the filter leaves of
-    // the capture, as it does whatever a LIMIT leaves.
+    // Split on four threads: a strict scan looks at the tail when it starts, whatever the
+    // filter leaves of the capture, as it does whatever a LIMIT leaves. The same errors.
     partitioned(&connection, 4, 500);
     let sql = format!("SELECT count(*) FROM read_udp('{plain}') WHERE frame_number <= 100");
     assert_eq!(value(&connection, &sql)?, "100");
     assert_eq!(warnings(), 0);
-    let strict = format!(
-        "SELECT count(*) FROM read_udp('{plain}', strict := true) WHERE frame_number <= 100"
-    );
-    let error = rows(&connection, &strict).expect_err(&strict);
-    assert!(error.message.contains("is truncated"), "{error}");
-    assert!(error.message.contains("frame 2999,"), "{error}");
+    for filter in [
+        "frame_number <= 100",
+        "frame_number > 100",
+        "frame_number = 1",
+    ] {
+        truncated(&format!(
+            "SELECT count(*) FROM read_udp('{plain}', strict := true) WHERE {filter}"
+        ));
+    }
     Ok(())
 }
 

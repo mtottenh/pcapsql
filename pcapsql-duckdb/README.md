@@ -258,7 +258,8 @@ What is saved:
 - A capture read on one thread (compressed, remote, small, or `threads = 1`)
   is read from its start in any case; the read ends after the last frame an
   upper bound on `frame_number` admits. `WHERE frame_number <= 1000` on a
-  20 GB `.pcap.gz` reads a thousand packets. A bound on `timestamp` does not
+  20 GB `.pcap.gz` reads a thousand packets (not with `strict := true`: see
+  "Truncated captures"). A bound on `timestamp` does not
   end the read (timestamps need not ascend), but the packets outside it are
   not parsed.
 - A capture read in partitions (below) is only read where the filter can
@@ -291,11 +292,18 @@ SELECT count(*) FROM read_frames('still-being-written.pcap', strict := true);
 
 A query that stops early (a `LIMIT`, or a filter with an upper bound on
 `frame_number`, which ends the read) may never get to the end of the capture.
-A scan on one thread then reports nothing, with or without `strict`. A scan in
-partitions (below) has a worker at the end of the capture from the start: the
-warning may or may not be logged, and with `strict := true` the end of the
-capture is checked when the scan starts, so the query fails whatever it goes
-on to read.
+Without `strict`, a scan on one thread then reports nothing, and a scan in
+partitions (below), which has a worker at the end of the capture from the
+start, may or may not log the warning.
+
+With `strict := true` the whole capture must be intact, whatever the query
+reads of it, on any number of threads: a scan in partitions checks the end of
+the capture when it starts, and a scan on one thread whose read an upper bound
+on `frame_number` ended reads on to the end of the file (without parsing) to
+check it. Either way the query fails. That makes `WHERE frame_number <= 1000`
+with `strict := true` read the whole capture. A `LIMIT` is the exception: a
+scan on one thread that DuckDB stops calling once it has its rows does not
+look further, so it returns them.
 
 With several files each is treated on its own: the warning names the file,
 there is one per truncated file, and the files after it are read in full.

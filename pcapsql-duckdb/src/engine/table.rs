@@ -114,7 +114,7 @@
 //! With several files the predicate applies to each file, whose frames are numbered from 1.
 //!
 //! A read that ends early does not get to the end of the capture, so it does not find a
-//! capture truncated, as with `LIMIT` (see below).
+//! capture truncated, as with `LIMIT`, unless the scan is strict (see below).
 //!
 //! # Row order
 //!
@@ -148,12 +148,20 @@
 //! per file; with `strict := true` the query fails instead. With several files each is treated
 //! on its own: the files after a truncated one are read as if it were not there.
 //!
-//! A scan that is not run to the end of the capture (a `LIMIT`) may not get to the broken tail.
-//! A scan of one partition then reports nothing, strict or not. With several partitions the
-//! worker at the end of the capture gets there whenever it does, before or after the others
-//! have filled the `LIMIT`: the warning may or may not be logged, and so that a strict scan
-//! does not fail by chance, a strict scan of several partitions reads the tail of the capture
-//! when it starts and fails there, whatever the query goes on to read.
+//! A scan that is not run to the end of the capture (a `LIMIT`, or an upper bound on
+//! `frame_number`, which ends the read) may not get to the broken tail. Without `strict`, a
+//! scan of one partition then reports nothing; with several partitions the worker at the end
+//! of the capture gets there whenever it does, before or after the others have filled the
+//! `LIMIT`, so the warning may or may not be logged.
+//!
+//! `strict := true` is about the whole capture, whatever the query reads of it, so that
+//! whether a strict scan fails does not depend on the threads or the file's size. A strict
+//! scan of several partitions reads the tail of the capture when it starts and fails there.
+//! A strict scan of one partition whose read a frame bound ended reads on to the end of the
+//! file (`read_to_the_end`: the record headers, nothing parsed) and fails there. That costs
+//! the rest of the file, which is what the split scan's index pass costs too. A `LIMIT` is the
+//! one exception: DuckDB stops calling a scan once it has its rows, so a strict scan of one
+//! partition under a `LIMIT` that ends before the tail returns its rows.
 
 use std::io::{self, Read};
 use std::num::NonZeroUsize;
@@ -736,7 +744,14 @@ impl TableFunctionCallbacks for PcapScan {
                     }
                 }
                 Step::End => {
-                    let finished = worker.scanning.take().expect("the scan was just stepped");
+                    let mut finished = worker.scanning.take().expect("the scan was just stepped");
+                    if bound.strict && shared.files[finished.file].index.is_none() {
+                        // A strict scan is about the whole capture. One read as one partition
+                        // is read on to its end when a frame bound ended the scan before it,
+                        // as a split one looks at its tail when it starts.
+                        self.read_to_the_end(bound, &mut finished)
+                            .map_err(|error| shared.fail(error))?;
+                    }
                     self.end_of_partition(context, bound, shared, worker, &finished)
                         .map_err(|error| shared.fail(error))?;
                 }
@@ -999,6 +1014,23 @@ impl PcapScan {
             ranges,
             index: Some(index),
         })
+    }
+
+    /// Read the rest of a scan's file, packet by packet and parsing nothing, so that its reader
+    /// knows whether the capture ends inside a record. A scan that got to the end reads
+    /// nothing more.
+    fn read_to_the_end(&self, bound: &Bound, scanning: &mut Scanning) -> Result<()> {
+        let reader = scanning.scan.reader_mut();
+        loop {
+            match reader.process_packets(PACKETS_PER_STEP, |_| Ok(())) {
+                Ok(0) => return Ok(()),
+                Ok(_) => {}
+                Err(error) => {
+                    let frame = reader.position().frame_number;
+                    return Err(self.read_error(&bound.files[scanning.file], frame, &error));
+                }
+            }
+        }
     }
 
     /// Whether the capture ends inside a record: the number of its last complete frame if so.

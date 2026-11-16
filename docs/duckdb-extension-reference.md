@@ -84,7 +84,7 @@ The stream tables of the pcapsql command-line tool (`tcp_connections`,
 |---|---|---|---|---|
 | `files` | `VARCHAR` or `VARCHAR[]` | required | all | The only positional argument: a path, a glob pattern (`*`, `?`, `[...]`, `**`), or a list of paths and patterns. Files are opened through DuckDB's file system |
 | `protocol` | `VARCHAR` | `'frames'` | `read_pcap` | The table to read, in any case. An unknown name is an error |
-| `strict` | `BOOLEAN` | `false` | all | `true` makes a capture that ends inside a record an error. By default the complete packets are returned and a warning is logged |
+| `strict` | `BOOLEAN` | `false` | all | `true` makes a capture that ends inside a record an error, also when a `frame_number` filter ends the read before the end (not a `LIMIT` on one thread). By default the complete packets are returned and a warning is logged |
 | `filename` | `BOOLEAN` | `false` | all | `true` adds a `filename VARCHAR` column after the table's columns, with the path of the file each row is from |
 
 ```sql

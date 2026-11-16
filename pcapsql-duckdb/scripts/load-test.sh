@@ -60,7 +60,6 @@ SELECT count(*), sum(length) FROM '$captures/dns.cap';
 SELECT count(*) FROM '$scratch/*.cap.gz' WHERE length > 100;
 SELECT current_setting('pcapsql_filter_pushdown'), count(*), min(frame_number), max(frame_number) FROM read_frames('$scratch/dns.cap.gz') WHERE frame_number > 4 AND frame_number < 10;
 SELECT frame_number FROM read_dns('$captures/dns.cap') WHERE timestamp >= TIMESTAMP '2005-03-30 08:47:50' AND timestamp < TIMESTAMP '2005-03-30 08:48:00';
-SELECT count(*) FROM read_udp('$scratch/cut.cap', strict := true) WHERE frame_number <= 10;
 "
 expected="pcapsql,true,$extension_version
 28
@@ -96,8 +95,7 @@ true,5,5,9
 3
 4
 5
-6
-10"
+6"
 
 actual=$("$duckdb" -unsigned -csv -noheader -c "$sql")
 if [ "$actual" != "$expected" ]; then
@@ -117,17 +115,20 @@ case $truncated in
     exit 1
     ;;
 esac
-if truncated=$("$duckdb" -unsigned -csv -noheader -c "LOAD '$extension'; SELECT count(*) FROM read_udp('$scratch/cut.cap', strict := true);" 2>&1); then
-    echo "load-test: FAILED: a truncated capture was read with strict := true: $truncated" >&2
-    exit 1
-fi
-case $truncated in
-*"is truncated"*) echo "load-test: strict: ${truncated%%$'\n'*}" ;;
-*)
-    echo "load-test: FAILED: unexpected error for a truncated capture: $truncated" >&2
-    exit 1
-    ;;
-esac
+# strict is about the whole capture, also when a frame bound ends the read before its end.
+for where in "" " WHERE frame_number <= 10"; do
+    if truncated=$("$duckdb" -unsigned -csv -noheader -c "LOAD '$extension'; SELECT count(*) FROM read_udp('$scratch/cut.cap', strict := true)$where;" 2>&1); then
+        echo "load-test: FAILED: a truncated capture was read with strict := true$where: $truncated" >&2
+        exit 1
+    fi
+    case $truncated in
+    *"is truncated"*) echo "load-test: strict$where: ${truncated%%$'\n'*}" ;;
+    *)
+        echo "load-test: FAILED: unexpected error for a truncated capture$where: $truncated" >&2
+        exit 1
+        ;;
+    esac
+done
 # A pattern that matches nothing, and a file among several that is not a capture, are errors
 # that name it.
 for sql in "SELECT count(*) FROM read_frames('$scratch/*.pcapng')" \
