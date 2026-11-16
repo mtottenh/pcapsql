@@ -13,22 +13,17 @@ use pcapsql_core::scan::{
 
 use super::types;
 
-/// The tables of the catalogue this engine reads: `frames` and the protocol tables, in
-/// catalogue order.
-///
-/// The stream tables (`tcp_connections`, `tls_sessions`, `http_messages`, `http2`) are in the
-/// catalogue but are built by stream analysis, which the extension does not run yet.
+/// The tables of the catalogue this engine reads, in catalogue order: all of them. That is
+/// `frames`, the protocol tables, and the stream tables (`tcp_connections`, `tls_sessions`,
+/// `http_messages`, `http2`), which the scan layer builds from the reassembled TCP streams of
+/// a capture rather than frame by frame (see [`Relation::is_stream`]).
 pub(super) fn scan_tables() -> impl Iterator<Item = (TableId, &'static TableDef)> {
-    Catalog::builtin()
-        .tables()
-        .filter(|(_, table)| !table.is_stream())
+    Catalog::builtin().tables()
 }
 
-/// The table `name`, if the engine reads it (see [`scan_tables`]).
+/// The table `name` of the catalogue.
 pub(super) fn scan_table(name: &str) -> Option<(TableId, &'static TableDef)> {
-    Catalog::builtin()
-        .table(name)
-        .filter(|(_, table)| !table.is_stream())
+    Catalog::builtin().table(name)
 }
 
 /// The columns of `table` this engine exposes, in table order: every column of the catalogue,
@@ -94,6 +89,16 @@ impl Relation {
         }
     }
 
+    /// Whether the relation is a stream table: its rows are what the reassembled TCP streams
+    /// of a whole capture hold when it ends, so a scan of it reads each capture in order as
+    /// one partition, takes no frame predicate, and is what a key log is for.
+    pub(super) fn is_stream(self) -> bool {
+        match self {
+            Relation::Table(table) => Catalog::builtin().get(table).is_stream(),
+            Relation::View(_) => false,
+        }
+    }
+
     /// The columns a scan of the relation returns, in order: a table's exposed columns, a
     /// view's columns.
     pub(super) fn columns(self) -> Vec<Declared> {
@@ -103,6 +108,9 @@ impl Relation {
                     name: column.name,
                     kind: types::column_kind(column),
                     nullable: column.nullable,
+                    // None in a stream table: its `frame_number` is worked out by stream
+                    // analysis (`ColumnSource::Stream`), a value of the row that says
+                    // nothing about which frames to read.
                     frame: match column.source {
                         ColumnSource::FrameNumber => Some(FrameColumn::Number),
                         ColumnSource::Timestamp => Some(FrameColumn::Timestamp),
@@ -133,6 +141,10 @@ impl Relation {
     /// order) over the frames `frames` accepts. Either way it has one output: the table's
     /// rows, or the view's joined rows.
     ///
+    /// A stream table is built from every frame, so its plan compiles only with the
+    /// predicate that accepts them all, which is the only one a scan of it ever has: none
+    /// of its columns is a [`FrameColumn`].
+    ///
     /// # Panics
     ///
     /// If an index is not a column of the relation.
@@ -148,7 +160,12 @@ impl Relation {
                     .map(|(id, _)| id)
                     .collect();
                 let columns = columns.iter().map(|&index| exposed[index]).collect();
-                plan.tables.push(TableScan::new(table, columns));
+                let scan = TableScan::new(table, columns);
+                if self.is_stream() {
+                    plan.streams.push(scan);
+                } else {
+                    plan.tables.push(scan);
+                }
             }
             Relation::View(view) => plan.fused.push(view.scan(columns)),
         }

@@ -32,6 +32,7 @@ mod rng;
 mod spec;
 #[cfg(test)]
 mod tests;
+pub mod tls;
 
 pub use fixtures::{jumbo_straddle_capture, oversized_frame_capture, truncated_capture};
 pub use legacy::{legacy_pcap, GenPacket, LegacyVariant};

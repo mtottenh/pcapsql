@@ -371,6 +371,12 @@ fn print_tls_status(keylog: &Option<Arc<KeyLog>>) {
             eprintln!("TLS decryption: enabled");
             eprintln!("  Keylog sessions: {}", kl.session_count());
             eprintln!("  Keylog entries:  {}", kl.entry_count());
+            if kl.skipped_count() > 0 {
+                eprintln!(
+                    "  Keylog entries skipped (labels not used for decryption): {}",
+                    kl.skipped_count()
+                );
+            }
             eprintln!();
             eprintln!("  Note: SSLKEYLOGFILE contains sensitive key material.");
             eprintln!("        Do not share or commit these files.");

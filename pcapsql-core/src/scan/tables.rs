@@ -966,7 +966,8 @@ fn http2() -> Vec<ColumnDef> {
     vec![
         // -- Frame information
         // Reassembled TCP connection the frame belongs to
-        stream("connection_id", U64),
+        // (`tcp_connections.connection_id`)
+        stream("connection_id", U64).required(),
         // HTTP/2 frame type (DATA, HEADERS, SETTINGS, etc.)
         stream("frame_type", Str),
         // HTTP/2 stream identifier (0 for connection-level frames)

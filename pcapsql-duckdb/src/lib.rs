@@ -15,6 +15,7 @@
 //! SELECT filename, count(*) FROM read_dns(['a.pcap', 'b/*.pcapng'], filename := true) GROUP BY ALL;
 //! SELECT count(*) FROM 'capture.pcap' WHERE frame_number <= 1000;
 //! SELECT timestamp, ip4_to_string(src_ip_v4), dst_port FROM read_tcp_packets('capture.pcap');
+//! SELECT method, path, status FROM read_http2('capture.pcap', keylog := 'keys.log');
 //! SELECT * FROM pcap_protocols();          -- name, description, field_count, kind
 //! SELECT * FROM pcap_views();              -- name, description, protocol, column_count
 //! SELECT * FROM pcap_schema('tcp');        -- column_name, column_type, nullable
@@ -24,8 +25,9 @@
 //! SELECT format_mac(mac('aabbccddeeff'));  -- aa:bb:cc:dd:ee:ff
 //! ```
 //!
-//! That is the scan functions (`read_pcap`, one `read_<table>` per table and one
-//! `read_<proto>_packets` per packets view), `pcap_protocols()`, `pcap_views()` and
+//! That is the scan functions (`read_pcap`, one `read_<table>` per table, the four stream
+//! tables among them, and one `read_<proto>_packets` per packets view), `pcap_protocols()`,
+//! `pcap_views()` and
 //! `pcap_schema()`, the sixteen scalar functions and the six `format_*` macros; the README
 //! lists them. None of them has logic of its own. The scan functions run the shared scan layer,
 //! `pcapsql_core::scan`, which the DataFusion engine runs too: the tables and columns are those

@@ -105,7 +105,8 @@ Automatic parsing of tunneled traffic with inner protocol extraction:
 
 ### TLS Decryption
 Decrypt TLS traffic using SSLKEYLOGFILE (NSS format):
-- TLS 1.2 (`CLIENT_RANDOM`) and TLS 1.3 (traffic secrets)
+- TLS 1.2 (`CLIENT_RANDOM`) and TLS 1.3 (traffic secrets); entries with other
+  labels (e.g. `ECH_SECRET`) are skipped, as in Wireshark
 - AES-128-GCM, AES-256-GCM, ChaCha20-Poly1305
 - SNI and ALPN extraction
 
@@ -548,9 +549,13 @@ What it offers:
 - Sixteen scalar functions and six macros for addresses, TCP flags and
   protocol numbers (`ip4_to_string`, `ip_in_cidr`, `format_mac`, ...).
 
-What it does not have yet: the stream tables (`tcp_connections`,
-`tls_sessions`, `http_messages`, `http2`), TLS decryption, and the SQL
-functions of the command-line tool beyond those sixteen.
+- The stream tables (`read_tcp_connections`, `read_tls_sessions`,
+  `read_http_messages`, `read_http2`), and TLS decryption with a key log:
+  `read_http2('capture.pcap', keylog := 'keys.log')`, or
+  `SET pcapsql_keylog = 'keys.log'`.
+
+What it does not have yet: the SQL functions of the command-line tool beyond
+those sixteen.
 
 **Requirements.** DuckDB 2.0.0, on Linux (x86-64, arm64) or macOS (arm64).
 The extension uses DuckDB's C API v2, which is not stable yet, so a build

@@ -43,6 +43,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reference in `docs/duckdb-extension-reference.md`.
 - DuckDB extension: `read_<protocol>_packets(files)` for each of the 21
   `*_packets` views, and `pcap_views()` to list them.
+- DuckDB extension: `read_tcp_connections`, `read_tls_sessions`,
+  `read_http_messages` and `read_http2`.
+- DuckDB extension: TLS decryption with a key log (`SSLKEYLOGFILE` format).
+  Use the `keylog := 'path'` parameter or the `pcapsql_keylog` setting.
 
 ### Changed
 
@@ -127,6 +131,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A streaming query without `ORDER BY` could return rows out of capture
   order.
 - `--filter` failed when the query contained non-ASCII text.
+- `http2.connection_id` was always NULL. It is now the id of the TCP
+  connection, so it joins with `tcp_connections`.
+- With a key log, `tls_sessions.version` showed `TLS 1.2` for a TLS 1.3
+  session.
 
 ## [0.4.1] - 2026-10-24
 
