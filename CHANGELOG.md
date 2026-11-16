@@ -118,6 +118,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `pcapsql-datafusion`: breaking change. The parse pass functions, for
   example `run_shared_parse`, take a `PassOptions` value. The
   `query::stream_tables` module and `NormalizedBatchSet` are removed.
+- Performance (CLI): writing fixed-width columns to Arrow uses 4% to 12%
+  fewer instructions per packet.
 
 ### Removed
 
