@@ -78,6 +78,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   string keys. `ParseContext::hint`, `insert_hint` and `set_hint` take a
   `HintKey`. `ParseContext.hints` is a `Hints` value. `HintEntry` is
   removed.
+- The CLI error for a failed stream reassembly no longer starts with
+  `I/O error:`.
 
 ### Removed
 
