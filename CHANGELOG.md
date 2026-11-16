@@ -19,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   columns, without Arrow types. The `scan` module is not yet a stable API.
 - `pcapsql-core`: the logic of the SQL scalar functions (protocol names,
   TCP flags, IP and MAC addresses, CIDR, hex) is in `pcapsql_core::format`.
+- `pcapsql-core`: `scan::ScanPlan` and `scan::PartitionScan` run a scan of
+  a capture and write the rows to any `scan::RowSink`. The CLI now uses
+  them. Query results do not change.
 
 ## [0.4.1] - 2026-10-24
 
