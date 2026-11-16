@@ -291,12 +291,13 @@ the frame numbers after them, with no error, for a query that does not read
 the changed part to its end. The cache holds at most 1,024 indexes and
 about 64 MiB, least recently used out, one cache per database.
 
-Because the pass is on one thread, a file of several is split only for its
-share of the threads (its share of the bytes of the files that can be split,
-rounded: files of one size on as many threads are not split, and a
-compressed or remote file takes no share), and with an upper bound on
-`frame_number` the pass ends at the bound; that index is not kept. A kept
-index is cut at such a bound.
+A file whose index is kept is split for all the threads, and a kept index is
+cut at an upper bound on `frame_number`. A file whose index must be built is
+split only for its share of the threads, because the pass is on one thread
+(its share of the bytes of the files that can be split, rounded: files of one
+size on as many threads are not split, and a compressed or remote file takes
+no share), and with an upper bound on `frame_number` the pass ends at the
+bound; that index is not kept.
 
 ### 6.5 Filter pushdown
 

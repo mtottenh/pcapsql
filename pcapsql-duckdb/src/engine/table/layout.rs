@@ -152,23 +152,12 @@ impl PcapScan {
             cheap_min_bytes: settings.min_file_size,
             ..PartitionPolicy::default()
         };
-        if partition_target(SeekCost::Cheap, size, None, settings.threads, &policy) <= 1 {
+        let all = partition_target(SeekCost::Cheap, size, None, settings.threads, &policy);
+        if all <= 1 {
             return Ok(Layout::sequential(format_args!(
                 "{size} bytes is less than {} = {}",
                 settings::PARALLEL_MIN_FILE_SIZE,
                 settings.min_file_size
-            )));
-        }
-        // The pass below reads the whole file on this one thread before any worker starts, so
-        // it is only worth its time where the threads would otherwise have nothing to do: the
-        // files of a scan are partitions already, and a file is split for its share of the
-        // threads only.
-        let threads = thread_share(settings.threads, size, scan_bytes);
-        let want = partition_target(SeekCost::Cheap, size, None, threads, &policy);
-        if want <= 1 {
-            return Ok(Layout::sequential(format_args!(
-                "the other files of the scan keep DuckDB's {} threads busy",
-                settings.threads
             )));
         }
 
@@ -178,7 +167,8 @@ impl PcapScan {
         let last_frame = if strict { None } else { frames.last_frame() };
 
         // The index an earlier scan built, if the file still looks like the one it was built
-        // from (the `index_cache` module). With a bound the index is cut there, so the
+        // from (the `index_cache` module). Without the pass a split costs nothing up front, so
+        // the file is split for all the threads. With a bound the index is cut there, so the
         // partitions are those of the frames the scan reads, as they would be with the pass.
         // `fingerprint`: the file's before the pass, to keep the index with.
         let mut fingerprint = None;
@@ -191,7 +181,7 @@ impl PcapScan {
                 let planned = first_frames(&cached.index, last_frame);
                 let usable = now.and_then(|now| cached.check_file(&now)).and_then(|()| {
                     // The records the partitions will start and end at.
-                    let ranges = plan_ranges(Some(&planned), want, frames);
+                    let ranges = plan_ranges(Some(&planned), all, frames);
                     cached.check_records(&mut file, relied_on(&planned, &ranges))
                 });
                 match usable {
@@ -200,7 +190,7 @@ impl PcapScan {
                             &mut file,
                             path,
                             planned,
-                            want,
+                            all,
                             strict,
                             frames,
                             Source::Cache,
@@ -212,6 +202,19 @@ impl PcapScan {
                     }
                 }
             }
+        }
+
+        // The pass below reads the whole file on this one thread before any worker starts, so
+        // it is only worth its time where the threads would otherwise have nothing to do: the
+        // files of a scan are partitions already, and a file is split for its share of the
+        // threads only.
+        let threads = thread_share(settings.threads, size, scan_bytes);
+        let want = partition_target(SeekCost::Cheap, size, None, threads, &policy);
+        if want <= 1 {
+            return Ok(Layout::sequential(format_args!(
+                "the other files of the scan keep DuckDB's {} threads busy",
+                settings.threads
+            )));
         }
 
         if settings.index_cache && fingerprint.is_none() {

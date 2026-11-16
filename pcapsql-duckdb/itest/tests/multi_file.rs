@@ -409,8 +409,8 @@ fn work_is_spread_across_files_and_within_them() -> Result<()> {
 
     // Files that are a thread's worth each are the partitions: none is split, so none is
     // read once for its record boundaries before the scan. With fewer files than threads
-    // each is split for its share. These are the notes of scans that build the index, so the
-    // index the scans above kept is not used here.
+    // each is split for its share. That is the rule for a file whose index is built for the
+    // scan, so the index the scans above kept is not used here.
     set(&connection, "pcapsql_index_cache", false);
     let layouts_of = |files: &str| -> Result<Vec<String>> {
         logged(&connection, "DEBUG");
@@ -443,6 +443,14 @@ fn work_is_spread_across_files_and_within_them() -> Result<()> {
     assert_eq!(
         layouts_of(&list(&[large_path.as_str()]))?,
         ["4 (of 4000 frames, cut at checkpoints 1000 frames apart)"]
+    );
+    // With the index kept there is no pass to save, and every file is split for all the
+    // threads.
+    set(&connection, "pcapsql_index_cache", true);
+    assert_eq!(
+        layouts_of(&list(&[large_path.as_str(); 4]))?,
+        ["4 (of 4000 frames, cut at checkpoints 1000 frames apart; index kept from an earlier \
+          scan)"; 4]
     );
     Ok(())
 }

@@ -704,7 +704,8 @@ When the index must be built:
   bytes of the files of the call that can be split, rounded (a compressed or
   remote file is read on one thread and takes no share). Four captures of one
   size on four threads are read one per thread and none is split; a large
-  capture beside small ones is split for nearly all the threads.
+  capture beside small ones is split for nearly all the threads. A capture
+  whose index is kept is split for all the threads.
 - With an upper bound on `frame_number` in the `WHERE` clause the pass ends
   at the last frame the bound admits (unless `strict := true`, which looks at
   the end of the capture).
@@ -720,8 +721,9 @@ When the index must be built:
 
 The index of a capture that a scan split is kept in memory for the later
 scans of that capture in the same database, by any scan function. A later
-scan splits the capture without reading it first. With an upper bound on
-`frame_number` it uses the part of the index up to the bound.
+scan splits the capture for all of DuckDB's threads, without reading it
+first. With an upper bound on `frame_number` it uses the part of the index
+up to the bound.
 
 - An index is found by the path as the scan opened it (as written, or as a
   pattern expanded to) and by `pcapsql_index_stride`. Another spelling of the

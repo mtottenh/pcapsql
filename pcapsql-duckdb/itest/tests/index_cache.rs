@@ -548,6 +548,69 @@ fn an_index_built_to_a_frame_bound_is_not_kept() -> Result<()> {
     Ok(())
 }
 
+/// Files whose indexes are kept are split for all of DuckDB's threads, since no pass is run
+/// for them; a file whose index is built is split for its share of the threads, as before.
+#[test]
+fn files_whose_indexes_are_kept_are_split_for_all_the_threads() -> Result<()> {
+    let fixture = Fixture::new();
+    let capture = golden::legacy(mixed_frames(0, FRAMES));
+    let paths: Vec<String> = ["a", "b", "c", "d"]
+        .iter()
+        .map(|name| fixture.write(&format!("{name}.pcap"), &capture))
+        .collect();
+    let list = format!(
+        "[{}]",
+        paths
+            .iter()
+            .map(|path| format!("'{path}'"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let (columns, one) = reference_rows(&capture, "udp");
+    let all: Vec<Vec<Cell>> = (0..4).flat_map(|_| one.iter().cloned()).collect();
+    let select = format!("SELECT * FROM read_udp({list})");
+    let busy = "1 (the other files of the scan keep DuckDB's 4 threads busy)".to_owned();
+    let kept = format!("4 (of {FRAMES} frames, cut at checkpoints 500 frames apart{KEPT}");
+
+    let connection = logging();
+    partitioned(&connection, 4, STRIDE);
+    // Four files of one size on four threads: none is split, so none is indexed, and nothing
+    // is kept.
+    for _ in 0..2 {
+        assert_cells(&connection, &select, &columns, &all);
+        assert_eq!(notes(&connection), vec![busy.clone(); 4]);
+    }
+    // Two of them on their own: split, and their indexes kept.
+    for path in &paths[..2] {
+        value(
+            &connection,
+            &format!("SELECT count(*) FROM read_udp('{path}')"),
+        )?;
+        assert!(!note(&connection).ends_with(KEPT));
+    }
+    assert_cells(&connection, &select, &columns, &all);
+    assert_eq!(
+        notes(&connection),
+        [kept.clone(), kept.clone(), busy.clone(), busy]
+    );
+    for path in &paths[2..] {
+        value(
+            &connection,
+            &format!("SELECT count(*) FROM read_udp('{path}')"),
+        )?;
+        notes(&connection);
+    }
+    for threads in [2, 4] {
+        set(&connection, "threads", threads);
+        assert_cells(&connection, &select, &columns, &all);
+        assert_eq!(
+            notes(&connection),
+            vec![kept.replacen('4', &threads.to_string(), 1); 4]
+        );
+    }
+    Ok(())
+}
+
 /// A scan with a filter on `frame_number` or `timestamp` reads the same partitions, and gets
 /// the same rows, from a kept index as from one it builds.
 #[test]

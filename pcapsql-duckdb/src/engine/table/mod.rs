@@ -93,11 +93,13 @@
 //! for the later scans of the same database (the `index_cache` module, and the setting
 //! `pcapsql_index_cache`), and the pass is avoided where it buys nothing:
 //!
-//! - A file is split for its share of DuckDB's threads: its share of the bytes of the scan's
-//!   files that can be split, rounded. Four captures of one size on four threads are four
-//!   partitions and no pass; one large capture among small ones is split for nearly all
-//!   threads. A compressed or remote file is one partition whatever its size and takes no
-//!   share, so a capture beside a large `.gz` is split for all of them.
+//! - A file whose index is kept, and still fits the file, is split for all of DuckDB's
+//!   threads, with no pass.
+//! - A file whose index must be built is split for its share of DuckDB's threads: its share
+//!   of the bytes of the scan's files that can be split, rounded. Four captures of one size on
+//!   four threads are four partitions and no pass; one large capture among small ones is split
+//!   for nearly all threads. A compressed or remote file is one partition whatever its size
+//!   and takes no share, so a capture beside a large `.gz` is split for all of them.
 //! - With an upper bound on `frame_number` (below) the pass ends at the last frame the bound
 //!   admits, unless the scan is `strict` (which looks at the capture's end). The index is then
 //!   that of the capture's beginning, which `plan_ranges` and the scan treat as the index of a
