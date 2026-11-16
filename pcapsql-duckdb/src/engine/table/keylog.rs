@@ -15,8 +15,12 @@
 //! - **How it is read.** At bind, through DuckDB's file system like a capture
 //!   ([`DuckFile`]), so it can be wherever DuckDB can read and the session's access rules
 //!   apply. A file that cannot be opened or is not a key log fails the statement there.
+//!   An entry of a label pcapsql does not read (`ECH_SECRET`, `ECH_CONFIG`, ...) is skipped
+//!   and counted, as Wireshark does; a leading byte order mark is ignored. A malformed entry
+//!   of a label it reads, or a line that is not an entry at all, is an error.
 //! - **What is said about it.** Its path, the number of the line that is wrong, and what was
-//!   expected there. Never a label, a random or a secret: a file given by mistake may be
+//!   expected there; of skipped entries, only how many there are. Never a label, a random or
+//!   a secret: a file given by mistake may be
 //!   anything, a private key included. The most a message repeats of the file is the one
 //!   character of a field that is not a hexadecimal digit.
 //!
@@ -42,6 +46,11 @@ impl Keys {
     pub(super) fn sessions(&self) -> usize {
         self.0.session_count()
     }
+
+    /// How many entries of labels pcapsql does not read were skipped.
+    pub(super) fn skipped(&self) -> usize {
+        self.0.skipped_count()
+    }
 }
 
 /// Without the secrets, which `KeyLog`'s own `Debug` would print.
@@ -60,9 +69,13 @@ fn describe(error: &KeyLogError) -> String {
         | KeyLogError::InvalidFormat { line, message } => {
             format!("line {line}: {message}")
         }
-        // The label is whatever the line starts with: not repeated.
+        // The label is whatever the line starts with: not repeated. (An unknown label on a
+        // line shaped like an entry is skipped, not an error.)
         KeyLogError::UnknownKeyType { line, .. } => {
-            format!("line {line} does not start with a label of the key log format")
+            format!(
+                "line {line} is not a key log entry (an unknown label, not followed by a \
+                 64-digit client random and a hexadecimal value)"
+            )
         }
     }
 }
@@ -138,8 +151,9 @@ mod tests {
                 "line 1: expected 3 space-separated fields, got 2",
             ),
             (
-                format!("# a comment\n\nNOT_A_LABEL {RANDOM} {SECRET}"),
-                "line 3 does not start with a label of the key log format",
+                format!("# a comment\n\nNOT_A_LABEL {RANDOM} {SECRET}z"),
+                "line 3 is not a key log entry (an unknown label, not followed by a 64-digit \
+                 client random and a hexadecimal value)",
             ),
             (
                 format!("CLIENT_TRAFFIC_SECRET_0 {SECRET}00 {SECRET}"),
@@ -161,6 +175,16 @@ mod tests {
                 assert!(!message.contains(part), "{message}");
             }
         }
+    }
+
+    #[test]
+    fn an_entry_of_an_unknown_label_is_skipped() {
+        let text = format!(
+            "\u{feff}ECH_SECRET {RANDOM} {SECRET}\nCLIENT_TRAFFIC_SECRET_0 {RANDOM} {SECRET}\n\
+             ECH_CONFIG {RANDOM} 0011\n"
+        );
+        let keys = Keys(Arc::new(KeyLog::parse(&text).unwrap()));
+        assert_eq!((keys.sessions(), keys.skipped()), (1, 2));
     }
 
     #[test]

@@ -39,8 +39,16 @@ impl PcapScan {
             format!("; filter: {}", pushdown::describe(plan.frames()))
         };
         // How much the key log holds, which is what tells a wrong one from a right one.
+        // Skipped entries (labels pcapsql does not read) are counted, never named.
         let keylog = keylog.map_or_else(String::new, |keys| {
-            format!("; key log: secrets of {} TLS sessions", keys.sessions())
+            let skipped = match keys.skipped() {
+                0 => String::new(),
+                n => format!(" ({n} entries of other labels skipped)"),
+            };
+            format!(
+                "; key log: secrets of {} TLS sessions{skipped}",
+                keys.sessions()
+            )
         });
         format!(
             "{}: scanning '{}': partitions: {}; columns: {columns}; protocols parsed: \

@@ -391,6 +391,10 @@ SELECT method, authority, path FROM http2 WHERE method IS NOT NULL;
   what was expected there. It never repeats a label, a client random or a
   secret: no key material goes into a message or DuckDB's log (the debug
   record of a scan says how many sessions the key log has secrets of).
+- An entry with a label pcapsql does not read (`ECH_SECRET`, `ECH_CONFIG`,
+  ...) is skipped, as Wireshark does, and counted in that debug record. A
+  leading UTF-8 byte order mark is ignored. A malformed entry of a label it
+  reads (bad hex, a wrong length, a missing field) is still an error.
 - What is tested is TLS 1.3 (`TLS_AES_128_GCM_SHA256`) carrying HTTP/2, on a
   generated capture (`pcapsql-testgen/fixtures/tls13_http2.pcap` with its
   `.keys`). Decrypted application data is parsed as HTTP/2 only. TLS 1.2

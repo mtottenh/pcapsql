@@ -823,6 +823,27 @@ fn a_key_log_decrypts_tls_and_gives_the_http2_frames() -> Result<()> {
             );
         }
     }
+    // Entries of labels pcapsql does not read are counted, and not named.
+    let random = "1111111111111111111111111111111111111111111111111111111111111111";
+    let ech = fixture.write(
+        "other-labels.keys",
+        format!("ECH_SECRET {random} 00ff\n{TLS13_HTTP2_KEYLOG}ECH_CONFIG {random} 0011\n")
+            .as_bytes(),
+    );
+    let sql = format!("SELECT count(*) FROM read_http2('{capture}', keylog := '{ech}')");
+    assert_eq!(value(&connection, &sql)?, "8");
+    let records = logged(&connection);
+    assert!(
+        records.iter().any(|record| record
+            .contains("; key log: secrets of 1 TLS sessions (2 entries of other labels skipped)")),
+        "{records:#?}"
+    );
+    assert!(
+        !records
+            .iter()
+            .any(|record| record.contains("ECH") || record.contains(random)),
+        "{records:#?}"
+    );
     assert_eq!(
         value(
             &connection,
@@ -1074,7 +1095,7 @@ fn a_key_log_that_cannot_be_read_fails_the_statement_without_its_content() -> Re
 
     // Files that are something else. The message has the path and the line, and nothing of
     // what the file holds.
-    let cases: [(&str, Vec<u8>, &str); 6] = [
+    let cases: [(&str, Vec<u8>, &str); 7] = [
         (
             "prose.keys",
             b"# a comment\n\nthese are just some words\n".to_vec(),
@@ -1083,11 +1104,18 @@ fn a_key_log_that_cannot_be_read_fails_the_statement_without_its_content() -> Re
         (
             "label.keys",
             format!(
-                "{}\nSUPER_SECRET_LABEL {random} {secret}\n",
+                "{}\nSUPER_SECRET_LABEL {random} {secret}words\n",
                 TLS13_HTTP2_KEYLOG.trim_end()
             )
             .into_bytes(),
-            "line 5 does not start with a label of the key log format",
+            "line 5 is not a key log entry (an unknown label, not followed by a 64-digit \
+             client random and a hexadecimal value)",
+        ),
+        (
+            "known.keys",
+            format!("ECH_SECRET {random} {secret}\nCLIENT_TRAFFIC_SECRET_0 {random} 5ec2zz\n")
+                .into_bytes(),
+            "line 2: invalid hex character: z",
         ),
         (
             "short.keys",
@@ -1103,7 +1131,7 @@ fn a_key_log_that_cannot_be_read_fails_the_statement_without_its_content() -> Re
             "private.pem",
             format!("-----BEGIN PRIVATE KEY-----\n{secret}\n-----END PRIVATE KEY-----\n")
                 .into_bytes(),
-            "line 1: expected 64 hex chars for client_random, got 7",
+            "line 1 is not a key log entry",
         ),
         // Not text at all: the capture itself.
         (
@@ -1152,7 +1180,8 @@ fn a_key_log_that_cannot_be_read_fails_the_statement_without_its_content() -> Re
         )),
         NOT_DECRYPTED
     );
-    // The good one still is, with Windows line ends and a comment too.
+    // The good one still is, with Windows line ends and a comment too, and with a byte order
+    // mark and entries of labels pcapsql does not read (NSS writes ECH_SECRET and ECH_CONFIG).
     let crlf = fixture.write(
         "crlf.keys",
         format!(
@@ -1161,7 +1190,15 @@ fn a_key_log_that_cannot_be_read_fails_the_statement_without_its_content() -> Re
         )
         .as_bytes(),
     );
-    for path in [&keys, &crlf] {
+    let ech = fixture.write(
+        "ech.keys",
+        format!(
+            "\u{feff}ECH_SECRET {random} {secret}\r\n{}ECH_CONFIG {random} 0011aabb\r\n",
+            TLS13_HTTP2_KEYLOG.replace('\n', "\r\n")
+        )
+        .as_bytes(),
+    );
+    for path in [&keys, &crlf, &ech] {
         assert_eq!(
             pair(&decrypted(
                 &connection,

@@ -105,7 +105,8 @@ Automatic parsing of tunneled traffic with inner protocol extraction:
 
 ### TLS Decryption
 Decrypt TLS traffic using SSLKEYLOGFILE (NSS format):
-- TLS 1.2 (`CLIENT_RANDOM`) and TLS 1.3 (traffic secrets)
+- TLS 1.2 (`CLIENT_RANDOM`) and TLS 1.3 (traffic secrets); entries with other
+  labels (e.g. `ECH_SECRET`) are skipped, as in Wireshark
 - AES-128-GCM, AES-256-GCM, ChaCha20-Poly1305
 - SNI and ALPN extraction
 

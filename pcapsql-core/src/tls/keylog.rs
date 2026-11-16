@@ -2,6 +2,14 @@
 //!
 //! Parses the NSS Key Log format used by browsers (Chrome, Firefox), curl,
 //! and other TLS implementations for exporting session keys.
+//!
+//! As in Wireshark, an entry whose label this parser does not know (NSS also
+//! writes `ECH_SECRET` and `ECH_CONFIG`, for instance) is skipped and counted
+//! ([`KeyLog::skipped_count`]), as long as it is shaped like an entry: a label
+//! of upper-case letters, digits and `_`, a 64-digit client random and a
+//! hexadecimal value. A leading UTF-8 byte order mark is ignored. A line of a
+//! known label that is malformed, or a line that is not an entry at all, is an
+//! error: the file is broken or is not a key log.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -24,7 +32,9 @@ pub enum KeyLogError {
     #[error("Invalid format at line {line}: {message}")]
     InvalidFormat { line: usize, message: String },
 
-    /// Unknown key type
+    /// A line with a label this parser does not know whose fields are not a
+    /// client random and a hexadecimal value, so not a key log entry. (An
+    /// unknown label on a line shaped like an entry is skipped, not an error.)
     #[error("Unknown key type at line {line}: {key_type}")]
     UnknownKeyType { line: usize, key_type: String },
 }
@@ -189,6 +199,9 @@ pub struct KeyLog {
 
     /// Total number of entries parsed.
     entry_count: usize,
+
+    /// Number of entries skipped for a label this parser does not know.
+    skipped_count: usize,
 }
 
 impl KeyLog {
@@ -197,6 +210,7 @@ impl KeyLog {
         KeyLog {
             entries: HashMap::new(),
             entry_count: 0,
+            skipped_count: 0,
         }
     }
 
@@ -221,14 +235,23 @@ impl KeyLog {
             let line = line_result?;
             let line_num = line_num + 1; // 1-indexed for error messages
 
+            // A byte order mark (Windows tools may write one) is not part of the first line.
+            let line = if line_num == 1 {
+                line.strip_prefix('\u{feff}').unwrap_or(&line)
+            } else {
+                &line
+            };
+
             // Skip empty lines and comments
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
 
-            let entry = parse_line(line, line_num)?;
-            keylog.add_entry(entry);
+            match parse_line(line, line_num)? {
+                Some(entry) => keylog.add_entry(entry),
+                None => keylog.skipped_count += 1,
+            }
         }
 
         Ok(keylog)
@@ -269,6 +292,12 @@ impl KeyLog {
         self.entry_count
     }
 
+    /// Get the number of entries skipped because their label is not one this
+    /// parser knows (for instance `ECH_SECRET` or `ECH_CONFIG`).
+    pub fn skipped_count(&self) -> usize {
+        self.skipped_count
+    }
+
     /// Check if the keylog is empty.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
@@ -286,8 +315,9 @@ impl Default for KeyLog {
     }
 }
 
-/// Parse a single line from SSLKEYLOGFILE.
-fn parse_line(line: &str, line_num: usize) -> Result<KeyLogEntry, KeyLogError> {
+/// Parse a single line from SSLKEYLOGFILE: `None` for an entry with a label
+/// this parser does not know, which is skipped.
+fn parse_line(line: &str, line_num: usize) -> Result<Option<KeyLogEntry>, KeyLogError> {
     let parts: Vec<&str> = line.split_whitespace().collect();
 
     if parts.len() != 3 {
@@ -301,10 +331,26 @@ fn parse_line(line: &str, line_num: usize) -> Result<KeyLogEntry, KeyLogError> {
     let client_random_hex = parts[1];
     let secret_hex = parts[2];
 
+    if !is_known_label(key_type) {
+        // An entry of a label we do not know is skipped, as Wireshark does. A line that is
+        // not shaped like an entry is not one of a key log at all.
+        if is_label(key_type)
+            && client_random_hex.len() == 64
+            && is_hex(client_random_hex)
+            && is_hex(secret_hex)
+        {
+            return Ok(None);
+        }
+        return Err(KeyLogError::UnknownKeyType {
+            line: line_num,
+            key_type: key_type.to_string(),
+        });
+    }
+
     // Parse client_random (always 32 bytes = 64 hex chars)
     let client_random = parse_hex_32(client_random_hex, line_num)?;
 
-    match key_type {
+    let entry = match key_type {
         "CLIENT_RANDOM" => {
             // TLS 1.2 master secret is always 48 bytes
             let master_secret = parse_hex_48(secret_hex, line_num)?;
@@ -362,11 +408,40 @@ fn parse_line(line: &str, line_num: usize) -> Result<KeyLogEntry, KeyLogError> {
                 secret,
             })
         }
-        _ => Err(KeyLogError::UnknownKeyType {
-            line: line_num,
-            key_type: key_type.to_string(),
-        }),
-    }
+        _ => unreachable!("a known label is matched above"),
+    };
+    entry.map(Some)
+}
+
+/// The labels [`parse_line`] reads.
+const KNOWN_LABELS: [&str; 8] = [
+    "CLIENT_RANDOM",
+    "CLIENT_HANDSHAKE_TRAFFIC_SECRET",
+    "SERVER_HANDSHAKE_TRAFFIC_SECRET",
+    "CLIENT_TRAFFIC_SECRET_0",
+    "SERVER_TRAFFIC_SECRET_0",
+    "EXPORTER_SECRET",
+    "EARLY_EXPORTER_SECRET",
+    "CLIENT_EARLY_TRAFFIC_SECRET",
+];
+
+fn is_known_label(label: &str) -> bool {
+    KNOWN_LABELS.contains(&label)
+}
+
+/// Shaped like a key log label: upper-case letters, digits and `_`, starting with a letter.
+fn is_label(label: &str) -> bool {
+    label.starts_with(|c: char| c.is_ascii_uppercase())
+        && label
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+}
+
+/// Bytes in hexadecimal: an even number of hexadecimal digits, at least two.
+fn is_hex(field: &str) -> bool {
+    !field.is_empty()
+        && field.len().is_multiple_of(2)
+        && field.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 /// Parse a hex string into a 32-byte array.
@@ -579,17 +654,104 @@ CLIENT_RANDOM 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef 0
     }
 
     #[test]
-    fn test_unknown_key_type() {
-        let content = "UNKNOWN_TYPE 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef deadbeef";
+    fn test_unknown_label_is_skipped() {
+        // NSS writes ECH_SECRET and ECH_CONFIG lines next to the ones read here.
+        let content = "\
+ECH_SECRET 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef deadbeef
+CLIENT_RANDOM 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f
+ECH_CONFIG 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef 0011AABBccdd
+UNKNOWN_TYPE_2 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef deadbeef
+";
 
-        let result = KeyLog::parse(content);
+        let keylog = KeyLog::parse(content).unwrap();
+        assert_eq!(keylog.session_count(), 1);
+        assert_eq!(keylog.entry_count(), 1);
+        assert_eq!(keylog.skipped_count(), 3);
+        let entries =
+            keylog.lookup_slice(&[0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef].repeat(4));
+        assert!(entries.unwrap().has_tls12_keys());
+    }
+
+    #[test]
+    fn test_unknown_label_not_shaped_like_an_entry() {
+        let random = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        for (content, label) in [
+            // Not a label.
+            (format!("unknown_type {random} deadbeef"), "unknown_type"),
+            (format!("1ABEL {random} deadbeef"), "1ABEL"),
+            // Not a client random.
+            (format!("ECH_SECRET {random}00 deadbeef"), "ECH_SECRET"),
+            (
+                format!("ECH_SECRET zz{} deadbeef", &random[2..]),
+                "ECH_SECRET",
+            ),
+            // Not hex.
+            (format!("ECH_SECRET {random} deadbee"), "ECH_SECRET"),
+            (format!("ECH_SECRET {random} nothex"), "ECH_SECRET"),
+            (String::from("SOME WORDS HERE"), "SOME"),
+        ] {
+            let result = KeyLog::parse(&format!("# c\n{content}"));
+            assert!(
+                matches!(
+                    &result,
+                    Err(KeyLogError::UnknownKeyType { line: 2, key_type }) if key_type == label
+                ),
+                "{content}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_byte_order_mark() {
+        let line = "CLIENT_RANDOM 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f";
+        for content in [
+            format!("\u{feff}{line}\r\n"),
+            format!("\u{feff}# keys\r\n{line}\r\n"),
+        ] {
+            let keylog = KeyLog::from_reader(content.as_bytes()).unwrap();
+            assert_eq!(keylog.entry_count(), 1);
+            assert_eq!(keylog.skipped_count(), 0);
+        }
+        // Only at the start of the file.
+        let result = KeyLog::parse(&format!("{line}\n\u{feff}{line}"));
         assert!(matches!(
             result,
-            Err(KeyLogError::UnknownKeyType {
-                line: 1,
-                key_type,
-            }) if key_type == "UNKNOWN_TYPE"
+            Err(KeyLogError::UnknownKeyType { line: 2, .. })
         ));
+    }
+
+    #[test]
+    fn test_malformed_known_label_is_an_error() {
+        let random = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let master = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f";
+        // Even after a skipped entry.
+        let skipped = format!("ECH_SECRET {random} deadbeef\n");
+        for content in [
+            format!("{skipped}CLIENT_RANDOM {random} {}", &master[2..]),
+            format!("{skipped}CLIENT_RANDOM {random}00 {master}"),
+            format!("{skipped}CLIENT_TRAFFIC_SECRET_0 {random} abc"),
+            format!("{skipped}CLIENT_TRAFFIC_SECRET_0 {random} zz"),
+        ] {
+            assert!(
+                matches!(
+                    KeyLog::parse(&content),
+                    Err(KeyLogError::InvalidHex { line: 2, .. })
+                ),
+                "{content}"
+            );
+        }
+        for content in [
+            format!("{skipped}CLIENT_RANDOM {random}"),
+            format!("{skipped}ECH_SECRET {random} deadbeef extra"),
+        ] {
+            assert!(
+                matches!(
+                    KeyLog::parse(&content),
+                    Err(KeyLogError::InvalidFormat { line: 2, .. })
+                ),
+                "{content}"
+            );
+        }
     }
 
     #[test]

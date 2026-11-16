@@ -186,6 +186,13 @@ key log has secrets of: `tls_sessions.is_decrypted` is true for them, and
   fails the statement; the message names the file and the line and repeats
   no label, random or secret of it. A key log without entries is accepted
   and decrypts nothing.
+- As in Wireshark, an entry whose label pcapsql does not read (NSS writes
+  `ECH_SECRET` and `ECH_CONFIG` too) is skipped when it is shaped like an
+  entry: an upper-case label, a 64-digit client random and a hexadecimal
+  value. The scan's debug log record says how many were skipped, never which.
+  A leading UTF-8 byte order mark is ignored. A malformed entry of a label
+  pcapsql reads (a field that is not hexadecimal or has the wrong length, a
+  missing or extra field) and any other line fail the statement.
 - One key log serves every file of a call. A session it has no secrets of is
   read as without a key log.
 - Only the four stream functions and `read_pcap` have the parameter.
