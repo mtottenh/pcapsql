@@ -5,8 +5,8 @@
 //! reads everything, and DuckDB filters its rows. Every query here returns the same with the
 //! setting on and off, on one thread and on four, with captures split into partitions and not.
 //!
-//! The rest is about what is saved and what is not taken over: which filters leave DuckDB's
-//! plan (`EXPLAIN`), which partitions and how many packets a scan reads (the DEBUG records of
+//! The rest is about what is saved and what is not taken over: that every filter stays in
+//! DuckDB's plan (`EXPLAIN`), which partitions and how many packets a scan reads (the DEBUG records of
 //! the scan, which carry the driver's `ScanStats`), and what DuckDB does with parameters.
 
 use std::io::Write;
@@ -678,84 +678,73 @@ fn the_corpus_captures_filter_the_same_either_way() -> Result<()> {
 }
 
 #[test]
-fn explain_shows_which_filters_duckdb_still_applies() -> Result<()> {
+fn explain_shows_every_filter_and_what_the_scan_filters_by() -> Result<()> {
     let connection = connect()?;
     let fixture = Fixture::new();
     execute(&connection, "CALL enable_logging(level = 'debug')");
     let capture = Capture::write(&fixture, "x.pcap", &golden::legacy_nanos(mixed_frames(50)));
     let time = ns(capture.times[20]);
     let later = ns(capture.times[30]);
-    // (the filter, whether DuckDB still applies a filter, what the scan filters by)
-    let cases: Vec<(String, bool, Option<String>)> = vec![
-        // Accepted: gone from the plan.
+    // (the filter, what the scan filters by). DuckDB keeps every filter in its plan, so that
+    // two scans of one file with different filters are not taken for the same (see
+    // `two_scans_of_one_capture_with_different_filters_keep_their_own_rows`).
+    let cases: Vec<(String, Option<String>)> = vec![
+        // Exact: the scan returns the rows the filter keeps.
         (
             "frame_number <= 5".into(),
-            false,
             Some("frame_number in (.., 5]".into()),
         ),
         (
             "5 >= frame_number".into(),
-            false,
             Some("frame_number in (.., 5]".into()),
         ),
         (
             "frame_number = 5".into(),
-            false,
             Some("frame_number in [5, 5]".into()),
         ),
         (
             "frame_number > 5".into(),
-            false,
             Some("frame_number in (5, ..)".into()),
         ),
         (
             "frame_number < 5::BIGINT".into(),
-            false,
             Some("frame_number in (.., 5)".into()),
         ),
         (
             "frame_number::HUGEINT < 5".into(),
-            false,
             Some("frame_number in (.., 5)".into()),
         ),
         (
             "frame_number < '7'".into(),
-            false,
             Some("frame_number in (.., 7)".into()),
         ),
         (
             "NOT (frame_number > 5)".into(),
-            false,
             Some("frame_number in (.., 5]".into()),
         ),
         (
             "frame_number + 1 < 5".into(),
-            false,
             Some("frame_number in (.., 4)".into()),
         ),
-        // Accepted, and true of every frame or of none.
-        ("frame_number > -1".into(), false, None),
-        ("frame_number < 18446744073709551616".into(), false, None),
-        ("frame_number < 0".into(), false, Some("no frame".into())),
-        ("frame_number < -1".into(), false, Some("no frame".into())),
+        // Exact, and true of every frame or of none.
+        ("frame_number > -1".into(), None),
+        ("frame_number < 18446744073709551616".into(), None),
+        ("frame_number < 0".into(), Some("no frame".into())),
+        ("frame_number < -1".into(), Some("no frame".into())),
         (
             "frame_number > 18446744073709551616".into(),
-            false,
             Some("no frame".into()),
         ),
         (
             format!("timestamp >= {time}"),
-            false,
             Some(format!("timestamp in [{}, ..) ns", capture.times[20])),
         ),
         (
             format!("{time} < timestamp"),
-            false,
             Some(format!("timestamp in ({}, ..) ns", capture.times[20])),
         ),
         (
             format!("timestamp = {time}"),
-            false,
             Some(format!(
                 "timestamp in [{}, {}] ns",
                 capture.times[20], capture.times[20]
@@ -763,52 +752,40 @@ fn explain_shows_which_filters_duckdb_still_applies() -> Result<()> {
         ),
         (
             "timestamp >= TIMESTAMP '2023-11-14 22:13:25'".into(),
-            false,
             Some("timestamp in [1700000005000000000, ..) ns".into()),
         ),
         (
             "timestamp >= DATE '2023-11-15'".into(),
-            false,
             Some("timestamp in [1700006400000000000, ..) ns".into()),
         ),
         (
             "timestamp < '2023-11-14 22:13:25.123456789'".into(),
-            false,
             Some("timestamp in (.., 1700000005123456789) ns".into()),
         ),
-        (
-            "timestamp > 'infinity'".into(),
-            false,
-            Some("no frame".into()),
-        ),
+        ("timestamp > 'infinity'".into(), Some("no frame".into())),
         (
             format!("timestamp >= {time} AND frame_number < 40"),
-            false,
             Some(format!(
                 "frame_number in (.., 40) and timestamp in [{}, ..) ns",
                 capture.times[20]
             )),
         ),
         // A range on one column reaches the scan as a BETWEEN that does not say whether its
-        // bounds are inclusive: the scan reads the inclusive range, and DuckDB keeps the filter.
+        // bounds are inclusive: the scan reads the inclusive range.
         (
             "frame_number BETWEEN 3 AND 7".into(),
-            true,
             Some("frame_number in [3, 7]".into()),
         ),
         (
             "frame_number > 3 AND frame_number < 7".into(),
-            true,
             Some("frame_number in [3, 7]".into()),
         ),
         (
             "frame_number >= 3 AND frame_number < 7".into(),
-            true,
             Some("frame_number in [3, 7]".into()),
         ),
         (
             format!("timestamp >= {time} AND timestamp < {later}"),
-            true,
             Some(format!(
                 "timestamp in [{}, {}] ns",
                 capture.times[20], capture.times[30]
@@ -816,49 +793,44 @@ fn explain_shows_which_filters_duckdb_still_applies() -> Result<()> {
         ),
         (
             format!("timestamp BETWEEN {time} AND {later} AND frame_number <= 25"),
-            true,
             Some(format!(
                 "frame_number in (.., 25] and timestamp in [{}, {}] ns",
                 capture.times[20], capture.times[30]
             )),
         ),
         // Not understood: DuckDB's, and the scan reads everything.
-        ("frame_number <> 5".into(), true, None),
-        ("frame_number IN (1, 2)".into(), true, None),
-        ("frame_number = 1 OR frame_number = 2".into(), true, None),
-        ("frame_number IS NOT DISTINCT FROM 5".into(), true, None),
-        ("frame_number < length".into(), true, None),
-        ("frame_number % 2 = 0".into(), true, None),
-        ("frame_number < 2.5".into(), true, None),
-        ("frame_number::BIGINT < 5".into(), true, None),
-        ("frame_number::DOUBLE < 5".into(), true, None),
-        ("length > 60".into(), true, None),
+        ("frame_number <> 5".into(), None),
+        ("frame_number IN (1, 2)".into(), None),
+        ("frame_number = 1 OR frame_number = 2".into(), None),
+        ("frame_number IS NOT DISTINCT FROM 5".into(), None),
+        ("frame_number < length".into(), None),
+        ("frame_number % 2 = 0".into(), None),
+        ("frame_number < 2.5".into(), None),
+        ("frame_number::BIGINT < 5".into(), None),
+        ("frame_number::DOUBLE < 5".into(), None),
+        ("length > 60".into(), None),
         (
             "timestamp::TIMESTAMP >= TIMESTAMP '2023-11-14 22:13:25'".into(),
-            true,
             None,
         ),
-        ("timestamp::DATE = DATE '2023-11-14'".into(), true, None),
-        ("epoch_ns(timestamp) > 5".into(), true, None),
-        // Both kinds: the scan takes its part, DuckDB keeps the rest.
+        ("timestamp::DATE = DATE '2023-11-14'".into(), None),
+        ("epoch_ns(timestamp) > 5".into(), None),
+        // Both kinds: the scan uses its part.
         (
             "frame_number < 20 AND length > 60".into(),
-            true,
             Some("frame_number in (.., 20)".into()),
         ),
         (
             "frame_number < 20 AND frame_number <> 7".into(),
-            true,
             Some("frame_number in (.., 20)".into()),
         ),
         (
             "(frame_number > 3 AND frame_number < 7) OR length > 1000".into(),
-            true,
             None,
         ),
     ];
     for function in ["read_frames", "read_udp"] {
-        for (filter, kept, predicate) in &cases {
+        for (filter, predicate) in &cases {
             if function == "read_udp" && filter.contains("length") {
                 continue;
             }
@@ -867,10 +839,9 @@ fn explain_shows_which_filters_duckdb_still_applies() -> Result<()> {
                 capture.path
             );
             pushdown(&connection, true);
-            assert_eq!(
+            assert!(
                 filtered_by_duckdb(&connection, &sql),
-                *kept,
-                "{sql}: a filter above the scan"
+                "{sql}: no filter above the scan"
             );
             let (_, scan) = scanned(&connection, &sql);
             // A predicate no frame satisfies may also be found out by DuckDB, which then
@@ -1063,7 +1034,7 @@ fn an_upper_frame_bound_ends_the_read_of_a_capture_that_is_not_split() -> Result
             let (result, scanned) = scanned(&connection, &sql);
             (result[0].clone(), scanned)
         };
-        // Accepted bounds: the read ends with the last frame they admit.
+        // Exact bounds: the read ends with the last frame they admit.
         let (rows, scan) = count("frame_number <= 100");
         assert_eq!(rows, "100");
         assert_eq!(scan.layouts.len(), 1);
@@ -1362,6 +1333,77 @@ fn a_prepared_filter_is_taken_over_when_it_has_its_value() -> Result<()> {
          WHERE f.frame_number BETWEEN 100 AND 110 AND u.encap_depth = 0 ORDER BY ALL"
     );
     assert_eq!(same_either_way(&connection, &join, "").len(), 11);
+    Ok(())
+}
+
+#[test]
+fn two_scans_of_one_capture_with_different_filters_keep_their_own_rows() -> Result<()> {
+    // DuckDB's `common_subplan` optimizer merges subplans whose plans are the same. Two scans
+    // of one file are the same call, so if a filter went into the scan and out of the plan,
+    // two differently filtered scans would look alike and one would get the other's rows.
+    let connection = connect()?;
+    let fixture = Fixture::new();
+    let capture = Capture::write(&fixture, "x.pcap", &golden::legacy_nanos(mixed_frames(300)));
+    let path = &capture.path;
+    let early = ns(capture.times[10]);
+    let late = ns(capture.times[294]);
+    // (the first filter, the second, the frames of each)
+    let filters = [
+        ("frame_number < 10", "frame_number > 295", 9, 5),
+        (
+            &*format!("timestamp < {early}"),
+            &*format!("timestamp > {late}"),
+            10,
+            5,
+        ),
+    ];
+    for (first, second, first_count, second_count) in filters {
+        let union = format!(
+            "SELECT 'a', count(*) FROM read_frames('{path}') WHERE {first} \
+             UNION ALL SELECT 'b', count(*) FROM read_frames('{path}') WHERE {second} \
+             ORDER BY ALL"
+        );
+        // The two sides are alike but for their filters, as in the union.
+        let join = format!(
+            "SELECT a.n, b.n \
+             FROM (SELECT count(*) AS n, min(frame_number) AS low \
+                   FROM read_frames('{path}') WHERE {first}) a \
+             JOIN (SELECT count(*) AS n, min(frame_number) AS low \
+                   FROM read_frames('{path}') WHERE {second}) b \
+             ON a.low < b.low"
+        );
+        let udp = format!(
+            "SELECT 'a', count(DISTINCT frame_number) FROM read_udp('{path}') WHERE {first} \
+             UNION ALL SELECT 'b', count(DISTINCT frame_number) FROM read_udp('{path}') \
+             WHERE {second} ORDER BY ALL"
+        );
+        // A common table expression that DuckDB inlines: a copy of one scan for each use.
+        let cte = format!(
+            "WITH t AS NOT MATERIALIZED (SELECT frame_number, timestamp FROM read_frames('{path}')) \
+             SELECT 'a', count(*) FROM t WHERE {first} \
+             UNION ALL SELECT 'b', count(*) FROM t WHERE {second} ORDER BY ALL"
+        );
+        for layout in LAYOUTS {
+            lay_out(&connection, layout, 50);
+            let what = format!("{layout:?}");
+            let expected = vec![
+                vec!["a".to_owned(), first_count.to_string()],
+                vec!["b".to_owned(), second_count.to_string()],
+            ];
+            assert_eq!(
+                same_either_way(&connection, &union, &what),
+                expected,
+                "{union}"
+            );
+            assert_eq!(same_either_way(&connection, &udp, &what), expected, "{udp}");
+            assert_eq!(same_either_way(&connection, &cte, &what), expected, "{cte}");
+            assert_eq!(
+                same_either_way(&connection, &join, &what),
+                [[first_count.to_string(), second_count.to_string()]],
+                "{join}"
+            );
+        }
+    }
     Ok(())
 }
 

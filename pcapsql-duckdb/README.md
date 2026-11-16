@@ -222,8 +222,7 @@ before a packet is parsed, and reads less of the capture for them. Everything
 else in a `WHERE` clause is DuckDB's to apply to the rows the scan returns, as
 before. The rows are the same either way.
 
-What the scan takes over (DuckDB then no longer evaluates it, and `EXPLAIN`
-shows no filter for it):
+What the scan filters by, returning exactly the rows the filter keeps:
 
 - `frame_number` compared with a constant: `=`, `<`, `<=`, `>`, `>=`, with
   the constant on either side. Any integer will do (`frame_number > -1` is
@@ -234,13 +233,19 @@ shows no filter for it):
   the comparison is on the nanoseconds the capture records.
 - Any `AND` of these.
 
-What it uses but leaves in DuckDB's plan: two bounds on the same column,
-which is what a range or a time window is, written as `BETWEEN` or as two
-comparisons. DuckDB hands such a pair to the scan as one range without saying
-whether its ends are included (the C API of DuckDB 2.0.0 does not expose
-that). The scan reads the range with both ends included and DuckDB applies
-the filter to the rows it gets, so the saving in reading is the same and
-`EXPLAIN` still shows the filter.
+What it filters by with a frame to spare at each end: two bounds on the same
+column, which is what a range or a time window is, written as `BETWEEN` or as
+two comparisons. DuckDB hands such a pair to the scan as one range without
+saying whether its ends are included (the C API of DuckDB 2.0.0 does not
+expose that), so the scan reads the range with both ends included.
+
+Every filter also stays in DuckDB's plan, and `EXPLAIN` shows it: DuckDB
+applies it to the rows the scan returns, which removes the frames at the ends
+of a range and costs a comparison per returned row otherwise. A filter that
+left the plan would be known only to the scan, and DuckDB, which tells two
+scans apart by their plans, would take two scans of one file with different
+filters in one statement (a `UNION ALL`, a join) for the same scan and give
+both the rows of one.
 
 What it leaves alone: `<>`, `IN`, `OR`, a comparison with another column or
 with an expression, a filter on a cast of the column (`timestamp::DATE = ...`,
@@ -446,7 +451,7 @@ the DuckDB side of it.
 |---|---|
 | `table.rs` | `PcapScan`, the table function behind every scan function: binds the table, expands the files argument (`FileSystem::glob`) and probes every file, maps DuckDB's projection and the pushed-down predicate to a `ScanPlan`, cuts each capture into partitions and leaves out what the predicate rules out (core's `BoundaryIndex`, `partition_target` and `PartitionQueue`, one queue over all files), has each worker claim a partition, and in each `exec` steps core's `PartitionScan` into a `ChunkWriter` until the chunk is full; reports the partition's ordinal as DuckDB's batch index |
 | `replacement.rs` | The replacement scan: which table names are capture paths, and `read_pcap` as the answer |
-| `pushdown.rs` | Filter pushdown: reads the filter expressions DuckDB offers a scan, turns what they say about `frame_number` and `timestamp` into core's `FramePredicate`, and accepts the ones that say exactly that. Its header lists every accepted shape with the reason it is exact, and what is not accepted |
+| `pushdown.rs` | Filter pushdown: reads the filter expressions DuckDB offers a scan and turns what they say about `frame_number` and `timestamp` into core's `FramePredicate`, which the scan filters by. It accepts none, so DuckDB keeps applying each; its header says why, lists every shape that is read exactly with the reason it is exact, and what is not read |
 | `settings.rs` | The four settings, and what a scan reads of DuckDB's (`threads`) |
 | `types.rs` | The DuckDB logical type of each column kind of the catalogue (the table above), and the name DuckDB prints for it |
 | `writer.rs` | `ChunkWriter`: stores the rows the shared scan layer produces (`pcapsql_core::scan::RowSink`) in the output chunk of one `exec` call |
@@ -504,11 +509,12 @@ Tests, in `itest/`:
   `pcapsql_filter_pushdown` on and off and compares the rows, at 1 and 4
   threads, split and not: generated captures with ascending, shuffled and
   pre-1970 timestamps, compressed ones, the corpus captures over every
-  table, and several files at once. It also checks which filters `EXPLAIN`
-  still shows, which partitions and how many packets a scan reads for a time
-  window and for a frame range (from the scan's log records), where the read
-  of a gzip capture ends, prepared statements with parameters, and what a
-  filter does to the report of a truncated capture.
+  table, and several files at once. It also checks that `EXPLAIN` still
+  shows every filter, that two differently filtered scans of one capture in
+  one statement keep their own rows, which partitions and how many packets
+  a scan reads for a time window and for a frame range (from the scan's log
+  records), where the read of a gzip capture ends, prepared statements with
+  parameters, and what a filter does to the report of a truncated capture.
 - `tests/golden_differential.rs` runs the queries of the DataFusion golden
   corpus over the same captures and compares with the snapshots committed in
   `pcapsql-datafusion/tests/golden/`. `build.rs` takes the captures and the

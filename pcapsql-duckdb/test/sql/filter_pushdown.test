@@ -153,6 +153,43 @@ AND message LIKE '%: 4 packets from frame 11, 1 of them not accepted by the filt
 ----
 1
 
+# Two scans of one capture with different filters in one statement keep their own rows. The
+# filters stay in DuckDB's plan, which is what tells the two apart: its common_subplan
+# optimizer would otherwise take them for one scan and give both the rows of one.
+query TI
+SELECT 'a', count(*) FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dns.cap') WHERE frame_number < 10
+UNION ALL
+SELECT 'b', count(*) FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dns.cap') WHERE frame_number > 30
+ORDER BY ALL;
+----
+a	9
+b	8
+
+query TI
+SELECT 'a', count(*) FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dns.cap') WHERE timestamp < TIMESTAMP '2005-03-30 08:47:50'
+UNION ALL
+SELECT 'b', count(*) FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dns.cap') WHERE timestamp >= TIMESTAMP '2005-03-30 08:49:18.734862'
+ORDER BY ALL;
+----
+a	2
+b	29
+
+query II
+SELECT a.n, b.n
+FROM (SELECT count(*) AS n, min(frame_number) AS low FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dns.cap') WHERE frame_number < 10) a
+JOIN (SELECT count(*) AS n, min(frame_number) AS low FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dns.cap') WHERE frame_number > 30) b
+ON a.low < b.low;
+----
+9	8
+
+query II
+SELECT a.n, b.n
+FROM (SELECT count(*) AS n, min(frame_number) AS low FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dns.cap') WHERE timestamp < TIMESTAMP '2005-03-30 08:47:50') a
+JOIN (SELECT count(*) AS n, min(frame_number) AS low FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dns.cap') WHERE timestamp >= TIMESTAMP '2005-03-30 08:49:18.734862') b
+ON a.low < b.low;
+----
+2	29
+
 # With several files the frame number counts in each
 query TI
 SELECT parse_filename(filename), frame_number

@@ -137,9 +137,10 @@ Type mapping:
   protocols and fields they need are parsed.
 - Filters: comparisons of `frame_number` or `timestamp` with a constant
   (`=`, `<`, `<=`, `>`, `>=`), and `AND`s of them, are applied by the scan
-  before a packet is parsed. Two bounds on one column narrow what is read and
-  are also still applied by DuckDB. Everything else is left to DuckDB. See
-  `pcapsql_filter_pushdown`.
+  before a packet is parsed, and narrow what is read. None is removed from
+  DuckDB's plan: DuckDB applies each again to the rows the scan returns, so
+  that two scans of one file with different filters stay apart. Everything
+  else is left to DuckDB. See `pcapsql_filter_pushdown`.
 
 ## Listing table functions
 

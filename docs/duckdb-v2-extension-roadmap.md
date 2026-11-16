@@ -288,6 +288,13 @@ it, and DuckDB still applies the real filter to the rows. An accessor for the
 inclusivity (or the node arriving as two comparisons) would let it be
 accepted.
 
+Since then nothing is accepted. An accepted filter is gone from DuckDB's plan
+and lives only in the bind data, which DuckDB's `common_subplan` optimizer
+does not compare: two scans of one file with different accepted filters in
+one statement serialized alike and were merged, and both returned the rows of
+one. Every filter now stays in the plan, as a range does; the scan still
+filters by all of them, so what is read is the same.
+
 ### 6.6 Errors, panics, logging
 
 - I/O and format errors return a `duckdb_neo::Error` from the callback. `exec`

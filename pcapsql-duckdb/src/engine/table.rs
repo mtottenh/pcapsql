@@ -17,7 +17,7 @@
 //! | Callback | Work | State |
 //! |---|---|---|
 //! | `bind` | Resolve the table, declare its columns, expand the files argument through DuckDB's file system, open and probe every file, estimate the row count | [`Bound`]: the files, table, `strict`, `filename`, and the predicate `pushdown_filter` fills in |
-//! | `pushdown_filter` | Accept the filters on `frame_number` and `timestamp` that are exactly a `FramePredicate` (`engine::pushdown`) | The predicate, in [`Bound`] |
+//! | `pushdown_filter` | Read what the filters say about `frame_number` and `timestamp` as a `FramePredicate` (`engine::pushdown`), accepting none | The predicate, in [`Bound`] |
 //! | `init_global_state` | Map the projected columns and the predicate to a `ScanPlan` and compile it; decide the partitions of every file, which for a capture worth splitting takes one pass over it, and leave out those the predicate rules out | [`Shared`]: the compiled plan, the partition queue over all files and the indexes it was cut from, the progress counter |
 //! | `max_threads` | The number of partitions | |
 //! | `init_local_state` | Number the worker; no file yet | [`Worker`] |
@@ -88,12 +88,12 @@
 //!
 //! DuckDB offers the scan the filters above it, and [`engine::pushdown`](super::pushdown)
 //! turns what they say about `frame_number` and `timestamp` into one predicate: a range of
-//! frame numbers and a range of timestamps. It accepts the filters that say exactly that, and
-//! DuckDB does not evaluate an accepted filter, so the scan must: the predicate goes into the
-//! plan (`ScanPlan::frames`), and core's driver gives rows for exactly the packets it accepts,
-//! whatever the partitions are. Rejected packets are read and not parsed. A filter that only
-//! narrows the predicate (a `BETWEEN`, whose bounds the scan cannot tell inclusive from
-//! exclusive) stays in DuckDB's plan and is applied there to the rows the scan returns.
+//! frame numbers and a range of timestamps. The predicate goes into the plan
+//! (`ScanPlan::frames`), and core's driver gives rows for exactly the packets it accepts,
+//! whatever the partitions are. Rejected packets are read and not parsed. No filter is
+//! accepted: each stays in DuckDB's plan and is applied there to the rows the scan returns,
+//! because a filter that left the plan would no longer tell two scans of one file apart (see
+//! `engine::pushdown`, "Why no filter is accepted").
 //!
 //! The predicate also saves reading, which is the point of it:
 //!
@@ -611,8 +611,8 @@ impl TableFunctionCallbacks for PcapScan {
             .map(|position| column_data.get_column_index(position))
             .collect::<Result<Vec<_>>>()?;
         let projection = self.projection(bound, &projected)?;
-        // The frames the filters above the scan leave: it returns rows of these only. For the
-        // filters it accepted, nobody else will see to that.
+        // The frames the filters above the scan may leave: it returns rows of these only, and
+        // DuckDB applies the filters themselves to those rows.
         let frames = bound.pushed.predicate();
         let plan = ScanPlan {
             tables: vec![TableScan::new(bound.table, projection.columns)],
@@ -802,9 +802,9 @@ impl TableClaimBatchCallbacks for PcapScan {
 }
 
 impl TableFilterPushdownCallbacks for PcapScan {
-    /// Narrow the scan by the filters that are about its frames, and accept those it applies
-    /// exactly (see [`engine::pushdown`](super::pushdown)). DuckDB calls this while it plans
-    /// the statement, and may call it more than once.
+    /// Narrow the scan by the filters that are about its frames, accepting none, so that DuckDB
+    /// still applies each (see [`engine::pushdown`](super::pushdown)). DuckDB calls this while
+    /// it plans the statement, and may call it more than once.
     fn pushdown_filter(
         &self,
         context: &Context,
@@ -814,7 +814,7 @@ impl TableFilterPushdownCallbacks for PcapScan {
         if !settings::filter_pushdown(context)? {
             return Ok(());
         }
-        bound.pushed.accept(&offered)
+        bound.pushed.narrow(&offered)
     }
 }
 
