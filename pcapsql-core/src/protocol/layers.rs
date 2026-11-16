@@ -19,13 +19,15 @@ use std::fmt::{self, Write as _};
 use bumpalo::Bump;
 
 use super::{FieldEntry, FieldSet, FieldValue, HintKey, Hints, ParseContext, Protocol, TunnelType};
+use crate::format::names::Name;
 
 /// Where a parser puts the fields of the layer it parses.
 ///
 /// [`push`](Self::push) appends a field. A value that exists in the packet
 /// is borrowed from it (`FieldValue::Str`, `FieldValue::Bytes`); one that has
 /// to be constructed is put in the packet's arena with [`str`](Self::str),
-/// [`format`](Self::format), [`list`](Self::list), a [`ListBuilder`] or a
+/// [`format`](Self::format), [`name`](Self::name), [`list`](Self::list), a
+/// [`ListBuilder`] or a
 /// [`TextBuilder`], and lives as long as the packet's layers do.
 pub struct FieldSink<'s, 'a> {
     fields: &'s mut Vec<FieldEntry<'a>>,
@@ -77,6 +79,17 @@ impl<'a> FieldSink<'_, 'a> {
     #[inline]
     pub fn format(&self, args: fmt::Arguments<'_>) -> FieldValue<'a> {
         FieldValue::Str(self.text_fmt(args))
+    }
+
+    /// The text of a name table ([`format::names`](crate::format::names))
+    /// as a string value: the table's own string for a number with a name,
+    /// text written into the arena for one without.
+    #[inline]
+    pub fn name(&self, name: Name) -> FieldValue<'a> {
+        match name.as_static() {
+            Some(text) => FieldValue::Str(text),
+            None => self.format(format_args!("{name}")),
+        }
     }
 
     /// A string value assembled piece by piece in the arena.

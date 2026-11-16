@@ -11,6 +11,7 @@ use super::{
     Cond, Dispatch, DispatchRule, FieldSink, FieldValue, HintKey, Hints, ParseContext, Parsed,
     Protocol, TunnelType,
 };
+use crate::format::names::gre_version_name;
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// IP protocol number for GRE.
@@ -130,13 +131,7 @@ impl Protocol for GreProtocol {
             version == gre_version::STANDARD || version == gre_version::PPTP_ENHANCED;
         fields.push(("version_valid", FieldValue::Bool(version_valid)));
 
-        // Add version name for convenience
-        let version_name = match version {
-            gre_version::STANDARD => "Standard",
-            gre_version::PPTP_ENHANCED => "PPTP-Enhanced",
-            _ => "Unknown",
-        };
-        fields.push(("version_name", FieldValue::Str(version_name)));
+        fields.push(("version_name", fields.name(gre_version_name(version))));
 
         offset += 2;
 
@@ -663,8 +658,8 @@ mod tests {
             );
             assert_eq!(result.get("version_valid"), Some(&FieldValue::Bool(false)));
             assert_eq!(
-                result.get("version_name"),
-                Some(&FieldValue::Str("Unknown"))
+                result.get("version_name").and_then(|v| v.as_str()),
+                Some(format!("Unknown ({version})").as_str())
             );
         }
     }

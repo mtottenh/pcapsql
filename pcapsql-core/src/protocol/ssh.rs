@@ -7,13 +7,14 @@ use super::{
     Cond, Dispatch, DispatchRule, FieldSink, FieldValue, HintKey, Hints, ParseContext, Parsed,
     Protocol,
 };
+use crate::format::names::ssh_msg_type_name;
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// SSH default port.
 pub const SSH_PORT: u16 = 22;
 
 /// SSH message types.
-mod msg_type {
+pub mod msg_type {
     pub const SSH_MSG_DISCONNECT: u8 = 1;
     pub const SSH_MSG_IGNORE: u8 = 2;
     pub const SSH_MSG_UNIMPLEMENTED: u8 = 3;
@@ -124,7 +125,7 @@ impl Protocol for SshProtocol {
 
         let msg_type = data[5];
         fields.push(("msg_type", FieldValue::UInt8(msg_type)));
-        fields.push(("msg_type_name", format_msg_type(msg_type, fields)));
+        fields.push(("msg_type_name", fields.name(ssh_msg_type_name(msg_type))));
 
         // Parse specific message types
         let payload = &data[5..5 + payload_length];
@@ -378,38 +379,6 @@ fn parse_channel_open(payload: &[u8], fields: &mut FieldSink<'_, '_>) {
             payload[offset + 3],
         ]);
         fields.push(("channel_id", FieldValue::UInt32(channel_id)));
-    }
-}
-
-/// Format SSH message type as a readable name.
-fn format_msg_type<'a>(msg_type: u8, fields: &FieldSink<'_, 'a>) -> FieldValue<'a> {
-    match msg_type {
-        msg_type::SSH_MSG_DISCONNECT => FieldValue::Str("DISCONNECT"),
-        msg_type::SSH_MSG_IGNORE => FieldValue::Str("IGNORE"),
-        msg_type::SSH_MSG_UNIMPLEMENTED => FieldValue::Str("UNIMPLEMENTED"),
-        msg_type::SSH_MSG_DEBUG => FieldValue::Str("DEBUG"),
-        msg_type::SSH_MSG_SERVICE_REQUEST => FieldValue::Str("SERVICE_REQUEST"),
-        msg_type::SSH_MSG_SERVICE_ACCEPT => FieldValue::Str("SERVICE_ACCEPT"),
-        msg_type::SSH_MSG_KEXINIT => FieldValue::Str("KEXINIT"),
-        msg_type::SSH_MSG_NEWKEYS => FieldValue::Str("NEWKEYS"),
-        msg_type::SSH_MSG_KEX_DH_INIT => FieldValue::Str("KEX_DH_INIT"),
-        msg_type::SSH_MSG_KEX_DH_REPLY => FieldValue::Str("KEX_DH_REPLY"),
-        msg_type::SSH_MSG_USERAUTH_REQUEST => FieldValue::Str("USERAUTH_REQUEST"),
-        msg_type::SSH_MSG_USERAUTH_FAILURE => FieldValue::Str("USERAUTH_FAILURE"),
-        msg_type::SSH_MSG_USERAUTH_SUCCESS => FieldValue::Str("USERAUTH_SUCCESS"),
-        msg_type::SSH_MSG_USERAUTH_BANNER => FieldValue::Str("USERAUTH_BANNER"),
-        msg_type::SSH_MSG_CHANNEL_OPEN => FieldValue::Str("CHANNEL_OPEN"),
-        msg_type::SSH_MSG_CHANNEL_OPEN_CONFIRMATION => FieldValue::Str("CHANNEL_OPEN_CONFIRMATION"),
-        msg_type::SSH_MSG_CHANNEL_OPEN_FAILURE => FieldValue::Str("CHANNEL_OPEN_FAILURE"),
-        msg_type::SSH_MSG_CHANNEL_WINDOW_ADJUST => FieldValue::Str("CHANNEL_WINDOW_ADJUST"),
-        msg_type::SSH_MSG_CHANNEL_DATA => FieldValue::Str("CHANNEL_DATA"),
-        msg_type::SSH_MSG_CHANNEL_EXTENDED_DATA => FieldValue::Str("CHANNEL_EXTENDED_DATA"),
-        msg_type::SSH_MSG_CHANNEL_EOF => FieldValue::Str("CHANNEL_EOF"),
-        msg_type::SSH_MSG_CHANNEL_CLOSE => FieldValue::Str("CHANNEL_CLOSE"),
-        msg_type::SSH_MSG_CHANNEL_REQUEST => FieldValue::Str("CHANNEL_REQUEST"),
-        msg_type::SSH_MSG_CHANNEL_SUCCESS => FieldValue::Str("CHANNEL_SUCCESS"),
-        msg_type::SSH_MSG_CHANNEL_FAILURE => FieldValue::Str("CHANNEL_FAILURE"),
-        _ => fields.format(format_args!("UNKNOWN({msg_type})")),
     }
 }
 

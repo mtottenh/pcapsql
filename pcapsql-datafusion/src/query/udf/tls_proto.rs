@@ -76,7 +76,10 @@ impl ScalarUDFImpl for TlsVersionNameUdf {
             .downcast_ref::<UInt16Array>()
             .expect("tls_version_name: expected uint16 array");
 
-        let result: StringArray = values.iter().map(|opt| opt.map(tls_version_name)).collect();
+        let result: StringArray = values
+            .iter()
+            .map(|opt| opt.map(|code| tls_version_name(code).into_cow()))
+            .collect();
         Ok(ColumnarValue::Array(Arc::new(result)))
     }
 }
@@ -124,7 +127,7 @@ impl ScalarUDFImpl for TlsRecordTypeNameUdf {
 
         let result: StringArray = values
             .iter()
-            .map(|opt| opt.map(tls_record_type_name))
+            .map(|opt| opt.map(|code| tls_record_type_name(code).into_cow()))
             .collect();
         Ok(ColumnarValue::Array(Arc::new(result)))
     }

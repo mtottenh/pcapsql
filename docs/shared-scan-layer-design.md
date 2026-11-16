@@ -726,7 +726,8 @@ Since then (`protocol/layers.rs`):
   no `unsafe`.
 - A parser writes its fields through a `FieldSink` (`push`; `str`,
   `format`, `list`, `ListBuilder` and `TextBuilder` for what it
-  constructs, all in the arena) and returns a
+  constructs, all in the arena; `name` for the text of a table of
+  `format::names`, which is static for a number with a name) and returns a
   `Parsed { remaining, child_hints, status }`. `Status::Error` makes the
   walk truncate the field vector back to where the layer began;
   `Status::Partial` keeps the fields and stops the walk.

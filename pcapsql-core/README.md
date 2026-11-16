@@ -91,8 +91,34 @@ pcapsql-core
 │                 cloud), boundary index + sidecar, compression
 ├── stream/     - TCP reassembly, HTTP/TLS stream parsing
 ├── tls/        - TLS key derivation and decryption
-└── format/     - Address formatting utilities
+└── format/     - Address formatting, and the kernels of the SQL scalar
+                  functions (names, flags, cidr, mac, hex)
 ```
+
+### Names of protocol numbers
+
+`format::names` holds the one set of code-to-name tables. The `*_name()`
+SQL functions and the name columns of the parsers (`icmp.type_name`,
+`bgp.message_type_name`, `tls.version`, ...) both read it, so a column and
+the function applied to the number beside it give the same text:
+
+```rust
+use pcapsql_core::format::{dns_type_name, icmp_type_name, ospf_lsa_type_name};
+
+assert_eq!(icmp_type_name(8), "Echo Request");
+assert_eq!(dns_type_name(28), "AAAA");
+// A number without a name carries the number, in the table's own style.
+assert_eq!(icmp_type_name(99), "Type 99");
+assert_eq!(dns_type_name(999), "TYPE999");
+assert_eq!(ospf_lsa_type_name(99), "Unknown (99)");
+```
+
+A lookup returns a `Name`, which is `Copy` and allocates nothing: write it
+with `{}`, compare it with a `str`, or take `as_static()` / `into_cow()`. A
+parser writes one with `FieldSink::name`. A parser must not keep a name
+table of its own: add the table to `format::names` and list the column in
+`protocol/name_columns_tests.rs`, which checks every name column against its
+table over every number.
 
 ## License
 

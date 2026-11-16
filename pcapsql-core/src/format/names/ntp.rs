@@ -1,32 +1,32 @@
 //! NTP mode and stratum names.
 
-use std::borrow::Cow;
+use super::Name;
 
 use crate::protocol::{ntp_mode as mode, ntp_stratum as stratum};
 
 /// Convert an NTP mode (0-7) to its name; `Unknown (n)` otherwise.
-pub fn ntp_mode_name(m: u8) -> Cow<'static, str> {
+pub fn ntp_mode_name(m: u8) -> Name {
     match m {
-        mode::RESERVED => Cow::Borrowed("Reserved"),
-        mode::SYMMETRIC_ACTIVE => Cow::Borrowed("Symmetric Active"),
-        mode::SYMMETRIC_PASSIVE => Cow::Borrowed("Symmetric Passive"),
-        mode::CLIENT => Cow::Borrowed("Client"),
-        mode::SERVER => Cow::Borrowed("Server"),
-        mode::BROADCAST => Cow::Borrowed("Broadcast"),
-        mode::CONTROL => Cow::Borrowed("NTP Control"),
-        mode::PRIVATE => Cow::Borrowed("Private"),
-        _ => Cow::Owned(format!("Unknown ({m})")),
+        mode::RESERVED => Name::fixed("Reserved"),
+        mode::SYMMETRIC_ACTIVE => Name::fixed("Symmetric Active"),
+        mode::SYMMETRIC_PASSIVE => Name::fixed("Symmetric Passive"),
+        mode::CLIENT => Name::fixed("Client"),
+        mode::SERVER => Name::fixed("Server"),
+        mode::BROADCAST => Name::fixed("Broadcast"),
+        mode::CONTROL => Name::fixed("NTP Control"),
+        mode::PRIVATE => Name::fixed("Private"),
+        _ => Name::unknown(m),
     }
 }
 
 /// Convert an NTP stratum to its description.
-pub fn ntp_stratum_name(s: u8) -> Cow<'static, str> {
+pub fn ntp_stratum_name(s: u8) -> Name {
     match s {
-        stratum::UNSPECIFIED => Cow::Borrowed("Unspecified"),
-        stratum::PRIMARY => Cow::Borrowed("Primary Reference"),
-        2..=15 => Cow::Owned(format!("Secondary (stratum {s})")),
-        stratum::UNSYNCHRONIZED => Cow::Borrowed("Unsynchronized"),
-        _ => Cow::Owned(format!("Reserved ({s})")),
+        stratum::UNSPECIFIED => Name::fixed("Unspecified"),
+        stratum::PRIMARY => Name::fixed("Primary Reference"),
+        2..=15 => Name::numbered("Secondary (stratum ", s, ")"),
+        stratum::UNSYNCHRONIZED => Name::fixed("Unsynchronized"),
+        _ => Name::numbered("Reserved (", s, ")"),
     }
 }
 

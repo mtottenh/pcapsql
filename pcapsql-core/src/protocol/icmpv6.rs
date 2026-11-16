@@ -4,6 +4,7 @@ use super::{
     Cond, Dispatch, DispatchRule, FieldSink, FieldValue, HintKey, Hints, ParseContext, Parsed,
     Protocol,
 };
+use crate::format::names::icmpv6_type_name;
 use crate::format::{ipv6_text, mac_text, IPV6_TEXT_LEN, MAC_TEXT_LEN};
 use crate::schema::{DataKind, FieldDescriptor};
 
@@ -54,12 +55,20 @@ pub mod time_exceeded_code {
     pub const FRAGMENT_REASSEMBLY_EXCEEDED: u8 = 1;
 }
 
-/// ICMPv6 Parameter Problem code constants.
+/// ICMPv6 Parameter Problem code constants (IANA "ICMPv6 Parameters",
+/// type 4; RFC 4443, RFC 7112, RFC 8754, RFC 8883).
 pub mod parameter_problem_code {
     pub const ERRONEOUS_HEADER: u8 = 0;
     pub const UNRECOGNIZED_NEXT_HEADER: u8 = 1;
     pub const UNRECOGNIZED_OPTION: u8 = 2;
     pub const INCOMPLETE_HEADER: u8 = 3;
+    pub const SR_UPPER_LAYER_HEADER: u8 = 4;
+    pub const UNRECOGNIZED_NEXT_HEADER_INTERMEDIATE: u8 = 5;
+    pub const EXTENSION_HEADER_TOO_BIG: u8 = 6;
+    pub const EXTENSION_HEADER_CHAIN_TOO_LONG: u8 = 7;
+    pub const TOO_MANY_EXTENSION_HEADERS: u8 = 8;
+    pub const TOO_MANY_OPTIONS: u8 = 9;
+    pub const OPTION_TOO_BIG: u8 = 10;
 }
 
 /// NDP option type constants.
@@ -138,8 +147,7 @@ impl Protocol for Icmpv6Protocol {
         fields.push(("checksum", FieldValue::UInt16(checksum)));
 
         // Add type name
-        let type_name = get_type_name(icmpv6_type);
-        fields.push(("type_name", FieldValue::Str(type_name)));
+        fields.push(("type_name", fields.name(icmpv6_type_name(icmpv6_type))));
 
         // Parse type-specific fields
         let consumed = match icmpv6_type {
@@ -215,28 +223,6 @@ impl Protocol for Icmpv6Protocol {
 
     fn dependencies(&self) -> &'static [&'static str] {
         &["ipv6"]
-    }
-}
-
-/// Get ICMPv6 type name.
-fn get_type_name(icmpv6_type: u8) -> &'static str {
-    match icmpv6_type {
-        icmpv6_type::DESTINATION_UNREACHABLE => "Destination Unreachable",
-        icmpv6_type::PACKET_TOO_BIG => "Packet Too Big",
-        icmpv6_type::TIME_EXCEEDED => "Time Exceeded",
-        icmpv6_type::PARAMETER_PROBLEM => "Parameter Problem",
-        icmpv6_type::ECHO_REQUEST => "Echo Request",
-        icmpv6_type::ECHO_REPLY => "Echo Reply",
-        icmpv6_type::MLD_QUERY => "MLD Query",
-        icmpv6_type::MLDV1_REPORT => "MLDv1 Report",
-        icmpv6_type::MLDV1_DONE => "MLDv1 Done",
-        icmpv6_type::MLDV2_REPORT => "MLDv2 Report",
-        icmpv6_type::ROUTER_SOLICITATION => "Router Solicitation",
-        icmpv6_type::ROUTER_ADVERTISEMENT => "Router Advertisement",
-        icmpv6_type::NEIGHBOR_SOLICITATION => "Neighbor Solicitation",
-        icmpv6_type::NEIGHBOR_ADVERTISEMENT => "Neighbor Advertisement",
-        icmpv6_type::REDIRECT => "Redirect",
-        _ => "Unknown",
     }
 }
 
@@ -1036,7 +1022,7 @@ mod tests {
         assert_eq!(result.get("type"), Some(&FieldValue::UInt8(131)));
         assert_eq!(
             result.get("type_name"),
-            Some(&FieldValue::Str("MLDv1 Report"))
+            Some(&FieldValue::Str("Multicast Listener Report"))
         );
     }
 
@@ -1058,7 +1044,7 @@ mod tests {
         assert_eq!(result.get("type"), Some(&FieldValue::UInt8(132)));
         assert_eq!(
             result.get("type_name"),
-            Some(&FieldValue::Str("MLDv1 Done"))
+            Some(&FieldValue::Str("Multicast Listener Done"))
         );
     }
 
@@ -1085,7 +1071,7 @@ mod tests {
         );
         assert_eq!(
             result.get("type_name"),
-            Some(&FieldValue::Str("MLDv2 Report"))
+            Some(&FieldValue::Str("Version 2 Multicast Listener Report"))
         );
     }
 

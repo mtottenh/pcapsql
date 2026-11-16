@@ -97,6 +97,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Protocol::parse_projected` takes a `FieldSet`, a set of positions in the
   parser's new `Protocol::field_names()` list. An empty set means no field,
   not every field.
+- Behaviour change: the parser name columns (for example
+  `icmp.type_name`) and the `*_name()` SQL functions now use one set of
+  tables, so they always agree.
+  - Where the old tables disagreed, the IANA name is used. ICMP type 13 is
+    `Timestamp`. ICMPv6 types 130 to 132 are `Multicast Listener Query`,
+    `Report` and `Done`. ICMPv6 type 143 is
+    `Version 2 Multicast Listener Report`.
+  - A code without a name now includes the number, for example
+    `Unknown (3)` or `Type 99`. Before, it was `Unknown`, `UNKNOWN`,
+    `unknown` or, for SSH, `UNKNOWN(60)`.
+  - For an unknown version, `tls_sessions.version` is now, for example,
+    `Unknown (0x0305)`.
+- `icmpv6_code_name()` now names the Parameter Problem codes 3 to 10
+  (RFC 7112, 8754 and 8883).
 
 ### Removed
 

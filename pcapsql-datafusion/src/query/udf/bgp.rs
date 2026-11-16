@@ -78,7 +78,7 @@ impl ScalarUDFImpl for BgpMessageTypeNameUdf {
 
         let result: StringArray = values
             .iter()
-            .map(|opt| opt.map(bgp_message_type_name))
+            .map(|opt| opt.map(|code| bgp_message_type_name(code).into_cow()))
             .collect();
         Ok(ColumnarValue::Array(Arc::new(result)))
     }
@@ -125,7 +125,10 @@ impl ScalarUDFImpl for BgpOriginNameUdf {
             .downcast_ref::<UInt8Array>()
             .expect("bgp_origin_name: expected uint8 array");
 
-        let result: StringArray = values.iter().map(|opt| opt.map(bgp_origin_name)).collect();
+        let result: StringArray = values
+            .iter()
+            .map(|opt| opt.map(|code| bgp_origin_name(code).into_cow()))
+            .collect();
         Ok(ColumnarValue::Array(Arc::new(result)))
     }
 }

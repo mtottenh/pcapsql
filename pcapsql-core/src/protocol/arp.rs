@@ -5,6 +5,7 @@ use super::{
     Cond, Dispatch, DispatchRule, FieldSink, FieldValue, HintKey, Hints, ParseContext, Parsed,
     Protocol,
 };
+use crate::format::names::arp_operation_name;
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// ARP operation codes.
@@ -71,13 +72,7 @@ impl Protocol for ArpProtocol {
         fields.push(("protocol_size", FieldValue::UInt8(protocol_size)));
         fields.push(("operation", FieldValue::UInt16(operation)));
 
-        // Operation name for convenience (zero-copy static string)
-        let operation_name = match operation {
-            operation::REQUEST => "Request",
-            operation::REPLY => "Reply",
-            _ => "Unknown",
-        };
-        fields.push(("operation_name", FieldValue::Str(operation_name)));
+        fields.push(("operation_name", fields.name(arp_operation_name(operation))));
 
         // For Ethernet/IPv4 ARP (most common case)
         if hardware_type == 1

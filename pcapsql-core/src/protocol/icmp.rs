@@ -4,6 +4,7 @@ use super::{
     Cond, Dispatch, DispatchRule, FieldSink, FieldValue, HintKey, Hints, ParseContext, Parsed,
     Protocol,
 };
+use crate::format::names::icmp_type_name;
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// IP protocol number for ICMP.
@@ -150,26 +151,7 @@ impl Protocol for IcmpProtocol {
             }
         }
 
-        // Add type name for convenience
-        let type_name = match icmp_type {
-            icmp_type::ECHO_REPLY => "Echo Reply",
-            icmp_type::DESTINATION_UNREACHABLE => "Destination Unreachable",
-            icmp_type::SOURCE_QUENCH => "Source Quench",
-            icmp_type::REDIRECT => "Redirect",
-            icmp_type::ECHO_REQUEST => "Echo Request",
-            icmp_type::ROUTER_ADVERTISEMENT => "Router Advertisement",
-            icmp_type::ROUTER_SOLICITATION => "Router Solicitation",
-            icmp_type::TIME_EXCEEDED => "Time Exceeded",
-            icmp_type::PARAMETER_PROBLEM => "Parameter Problem",
-            icmp_type::TIMESTAMP_REQUEST => "Timestamp Request",
-            icmp_type::TIMESTAMP_REPLY => "Timestamp Reply",
-            icmp_type::INFO_REQUEST => "Information Request",
-            icmp_type::INFO_REPLY => "Information Reply",
-            icmp_type::ADDRESS_MASK_REQUEST => "Address Mask Request",
-            icmp_type::ADDRESS_MASK_REPLY => "Address Mask Reply",
-            _ => "Unknown",
-        };
-        fields.push(("type_name", FieldValue::Str(type_name)));
+        fields.push(("type_name", fields.name(icmp_type_name(icmp_type))));
 
         // ICMP doesn't have child protocols typically
         Parsed::ok(&data[8..], Hints::new())

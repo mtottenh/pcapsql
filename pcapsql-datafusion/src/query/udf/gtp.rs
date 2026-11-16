@@ -67,7 +67,7 @@ impl ScalarUDFImpl for GtpMessageTypeNameUdf {
 
         let result: StringArray = values
             .iter()
-            .map(|opt| opt.map(gtp_message_type_name))
+            .map(|opt| opt.map(|code| gtp_message_type_name(code).into_cow()))
             .collect();
         Ok(ColumnarValue::Array(Arc::new(result)))
     }
