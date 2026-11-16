@@ -873,8 +873,11 @@ fn a_time_window_reads_the_partitions_it_overlaps() -> Result<()> {
         &golden::legacy((0..FRAMES).map(golden::udp_frame).collect()),
     );
     let path = &capture.path;
-    // Eight partitions of 2,500 frames, each five checkpoint windows of 500.
+    // Eight partitions of 2,500 frames, each five checkpoint windows of 500. Every scan builds
+    // its index, as the notes below say: a kept index (`index_cache.rs`) reads the same
+    // partitions without the pass.
     partitioned(&connection, 8, 500);
+    set(&connection, "pcapsql_index_cache", false);
     pushdown(&connection, true);
     let at = |frame: usize| ns(capture.times[frame - 1]);
     let count = |filter: &str| -> (String, Scanned) {
@@ -1177,22 +1180,28 @@ fn a_frame_number_filter_applies_to_each_of_several_files() -> Result<()> {
 
     // What is read of each file: the first frames of each. No file is split: the small one
     // is not a thread's worth of the scan's bytes, and of the large one the pass that looks
-    // for places to split at stops at the third frame.
+    // for places to split at stops at the third frame. With the index the scans above kept
+    // for the large one there is no pass, and the index is cut at the third frame.
     partitioned(&connection, 4, 100);
     pushdown(&connection, true);
     let sql = format!("SELECT count(*) FROM read_frames({files}) WHERE frame_number <= 3");
-    let (rows, scan) = scanned(&connection, &sql);
-    assert_eq!(rows, ["9"]);
-    assert_eq!(
-        scan.layouts,
-        [
-            "1 (the other files of the scan keep DuckDB's 4 threads busy)",
-            "1 (the first 3 frames give no place to split at, with a checkpoint every 100 \
-             frames)",
-            "1 (a compressed capture cannot be split)",
-        ]
-    );
-    assert_eq!(scan.partitions, [(1, 3, 0), (1, 3, 0), (1, 3, 0)]);
+    for (cache, kept) in [(false, ""), (true, "; index kept from an earlier scan")] {
+        set(&connection, "pcapsql_index_cache", cache);
+        let (rows, scan) = scanned(&connection, &sql);
+        assert_eq!(rows, ["9"]);
+        assert_eq!(
+            scan.layouts,
+            [
+                "1 (the other files of the scan keep DuckDB's 4 threads busy)".to_owned(),
+                format!(
+                    "1 (the first 3 frames give no place to split at, with a checkpoint every \
+                     100 frames{kept})"
+                ),
+                "1 (a compressed capture cannot be split)".to_owned(),
+            ]
+        );
+        assert_eq!(scan.partitions, [(1, 3, 0), (1, 3, 0), (1, 3, 0)]);
+    }
     // A filter no frame satisfies opens none of them.
     let sql = format!("SELECT count(*) FROM read_frames({files}) WHERE frame_number < 1");
     let (rows, scan) = scanned(&connection, &sql);

@@ -27,7 +27,7 @@
 //! |---|---|---|
 //! | `bind` | Resolve the table or view, declare its columns, expand the files argument through DuckDB's file system, open and probe every file, read the key log of a stream table, estimate the row count | [`BindData`]: the files, table, `strict`, `filename`, the key log, and the predicate `pushdown_filter` fills in |
 //! | `pushdown_filter` | Read what the filters say about `frame_number` and `timestamp` as a `FramePredicate` (`engine::pushdown`), accepting none | The predicate, in [`BindData`] |
-//! | `init_global_state` | Map the projected columns and the predicate to a `ScanPlan` (a table scan, or a view's fused scan) and compile it; decide the partitions of every file, which for a capture worth splitting takes one pass over it, and leave out those the predicate rules out | [`Shared`]: the compiled plan, the partition queue over all files and the indexes it was cut from, the progress counter |
+//! | `init_global_state` | Map the projected columns and the predicate to a `ScanPlan` (a table scan, or a view's fused scan) and compile it; decide the partitions of every file, which for a capture worth splitting takes one pass over it unless an earlier scan's index of it is kept, and leave out those the predicate rules out | [`Shared`]: the compiled plan, the partition queue over all files and the indexes it was cut from, the progress counter |
 //! | `max_threads` | The number of partitions | |
 //! | `init_local_state` | Number the worker; no file yet | [`Worker`] |
 //! | `claim_batch` | Claim the next partition, open its file at its offset, build the reader and the `PartitionScan` | [`Scanning`], in the worker: the scan, which owns the reader and through it the open file |
@@ -88,9 +88,10 @@
 //!   read as one partition and the scan reports the damage where it reads it, after the rows
 //!   before it, as it always did.
 //!
-//! The pass reads the capture on one thread before any worker starts, and nothing of it is
-//! kept for the next statement. It costs about what counting the capture's frames costs
-//! (roadmap, section 8.2), so it is avoided where it buys nothing:
+//! The pass reads the capture on one thread before any worker starts. It costs about what
+//! counting the capture's frames costs (roadmap, section 8.2), so its index is kept, in memory,
+//! for the later scans of the same database (the `index_cache` module, and the setting
+//! `pcapsql_index_cache`), and the pass is avoided where it buys nothing:
 //!
 //! - A file is split for its share of DuckDB's threads: its share of the bytes of the scan's
 //!   files that can be split, rounded. Four captures of one size on four threads are four
@@ -100,7 +101,13 @@
 //! - With an upper bound on `frame_number` (below) the pass ends at the last frame the bound
 //!   admits, unless the scan is `strict` (which looks at the capture's end). The index is then
 //!   that of the capture's beginning, which `plan_ranges` and the scan treat as the index of a
-//!   capture that has grown since.
+//!   capture that has grown since, and it is not kept. A kept index of the whole capture is
+//!   cut at the bound in the same way.
+//!
+//! A partition read to its end must end where the next one starts. If it does not, the file
+//! is not the file its index is of (it changed after the pass, or the kept index could not be
+//! told from that of the file before the scan): the query fails and the kept index is dropped
+//! (`report::misaligned`).
 //!
 //! The partitions of all files are in one `PartitionQueue`, those of the first file first and
 //! each file's in capture order ([`Shared::owners`] says which file a partition is of). A
@@ -227,6 +234,7 @@
 
 mod args;
 mod function;
+mod index_cache;
 mod keylog;
 mod layout;
 mod reader;
@@ -259,6 +267,7 @@ use pcapsql_core::scan::{Catalog, CompiledScan, OutColumn, PartitionQueue, Step}
 use pcapsql_core::{default_registry, ProtocolRegistry};
 
 use self::function::CaptureFunction;
+use self::index_cache::IndexCache;
 use self::keylog::Keys;
 use self::layout::{can_split, estimated_rows, Layout};
 use self::reader::Scanning;
@@ -300,21 +309,25 @@ fn protocols() -> &'static Arc<ProtocolRegistry> {
 }
 
 pub(super) fn register(extension: &Extension) -> Result<()> {
+    // The indexes of the captures this database's scans split, shared by all its scan
+    // functions (the `index_cache` module).
+    let indexes = Arc::new(IndexCache::default());
     // No view has the name of a table (a test in core says so), so no two functions collide.
     for relation in relation::relations() {
         let name = format!("read_{}", relation.name());
-        builder(&name, Some(relation)).register(extension)?;
+        builder(&name, Some(relation), &indexes).register(extension)?;
     }
-    builder("read_pcap", None).register(extension)?;
+    builder("read_pcap", None, &indexes).register(extension)?;
     time_range::register(extension)
 }
 
 type Builder = duckdb_neo::table_function::TableFunctionBuilder<guard::Guarded<PcapScan>>;
 
-fn builder(name: &str, relation: Option<Relation>) -> Builder {
+fn builder(name: &str, relation: Option<Relation>, indexes: &Arc<IndexCache>) -> Builder {
     let scan = PcapScan {
         name: name.to_owned(),
         relation,
+        indexes: indexes.clone(),
     };
     guard::table_function(name, scan.signature(), scan)
         .with_projection_pushdown(true)
@@ -331,6 +344,8 @@ struct PcapScan {
     /// The SQL name of the function, for messages.
     name: String,
     relation: Option<Relation>,
+    /// The indexes of earlier scans, which the scan functions of a database share.
+    indexes: Arc<IndexCache>,
 }
 
 impl CaptureFunction for PcapScan {
@@ -409,7 +424,7 @@ struct Shared {
 struct ScannedFile {
     /// The index the file's partitions were cut from; `None` when its one partition is the
     /// whole capture (see [`Layout::index`](layout::Layout::index)).
-    index: Option<BoundaryIndex>,
+    index: Option<Arc<BoundaryIndex>>,
     /// Set by the worker that reports the file truncated, so that it is reported once.
     truncation_reported: AtomicBool,
 }

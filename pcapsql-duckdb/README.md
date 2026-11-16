@@ -514,7 +514,9 @@ keeps the partitions in order wherever order matters (a plain `SELECT`,
 `LIMIT`, `CREATE TABLE AS`, `INSERT`). To find where a capture can be cut, the
 scan first reads the header of every record, once, when the query starts; that
 pass reads the whole file, so the first row of a large capture that is not in
-the page cache takes as long as reading it. Compressed captures and captures
+the page cache takes as long as reading it. What the pass finds is kept in
+memory, so a later scan of the same capture in the same database starts
+without it (`pcapsql_index_cache`). Compressed captures and captures
 on a remote file system (`s3://`, `https://`) are read on one thread, and so
 is a capture with a damaged record, which is reported where the scan gets to
 it.
@@ -529,6 +531,7 @@ one each.
 | `pcapsql_parallel_scan` | `true` | `false` reads every capture on one thread, as `SET threads = 1` does for the whole query |
 | `pcapsql_parallel_min_file_size` | 4194304 | The size in bytes from which a capture is split |
 | `pcapsql_index_stride` | 65536 | Frames between two places a capture can be cut at. A capture of no more frames than this is not split, and none is split into more parts than it has such places |
+| `pcapsql_index_cache` | `true` | Keep where a capture can be cut, in memory, for later scans of it in the same database. `false` reads the capture for it in every scan that splits it. Before a kept index is used, the file is checked by its size and some of its bytes (`docs/duckdb-extension-reference.md`, "The index cache", says what that misses); turn the cache off where captures are rewritten in place |
 | `pcapsql_filter_pushdown` | `true` | `false` leaves every filter to DuckDB, which then applies it to the rows of a scan of the whole capture (see "Filters") |
 
 The second and third are for experiments and tests; their defaults are those
@@ -623,8 +626,9 @@ A copy format, `pcap`, for `COPY ... TO` (see "Writing a capture"). The
 DataFusion engine has no counterpart; the file is written by
 `pcapsql_core::io::PcapWriter`.
 
-Five settings: `pcapsql_parallel_scan`, `pcapsql_parallel_min_file_size` and
-`pcapsql_index_stride`, described under "Parallel scans" above,
+Six settings: `pcapsql_parallel_scan`, `pcapsql_parallel_min_file_size`,
+`pcapsql_index_stride` and `pcapsql_index_cache`, described under "Parallel
+scans" above,
 `pcapsql_filter_pushdown`, under "Filters", and `pcapsql_keylog`, under "TLS
 decryption".
 

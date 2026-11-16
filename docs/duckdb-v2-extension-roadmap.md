@@ -197,9 +197,10 @@ counter. Type mapping from `ColKind` is in `engine/types.rs`; lists map to
 As built, the surface is listed in
 [`duckdb-extension-reference.md`](duckdb-extension-reference.md), which is
 checked against the artifact. It differs from this section in the settings:
-there are five (`pcapsql_parallel_scan`, `pcapsql_parallel_min_file_size`,
-`pcapsql_index_stride`, `pcapsql_filter_pushdown`, `pcapsql_keylog`) and no
-`pcapsql_index_cache_dir`, because there is no index cache (P4).
+there are six (`pcapsql_parallel_scan`, `pcapsql_parallel_min_file_size`,
+`pcapsql_index_stride`, `pcapsql_index_cache`, `pcapsql_filter_pushdown`,
+`pcapsql_keylog`) and no `pcapsql_index_cache_dir`, because the index cache is
+in memory only (section 6.4).
 
 ## 6. Scan architecture
 
@@ -272,13 +273,30 @@ With several files (D9), the partition queue holds every file's partitions
 in file order, so `claim_batch` distributes work across and within files and
 the batch index keeps the output in file-then-frame order.
 
-As built (P4, and section 8.2): there is no index cache and no
-`pcapsql_index_cache_dir`, so the index of a capture that is split is built
-by a pass over it at the start of every scan. Because that pass is on one
-thread, a file of several is split only for its share of the threads (its
-share of the bytes of the files that can be split, rounded: files of one size
-on as many threads are not split, and a compressed or remote file takes no
-share), and with an upper bound on `frame_number` the pass ends at the bound.
+As built (P4, section 8.2, and the index cache after it): the index of a
+capture that is split is built by a pass over it, on one thread, when the
+scan starts, and kept in memory for the later scans of the same database
+(`engine/table/index_cache.rs`; the setting `pcapsql_index_cache`, on by
+default). There is no `pcapsql_index_cache_dir` and nothing is written to
+disk: the file API has no modification time to validate a stored index
+with. An entry is found by the path as opened and the stride, holds only an
+index of the whole capture, and is checked before each use: the file's
+size, a hash of its first and last 64 KiB, and a hash of the first 32 bytes
+at each checkpoint where the scan starts or ends a partition. While the scan
+runs, a partition read to its end must end where the next one starts; if it
+does not, the query fails and the entry is dropped. The module documentation
+says what these checks miss: records between checkpoints that change while
+the bytes at the checkpoints do not. Records merged or split in place shift
+the frame numbers after them, with no error, for a query that does not read
+the changed part to its end. The cache holds at most 1,024 indexes and
+about 64 MiB, least recently used out, one cache per database.
+
+Because the pass is on one thread, a file of several is split only for its
+share of the threads (its share of the bytes of the files that can be split,
+rounded: files of one size on as many threads are not split, and a
+compressed or remote file takes no share), and with an upper bound on
+`frame_number` the pass ends at the bound; that index is not kept. A kept
+index is cut at such a bound.
 
 ### 6.5 Filter pushdown
 

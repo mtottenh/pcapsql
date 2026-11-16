@@ -1,10 +1,10 @@
-use pcapsql_core::io::{Compression, StreamHeader};
+use pcapsql_core::io::{Compression, PacketPosition, StreamHeader};
 use pcapsql_core::scan::FramePredicate;
 
 use super::args::DEFAULT_PROTOCOL;
 use super::function::has_wildcard;
 use super::layout::{can_split, thread_share};
-use super::report::parsed_protocols;
+use super::report::{misaligned, parsed_protocols};
 use super::*;
 
 fn bound(relation: &str) -> BindData {
@@ -26,6 +26,7 @@ fn scan(relation: &str) -> PcapScan {
     PcapScan {
         name: format!("read_{relation}"),
         relation: Relation::find(relation),
+        indexes: Default::default(),
     }
 }
 
@@ -222,6 +223,7 @@ fn only_read_pcap_and_the_stream_functions_take_a_key_log() {
     let read_pcap = PcapScan {
         name: "read_pcap".to_owned(),
         relation: None,
+        indexes: Default::default(),
     };
     assert_eq!(read_pcap.positions().protocol, Some(1));
     assert_eq!(read_pcap.positions().strict, 2);
@@ -351,6 +353,7 @@ fn every_scan_table_gets_a_function_and_none_is_called_pcap() {
         let function = PcapScan {
             name: String::new(),
             relation: Some(relation),
+            indexes: Default::default(),
         };
         assert_eq!(function.positions().strict, 1);
         assert_eq!(function.positions().filename, 2);
@@ -422,4 +425,39 @@ fn only_local_uncompressed_files_can_be_split() {
     assert!(can_split(false, &header(Compression::None)));
     assert!(!can_split(false, &header(Compression::Gzip)));
     assert!(!can_split(true, &header(Compression::None)));
+}
+
+/// A partition that is read to its end ends where the next one starts; in a pcapng capture a
+/// block that is not a packet may come between.
+#[test]
+fn a_partition_read_to_its_end_ends_where_the_next_one_starts() {
+    let end = PacketPosition {
+        byte_offset: 1000,
+        frame_number: 101,
+    };
+    let never = || -> bool { unreachable!("not asked") };
+    // Where the index says, in either format.
+    assert_eq!(misaligned(false, 100, 1000, &end, false, never), None);
+    assert_eq!(misaligned(true, 100, 1000, &end, false, never), None);
+    // In a pcap file anywhere else is wrong: records before frame 101 that the index did not
+    // count, or a record of the next partition read as one of this one.
+    let short = misaligned(false, 100, 990, &end, false, never).unwrap();
+    assert_eq!(
+        short,
+        "by the index frame 101 starts at byte 1000, but frame 100 ends at byte 990"
+    );
+    assert!(misaligned(false, 100, 1010, &end, false, never).is_some());
+    // In a pcapng file the bytes before the next partition may be blocks of no packet.
+    assert_eq!(misaligned(true, 100, 990, &end, false, || false), None);
+    assert!(misaligned(true, 100, 990, &end, false, || true).is_some());
+    assert!(misaligned(true, 100, 1010, &end, false, never).is_some());
+    // Ended before its last frame: by the filter, which is no news; or because the records
+    // ran out.
+    assert_eq!(misaligned(false, 50, 500, &end, true, never), None);
+    assert_eq!(misaligned(true, 50, 500, &end, true, never), None);
+    let out = misaligned(false, 50, 500, &end, false, never).unwrap();
+    assert_eq!(
+        out,
+        "by the index frame 101 starts at byte 1000, but the records end after frame 50"
+    );
 }

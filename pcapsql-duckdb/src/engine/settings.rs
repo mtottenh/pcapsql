@@ -5,6 +5,7 @@
 //! | `pcapsql_parallel_scan` | `BOOLEAN` | `true` | Split a large local capture into partitions that several threads scan. `false` reads every capture on one thread |
 //! | `pcapsql_parallel_min_file_size` | `UBIGINT` | 4194304 | The size in bytes from which a capture is split. Below it the index pass costs more than it saves |
 //! | `pcapsql_index_stride` | `UBIGINT` | 65536 | Frames between two places a capture can be split at. A capture has at most one partition per stride |
+//! | `pcapsql_index_cache` | `BOOLEAN` | `true` | Keep the index of a capture a scan split, in memory, for later scans of it in the same database (`engine::table`, module `index_cache`). `false`: every split scan builds the index, and none is kept |
 //! | `pcapsql_filter_pushdown` | `BOOLEAN` | `true` | Let a scan take over the filters on `frame_number` and `timestamp` it can apply exactly (`engine::pushdown`). `false` leaves every filter to DuckDB, which then applies it to the rows of a full scan |
 //! | `pcapsql_keylog` | `VARCHAR` | empty | The path of a TLS key log (NSS key log format, `SSLKEYLOGFILE`) that a scan of a stream table decrypts TLS with when its `keylog` parameter is not given. Empty: none. It is how a scan that cannot be given the parameter gets one: a view over `read_tls_sessions`, a prepared statement |
 //!
@@ -28,6 +29,7 @@ pub const PARALLEL_MIN_FILE_SIZE: &str = "pcapsql_parallel_min_file_size";
 pub const INDEX_STRIDE: &str = "pcapsql_index_stride";
 pub const FILTER_PUSHDOWN: &str = "pcapsql_filter_pushdown";
 pub const KEYLOG: &str = "pcapsql_keylog";
+pub const INDEX_CACHE: &str = "pcapsql_index_cache";
 
 /// DuckDB's own setting: the number of threads a query may run on.
 const THREADS: &str = "threads";
@@ -41,6 +43,8 @@ pub struct ScanSettings {
     pub min_file_size: u64,
     /// `pcapsql_index_stride`: at least 1.
     pub index_stride: u64,
+    /// `pcapsql_index_cache`.
+    pub index_cache: bool,
     /// DuckDB's `threads`: at least 1.
     pub threads: usize,
 }
@@ -57,11 +61,15 @@ impl ScanSettings {
                 .get::<u64>()?
                 .ok_or_else(|| Error::invalid_input(format!("the setting {name} is NULL")))
         };
-        let (parallel, _scope) = config.get_value(PARALLEL_SCAN)?;
+        let switch = |name: &str| -> Result<bool> {
+            let (value, _scope) = config.get_value(name)?;
+            Ok(value.get::<bool>()?.unwrap_or(true))
+        };
         Ok(Self {
-            parallel: parallel.get::<bool>()?.unwrap_or(true),
+            parallel: switch(PARALLEL_SCAN)?,
             min_file_size: number(PARALLEL_MIN_FILE_SIZE)?,
             index_stride: number(INDEX_STRIDE)?.max(1),
+            index_cache: switch(INDEX_CACHE)?,
             threads: usize::try_from(number(THREADS)?)
                 .unwrap_or(usize::MAX)
                 .max(1),
@@ -120,10 +128,15 @@ impl CustomOptionCallbacks for NotNull {
 }
 
 pub(super) fn register(extension: &Extension) -> Result<()> {
-    let switches: [(&'static str, &str); 2] = [
+    let switches: [(&'static str, &str); 3] = [
         (
             PARALLEL_SCAN,
             "Scan a large local capture in partitions, on several threads",
+        ),
+        (
+            INDEX_CACHE,
+            "Keep the index of a capture that a scan split, so that a later scan of it in this \
+             database splits it without reading it first",
         ),
         (
             FILTER_PUSHDOWN,

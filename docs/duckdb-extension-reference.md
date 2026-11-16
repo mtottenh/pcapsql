@@ -27,7 +27,7 @@ is described in
 | Scalar functions | 48 | `ip4`, `ip4_to_string`, `ip6`, `ip6_to_string`, `mac`, `mac_to_string`, `is_private_ip`, `is_loopback_ip`, `is_multicast_ip`, `is_multicast_ip6`, `is_link_local_ip6`, `mac_is_broadcast`, `mac_is_multicast`, `mac_is_local`, `ip_in_cidr`, `ip6_in_cidr`, `tcp_flags_str`, `has_tcp_flag`, `ethertype_name`, `ip_proto_name`, `dscp_name`, `ecn_name`, `icmp_type_name`, `icmp_code_name`, `icmpv6_type_name`, `icmpv6_code_name`, `dns_type_name`, `dns_class_name`, `dns_rcode_name`, `bgp_message_type_name`, `bgp_origin_name`, `ospf_packet_type_name`, `ospf_lsa_type_name`, `gtp_message_type_name`, `ntp_mode_name`, `ntp_stratum_name`, `tls_record_type_name`, `tls_version_name`, `pcap_hex`, `pcap_unhex`, `hdr_count`, `hdr_min`, `hdr_max`, `hdr_mean`, `hdr_stdev`, `hdr_percentile`, `hdr_buckets`, `hdr_ascii` |
 | Aggregate functions | 1 | `hdr_histogram` |
 | Macros | 9 | `format_ip4`, `format_ip6`, `format_mac`, `format_ip4_list`, `format_ip6_list`, `format_mac_list`, `start_time`, `end_time`, `relative_time` |
-| Settings | 5 | `pcapsql_parallel_scan`, `pcapsql_parallel_min_file_size`, `pcapsql_index_stride`, `pcapsql_filter_pushdown`, `pcapsql_keylog` |
+| Settings | 6 | `pcapsql_parallel_scan`, `pcapsql_parallel_min_file_size`, `pcapsql_index_stride`, `pcapsql_index_cache`, `pcapsql_filter_pushdown`, `pcapsql_keylog` |
 | Replacement scan | 1 | `FROM 'capture.pcap'` |
 | Copy format | 1 | `FORMAT pcap`, for `COPY ... TO`, with the options `LINKTYPE`, `SNAPLEN` and `PRECISION` |
 
@@ -680,6 +680,7 @@ All are global.
 | `pcapsql_parallel_scan` | `BOOLEAN` | `true` | Scan a large local uncompressed capture in partitions, on several threads. `false` reads every capture on one thread |
 | `pcapsql_parallel_min_file_size` | `UBIGINT` | `4194304` | The size in bytes from which a capture is scanned in partitions |
 | `pcapsql_index_stride` | `UBIGINT` | `65536` | Frames between two places a capture can be split at. A capture of no more frames than this is not split |
+| `pcapsql_index_cache` | `BOOLEAN` | `true` | Keep the index of a capture that a scan split, in memory, for later scans of it in the same database (see "The index cache" below). `false`: every split scan reads the capture for its index first, and no index is kept. NULL is refused |
 | `pcapsql_filter_pushdown` | `BOOLEAN` | `true` | Apply filters on `frame_number` and `timestamp` in the scan. `false` leaves every filter to DuckDB |
 | `pcapsql_keylog` | `VARCHAR` | empty | The path of the TLS key log a scan of a stream table decrypts with when its `keylog` parameter is not given. Empty: none. The file is opened when a scan is bound, not when the setting is set. NULL is refused |
 
@@ -688,13 +689,16 @@ SET pcapsql_parallel_scan = false;
 ```
 
 What a split costs, and when there is none. A capture has no index of its
-records, so before a capture is scanned in partitions it is read once, on one
-thread, for the places to split it at, and nothing of that is kept for the
-next statement. The pass takes about as long as `SELECT count(*) FROM
-read_frames(...)` on one thread (a quarter of a second per gigabyte where it
-was measured; the roadmap, section 8.2, has the numbers). A query that parses
-a protocol repays it two to three times over on four threads; a query that
-needs little of the capture does not:
+records, so the first time a capture is scanned in partitions it is read
+once, on one thread, for the places to split it at. The pass takes about as
+long as `SELECT count(*) FROM read_frames(...)` on one thread (a quarter of a
+second per gigabyte where it was measured; the roadmap, section 8.2, has the
+numbers). A query that parses a protocol repays it two to three times over on
+four threads; a query that needs little of the capture does not. The index is
+then kept for the later scans of the capture (see "The index cache" below),
+and they split it without the pass.
+
+When the index must be built:
 
 - A capture is split for its share of DuckDB's threads: its share of the
   bytes of the files of the call that can be split, rounded (a compressed or
@@ -711,6 +715,65 @@ needs little of the capture does not:
 - A scan that parses nothing (`frames` columns only) gains little from a
   split and nothing for `count(*)`: reading the capture is most of its work,
   and the pass reads it once more.
+
+### The index cache
+
+The index of a capture that a scan split is kept in memory for the later
+scans of that capture in the same database, by any scan function. A later
+scan splits the capture without reading it first. With an upper bound on
+`frame_number` it uses the part of the index up to the bound.
+
+- An index is found by the path as the scan opened it (as written, or as a
+  pattern expanded to) and by `pcapsql_index_stride`. Another spelling of the
+  path, or another stride, is another index.
+- Only an index of the whole capture is kept. The index of a scan whose pass
+  stopped at a bound on `frame_number` is not.
+- Each database has its own cache, and it goes when the database is closed.
+  It holds at most 1,024 indexes and about 64 MiB; past that, the index used
+  longest ago is dropped. At the default stride an index takes about 100
+  bytes per 65,536 frames.
+- `SET pcapsql_index_cache = false` turns it off: no index is used or kept.
+- The checks below read, before the scan starts, about 128 KiB of each file
+  whose index is kept and 32 bytes at each place it is split at, one file
+  after the other. A scan that builds an index and keeps it reads about
+  256 KiB more, and 32 bytes per checkpoint.
+
+DuckDB's file system does not give a file's modification time. So before a
+kept index is used, the scan checks that the file still looks like the one
+the index was built from: the same size, the same first and last 64 KiB, and
+the same first 32 bytes at every place where a partition starts or ends. If
+one check fails, the index is built again. While the scan runs, each
+partition must end where the next one starts. If one does not, the file has
+changed: the query fails with an error that says so (`'x.pcap' changed after
+its index was built`), and the index is dropped, so the query can be run
+again.
+
+What these checks do not see: a file rewritten in place with the same size,
+the same first and last 64 KiB and the same first 32 bytes where partitions
+start and end, but other records between them. Two records merged into one
+by rewriting one length field are an example: no byte at those places
+changes, but every frame after the merge is one frame earlier than the index
+says. Then:
+
+- A scan that reads the changed part to its end fails once, after it has
+  returned some rows.
+- A scan that does not read it, because a filter on `frame_number` or
+  `timestamp`, or a `LIMIT`, leaves it out, numbers the later frames wrongly,
+  with no error. For example, take a capture of 12,000 frames split at
+  frames 1, 3001, 6001 and 9001, and merge records 5000 and 5001. Then
+  `WHERE frame_number BETWEEN 9001 AND 9003` returns the frames that are now
+  9000 to 9002, numbered 9001 to 9003, and `WHERE frame_number > 6000`
+  counts 6,000 frames where there are 5,999.
+- In a pcapng file, frames are missing when there are more packets between
+  two such places and the first new one comes after a block that is not a
+  packet (an interface description, for example).
+- Under a filter on `timestamp`, rows are missing when only the times of the
+  records between two such places changed.
+- In a pcapng file, an interface description changed in place after the
+  first 64 KiB is not seen: the frames after it are read with the old link
+  type and time resolution.
+
+Where captures are rewritten in place, turn the cache off.
 
 ## Replacement scan
 

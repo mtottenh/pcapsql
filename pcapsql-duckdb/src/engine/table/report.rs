@@ -6,17 +6,18 @@ use std::sync::atomic::Ordering;
 
 use duckdb_neo::{
     connection::Context,
+    error::DuckDBError,
     log::{Log, LogLevel},
-    Result,
+    Error, Result,
 };
-use pcapsql_core::io::PacketReader;
+use pcapsql_core::io::{PacketPosition, PacketReader, PCAPNG_FRAME_BLOCK_TYPES};
 use pcapsql_core::scan::CompiledScan;
 
 use super::{
     function::CaptureFunction, keylog::Keys, layout::Layout, reader::Scanning, BindData, PcapScan,
     Shared, Worker, LOG_TYPE, PACKETS_PER_STEP,
 };
-use crate::engine::pushdown;
+use crate::engine::{fs::DuckFile, pushdown};
 
 impl PcapScan {
     /// One line on what a scan reads of one of its files, and parses.
@@ -93,6 +94,29 @@ impl PcapScan {
         if let Some(error) = finished.fault.get() {
             return Err(self.read_error(path, last_frame, &error));
         }
+        // A partition that was read to its end ends where the next one starts, if the index
+        // it was cut from is the index of the file as it is: the records between the two
+        // checkpoints are those the index counted. The index may be one of an earlier scan
+        // that the checks before the scan could not tell from that of the file (the
+        // `index_cache` module), or the file changed after the pass.
+        if let (Some(index), Some(end)) = (&shared.files[finished.file].index, &finished.end) {
+            let filtered = shared.plan.frames().past_end(last_frame.saturating_add(1));
+            let next_is_frame = || {
+                index.format.is_pcapng()
+                    && starts_a_frame_block(context, path, reader.source_offset())
+            };
+            if let Some(why) = misaligned(
+                index.format.is_pcapng(),
+                last_frame,
+                reader.source_offset(),
+                end,
+                filtered,
+                next_is_frame,
+            ) {
+                self.indexes.forget(path, index.stride);
+                return Err(self.changed_error(path, &why));
+            }
+        }
         // Which worker read what, for whoever asks the log how a scan was spread.
         let stats = finished.scan.stats();
         let skipped = if shared.plan.frames().is_all() {
@@ -141,6 +165,75 @@ impl PcapScan {
         );
         Ok(())
     }
+}
+
+impl PcapScan {
+    /// The error of a scan that found the file it reads is not the file its index is of.
+    fn changed_error(&self, path: &str, why: &str) -> Error {
+        self.error(
+            DuckDBError::IoReadFailure,
+            format_args!(
+                "'{path}' changed after its index was built: {why}. Rows of the scan may be \
+                 wrong. The index is dropped: run the query again"
+            ),
+        )
+    }
+}
+
+/// Why a partition that is not the last of its file did not end where the next one starts,
+/// or `None` if it did, or if it was not read that far because the filter ends it before.
+///
+/// `last_frame` is the number of the partition's last frame, `offset` the file offset of what
+/// its reader would read next, and `end` where the next partition starts by the index.
+/// `filtered`: the frame after `last_frame` is past the filter's last. In a pcapng capture
+/// blocks that are not frames may come between a partition's last frame and the next
+/// partition's first; `next_is_frame` says whether what is at `offset` is a block the reader
+/// would number.
+pub(super) fn misaligned(
+    pcapng: bool,
+    last_frame: u64,
+    offset: u64,
+    end: &PacketPosition,
+    filtered: bool,
+    next_is_frame: impl FnOnce() -> bool,
+) -> Option<String> {
+    let next = last_frame.saturating_add(1);
+    if next < end.frame_number {
+        // The reader ran out of records before the partition's last frame.
+        return (!filtered).then(|| {
+            format!(
+                "by the index frame {} starts at byte {}, but the records end after frame \
+                 {last_frame}",
+                end.frame_number, end.byte_offset
+            )
+        });
+    }
+    let aligned =
+        offset == end.byte_offset || (pcapng && offset < end.byte_offset && !next_is_frame());
+    (!aligned).then(|| {
+        format!(
+            "by the index frame {} starts at byte {}, but frame {last_frame} ends at byte \
+             {offset}",
+            end.frame_number, end.byte_offset
+        )
+    })
+}
+
+/// Whether a pcapng block that is a frame starts at byte `offset` of `path`, in either byte
+/// order: one of the types the reader and the index pass number (`PCAPNG_FRAME_BLOCK_TYPES`),
+/// and no other, so that a block they pass over is not taken for a frame. A file that cannot be
+/// read there says no: the scan reports what is wrong with it.
+fn starts_a_frame_block(context: &Context, path: &str, offset: u64) -> bool {
+    let mut block_type = [0; 4];
+    let read = DuckFile::open(context, path)
+        .and_then(|mut file| file.read_exact_at(offset, &mut block_type));
+    read.is_ok()
+        && [
+            u32::from_le_bytes(block_type),
+            u32::from_be_bytes(block_type),
+        ]
+        .iter()
+        .any(|found| PCAPNG_FRAME_BLOCK_TYPES.contains(found))
 }
 
 /// The protocols the parse of a compiled plan is restricted to, each with the fields it

@@ -1,5 +1,7 @@
 //! The partitions of one file of a scan, and the row estimate of a file.
 
+use std::sync::Arc;
+
 use duckdb_neo::{connection::Context, Result};
 use pcapsql_core::io::{
     build_boundary_index_to, BoundaryIndex, PacketPosition, PacketRange, PacketReader,
@@ -7,6 +9,7 @@ use pcapsql_core::io::{
 };
 use pcapsql_core::scan::{partition_target, plan_ranges, FramePredicate, PartitionPolicy};
 
+use super::index_cache::{relied_on, worth_keeping, Cached, Fingerprint, Stale};
 use super::{function::CaptureFunction, PcapScan, PACKETS_PER_STEP};
 use crate::engine::{
     fs::{self, DuckFile},
@@ -21,6 +24,38 @@ const ESTIMATED_BYTES_PER_FRAME: u64 = 512;
 /// How much larger a compressed capture is taken to be once decompressed, for the same estimate.
 const ESTIMATED_COMPRESSION_RATIO: u64 = 4;
 
+/// Where the index a file is cut at comes from.
+enum Source {
+    /// The pass of this scan. `stale`: why the index the cache had for the file was not used.
+    Pass { stale: Option<Stale> },
+    /// The cache, from an earlier scan.
+    Cache,
+}
+
+/// The index of the first `last_frame` frames of a capture, cut from `index`, the index of all
+/// of it: the index the pass builds when it stops at that frame, but for the timestamps of its
+/// last window, which take in the frames after it (`plan_ranges` does not look at the times of
+/// the last window). `index` itself when there is no bound or the capture ends before it.
+pub(super) fn first_frames(
+    index: &Arc<BoundaryIndex>,
+    last_frame: Option<u64>,
+) -> Arc<BoundaryIndex> {
+    let Some(last) = last_frame.filter(|last| *last < index.packet_count) else {
+        return index.clone();
+    };
+    Arc::new(BoundaryIndex {
+        packet_count: last,
+        checkpoints: index
+            .checkpoints
+            .iter()
+            .take_while(|checkpoint| checkpoint.frame_number <= last)
+            .cloned()
+            .collect(),
+        source_etag: index.source_etag.clone(),
+        ..*index.as_ref()
+    })
+}
+
 /// The partitions of one file: what [`PcapScan::layout`] decided.
 #[derive(Debug)]
 pub(super) struct Layout {
@@ -28,7 +63,7 @@ pub(super) struct Layout {
     pub(super) ranges: Vec<PacketRange>,
     /// The index `ranges` were cut from. `None`: `ranges` is the whole capture, read from its
     /// first byte.
-    pub(super) index: Option<BoundaryIndex>,
+    pub(super) index: Option<Arc<BoundaryIndex>>,
     /// The decision in words, for the log.
     pub(super) note: String,
 }
@@ -137,13 +172,56 @@ impl PcapScan {
             )));
         }
 
-        // One pass over the record headers. Nothing is kept of the index beyond this scan, so
-        // what would tell a later reader that the file has changed is left out. Frames past
-        // an upper bound on `frame_number` are not looked for: the index is then that of the
-        // capture's beginning, which is what an index is of a capture that has grown since,
-        // and `plan_ranges` and the scan treat it as that. A strict scan needs the pass to
-        // reach the end, where the capture may be cut off.
+        // Frames past an upper bound on `frame_number` are not read, nor indexed by the pass
+        // below. A strict scan needs the index to reach the end, where the capture may be cut
+        // off.
         let last_frame = if strict { None } else { frames.last_frame() };
+
+        // The index an earlier scan built, if the file still looks like the one it was built
+        // from (the `index_cache` module). With a bound the index is cut there, so the
+        // partitions are those of the frames the scan reads, as they would be with the pass.
+        // `fingerprint`: the file's before the pass, to keep the index with.
+        let mut fingerprint = None;
+        let mut stale = None;
+        if settings.index_cache {
+            if let Some(cached) = self.indexes.get(path, settings.index_stride) {
+                let now = Fingerprint::of(&mut file, size)
+                    .map_err(|error| Stale::Unreadable(error.to_string()));
+                fingerprint = now.clone().ok();
+                let planned = first_frames(&cached.index, last_frame);
+                let usable = now.and_then(|now| cached.check_file(&now)).and_then(|()| {
+                    // The records the partitions will start and end at.
+                    let ranges = plan_ranges(Some(&planned), want, frames);
+                    cached.check_records(&mut file, relied_on(&planned, &ranges))
+                });
+                match usable {
+                    Ok(()) => {
+                        return self.cut(
+                            &mut file,
+                            path,
+                            planned,
+                            want,
+                            strict,
+                            frames,
+                            Source::Cache,
+                        )
+                    }
+                    Err(why) => {
+                        self.indexes.forget(path, settings.index_stride);
+                        stale = Some(why);
+                    }
+                }
+            }
+        }
+
+        if settings.index_cache && fingerprint.is_none() {
+            fingerprint = Fingerprint::of(&mut file, size).ok();
+        }
+
+        // One pass over the record headers, to the last frame the scan reads: the index is
+        // then that of the capture's beginning, which is what an index is of a capture that
+        // has grown since, and `plan_ranges` and the scan treat it as that. It is kept for
+        // later scans only if it is of the whole capture.
         file.seek(0)?;
         let built = build_boundary_index_to(
             &mut file,
@@ -155,7 +233,12 @@ impl PcapScan {
             last_frame,
         );
         let index = match built {
-            Ok(index) => index,
+            // The pass grew the vector of checkpoints, which may have room for twice as many as
+            // it holds. The cache holds it for as long as it holds the index.
+            Ok(mut index) => {
+                index.checkpoints.shrink_to_fit();
+                Arc::new(index)
+            }
             // A record the pass cannot get past. The scan cannot either, but it returns the
             // rows before it first and then says where it is.
             Err(error) => {
@@ -164,30 +247,97 @@ impl PcapScan {
                 )))
             }
         };
-        // What the pass counted: the frames of the capture, or those up to the filter's last.
+        if let Some(before) = fingerprint {
+            if worth_keeping(&index, last_frame) {
+                self.keep(&mut file, path, &index, before);
+            }
+        }
+        self.cut(
+            &mut file,
+            path,
+            index,
+            want,
+            strict,
+            frames,
+            Source::Pass { stale },
+        )
+    }
+
+    /// Keep `index`, just built from `file`, for later scans, with `before`, the fingerprint
+    /// the file had before the pass, if the file has it still. A file that cannot be read for
+    /// the marks is not kept, and the scan goes on: it reports what is wrong when it gets there.
+    fn keep(
+        &self,
+        file: &mut DuckFile,
+        path: &str,
+        index: &Arc<BoundaryIndex>,
+        before: Fingerprint,
+    ) {
+        // Before the marks are read, which is a read per checkpoint.
+        if !self.indexes.admits(path, index) {
+            return;
+        }
+        let Ok(cached) = Cached::new(index.clone(), before, file) else {
+            return;
+        };
+        // A file that changed under the pass may have been indexed half before the change and
+        // half after.
+        let unchanged = file
+            .size()
+            .ok()
+            .and_then(|size| Fingerprint::of(file, size).ok())
+            .is_some_and(|after| cached.check_file(&after).is_ok());
+        if unchanged {
+            self.indexes.insert(path, cached);
+        }
+    }
+
+    /// The partitions of a file cut at the checkpoints of `index`, from `source`, for `want`
+    /// threads, without what `frames` rules out.
+    #[allow(clippy::too_many_arguments)]
+    fn cut(
+        &self,
+        file: &mut DuckFile,
+        path: &str,
+        index: Arc<BoundaryIndex>,
+        want: usize,
+        strict: bool,
+        frames: &FramePredicate,
+        source: Source,
+    ) -> Result<Layout> {
+        // What the index counts: the frames of the capture, or those up to the filter's last.
+        let last_frame = if strict { None } else { frames.last_frame() };
         let counted = if last_frame.is_some_and(|last| index.packet_count >= last) {
             "the first "
         } else {
             ""
         };
+        // Where it is from.
+        let from = match source {
+            Source::Pass { stale } => stale.map_or_else(String::new, |why| {
+                format!("; the kept index no longer matched ({why}) and was built again")
+            }),
+            Source::Cache => "; index kept from an earlier scan".to_owned(),
+        };
         let whole = plan_ranges(Some(&index), want, &FramePredicate::all()).len();
         if whole <= 1 {
             return Ok(Layout::sequential(format_args!(
-                "{counted}{} frames give no place to split at, with a checkpoint every {} frames",
+                "{counted}{} frames give no place to split at, with a checkpoint every {} \
+                 frames{from}",
                 index.packet_count, index.stride
             )));
-        }
-        if strict {
-            // Workers do not wait for each other, so the one at the end of the capture could
-            // find a broken tail before or after a `LIMIT` is filled by the others. Whether a
-            // strict scan fails must not depend on that: the tail is looked at now.
-            if let Some(last_frame) = self.truncated_tail(&mut file, &index) {
-                return Err(self.truncation_error(path, last_frame));
-            }
         }
         // The partitions, without those the filter rules out and each shrunk to the checkpoint
         // windows that may hold a frame it accepts. There may be none left.
         let ranges = plan_ranges(Some(&index), want, frames);
+        if strict {
+            // Workers do not wait for each other, so the one at the end of the capture could
+            // find a broken tail before or after a `LIMIT` is filled by the others. Whether a
+            // strict scan fails must not depend on that: the tail is looked at now.
+            if let Some(last_frame) = self.truncated_tail(file, &index) {
+                return Err(self.truncation_error(path, last_frame));
+            }
+        }
         let filtered = if frames.is_all() {
             String::new()
         } else {
@@ -208,7 +358,7 @@ impl PcapScan {
         };
         Ok(Layout {
             note: format!(
-                "{} (of {counted}{} frames, cut at checkpoints {} frames apart{filtered})",
+                "{} (of {counted}{} frames, cut at checkpoints {} frames apart{filtered}{from})",
                 ranges.len(),
                 index.packet_count,
                 index.stride

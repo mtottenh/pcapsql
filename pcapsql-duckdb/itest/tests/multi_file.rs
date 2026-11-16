@@ -409,7 +409,9 @@ fn work_is_spread_across_files_and_within_them() -> Result<()> {
 
     // Files that are a thread's worth each are the partitions: none is split, so none is
     // read once for its record boundaries before the scan. With fewer files than threads
-    // each is split for its share.
+    // each is split for its share. These are the notes of scans that build the index, so the
+    // index the scans above kept is not used here.
+    set(&connection, "pcapsql_index_cache", false);
     let layouts_of = |files: &str| -> Result<Vec<String>> {
         logged(&connection, "DEBUG");
         let copies = files.matches(".pcap'").count();
