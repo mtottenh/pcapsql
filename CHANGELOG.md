@@ -111,6 +111,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `Unknown (0x0305)`.
 - `icmpv6_code_name()` now names the Parameter Problem codes 3 to 10
   (RFC 7112, 8754 and 8883).
+- `pcapsql-datafusion`: breaking change. The parse pass functions, for
+  example `run_shared_parse`, take a `PassOptions` value. The
+  `query::stream_tables` module and `NormalizedBatchSet` are removed.
 
 ### Removed
 
