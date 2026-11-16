@@ -6,11 +6,17 @@
 //! - **Constant memory**: Fixed footprint regardless of data size
 //! - **Streaming**: Values accumulated incrementally via `update_batch`
 //! - **Mergeable**: Supports parallel execution via `merge_batch`
-//! - **High precision**: Configurable significant figures (1-5)
 //!
 //! ## Aggregate Function
 //!
-//! - `hdr_histogram(value, [sigfigs])` - Build histogram, returns serialized bytes
+//! - `hdr_histogram(value)` - Build histogram, returns serialized bytes
+//!
+//! The value is a number: an integer of any width, a float or a decimal.
+//! An argument of any other type is an error when the query is planned, as
+//! in the DuckDB extension. A second argument (once documented as the
+//! number of significant figures) is accepted and ignored, so queries that
+//! pass one keep working: the histogram always has the kernel's default
+//! precision.
 //!
 //! ## Scalar Extraction Functions
 //!
@@ -45,9 +51,6 @@
 //!     hdr_min(hist) as min_rtt,
 //!     hdr_max(hist) as max_rtt
 //! FROM h;
-//!
-//! -- With custom precision (3 significant figures)
-//! SELECT hdr_histogram(latency_us, 3) as hist FROM measurements;
 //! ```
 //!
 //! ## Serialization
@@ -67,13 +70,14 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayBuilder, ArrayRef, BinaryArray, Float32Array, Float64Array, Int16Array, Int32Array,
-    Int64Array, Int8Array, ListArray, StringArray, StructArray, UInt16Array, UInt32Array,
-    UInt64Array, UInt64Builder, UInt8Array,
+    Array, ArrayBuilder, ArrayRef, BinaryArray, Decimal128Array, Decimal256Array, Decimal32Array,
+    Decimal64Array, Float16Array, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array,
+    Int8Array, ListArray, StringArray, StructArray, UInt16Array, UInt32Array, UInt64Array,
+    UInt64Builder, UInt8Array,
 };
 use arrow::buffer::{BooleanBuffer, NullBuffer, OffsetBuffer, ScalarBuffer};
-use arrow::datatypes::{DataType, Field, Fields};
-use datafusion::common::{Result as DFResult, ScalarValue};
+use arrow::datatypes::{i256, DataType, Field, Fields};
+use datafusion::common::{exec_err, plan_err, Result as DFResult, ScalarValue};
 use datafusion::logical_expr::{
     Accumulator, AggregateUDF, AggregateUDFImpl, ColumnarValue, ScalarFunctionArgs, ScalarUDF,
     ScalarUDFImpl, Signature, Volatility,
@@ -99,10 +103,70 @@ struct HdrHistogramUdaf {
 impl HdrHistogramUdaf {
     fn new() -> Self {
         Self {
-            // Accept Float64 value, optional UInt8 sigfigs
+            // The value, and an ignored second argument; the types are
+            // checked in `return_type`.
             signature: Signature::variadic_any(Volatility::Immutable),
         }
     }
+}
+
+/// Whether `hdr_histogram` records values of this type: the numbers, and
+/// the type of a bare NULL (nothing to record).
+fn is_recordable(data_type: &DataType) -> bool {
+    matches!(
+        data_type,
+        DataType::Null
+            | DataType::Int8
+            | DataType::Int16
+            | DataType::Int32
+            | DataType::Int64
+            | DataType::UInt8
+            | DataType::UInt16
+            | DataType::UInt32
+            | DataType::UInt64
+            | DataType::Float16
+            | DataType::Float32
+            | DataType::Float64
+            | DataType::Decimal32(..)
+            | DataType::Decimal64(..)
+            | DataType::Decimal128(..)
+            | DataType::Decimal256(..)
+    )
+}
+
+/// The integer part of the decimal stored as `stored` with `scale`, for a
+/// value that is not negative: the stored integer without its last `scale`
+/// digits (with `scale` zeros added for a negative scale, and `i128::MAX`
+/// when that does not fit). What the DuckDB extension records of a DECIMAL.
+fn decimal_integer_part(stored: i128, scale: i8) -> i128 {
+    let digits = u32::from(scale.unsigned_abs());
+    match 10_i128.checked_pow(digits) {
+        // More digits than an i128 has: the integer part is 0.
+        None if scale >= 0 => 0,
+        Some(unit) if scale >= 0 => stored / unit,
+        unit => match unit.and_then(|unit| stored.checked_mul(unit)) {
+            Some(value) => value,
+            None if stored == 0 => 0,
+            None => i128::MAX,
+        },
+    }
+}
+
+/// [`decimal_integer_part`] of a 256-bit decimal; past `i128::MAX` it is
+/// `i128::MAX`, which the histogram records as its largest value anyway.
+fn decimal256_integer_part(stored: i256, scale: i8) -> i128 {
+    let digits = u32::from(scale.unsigned_abs());
+    let ten = i256::from_i128(10);
+    let part = match ten.checked_pow(digits) {
+        None if scale >= 0 => i256::ZERO,
+        Some(unit) if scale >= 0 => stored.checked_div(unit).unwrap_or(i256::ZERO),
+        unit => match unit.and_then(|unit| stored.checked_mul(unit)) {
+            Some(value) => value,
+            None if stored == i256::ZERO => i256::ZERO,
+            None => return i128::MAX,
+        },
+    };
+    part.to_i128().unwrap_or(i128::MAX)
 }
 
 impl AggregateUDFImpl for HdrHistogramUdaf {
@@ -118,7 +182,22 @@ impl AggregateUDFImpl for HdrHistogramUdaf {
         &self.signature
     }
 
-    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+    fn return_type(&self, arg_types: &[DataType]) -> DFResult<DataType> {
+        match arg_types {
+            [value] | [value, _] if is_recordable(value) => {}
+            [value] | [value, _] => {
+                return plan_err!(
+                    "hdr_histogram: the values must be numbers (an integer type, a float or \
+                     a decimal), not {value}"
+                )
+            }
+            _ => {
+                return plan_err!(
+                    "hdr_histogram takes one argument, the value, not {}",
+                    arg_types.len()
+                )
+            }
+        }
         // Return serialized histogram as binary
         Ok(DataType::Binary)
     }
@@ -182,10 +261,10 @@ impl Accumulator for HdrHistogramAccumulator {
 
         let values_array = &values[0];
 
-        // Handle every numeric array type; anything else is ignored.
-        // Note: floats are truncated and negative values are skipped (the
-        // core kernels), so callers wanting sub-unit precision should
-        // scale values before recording.
+        // Every numeric array type; `return_type` refused the others.
+        // Note: floats and decimals are truncated and negative values are
+        // skipped (the core kernels, as in the DuckDB extension), so callers
+        // wanting sub-unit precision should scale values before recording.
         macro_rules! record {
             ($array_ty:ty, $record:ident, $wide:ty) => {
                 if let Some(a) = values_array.as_any().downcast_ref::<$array_ty>() {
@@ -209,9 +288,51 @@ impl Accumulator for HdrHistogramAccumulator {
         record!(UInt32Array, record, u64);
         record!(UInt16Array, record, u64);
         record!(UInt8Array, record, u64);
-        // Silently ignore non-numeric types
+        if let Some(a) = values_array.as_any().downcast_ref::<Float16Array>() {
+            for value in a.iter().flatten() {
+                self.histogram.record_float(f64::from(value));
+            }
+            return Ok(());
+        }
 
-        Ok(())
+        // A decimal: the integer part of a value that is not negative (one
+        // of -0.5 is not recorded either), as the DuckDB extension does.
+        macro_rules! record_decimal {
+            ($array_ty:ty) => {
+                if let Some(a) = values_array.as_any().downcast_ref::<$array_ty>() {
+                    let scale = a.scale();
+                    for value in a.iter().flatten() {
+                        let stored = i128::from(value);
+                        if stored >= 0 {
+                            self.histogram
+                                .record_wide(decimal_integer_part(stored, scale));
+                        }
+                    }
+                    return Ok(());
+                }
+            };
+        }
+        record_decimal!(Decimal32Array);
+        record_decimal!(Decimal64Array);
+        record_decimal!(Decimal128Array);
+        if let Some(a) = values_array.as_any().downcast_ref::<Decimal256Array>() {
+            let scale = a.scale();
+            for stored in a.iter().flatten() {
+                if !stored.is_negative() {
+                    self.histogram
+                        .record_wide(decimal256_integer_part(stored, scale));
+                }
+            }
+            return Ok(());
+        }
+        if values_array.data_type() == &DataType::Null {
+            return Ok(());
+        }
+
+        exec_err!(
+            "hdr_histogram: the values must be numbers, not {}",
+            values_array.data_type()
+        )
     }
 
     /// Merge histograms from parallel workers.
@@ -1047,7 +1168,7 @@ mod tests {
     async fn test_sql_functions_answer_as_the_kernels_do() {
         let ctx = SessionContext::new();
         crate::query::udf::register_histogram_udfs(&ctx).unwrap();
-        let cases: [(&str, &str, &[u64]); 10] = [
+        let cases: [(&str, &str, &[u64]); 12] = [
             (
                 "integers, some NULL",
                 "SELECT hdr_histogram(v) AS h FROM (VALUES (1), (NULL), (5), (5), (1000)) t(v)",
@@ -1094,15 +1215,29 @@ mod tests {
                 &[4294967295, 136, 583, 65080],
             ),
             (
-                // Unlike in the DuckDB extension, which records the integer part.
-                "a DECIMAL column is not recorded",
-                "SELECT hdr_histogram(CAST(v AS DECIMAL(10, 2))) AS h FROM (VALUES (1.5), (20)) t(v)",
-                &[],
+                // As in the DuckDB extension.
+                "a DECIMAL records its integer part, and no negative value",
+                "SELECT hdr_histogram(CAST(v AS DECIMAL(10, 2))) AS h FROM \
+                 (VALUES (1.5), (20), (-0.5), (-3), (0.99), (99999999.99), (NULL)) t(v)",
+                &[1, 20, 0, 99_999_999],
             ),
             (
-                "a column that is not a number is not recorded",
-                "SELECT hdr_histogram(v) AS h FROM (VALUES ('a'), ('b')) t(v)",
-                &[],
+                "a DECIMAL past u64::MAX is recorded as u64::MAX",
+                "SELECT hdr_histogram(CAST(v AS DECIMAL(38, 0))) AS h FROM \
+                 (VALUES ('99999999999999999999999999999999999999'), ('18446744073709551615'), \
+                 ('-99999999999999999999999999999999999999')) t(v)",
+                &[u64::MAX, u64::MAX],
+            ),
+            (
+                "a 256-bit DECIMAL",
+                "SELECT hdr_histogram(arrow_cast(CAST(v AS DECIMAL(10, 2)), 'Decimal256(60, 2)')) \
+                 AS h FROM (VALUES (1.5), (-2.25), (300.75)) t(v)",
+                &[1, 300],
+            ),
+            (
+                "a second argument is ignored",
+                "SELECT hdr_histogram(v, 3) AS h FROM (VALUES (1), (5)) t(v)",
+                &[1, 5],
             ),
         ];
         for (what, sql, recorded) in cases {
@@ -1112,6 +1247,58 @@ mod tests {
                 "{what}"
             );
         }
+    }
+
+    /// What is not a number is refused when the query is planned, as in
+    /// the DuckDB extension, and so is a call without a value or with more
+    /// than two arguments.
+    #[tokio::test]
+    async fn test_hdr_histogram_refuses_what_it_cannot_record() {
+        let ctx = SessionContext::new();
+        crate::query::udf::register_histogram_udfs(&ctx).unwrap();
+        for (sql, message) in [
+            (
+                "SELECT hdr_histogram(v) FROM (VALUES ('a'), ('b')) t(v)",
+                "must be numbers",
+            ),
+            (
+                "SELECT hdr_histogram(v) FROM (VALUES (true)) t(v)",
+                "must be numbers",
+            ),
+            (
+                "SELECT hdr_histogram(v, 3, 4) FROM (VALUES (1)) t(v)",
+                "one argument",
+            ),
+        ] {
+            let error = match ctx.sql(sql).await {
+                Ok(frame) => frame.collect().await.unwrap_err(),
+                Err(error) => error,
+            };
+            assert!(error.to_string().contains(message), "{sql}: {error}");
+        }
+    }
+
+    #[test]
+    fn test_decimal_integer_part() {
+        assert_eq!(decimal_integer_part(150, 2), 1);
+        assert_eq!(decimal_integer_part(99, 2), 0);
+        assert_eq!(decimal_integer_part(7, 0), 7);
+        // A scale past what an i128 holds: the integer part is 0.
+        assert_eq!(decimal_integer_part(i128::MAX, 39), 0);
+        assert_eq!(decimal_integer_part(i128::MAX, 38), 1);
+        // A negative scale adds zeros, saturating.
+        assert_eq!(decimal_integer_part(12, -3), 12_000);
+        assert_eq!(decimal_integer_part(12, -38), i128::MAX);
+        assert_eq!(decimal_integer_part(0, -38), 0);
+
+        let big = |v: i128| i256::from_i128(v);
+        assert_eq!(decimal256_integer_part(big(150), 2), 1);
+        assert_eq!(decimal256_integer_part(i256::MAX, 76), 5);
+        assert_eq!(decimal256_integer_part(i256::MAX, 0), i128::MAX);
+        assert_eq!(decimal256_integer_part(big(1), 77), 0);
+        assert_eq!(decimal256_integer_part(big(12), -3), 12_000);
+        assert_eq!(decimal256_integer_part(big(12), -76), i128::MAX);
+        assert_eq!(decimal256_integer_part(i256::ZERO, -76), 0);
     }
 
     #[tokio::test]

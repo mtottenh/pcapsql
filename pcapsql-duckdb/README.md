@@ -775,12 +775,11 @@ the other. A group without a value is an empty histogram, not NULL, and a
 
 What differs from the DataFusion functions:
 
-- `hdr_histogram` takes one argument. DataFusion's accepts more and ignores
-  them (its help shows a `sigfigs` argument that has no effect).
-- A value that is not a number is refused when the statement is bound;
-  DataFusion returns an empty histogram for such a column. A `DECIMAL` is
-  recorded (its integer part), where DataFusion ignores the column, and so
-  is a `HUGEINT`, which DataFusion does not have.
+- `hdr_histogram` takes one argument. DataFusion's also accepts a second
+  one and ignores it (it was once documented as a precision).
+- Both refuse a value that is not a number when the statement is planned,
+  and both record the integer part of a `DECIMAL`. A `HUGEINT` is recorded
+  too, a type DataFusion does not have.
 - The list of `hdr_buckets` is DuckDB's `STRUCT(lo, hi, count)[]`:
   `unnest(..., recursive := true)` makes rows and columns of it.
 
