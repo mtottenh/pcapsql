@@ -497,8 +497,10 @@ a large uncompressed capture.
     (from the scan's DEBUG record), a pushed-down `frame_number` filter,
     `LIMIT`, a 404 as an error that names the URL, that
     `enable_external_access = false` refuses the URL with no request made,
-    and that every capture was requested from the server. How many bytes
-    `LIMIT` and a filter fetch, and whether `httpfs` asks for ranges, are
+    and that every capture was requested from the server. A pushed-down
+    frame range and `LIMIT` must end the read: no byte range either asks
+    for may reach the second half of the 28 MB capture, and neither may
+    fetch as many bytes as it holds. Whether `httpfs` asks for ranges is
     printed, not required. Without `httpfs` it exits with 77 and the make
     target passes; with `--require-httpfs`, which the workflows pass, that
     is a failure. Verified where it was written: the server (36 curl checks,

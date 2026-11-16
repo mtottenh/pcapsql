@@ -14,7 +14,8 @@
 #     from the URL as read from the file;
 #   - `filename` is the URL; a list of URLs, and of a URL and a file, is read as one table;
 #   - a remote capture is read as one partition, where the same file on disk is split;
-#   - a filter on `frame_number` is pushed down and `LIMIT` ends the scan;
+#   - a filter on `frame_number` is pushed down, and it and `LIMIT` end the read: neither asks
+#     the server for anything in the second half of a 28 MB capture;
 #   - a URL the server has no file for is an error that names the URL;
 #   - `SET enable_external_access = false` refuses the URL without a request to the server;
 #   - every capture was in fact requested from the server, in ranges.
@@ -259,10 +260,51 @@ if [ "$one" != "$big_frames"$'\n'"partitions: 1 (a remote file is not indexed)" 
 fi
 echo "remote-test: big.pcap: ${split#*$'\n'} on disk, one partition from the URL"
 
-# A scan that stops early asks the server for less than the file holds.
+# A scan that stops early asks the server for less than the file holds. What it asks for is
+# measured two ways, over the GET requests for big.pcap since line <from> of the log:
+#
+#   fetched <from>  the bytes the server sent;
+#   reach <from>    the end of the furthest byte range asked for (the first byte past it), or
+#                   of what was sent for a request without a closed range.
+#
+# How `httpfs` reads is its business, so the bounds leave it room: frames 1000 to 1009 and the
+# first chunk of rows a LIMIT needs are in the first 300 kB, the extension reads a remote file
+# 4 MiB at a time (`fs::REMOTE_BUFFER`) and `httpfs` buffers 1 MB on top, and the file is about
+# 28 MB. A read that ended early stays well within the first half of it; one that did not end
+# early reaches its end. The bytes sent are bounded by the file size only, since bind and scan
+# each open the file and nothing says `httpfs` caches what the first open fetched.
 big_size=$(wc -c < "$served/big.pcap" | tr -d ' ')
 fetched() {
     requests "$1" big.pcap | awk -F '\t' '$1 == "GET" { bytes += $5 } END { print bytes + 0 }'
+}
+reach() {
+    requests "$1" big.pcap | awk -F '\t' '
+        $1 == "GET" {
+            end = $5
+            if (match($3, /^bytes=[0-9]+-[0-9]+$/)) {
+                split(substr($3, 7), bounds, "-")
+                end = bounds[2] + 1
+            } else if (match($3, /^bytes=[0-9]+-$/)) {
+                end = substr($3, 7, RLENGTH - 7) + $5
+            }
+            if (end > furthest) furthest = end
+        }
+        END { print furthest + 0 }'
+}
+# ended_early <what> <from>: the GET requests since line <from> stayed in the first half of
+# big.pcap and fetched less than all of it.
+ended_early() {
+    local reached bytes
+    reached=$(reach "$2")
+    bytes=$(fetched "$2")
+    [ "$bytes" -gt 0 ] || fail "$1: nothing of big.pcap was fetched: the request log has no GET for it"
+    if [ "$reached" -ge $((big_size / 2)) ]; then
+        fail "$1: the read of big.pcap reached byte $reached of $big_size: it did not end early"
+    fi
+    if [ "$bytes" -ge "$big_size" ]; then
+        fail "$1: $bytes bytes of big.pcap were fetched, which has $big_size: the read did not end early"
+    fi
+    echo "remote-test: $1: fetched $bytes of $big_size bytes of big.pcap, none past byte $reached, in $(requests "$2" big.pcap | awk -F '\t' '$1 == "GET"' | wc -l | tr -d ' ') requests"
 }
 
 from=$(log_lines)
@@ -270,13 +312,13 @@ pushed=$(scan_record "SELECT count(*), min(frame_number), max(frame_number) FROM
 if [ "$pushed" != "10,1000,1009"$'\n'"partitions: 1 (a remote file is not indexed); filter: frame_number in [1000, 1009]" ]; then
     fail "a filter on frame_number should be pushed down into the scan of the URL: $pushed"
 fi
-pushed_bytes=$(fetched "$from")
+ended_early "frames 1000 to 1009, pushed down" "$from"
 expect "the same filter, not pushed down" "10,1000,1009" "
     SET pcapsql_filter_pushdown = false;
     SELECT count(*), min(frame_number), max(frame_number) FROM read_frames('$base/big.pcap') WHERE frame_number BETWEEN 1000 AND 1009;"
 expect "a filter on frame_number over a protocol table" "$(sql "SELECT count(*), sum(src_port) FROM read_tcp('$served/big.pcap') WHERE frame_number > 199000;")" "
     SELECT count(*), sum(src_port) FROM read_tcp('$base/big.pcap') WHERE frame_number > 199000;"
-echo "remote-test: big.pcap: frame_number filters agree with the file; frames 1000 to 1009 took $pushed_bytes of $big_size bytes"
+echo "remote-test: big.pcap: frame_number filters agree with the file"
 
 from=$(log_lines)
 expect "LIMIT 5" "1
@@ -284,13 +326,9 @@ expect "LIMIT 5" "1
 3
 4
 5" "SELECT frame_number FROM read_frames('$base/big.pcap') LIMIT 5;"
-limit_bytes=$(fetched "$from")
-# How much of a file `httpfs` asks for is its business, so this is reported, not required.
-if [ "$limit_bytes" -lt "$big_size" ]; then
-    echo "remote-test: LIMIT 5: $limit_bytes of $big_size bytes of big.pcap were fetched, in $(requests "$from" big.pcap | wc -l | tr -d ' ') requests"
-else
-    echo "remote-test: NOTE: LIMIT 5 fetched $limit_bytes bytes of big.pcap, which has $big_size: the scan did not end early, or httpfs reads ahead of it"
-fi
+# The scan is one partition, so one worker: DuckDB stops calling it once the LIMIT is met, after
+# the first chunk of rows.
+ended_early "LIMIT 5" "$from"
 
 # ---- errors ----
 
