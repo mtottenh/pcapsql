@@ -79,6 +79,41 @@ fn set(names: &[&str]) -> HashSet<String> {
     names.iter().map(|s| s.to_string()).collect()
 }
 
+/// The protocols of `scope` whose fields something reads, each with those
+/// fields (`None`: all of them). Every other protocol the scope parses is
+/// checked to be projected to no field: it is a layer on the way.
+fn read_fields(scope: &ParseScope) -> HashMap<String, Option<HashSet<String>>> {
+    let registry = default_registry();
+    let mut read = HashMap::new();
+    for name in scope.required().expect("a scoped parse") {
+        if registry.get_parser(name).is_none() {
+            continue; // `frames`
+        }
+        match scope.projections().get(name) {
+            None => {
+                read.insert(name.clone(), None);
+            }
+            Some(fields) if fields.is_empty() => {}
+            Some(fields) => {
+                read.insert(name.clone(), Some(fields.clone()));
+            }
+        }
+    }
+    // Nothing outside the scope is projected.
+    for name in scope.projections().keys() {
+        assert!(scope.required().unwrap().contains(name), "{name}");
+    }
+    read
+}
+
+/// `read_fields` as written in a test.
+fn reads(protocols: &[(&str, Option<&[&str]>)]) -> HashMap<String, Option<HashSet<String>>> {
+    protocols
+        .iter()
+        .map(|(name, fields)| (name.to_string(), fields.map(set)))
+        .collect()
+}
+
 #[test]
 fn an_empty_plan_parses_nothing() {
     let compiled = compile(&ScanPlan::default()).unwrap();
@@ -161,11 +196,15 @@ fn scope_is_the_dependency_closure_with_field_projections() {
         ParseScope::for_tables(&["tcp", "dns", "frames"], &registry).required()
     );
     // Pseudo-columns are not parser fields; a table read in full has no
-    // projection; `frames` is not parsed.
+    // projection; `frames` is not parsed. The layers under `tcp` and `dns`
+    // are parsed to reach them, with no field.
     assert_eq!(
-        scope.projections(),
-        &HashMap::from([("tcp".to_string(), set(&["dst_port"]))])
+        read_fields(scope),
+        reads(&[("tcp", Some(&["dst_port"])), ("dns", None)])
     );
+    for transit in ["ethernet", "ipv4", "ipv6", "udp", "vlan", "vxlan"] {
+        assert_eq!(scope.projections().get(transit), Some(&HashSet::new()));
+    }
 }
 
 #[test]
@@ -175,13 +214,10 @@ fn a_scan_without_field_columns_projects_no_fields() {
         ..ScanPlan::default()
     };
     let compiled = compile(&plan).unwrap();
-    assert_eq!(
-        compiled.scope().projections(),
-        &HashMap::from([
-            ("udp".to_string(), HashSet::new()),
-            ("tcp".to_string(), HashSet::new())
-        ])
-    );
+    assert_eq!(read_fields(compiled.scope()), reads(&[]));
+    let projections = compiled.scope().projections();
+    assert_eq!(projections.get("udp"), Some(&HashSet::new()));
+    assert_eq!(projections.get("tcp"), Some(&HashSet::new()));
     assert!(compiled.outputs()[0].columns.is_empty());
 }
 
@@ -239,8 +275,8 @@ fn the_opt_in_timestamp_column_is_selectable() {
         }
     );
     assert_eq!(
-        compiled.scope().projections(),
-        &HashMap::from([("tcp".to_string(), set(&["dst_port"]))])
+        read_fields(compiled.scope()),
+        reads(&[("tcp", Some(&["dst_port"]))])
     );
 
     // Every column, opt-in included, still reads every field: no
@@ -250,7 +286,9 @@ fn the_opt_in_timestamp_column_is_selectable() {
         tables: vec![TableScan::new(id("tcp"), all)],
         ..ScanPlan::default()
     };
-    assert!(compile(&plan).unwrap().scope().projections().is_empty());
+    let compiled = compile(&plan).unwrap();
+    assert_eq!(read_fields(compiled.scope()), reads(&[("tcp", None)]));
+    assert!(!compiled.scope().projections().contains_key("tcp"));
 }
 
 #[test]
@@ -282,8 +320,13 @@ fn stream_tables_pin_one_partition_and_parse_tcp_in_full() {
     // The stream analysis reads tcp and the IP layers in full; other
     // tables keep their projection.
     assert_eq!(
-        compiled.scope().projections(),
-        &HashMap::from([("udp".to_string(), set(&["dst_port"]))])
+        read_fields(compiled.scope()),
+        reads(&[
+            ("tcp", None),
+            ("ipv4", None),
+            ("ipv6", None),
+            ("udp", Some(&["dst_port"])),
+        ])
     );
     assert_eq!(
         compiled.scope().required(),
@@ -302,7 +345,10 @@ fn stream_tables_pin_one_partition_and_parse_tcp_in_full() {
         compiled.scope().required(),
         ParseScope::for_tables(&["tcp"], &registry).required()
     );
-    assert!(compiled.scope().projections().is_empty());
+    assert_eq!(
+        read_fields(compiled.scope()),
+        reads(&[("tcp", None), ("ipv4", None), ("ipv6", None)])
+    );
 
     let plan = ScanPlan {
         tables: vec![full("tcp")],
@@ -341,11 +387,12 @@ fn predicate_and_fetch_reach_the_output() {
     // The predicate's field is extracted although it is not an output
     // column; a predicate that cannot drop a row adds nothing.
     assert_eq!(
-        compiled.scope().projections(),
-        &HashMap::from([
-            ("tcp".to_string(), set(&["dst_port"])),
-            ("udp".to_string(), HashSet::new()),
-        ])
+        read_fields(compiled.scope()),
+        reads(&[("tcp", Some(&["dst_port"]))])
+    );
+    assert_eq!(
+        compiled.scope().projections().get("udp"),
+        Some(&HashSet::new())
     );
 }
 
@@ -416,10 +463,10 @@ fn fused_scans_resolve_members_and_columns() {
     );
     // The table scan's and the fused member's columns are united.
     assert_eq!(
-        compiled.scope().projections(),
-        &HashMap::from([
-            ("tcp".to_string(), set(&["src_port", "dst_port"])),
-            ("ipv4".to_string(), set(&["ttl"])),
+        read_fields(compiled.scope()),
+        reads(&[
+            ("tcp", Some(&["src_port", "dst_port"])),
+            ("ipv4", Some(&["ttl"])),
         ])
     );
     assert_eq!(
@@ -458,9 +505,10 @@ fn a_fused_member_without_columns_is_still_parsed() {
         compiled.scope().required(),
         ParseScope::for_tables(&["dns"], &registry).required()
     );
+    assert_eq!(read_fields(compiled.scope()), reads(&[]));
     assert_eq!(
-        compiled.scope().projections(),
-        &HashMap::from([("dns".to_string(), HashSet::new())])
+        compiled.scope().projections().get("dns"),
+        Some(&HashSet::new())
     );
 }
 

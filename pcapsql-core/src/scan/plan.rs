@@ -18,7 +18,7 @@ use super::catalog::{
 };
 use super::fused::{FusedCell, FusedFilterPlan, FusedMemberPlan, FusedPlan};
 use super::predicate::{CompiledPredicate, FramePredicate, RowPredicate};
-use crate::{ParseScope, ProtocolRegistry};
+use crate::{ParseScope, Protocol, ProtocolRegistry};
 
 /// A column of a scan's output: its position in [`OutputPlan::columns`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -750,8 +750,15 @@ impl ScanPlan {
 const STREAM_PROTOCOLS: [&str; 3] = ["tcp", "ipv4", "ipv6"];
 
 /// The scope of a pass: the protocol tables it reads (plus `tcp` for stream
-/// analysis) with their dependency closure, and per table the field
-/// projection where its columns are a subset.
+/// analysis) with their dependency closure, and per protocol the fields
+/// that something reads.
+///
+/// What reads the fields of a protocol's layers is a table of the protocol
+/// (its columns and its row predicate's), a fused join with the protocol
+/// as a member (its columns and its filter) and, with stream tables in the
+/// pass, stream analysis (all of `tcp`, `ipv4` and `ipv6`). A protocol that
+/// none of them reads is in the scope only to reach the protocols that
+/// are: its layers are parsed for their hints and payload, with no field.
 fn parse_scope(
     catalog: &Catalog,
     registry: &ProtocolRegistry,
@@ -763,13 +770,22 @@ fn parse_scope(
         names.push("tcp");
     }
     let mut scope = ParseScope::for_tables(&names, registry);
-    for (id, name) in &needs.tables {
-        if streams && STREAM_PROTOCOLS.contains(name) {
+    let parsed = scope.required().cloned().unwrap_or_default();
+    for name in registry.all_parsers().map(|parser| parser.name()) {
+        if !parsed.contains(name) {
+            continue;
+        }
+        if streams && STREAM_PROTOCOLS.contains(&name) {
             continue; // stream analysis needs these layers' full fields
         }
-        if let Some(fields) = needs.projection(*id, catalog.get(*id)) {
-            scope = scope.with_projection(*name, fields.into_iter().map(String::from).collect());
-        }
+        let fields = match needs.tables.iter().find(|(_, table)| *table == name) {
+            Some((id, _)) => match needs.projection(*id, catalog.get(*id)) {
+                Some(fields) => fields,
+                None => continue, // every field the table has a column for
+            },
+            None => HashSet::new(), // a layer on the way to another
+        };
+        scope = scope.with_projection(name, fields.into_iter().map(String::from).collect());
     }
     scope
 }

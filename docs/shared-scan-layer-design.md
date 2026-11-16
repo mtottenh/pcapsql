@@ -763,6 +763,93 @@ option texts included) and `http` to nothing. The remaining cost of a
 for three layers), the router and row writer (460) and the three parsers
 (450).
 
+### 3.6.2 Projection below the table
+
+A scan's `ParseScope` (`scan/plan.rs`, `parse_scope`) gives every protocol
+it parses the fields that something reads. What reads a layer's fields is
+
+- a table of the protocol: its output columns and the columns its
+  `RowPredicate` compares;
+- a fused join with the protocol as a member: its columns (the arguments of
+  a `COALESCE` included) and its filter; a member with no column is parsed
+  for its rows and reads no field;
+- stream analysis, when the pass has a stream table: every field of `tcp`,
+  `ipv4` and `ipv6` (the DataFusion frontend builds those tables from the
+  layers it is shown).
+
+Nothing else does: the encapsulation columns, the joins and the tunnel
+context come from the layer and the hints, not from fields. Every other
+protocol of the scope is there only to reach the ones that are read (the
+`ethernet` and `ipv4` under a scan of `udp`, and the tunnels that may carry
+it): its projection is empty, and its layers are parsed for their hints,
+their payload and whether they are layers at all.
+
+A parser with a projected parse declares its field list (`field_list!` in
+`protocol/projection.rs`, `Protocol::field_names`): an enum with a variant
+per field, in the order the parser writes them, whose names are the
+schema's. When a scope is resolved against a registry, each parser's field
+names become a `FieldSet`, a 64-bit set of positions in that list, and a
+projection of every field becomes no projection. In the packet loop a
+parser asks `projection.has(Field::DstPort)`, one bit test, where it used to
+compare the name with each requested name of its length. The full parse and
+the projected parse are one function (`parse_tcp(data, want, fields)`):
+`parse` passes `FieldSet::ALL`, a constant, so after inlining the full parse
+has no test left. A group of fields that costs work to decode (the TCP
+options, the DNS answers) is skipped when the projection has none of them.
+
+`ethernet`, `linux_sll`, `sll2`, `vlan`, `ipv4`, `ipv6`, `tcp`, `udp` and
+`dns` have a projected parse. Whatever the projection, it returns the full
+parse's `Parsed` (remaining bytes, hints, status and error), so the layers
+after it and their tunnel context do not change; only the fields written
+do. A parser whose parse can end in `Status::Partial` has none: written no
+field, its layer would be dropped where the full parse keeps it.
+`tests/projection_equivalence.rs` holds the nine to that over the fuzz
+corpus and the golden captures: for every layer, the empty projection and
+each single field against the full parse, and whole packets in scopes that
+project them.
+
+Measured with `pcapsql-core/examples/parse_cost.rs` (`scan <table> <frame>
+<packets> <columns>`), per packet through `PartitionScan` into a sink that
+stores nothing (callgrind, bench profile), before and after:
+
+| Table (frame) | Columns | Instructions |
+|---|---|---|
+| `frames` (`udp`) | none (a row count) | 586 to 586 |
+| `ethernet` (`udp`) | none | 2,362 to 2,103 |
+| | `src_mac` | 2,411 to 2,211 |
+| `ipv4` (`udp`) | none | 2,362 to 2,103 |
+| | `ttl` | 2,411 to 2,207 |
+| `udp` | none | 2,390 to 2,103 |
+| | `dst_port` | 2,421 to 2,206 |
+| | all | 2,514 to 2,367 |
+| `tcp` (timestamp option) | none | 3,154 to 2,240 |
+| | `dst_port` | 2,789 to 2,346 |
+| | 12 of its 24 fields | 3,931 to 2,920 |
+| | 22 of them | 6,118 to 3,848 |
+| | 23 of them | 6,178 to 3,905 |
+| | all 24 (no projection) | 3,953 to 3,827 |
+| | all | 3,981 to 3,855 |
+| `dns` (one answer) | none | 6,351 to 4,790 |
+| | `transaction_id` | 5,184 to 4,892 |
+| | `query_name` | 6,007 to 5,707 |
+| | all | 7,103 to 7,083 |
+
+A row count of `tcp` and `dns` cost more than one column before (an empty
+projection was taken for "every field"). A projection of `tcp` now costs
+less than the full parse up to 20 of its 24 fields; with 22 and 23 it costs
+0.5 and 2 percent more (24 bit tests the full parse does not make, and
+pushes that the compiler keeps apart), where 23 cost 56 percent more before
+(6,178 against 3,953). The counts before vary a little with the order of a
+`HashSet`, which the old projection was built from; the bit set has no
+order.
+
+What is left of the `ethernet` row count is the walk: about 1,000
+instructions for three layers (the dispatch tables, the context, and 90 for
+copying the 152-byte `Hints` from each layer's `Parsed` into the context),
+the router (260) and the reader (300). The parsers' share is 210. Shrinking
+`Hints` below the size the compiler copies inline would remove the copy; it
+needs 32-bit hint values throughout, and is not done.
+
 ### 3.7 Where static dispatch matters, and how the generics stay contained
 
 | Frequency | Code | Dispatch |

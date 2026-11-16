@@ -1335,10 +1335,18 @@ mod tests {
             scope.required(),
             pcapsql_core::ParseScope::for_tables(&["dns", "udp"], &registry).required()
         );
+        // `udp` extracts the field of its column, `dns` (all columns) every
+        // field, and the layers under them (ethernet, ipv4, ...) none.
+        let projections = scope.projections();
         assert_eq!(
-            scope.projections(),
-            &HashMap::from([("udp".to_string(), HashSet::from(["dst_port".to_string()]))])
+            projections.get("udp"),
+            Some(&HashSet::from(["dst_port".to_string()]))
         );
+        assert!(!projections.contains_key("dns"));
+        for (protocol, fields) in projections {
+            assert!(protocol == "udp" || fields.is_empty(), "{protocol}");
+        }
+        assert_eq!(projections.get("ipv4"), Some(&HashSet::new()));
         assert!(!compiled.scan().requires_single_partition());
     }
 
