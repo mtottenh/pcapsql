@@ -77,7 +77,9 @@ pub struct MemberJoin {
     pub kind: JoinKind,
     /// Index of the member whose keys this one is compared with.
     pub with: usize,
-    /// Whether `encap_depth` must be equal too.
+    /// Whether `encap_depth` must be equal too. Not allowed when either
+    /// side is `frames`, which has no `encap_depth`
+    /// ([`PlanError::FramesDepthJoin`]).
     pub depth: bool,
 }
 
@@ -231,6 +233,15 @@ pub enum PlanError {
         /// What is wrong with it.
         reason: &'static str,
     },
+    /// A fused join member joined on `encap_depth`
+    /// ([`MemberJoin::depth`]) where it or the member it joins is `frames`,
+    /// which has no `encap_depth`: the join could never match.
+    FramesDepthJoin {
+        /// Its index in [`ScanPlan::fused`].
+        fused: usize,
+        /// The index of the member in [`FusedScan::members`].
+        member: usize,
+    },
     /// More outputs or output columns than an [`OutputId`] or [`OutCol`]
     /// can number.
     TooLarge,
@@ -258,6 +269,11 @@ impl fmt::Display for PlanError {
             PlanError::InvalidFused { fused, reason } => {
                 write!(f, "fused join {fused}: {reason}")
             }
+            PlanError::FramesDepthJoin { fused, member } => write!(
+                f,
+                "fused join {fused}: member {member} joins on encap_depth with frames, \
+                 which has no encap_depth"
+            ),
             PlanError::TooLarge => write!(f, "the plan has too many outputs or columns"),
         }
     }
@@ -489,7 +505,7 @@ impl ScanPlan {
             if fused.members.is_empty() {
                 return Err(invalid("no members"));
             }
-            let mut members = Vec::with_capacity(fused.members.len());
+            let mut members: Vec<&TableDef> = Vec::with_capacity(fused.members.len());
             for (i, member) in fused.members.iter().enumerate() {
                 let table = table_of(member.table)?;
                 if table.is_stream() {
@@ -501,6 +517,16 @@ impl ScanPlan {
                     (_, None) => return Err(invalid("a later member needs a join")),
                     (_, Some(join)) if join.with >= i => {
                         return Err(invalid("a member can only join an earlier member"))
+                    }
+                    (_, Some(join))
+                        if join.depth
+                            && (table.kind == TableKind::Frames
+                                || members[join.with].kind == TableKind::Frames) =>
+                    {
+                        return Err(PlanError::FramesDepthJoin {
+                            fused: index,
+                            member: i,
+                        })
                     }
                     (_, Some(_)) => {}
                 }
@@ -1397,6 +1423,66 @@ mod tests {
             compile(&plan).unwrap_err(),
             PlanError::NotAPacketTable("tls_sessions")
         );
+    }
+
+    /// `frames` has no `encap_depth`: a depth join on either side of it
+    /// could never match, so it does not compile.
+    #[test]
+    fn depth_joins_with_frames_are_errors() {
+        let join = |with, depth| {
+            Some(MemberJoin {
+                kind: JoinKind::Left,
+                with,
+                depth,
+            })
+        };
+        let member = |table: &str, join| FusedMember {
+            table: id(table),
+            join,
+        };
+        let compiled = |members: Vec<FusedMember>| {
+            let plan = ScanPlan {
+                fused: vec![FusedScan {
+                    members,
+                    columns: vec![],
+                    filter: None,
+                    fetch: None,
+                }],
+                ..ScanPlan::default()
+            };
+            compile(&plan)
+        };
+        // frames on the left.
+        let error = compiled(vec![
+            member("frames", None),
+            member("udp", join(0, false)),
+            member("ipv4", join(0, true)),
+        ])
+        .unwrap_err();
+        assert_eq!(
+            error,
+            PlanError::FramesDepthJoin {
+                fused: 0,
+                member: 2
+            }
+        );
+        assert!(error.to_string().contains("encap_depth"), "{error}");
+        // frames on the right.
+        assert_eq!(
+            compiled(vec![member("udp", None), member("frames", join(0, true))]).unwrap_err(),
+            PlanError::FramesDepthJoin {
+                fused: 0,
+                member: 1
+            }
+        );
+        // Without depth, or between protocol tables, it compiles.
+        assert!(compiled(vec![member("udp", None), member("frames", join(0, false))]).is_ok());
+        assert!(compiled(vec![
+            member("frames", None),
+            member("udp", join(0, false)),
+            member("ipv4", join(1, true)),
+        ])
+        .is_ok());
     }
 
     /// `frames`, `tcp` on the frame, `ipv4` and `ipv6` left-joined on the
