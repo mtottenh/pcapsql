@@ -22,11 +22,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `pcapsql-core`: `scan::ScanPlan` and `scan::PartitionScan` run a scan of
   a capture and write the rows to any `scan::RowSink`. The CLI now uses
   them. Query results do not change.
+- DuckDB extension: `read_pcap(files, protocol := 'tcp')` and one
+  `read_<table>(files)` function for each table, for example
+  `read_tcp('x.pcap')`.
+- DuckDB extension: `pcap_schema(table)` lists the columns of a table and
+  their DuckDB types.
+- DuckDB extension: 16 scalar functions and 6 `format_*` macros. They give
+  the same results as the CLI.
 
 ### Changed
 
 - The DuckDB extension is rebuilt for DuckDB 2.0.0 and its C API v2. It
   does not load in DuckDB 1.x.
+- DuckDB extension, compared with the extension for DuckDB 1.x:
+  - `protocol` is a named parameter of `read_pcap`. It is no longer the
+    second argument.
+  - Column names and types are the same as in the CLI. IPv4 addresses are
+    `UINTEGER`. IPv6 and MAC addresses are `BLOB`.
+  - Timestamps are `TIMESTAMP_NS`. Nanosecond captures keep their
+    precision.
+  - `read_pcap(..., protocol := 'tcp')` and `read_tcp(...)` return the same
+    rows, also for tunnelled packets.
+  - `pcap_protocols()` has a new `kind` column. `field_count` now counts
+    the columns of the table.
+  - Some scalar results change to match the CLI. For example,
+    `tcp_flags_str(0)` is `''`, not `NONE`, and an unknown IP protocol is
+    `Proto 200`, not `PROTO200`.
 
 ## [0.4.1] - 2026-10-24
 
