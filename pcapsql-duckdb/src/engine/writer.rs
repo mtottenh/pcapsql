@@ -40,8 +40,8 @@
 //!
 //! # Soundness
 //!
-//! This is the only module of the crate with `unsafe` code, apart from one function of
-//! `engine::scalar` (`values_without_nulls`, which reads; see there).
+//! This is the only module of the crate with `unsafe` code, apart from one private module of
+//! `engine::scalar` (`valid`, which reads; see there).
 //!
 //! `duckdb-neo`'s checked writers
 //! borrow one vector at a time and need the row count before the first write; a row sink writes

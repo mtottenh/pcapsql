@@ -991,12 +991,136 @@ fn a_constant_pattern_keeps_nulls_at_any_row() -> Result<()> {
     Ok(())
 }
 
-/// `ip_in_cidr` and `has_tcp_flag` with a literal pattern read a flat chunk without NULLs as a
-/// slice and every other chunk a row at a time. Both answer what the per-row path answers (the
-/// one a pattern from a column takes) and what the expression in SQL does: for chunks of every
-/// size around a 64-row word of the validity mask and around a whole chunk, with no NULL, a
-/// NULL at either end, at the edges of a word, here and there, and in every row; and for the
-/// same rows behind a constant vector and behind the selection of a hash join.
+/// What `ip_in_cidr` answers for the two networks of [`create_flat`], and `has_tcp_flag` for its
+/// two flags, in SQL.
+const CIDR_SQL: [&str; 2] = ["(ip & 4294967232) = 64", "(ip & 4294967040) = 0"];
+const FLAG_SQL: [&str; 2] = ["(flags & 2) <> 0", "(flags & 16) <> 0"];
+
+/// The table `flat`: `n` rows of an address and TCP flags, both NULL in the rows where `null`,
+/// an expression of the row number `i` and of `n`, is true; and a network and a flag name that
+/// differ from one row to the next, so that as arguments they are not a constant.
+fn create_flat(connection: &Connection, n: usize, null: &str) -> Result<()> {
+    connection.execute(
+        format!(
+            "CREATE OR REPLACE TABLE flat AS SELECT i,
+                 CASE WHEN {null} THEN NULL ELSE (i * 37 % 300)::UINTEGER END AS ip,
+                 CASE WHEN {null} THEN NULL ELSE (i * 37 % 512)::USMALLINT END AS flags,
+                 CASE WHEN i % 2 = 0 THEN '0.0.0.64/26' ELSE '0.0.0.0/24' END AS cidr,
+                 CASE WHEN i % 2 = 0 THEN 'SYN' ELSE 'ack' END AS flag
+             FROM (SELECT i, {n} AS n FROM range({n}) t(i))"
+        ),
+        Parameters::None,
+    )?;
+    Ok(())
+}
+
+/// The answers of `ip_in_cidr` and `has_tcp_flag` for the rows of `flat`, with a literal
+/// pattern and with the pattern of the row, against each other and against the expression in
+/// SQL; and the NULLs of the answers against the NULLs of the values.
+fn check_flat(connection: &Connection, context: &str) -> Result<()> {
+    let [cidr_even, cidr_odd] = CIDR_SQL;
+    let [flag_even, flag_odd] = FLAG_SQL;
+    let cidr = format!("CASE WHEN i % 2 = 0 THEN {cidr_even} ELSE {cidr_odd} END");
+    let flag = format!("CASE WHEN i % 2 = 0 THEN {flag_even} ELSE {flag_odd} END");
+
+    // The functions as the projection of the scan of the table, whose vectors are flat: each
+    // literal pattern for every row, and the pattern of the row.
+    connection.execute(
+        "CREATE OR REPLACE TABLE answered AS SELECT i, ip, flags,
+             ip_in_cidr(ip, '0.0.0.64/26') AS cidr_even, ip_in_cidr(ip, '0.0.0.0/24') AS cidr_odd,
+             ip_in_cidr(ip, cidr) AS cidr_row,
+             has_tcp_flag(flags, 'SYN') AS flag_even, has_tcp_flag(flags, 'ack') AS flag_odd,
+             has_tcp_flag(flags, flag) AS flag_row,
+             ip_in_cidr(ip, 'no network') AS no_cidr, has_tcp_flag(flags, 'no flag') AS no_flag
+         FROM flat",
+        Parameters::None,
+    )?;
+    assert_eq!(
+        rows(
+            connection,
+            &format!(
+                "SELECT count(*) FILTER (cidr_even IS DISTINCT FROM ({cidr_even})),
+                        count(*) FILTER (cidr_odd IS DISTINCT FROM ({cidr_odd})),
+                        count(*) FILTER (
+                            CASE WHEN i % 2 = 0 THEN cidr_even ELSE cidr_odd END
+                            IS DISTINCT FROM cidr_row),
+                        count(*) FILTER (flag_even IS DISTINCT FROM ({flag_even})),
+                        count(*) FILTER (flag_odd IS DISTINCT FROM ({flag_odd})),
+                        count(*) FILTER (
+                            CASE WHEN i % 2 = 0 THEN flag_even ELSE flag_odd END
+                            IS DISTINCT FROM flag_row),
+                        count(*) FILTER (
+                            (ip IS NULL) <> (cidr_even IS NULL) OR (ip IS NULL) <> (cidr_odd IS NULL)
+                            OR (ip IS NULL) <> (cidr_row IS NULL)),
+                        count(*) FILTER (
+                            (flags IS NULL) <> (flag_even IS NULL)
+                            OR (flags IS NULL) <> (flag_odd IS NULL)
+                            OR (flags IS NULL) <> (flag_row IS NULL)),
+                        count(*) FILTER (no_cidr IS NOT NULL),
+                        count(*) FILTER (no_flag IS DISTINCT FROM (flags - flags <> 0))
+                 FROM answered"
+            ),
+        )?,
+        [row(&["0"; 10])],
+        "{context}, projected"
+    );
+
+    // The same in one expression, where a `CASE` gives the function the rows of each branch
+    // behind a selection, and behind the selection of a hash join.
+    for (kind, from) in [
+        ("flat", "FROM flat"),
+        (
+            "dictionary",
+            "FROM flat JOIN (SELECT i FROM range(0, 40000, 3) t(i)) USING (i)",
+        ),
+    ] {
+        assert_eq!(
+            rows(
+                connection,
+                &format!(
+                    "SELECT count(*) FILTER (
+                                CASE WHEN i % 2 = 0 THEN ip_in_cidr(ip, '0.0.0.64/26')
+                                     ELSE ip_in_cidr(ip, '0.0.0.0/24') END
+                                IS DISTINCT FROM ip_in_cidr(ip, cidr)),
+                            count(*) FILTER (
+                                ip_in_cidr(ip, cidr) IS DISTINCT FROM ({cidr})),
+                            count(*) FILTER (
+                                ip_in_cidr(ip, '0.0.0.64/26') IS DISTINCT FROM ({cidr_even})),
+                            count(*) FILTER (
+                                CASE WHEN i % 2 = 0 THEN has_tcp_flag(flags, 'SYN')
+                                     ELSE has_tcp_flag(flags, 'ack') END
+                                IS DISTINCT FROM has_tcp_flag(flags, flag)),
+                            count(*) FILTER (
+                                has_tcp_flag(flags, flag) IS DISTINCT FROM ({flag})),
+                            count(*) FILTER (
+                                has_tcp_flag(flags, 'ack') IS DISTINCT FROM ({flag_odd})),
+                            count(*) FILTER (ip_in_cidr(ip, 'no network') IS NOT NULL),
+                            count(*) FILTER (has_tcp_flag(flags, 'no flag')),
+                            count(ip_in_cidr(ip, '0.0.0.0/24')) = count(ip),
+                            count(has_tcp_flag(flags, 'ack')) = count(flags)
+                     {from}"
+                ),
+            )?,
+            [row(&[
+                "0", "0", "0", "0", "0", "0", "0", "0", "true", "true"
+            ])],
+            "{context}, {kind}"
+        );
+    }
+    Ok(())
+}
+
+/// `ip_in_cidr` and `has_tcp_flag` with a literal pattern read the values of a flat chunk as
+/// slices, of the rows of the 64-row words of the validity mask that have no NULL, and the rows
+/// of the other words a row at a time or not at all; a chunk with NULLs in most of its words,
+/// and one behind a selection, they read a row at a time. They answer what the per-row path
+/// answers (the one a pattern from a column takes) and what the expression in SQL does, and
+/// their NULLs are those of the values: for chunks of every size around a word of the mask and
+/// around a whole chunk, with no NULL, a NULL in every row, at either end, at one edge of each
+/// word or both, in every row but that edge, in alternate rows and in alternate words, in most
+/// words with the others whole or NULL, here and there, and in 1%, 50% and 99% of the rows at
+/// random; and for the same rows behind a constant vector and behind the selection of a hash
+/// join.
 #[test]
 fn a_constant_pattern_answers_like_the_per_row_path() -> Result<()> {
     let connection = connect()?;
@@ -1004,62 +1128,38 @@ fn a_constant_pattern_answers_like_the_per_row_path() -> Result<()> {
         ("none", "false"),
         ("first", "i = 0"),
         ("last", "i = n - 1"),
+        ("first of each word", "i % 64 = 0"),
+        ("last of each word", "i % 64 = 63"),
         ("word edges", "i % 64 IN (0, 63)"),
+        ("all but the first of each word", "i % 64 <> 0"),
+        ("all but the last of each word", "i % 64 <> 63"),
         ("chunk edges", "i IN (2047, 2048)"),
+        ("alternate rows", "i % 2 = 0"),
+        ("alternate words", "i // 64 % 2 = 0"),
+        ("the other alternate words", "i // 64 % 2 = 1"),
         ("some", "i % 7 = 3"),
+        (
+            "one of each word, and one word in five",
+            "i % 64 = 3 OR i // 64 % 5 = 0",
+        ),
+        (
+            "one of each word but one word in five",
+            "i % 64 = 3 AND i // 64 % 5 <> 0",
+        ),
+        (
+            "one of each word but one word in three",
+            "i % 64 = 3 AND i // 64 % 3 <> 0",
+        ),
+        ("1% at random", "hash(i) % 100 < 1"),
+        ("50% at random", "hash(i) % 100 < 50"),
+        ("99% at random", "hash(i) % 100 < 99"),
         ("all but one", "i <> n / 2"),
         ("all", "true"),
     ];
-    // What each function answers, in SQL.
-    let cidr = "CASE WHEN i % 2 = 0 THEN (ip & 4294967232) = 64 ELSE (ip & 4294967040) = 0 END";
-    let flag = "CASE WHEN i % 2 = 0 THEN (flags & 2) <> 0 ELSE (flags & 16) <> 0 END";
     for n in [0, 1, 2, 63, 64, 65, 127, 128, 129, 2047, 2048, 2049, 4097] {
         for (name, null) in nulls {
-            connection.execute(
-                format!(
-                    "CREATE OR REPLACE TABLE flat AS SELECT i,
-                         CASE WHEN {null} THEN NULL ELSE (i * 37 % 300)::UINTEGER END AS ip,
-                         CASE WHEN {null} THEN NULL ELSE (i * 37 % 512)::USMALLINT END AS flags,
-                         CASE WHEN i % 2 = 0 THEN '0.0.0.64/26' ELSE '0.0.0.0/24' END AS cidr,
-                         CASE WHEN i % 2 = 0 THEN 'SYN' ELSE 'ack' END AS flag
-                     FROM (SELECT i, {n} AS n FROM range({n}) t(i))"
-                ),
-                Parameters::None,
-            )?;
-            for (kind, from) in [
-                ("flat", "FROM flat"),
-                (
-                    "dictionary",
-                    "FROM flat JOIN (SELECT i FROM range(0, 5000, 3) t(i)) USING (i)",
-                ),
-            ] {
-                assert_eq!(
-                    rows(
-                        &connection,
-                        &format!(
-                            "SELECT count(*) FILTER (
-                                        CASE WHEN i % 2 = 0 THEN ip_in_cidr(ip, '0.0.0.64/26')
-                                             ELSE ip_in_cidr(ip, '0.0.0.0/24') END
-                                        IS DISTINCT FROM ip_in_cidr(ip, cidr)),
-                                    count(*) FILTER (
-                                        ip_in_cidr(ip, cidr) IS DISTINCT FROM ({cidr})),
-                                    count(*) FILTER (
-                                        CASE WHEN i % 2 = 0 THEN has_tcp_flag(flags, 'SYN')
-                                             ELSE has_tcp_flag(flags, 'ack') END
-                                        IS DISTINCT FROM has_tcp_flag(flags, flag)),
-                                    count(*) FILTER (
-                                        has_tcp_flag(flags, flag) IS DISTINCT FROM ({flag})),
-                                    count(*) FILTER (ip_in_cidr(ip, 'no network') IS NOT NULL),
-                                    count(*) FILTER (has_tcp_flag(flags, 'no flag')),
-                                    count(ip_in_cidr(ip, '0.0.0.0/24')) = count(ip),
-                                    count(has_tcp_flag(flags, 'ack')) = count(flags)
-                             {from}"
-                        ),
-                    )?,
-                    [row(&["0", "0", "0", "0", "0", "0", "true", "true"])],
-                    "{n} rows, NULLs: {name}, {kind}"
-                );
-            }
+            create_flat(&connection, n, null)?;
+            check_flat(&connection, &format!("{n} rows, NULLs: {name}"))?;
         }
         // One value for every row of the chunk: a constant vector.
         let all = n.to_string();
@@ -1084,4 +1184,39 @@ fn a_constant_pattern_answers_like_the_per_row_path() -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// The same for NULLs in runs, as the `tcp_flags` of packets that are not TCP are: a run of
+/// every length from 1 to 200 rows, each starting at a different row of its word of the
+/// validity mask, with from 1 to 97 rows that are not NULL between one run and the next.
+#[test]
+fn a_constant_pattern_answers_around_runs_of_nulls() -> Result<()> {
+    let connection = connect()?;
+    let mut next = 0;
+    let runs: Vec<String> = (1..=200)
+        .map(|length| {
+            let start = next + length * 37 % 97 + 1;
+            next = start + length;
+            format!("({start}, {next})")
+        })
+        .collect();
+    connection.execute(
+        format!(
+            "CREATE TABLE null_rows AS SELECT unnest(range(first, last)) AS i
+             FROM (VALUES {}) run(first, last)",
+            runs.join(", ")
+        ),
+        Parameters::None,
+    )?;
+    // Rows after the last run, and a last word of the mask that is not whole.
+    let n = next + 77;
+    create_flat(&connection, n, "i IN (SELECT i FROM null_rows)")?;
+    assert_eq!(
+        rows(
+            &connection,
+            "SELECT count(*), count(*) - count(ip), count(*) - count(flags) FROM flat"
+        )?,
+        [row(&[&n.to_string(), "20100", "20100"])]
+    );
+    check_flat(&connection, "runs of NULLs")
 }

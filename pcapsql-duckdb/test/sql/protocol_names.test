@@ -111,3 +111,20 @@ SELECT count(*), min(tcp_flags_str(flags)), max(ip_proto_name(proto)),
 FROM one, range(3000) t(i);
 ----
 3000	SYN,ACK	TCP	3000	1500
+
+# A stored column with NULLs in runs of 150 rows and here and there, as the flags of packets
+# that are not TCP are: the answers are those of the expression, and NULL exactly where the
+# flags are
+statement ok
+CREATE TABLE segments AS SELECT i,
+    CASE WHEN (i // 150) % 3 = 0 OR i % 97 = 5 THEN NULL ELSE (i * 37 % 512)::USMALLINT END AS f
+FROM range(10000) t(i);
+
+query IIIIII
+SELECT count(*), count(has_tcp_flag(f, 'SYN')),
+       count(*) FILTER (has_tcp_flag(f, 'SYN')), count(*) FILTER (NOT has_tcp_flag(f, 'SYN')),
+       count(*) FILTER (has_tcp_flag(f, 'SYN') IS DISTINCT FROM ((f & 2) <> 0)),
+       count(*) FILTER ((has_tcp_flag(f, 'SYN') IS NULL) <> (f IS NULL))
+FROM segments;
+----
+10000	6531	3266	3265	0	0
