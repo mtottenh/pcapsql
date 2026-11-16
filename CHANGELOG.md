@@ -149,6 +149,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Behaviour change (CLI): `hdr_histogram` now records `DECIMAL` values (the
   integer part) and gives an error for a value that is not a number. Before,
   it returned an empty histogram for both.
+- Performance (DuckDB extension): a filter such as
+  `frame_number <= 100000` stops reading the capture at that frame when
+  several threads are used.
+- Performance (DuckDB extension): a call with several files splits a file
+  only when there are more threads than files.
 
 ### Removed
 
