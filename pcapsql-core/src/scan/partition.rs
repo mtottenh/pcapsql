@@ -215,14 +215,10 @@ impl PartitionQueue {
     /// rows of partition `n` precede those of partition `n + 1` in the
     /// capture, so the ordinal can serve as an engine's batch index.
     pub fn claim(&self) -> Option<(usize, &PacketRange)> {
-        let len = self.ranges.len();
-        let index = self
-            .next
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
-                (next < len).then_some(next + 1)
-            })
-            .ok()?;
-        Some((index, &self.ranges[index]))
+        // Past the end the counter keeps counting, which is harmless: it
+        // cannot wrap within the number of claims a scan makes.
+        let index = self.next.fetch_add(1, Ordering::Relaxed);
+        self.ranges.get(index).map(|range| (index, range))
     }
 
     /// The number of partitions, claimed or not.

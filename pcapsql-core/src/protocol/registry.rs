@@ -733,7 +733,7 @@ impl ProtocolRegistry {
         let after = |parent: &BuiltinProtocol| {
             let keys = parent.child_hint_keys();
             let mut tables: Vec<(HintKey, Vec<TableEntry>)> = Vec::new();
-            for parser in 0..self.parsers.len() {
+            for (parser, protocol) in self.parsers.iter().enumerate() {
                 for rule in rules(parser) {
                     let DispatchRule::Hints {
                         after,
@@ -744,10 +744,7 @@ impl ProtocolRegistry {
                         continue;
                     };
                     let (first, rest) = all.split_first().unwrap_or_else(|| {
-                        panic!(
-                            "{}: a hint rule needs a condition",
-                            self.parsers[parser].name()
-                        )
+                        panic!("{}: a hint rule needs a condition", protocol.name())
                     });
                     let follows = after.is_empty() || after.contains(&parent.name());
                     if !follows || !all.iter().all(|cond| cond.possible_after(keys)) {

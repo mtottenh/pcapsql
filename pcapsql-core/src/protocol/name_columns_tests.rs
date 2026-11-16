@@ -26,8 +26,8 @@ struct NameColumn {
     table: fn(u32) -> Option<String>,
 }
 
-const U8: &[RangeInclusive<u32>] = &[0..=0xff];
-const U16: &[RangeInclusive<u32>] = &[0..=0xffff];
+const U8: &[RangeInclusive<u32>] = &[RangeInclusive::new(0, 0xff)];
+const U16: &[RangeInclusive<u32>] = &[RangeInclusive::new(0, 0xffff)];
 
 /// The narrowing a table's argument needs: the ranges above keep every
 /// number within the code's width.
@@ -167,7 +167,7 @@ const NAME_COLUMNS: &[NameColumn] = &[
     },
     NameColumn {
         column: "gre.version_name",
-        codes: &[0..=7],
+        codes: &[RangeInclusive::new(0, 7)],
         layer: |version| {
             let mut header = code::<u16>(version).to_be_bytes().to_vec();
             header.extend_from_slice(&0x0800u16.to_be_bytes());

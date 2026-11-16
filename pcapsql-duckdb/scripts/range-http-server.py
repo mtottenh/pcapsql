@@ -30,6 +30,8 @@ import sys
 import threading
 import urllib.parse
 
+REASONS = {416: "Range Not Satisfiable"}
+
 RANGE = re.compile(r"^bytes=(\d*)-(\d*)$")
 
 
@@ -110,7 +112,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.respond(206, headers, file, first, last - first + 1, body)
 
     def respond(self, status, headers, file=None, offset=0, length=0, body=False):
-        self.send_response(status)
+        # RFC 9110's reason phrases, whatever this Python's tables say
+        # (3.12 still calls 416 "Requested Range Not Satisfiable").
+        self.send_response(status, REASONS.get(status))
         for name, value in headers.items():
             self.send_header(name, value)
         # For HEAD, the length the body of the same GET would have.
