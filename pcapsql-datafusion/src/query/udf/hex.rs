@@ -4,13 +4,13 @@
 
 use std::sync::Arc;
 
-use arrow::array::{Array, BinaryArray, StringBuilder};
+use arrow::array::{Array, BinaryArray, BinaryBuilder, StringBuilder};
 use arrow::datatypes::DataType;
 use datafusion::common::Result as DFResult;
 use datafusion::logical_expr::{
     ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
 };
-use pcapsql_core::format::{parse_hex, write_hex};
+use pcapsql_core::format::{parse_hex_into, write_hex};
 
 /// Create the `hex()` UDF that converts binary data to hexadecimal string.
 ///
@@ -131,11 +131,22 @@ impl ScalarUDFImpl for UnhexUdf {
         let args = ColumnarValue::values_to_arrays(&args.args)?;
         let hex_values = super::string_arg(&args[0], "unhex")?;
 
-        let result: BinaryArray = hex_values
-            .iter()
-            .map(|opt| opt.and_then(parse_hex))
-            .collect();
+        // Two digits a byte: the values need at most half the text. One
+        // buffer takes the bytes of every row on their way to the builder.
+        let offsets = hex_values.value_offsets();
+        let text = match (offsets.first(), offsets.last()) {
+            (Some(first), Some(last)) => usize::try_from(last - first).unwrap_or(0),
+            _ => 0,
+        };
+        let mut builder = BinaryBuilder::with_capacity(hex_values.len(), text / 2);
+        let mut bytes = Vec::new();
+        for hex in hex_values.iter() {
+            match hex.and_then(|hex| parse_hex_into(hex, &mut bytes)) {
+                Some(bytes) => builder.append_value(bytes),
+                None => builder.append_null(),
+            }
+        }
 
-        Ok(ColumnarValue::Array(Arc::new(result)))
+        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 }

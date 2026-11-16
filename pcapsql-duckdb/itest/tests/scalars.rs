@@ -736,6 +736,29 @@ fn pcap_unhex_decodes_text() -> Result<()> {
         )?,
         ["01", "NULL", "NULL", "", "FF00"]
     );
+    // One buffer takes the bytes of every row of a chunk: a row gets its own bytes and nothing
+    // of what a longer row, or one that stopped at a character that is not hex, left there.
+    assert_eq!(
+        column(
+            &connection,
+            "SELECT hex(pcap_unhex(x)) FROM (VALUES
+                 ('00112233445566778899aabbccddeeff0123'), ('ab'), ('0011223344zz'), (''),
+                 ('abc'), ('cd'), (NULL), ('ef01'), ('0x'), ('FFEEDDCCBBAA99887766554433221100'))
+                 t(x)",
+        )?,
+        [
+            "00112233445566778899AABBCCDDEEFF0123",
+            "AB",
+            "NULL",
+            "",
+            "NULL",
+            "CD",
+            "NULL",
+            "EF01",
+            "",
+            "FFEEDDCCBBAA99887766554433221100"
+        ]
+    );
     assert_eq!(
         rows(
             &connection,
@@ -920,5 +943,145 @@ fn dictionary_vectors() -> Result<()> {
         // 128.0.0.0.
         [row(&["2000", "2000", "2000", "2000", "2000", "2000", "2000", "1000", "500"])]
     );
+    Ok(())
+}
+
+/// `ip_in_cidr` and `has_tcp_flag` with a literal pattern store the answers of a chunk at once
+/// and then make the rows of NULL values NULL from the input's validity mask: a NULL at any row
+/// of a chunk (the first and last of a 64-row word of the mask, a run across two chunks) stays
+/// NULL, and every other row has its own answer.
+#[test]
+fn a_constant_pattern_keeps_nulls_at_any_row() -> Result<()> {
+    let connection = connect()?;
+    connection.execute(
+        "CREATE TABLE sparse AS SELECT i,
+             CASE WHEN i % 64 IN (0, 63) OR i % 7 = 3 OR i BETWEEN 2040 AND 2110
+                       OR i BETWEEN 4096 AND 4159
+                  THEN NULL ELSE i END AS x
+         FROM range(10000) t(i)",
+        Parameters::None,
+    )?;
+    // The scanned vectors, then the same rows behind the selection of a hash join.
+    for from in [
+        "FROM sparse",
+        "FROM sparse JOIN (SELECT i FROM range(0, 10000, 3) t(i)) USING (i)",
+    ] {
+        assert_eq!(
+            rows(
+                &connection,
+                &format!(
+                    "SELECT count(*) = count(*) FILTER (
+                                ip_in_cidr(x::UINTEGER, '0.0.16.0/20')
+                                IS NOT DISTINCT FROM ((x & 4294963200) = 4096)),
+                            count(*) = count(*) FILTER (
+                                has_tcp_flag((x % 512)::USMALLINT, 'syn')
+                                IS NOT DISTINCT FROM (((x % 512) & 2) <> 0)),
+                            count(*) - count(x) = count(*) FILTER (
+                                ip_in_cidr(x::UINTEGER, '0.0.16.0/20') IS NULL),
+                            count(*) FILTER (ip_in_cidr(x::UINTEGER, '0.0.16.0/20')) > 0,
+                            count(*) FILTER (ip_in_cidr(x::UINTEGER, 'no network') IS NULL)
+                                = count(*)
+                     {from}"
+                ),
+            )?,
+            [row(&["true", "true", "true", "true", "true"])],
+            "{from}"
+        );
+    }
+    Ok(())
+}
+
+/// `ip_in_cidr` and `has_tcp_flag` with a literal pattern read a flat chunk without NULLs as a
+/// slice and every other chunk a row at a time. Both answer what the per-row path answers (the
+/// one a pattern from a column takes) and what the expression in SQL does: for chunks of every
+/// size around a 64-row word of the validity mask and around a whole chunk, with no NULL, a
+/// NULL at either end, at the edges of a word, here and there, and in every row; and for the
+/// same rows behind a constant vector and behind the selection of a hash join.
+#[test]
+fn a_constant_pattern_answers_like_the_per_row_path() -> Result<()> {
+    let connection = connect()?;
+    let nulls = [
+        ("none", "false"),
+        ("first", "i = 0"),
+        ("last", "i = n - 1"),
+        ("word edges", "i % 64 IN (0, 63)"),
+        ("chunk edges", "i IN (2047, 2048)"),
+        ("some", "i % 7 = 3"),
+        ("all but one", "i <> n / 2"),
+        ("all", "true"),
+    ];
+    // What each function answers, in SQL.
+    let cidr = "CASE WHEN i % 2 = 0 THEN (ip & 4294967232) = 64 ELSE (ip & 4294967040) = 0 END";
+    let flag = "CASE WHEN i % 2 = 0 THEN (flags & 2) <> 0 ELSE (flags & 16) <> 0 END";
+    for n in [0, 1, 2, 63, 64, 65, 127, 128, 129, 2047, 2048, 2049, 4097] {
+        for (name, null) in nulls {
+            connection.execute(
+                format!(
+                    "CREATE OR REPLACE TABLE flat AS SELECT i,
+                         CASE WHEN {null} THEN NULL ELSE (i * 37 % 300)::UINTEGER END AS ip,
+                         CASE WHEN {null} THEN NULL ELSE (i * 37 % 512)::USMALLINT END AS flags,
+                         CASE WHEN i % 2 = 0 THEN '0.0.0.64/26' ELSE '0.0.0.0/24' END AS cidr,
+                         CASE WHEN i % 2 = 0 THEN 'SYN' ELSE 'ack' END AS flag
+                     FROM (SELECT i, {n} AS n FROM range({n}) t(i))"
+                ),
+                Parameters::None,
+            )?;
+            for (kind, from) in [
+                ("flat", "FROM flat"),
+                (
+                    "dictionary",
+                    "FROM flat JOIN (SELECT i FROM range(0, 5000, 3) t(i)) USING (i)",
+                ),
+            ] {
+                assert_eq!(
+                    rows(
+                        &connection,
+                        &format!(
+                            "SELECT count(*) FILTER (
+                                        CASE WHEN i % 2 = 0 THEN ip_in_cidr(ip, '0.0.0.64/26')
+                                             ELSE ip_in_cidr(ip, '0.0.0.0/24') END
+                                        IS DISTINCT FROM ip_in_cidr(ip, cidr)),
+                                    count(*) FILTER (
+                                        ip_in_cidr(ip, cidr) IS DISTINCT FROM ({cidr})),
+                                    count(*) FILTER (
+                                        CASE WHEN i % 2 = 0 THEN has_tcp_flag(flags, 'SYN')
+                                             ELSE has_tcp_flag(flags, 'ack') END
+                                        IS DISTINCT FROM has_tcp_flag(flags, flag)),
+                                    count(*) FILTER (
+                                        has_tcp_flag(flags, flag) IS DISTINCT FROM ({flag})),
+                                    count(*) FILTER (ip_in_cidr(ip, 'no network') IS NOT NULL),
+                                    count(*) FILTER (has_tcp_flag(flags, 'no flag')),
+                                    count(ip_in_cidr(ip, '0.0.0.0/24')) = count(ip),
+                                    count(has_tcp_flag(flags, 'ack')) = count(flags)
+                             {from}"
+                        ),
+                    )?,
+                    [row(&["0", "0", "0", "0", "0", "0", "true", "true"])],
+                    "{n} rows, NULLs: {name}, {kind}"
+                );
+            }
+        }
+        // One value for every row of the chunk: a constant vector.
+        let all = n.to_string();
+        assert_eq!(
+            rows(
+                &connection,
+                &format!(
+                    "SELECT count(*),
+                            count(*) FILTER (ip_in_cidr(ip, '0.0.0.64/26')),
+                            count(*) FILTER (NOT ip_in_cidr(ip, '0.0.0.0/26')),
+                            count(ip_in_cidr(missing, '0.0.0.0/0')),
+                            count(*) FILTER (has_tcp_flag(flags, 'ack')),
+                            count(*) FILTER (NOT has_tcp_flag(flags, 'fin')),
+                            count(has_tcp_flag(no_flags, 'ack'))
+                     FROM (SELECT 100::UINTEGER AS ip, NULL::UINTEGER AS missing,
+                                  18::USMALLINT AS flags, NULL::USMALLINT AS no_flags) one,
+                          range({n}) t(i)"
+                ),
+            )?,
+            [row(&[&all, &all, &all, "0", &all, &all, "0"])],
+            "{n} rows, constant"
+        );
+    }
     Ok(())
 }

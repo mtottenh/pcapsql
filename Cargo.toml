@@ -102,3 +102,11 @@ url = "2"
 [profile.release]
 lto = true
 codegen-units = 1
+
+# Benchmarks would inherit the release profile, and one fat-LTO codegen unit
+# of the whole dependency tree (DataFusion, Arrow) does not link in 15 GB of
+# memory. Thin LTO still inlines across crates, which is what the scan path
+# relies on; absolute numbers are a little behind a release build.
+[profile.bench]
+lto = "thin"
+codegen-units = 16

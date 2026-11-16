@@ -125,3 +125,7 @@ harness = false
 [[bench]]
 name = "scan"
 harness = false
+
+[[bench]]
+name = "udf"
+harness = false

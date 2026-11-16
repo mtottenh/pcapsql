@@ -339,21 +339,46 @@ impl ParseScope {
 ///
 /// A returned layer's `child_hints` are empty: the walk moves them into the
 /// context of the layer that follows rather than copying them.
+///
+/// The layers come in a `Vec` of their own: one heap allocation for every
+/// packet that is parsed. A caller that parses packet after packet uses
+/// [`parse_packet_into`] with a [`LayerBuf`] instead.
 pub fn parse_packet<'a>(
     registry: &ProtocolRegistry,
     link_type: u16,
     data: &'a [u8],
     scope: &ParseScope,
-) -> Vec<(&'static str, ParseResult<'a>)> {
-    // Typical packet has 3-4 protocol layers (Eth/IP/TCP/App);
-    // tunneled packets may have more (up to ~8 for deep encapsulation).
-    let mut results = Vec::with_capacity(8);
+) -> Layers<'a> {
+    let mut results = Vec::new();
+    parse_packet_into(registry, link_type, data, scope, &mut results);
+    results
+}
+
+/// [`parse_packet`] into storage the caller keeps: `out` is emptied, then
+/// holds the packet's layers. Its capacity is reused, so a caller that hands
+/// in the same storage for every packet (see [`LayerBuf`]) allocates for the
+/// first packets only.
+pub fn parse_packet_into<'a>(
+    registry: &ProtocolRegistry,
+    link_type: u16,
+    data: &'a [u8],
+    scope: &ParseScope,
+    out: &mut Layers<'a>,
+) {
+    out.clear();
     let scope = scope.resolved_for(registry);
 
     // A scope that needs no protocol table at all (`frames` only) parses
-    // nothing: the frame columns come from the record header.
+    // nothing: the frame columns come from the record header. This is ahead
+    // of the reservation below, so that such a scan pays for no storage.
     if scope.parses_nothing {
-        return results;
+        return;
+    }
+
+    // Typical packet has 3-4 protocol layers (Eth/IP/TCP/App);
+    // tunneled packets may have more (up to ~8 for deep encapsulation).
+    if out.capacity() == 0 {
+        out.reserve(8);
     }
 
     let mut context = ParseContext::new(link_type);
@@ -417,15 +442,115 @@ pub fn parse_packet<'a>(
         // An error with no fields is not a layer of the packet (see the
         // function docs); a partial result keeps the fields it got.
         if result.error.is_none() || !result.fields.is_empty() {
-            results.push((name, result));
+            out.push((name, result));
         }
 
         if should_stop {
             break;
         }
     }
+}
 
-    results
+/// The layers of one packet, as [`parse_packet`] returns them.
+pub type Layers<'a> = Vec<(&'static str, ParseResult<'a>)>;
+
+/// Storage for the layers of one packet at a time, kept from packet to
+/// packet so that [`parse_packet_into`] does not allocate for each.
+///
+/// A layer borrows the packet it was parsed from and every packet has a
+/// lifetime of its own, so the storage cannot simply be a `Vec` of layers:
+/// its type would name one packet's lifetime. Between packets the buffer
+/// keeps the allocation as an empty `Vec` of `'static` layers;
+/// [`for_packet`](Self::for_packet) lends it out as an empty `Vec` of the
+/// lifetime the caller needs, and the guard puts it back, emptied, when it is
+/// dropped.
+///
+/// ```
+/// use pcapsql_core::protocol::{default_registry, parse_packet_into, LayerBuf, ParseScope};
+///
+/// let registry = default_registry();
+/// let scope = ParseScope::full();
+/// let mut buf = LayerBuf::new();
+/// for packet in [vec![0xffu8; 14], vec![0x00u8; 60]] {
+///     let mut layers = buf.for_packet();
+///     parse_packet_into(&registry, 1, &packet, &scope, &mut layers);
+///     for (name, layer) in layers.iter() {
+///         println!("{name}: {} fields", layer.fields.len());
+///     }
+/// }
+/// ```
+#[derive(Debug, Default)]
+pub struct LayerBuf {
+    /// Always empty: only its capacity matters.
+    spare: Layers<'static>,
+}
+
+impl LayerBuf {
+    /// A buffer without storage yet: the first packet with layers allocates.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The buffer's storage as the (empty) layers of one packet. It returns
+    /// to the buffer when the guard is dropped.
+    #[inline]
+    pub fn for_packet<'a>(&mut self) -> PacketLayers<'_, 'a> {
+        let layers = recycle(std::mem::take(&mut self.spare));
+        PacketLayers { buf: self, layers }
+    }
+}
+
+/// The layers of one packet, in storage borrowed from a [`LayerBuf`]. It
+/// dereferences to the `Vec` that [`parse_packet_into`] fills.
+#[derive(Debug)]
+pub struct PacketLayers<'buf, 'a> {
+    buf: &'buf mut LayerBuf,
+    layers: Layers<'a>,
+}
+
+impl<'a> std::ops::Deref for PacketLayers<'_, 'a> {
+    type Target = Layers<'a>;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.layers
+    }
+}
+
+impl std::ops::DerefMut for PacketLayers<'_, '_> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.layers
+    }
+}
+
+impl Drop for PacketLayers<'_, '_> {
+    #[inline]
+    fn drop(&mut self) {
+        self.buf.spare = recycle(std::mem::take(&mut self.layers));
+    }
+}
+
+/// `layers` emptied, as the layers of another lifetime, in the same
+/// allocation.
+///
+/// There is no `unsafe` here. Collecting a `vec::IntoIter` into a `Vec` of
+/// elements with the same size and alignment reuses the source's allocation
+/// (the standard library's in-place collection), and two instantiations of
+/// one type that differ in a lifetime only are such elements. The iterator is
+/// empty, so no element is ever converted: the closure only gives the result
+/// its type. A standard library that did not collect in place would leave
+/// this correct and make it allocate once per packet, which
+/// `tests/parse_alloc.rs` counts and would fail on.
+#[inline]
+fn recycle<'a, 'b>(mut layers: Layers<'a>) -> Layers<'b> {
+    layers.clear();
+    layers
+        .into_iter()
+        .map(|_| -> (&'static str, ParseResult<'b>) {
+            unreachable!("the layers were cleared before they were recycled")
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -441,6 +566,71 @@ mod parse_packet_tests {
             .build();
         let ip = Ipv4Builder::new().udp().payload(udp).build();
         EthernetBuilder::new().ipv4().payload(ip).build()
+    }
+
+    /// The layers of each packet as `Debug` text: what there is to compare,
+    /// a `ParseResult` having no `PartialEq`.
+    fn described(layers: &Layers<'_>) -> Vec<String> {
+        layers
+            .iter()
+            .map(|(name, result)| format!("{name}: {result:?}"))
+            .collect()
+    }
+
+    /// A `LayerBuf` gives every packet the layers `parse_packet` returns,
+    /// whatever the packet before left in it, and keeps one allocation
+    /// throughout, also when a guard is dropped with layers in it.
+    #[test]
+    fn layer_buf_gives_the_layers_of_parse_packet() {
+        let registry = default_registry();
+        let full = ParseScope::full();
+        let frames_only = ParseScope::for_tables(&["frames"], &registry);
+        let frames = [
+            udp_frame(53, vec![0x12, 0x34, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0]),
+            udp_frame(9999, vec![0xAB; 8]),
+            vec![0xff; 5],
+            udp_frame(2152, vec![0x30, 0xff, 0x00, 0x00]),
+            Vec::new(),
+        ];
+
+        let mut buf = LayerBuf::new();
+        assert_eq!(buf.spare.capacity(), 0);
+        // As an address: a pointer type would name one packet's lifetime.
+        let mut storage = None;
+        for round in 0..3 {
+            for frame in &frames {
+                let frame = frame.clone(); // a lifetime of its own per packet
+                let mut layers = buf.for_packet();
+                assert!(layers.is_empty(), "the last packet's layers are gone");
+                parse_packet_into(&registry, 1, &frame, &full, &mut layers);
+                let expected = parse_packet(&registry, 1, &frame, &full);
+                assert_eq!(described(&layers), described(&expected), "round {round}");
+                if let Some(storage) = storage {
+                    assert_eq!(layers.as_ptr().addr(), storage, "the allocation is reused");
+                }
+                storage = Some(layers.as_ptr().addr());
+
+                // A scope that parses nothing leaves no stale layer behind.
+                parse_packet_into(&registry, 1, &frame, &frames_only, &mut layers);
+                assert!(layers.is_empty());
+                parse_packet_into(&registry, 1, &frame, &full, &mut layers);
+            }
+        }
+        assert!(buf.spare.is_empty());
+        assert!(buf.spare.capacity() >= 8);
+        assert_eq!(Some(buf.spare.as_ptr().addr()), storage);
+    }
+
+    /// `frames` alone asks for no storage at all.
+    #[test]
+    fn a_scope_that_parses_nothing_does_not_reserve() {
+        let registry = default_registry();
+        let scope = ParseScope::for_tables(&["frames"], &registry);
+        let frame = udp_frame(9999, vec![0xAB; 8]);
+        assert_eq!(parse_packet(&registry, 1, &frame, &scope).capacity(), 0);
+        let mut buf = LayerBuf::new();
+        parse_packet_into(&registry, 1, &frame, &scope, &mut buf.for_packet());
+        assert_eq!(buf.spare.capacity(), 0);
     }
 
     /// A parser that fails without extracting anything is not a layer: the

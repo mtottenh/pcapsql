@@ -119,6 +119,10 @@ jobs:
       - name: Check that the extension opens files only through DuckDB
         run: pcapsql-duckdb/scripts/check-no-std-fs.sh
 
+      # What `make check_unsafe` runs.
+      - name: Check that unsafe code is allowed only in its two audited places
+        run: pcapsql-duckdb/scripts/check-unsafe.sh
+
       # What `make check_pins` runs. It reads the submodule's commit from the index, not from a
       # checkout.
       - name: Check that every place that names the DuckDB release agrees

@@ -6,15 +6,16 @@
 #   make load_test_release  LOAD it in the stock DuckDB command-line shell
 #   make check_reference_release  docs/duckdb-extension-reference.md lists what it registers
 #   make itest              in-process tests (itest/) against a linked libduckdb
-#   make check              duckdb_neo containment, no std::fs in the extension, the pins of the
-#                           DuckDB release agree, and fmt and clippy for itest/
+#   make check              duckdb_neo containment, no std::fs in the extension, `unsafe` only in
+#                           its two audited places, the pins of the DuckDB release agree, and fmt
+#                           and clippy for itest/
 #   make canary             build against the newest duckdb-neo (scripts/canary.sh)
 #
 # `debug`, `test_debug` and `load_test_debug` do the same for an unoptimised build.
 
 .PHONY: all configure debug release test test_debug test_release load_test load_test_debug load_test_release
 .PHONY: check_reference check_reference_debug check_reference_release
-.PHONY: itest lint_itest check_containment check_no_std_fs check_pins check canary clean clean_all
+.PHONY: itest lint_itest check_containment check_no_std_fs check_unsafe check_pins check canary clean clean_all
 
 PROJ_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
@@ -81,10 +82,13 @@ check_containment:
 check_no_std_fs:
 	scripts/check-no-std-fs.sh
 
+check_unsafe:
+	scripts/check-unsafe.sh
+
 check_pins:
 	scripts/check-pins.sh
 
-check: check_containment check_no_std_fs check_pins lint_itest
+check: check_containment check_no_std_fs check_unsafe check_pins lint_itest
 
 # Not part of `check`: it needs the network, and its failure is news about DuckDB, not about this
 # tree. `make canary CANARY=main` builds against the main branch of duckdb-rs.

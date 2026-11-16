@@ -40,7 +40,10 @@
 //!
 //! # Soundness
 //!
-//! This is the only module of the crate with `unsafe` code. `duckdb-neo`'s checked writers
+//! This is the only module of the crate with `unsafe` code, apart from one function of
+//! `engine::scalar` (`values_without_nulls`, which reads; see there).
+//!
+//! `duckdb-neo`'s checked writers
 //! borrow one vector at a time and need the row count before the first write; a row sink writes
 //! all columns of a row before the next row and learns the row count last. So the writer keeps,
 //! per column, the raw data and validity pointers `duckdb-neo` hands out, and upholds these

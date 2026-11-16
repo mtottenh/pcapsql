@@ -29,7 +29,7 @@
 //! has an invalid-input case (`parse_*`), it returns `None` and the wrapper
 //! decides what that means in SQL (NULL in both engines today).
 
-mod address;
+pub(crate) mod address;
 pub mod cidr;
 pub mod flags;
 pub mod hex;
@@ -37,8 +37,8 @@ pub mod mac;
 pub mod names;
 
 pub use address::{
-    detect_address_column, format_ipv4, format_ipv6, format_mac, write_ipv4, write_ipv6, write_mac,
-    AddressKind,
+    detect_address_column, format_ipv4, format_ipv6, format_mac, ipv4_text, ipv6_text, mac_text,
+    write_ipv4, write_ipv6, write_mac, AddressKind, IPV4_TEXT_LEN, IPV6_TEXT_LEN, MAC_TEXT_LEN,
 };
 pub use cidr::{
     ipv4_in_cidr, ipv4_prefix_mask, ipv6_in_prefix, is_link_local_ipv6, is_loopback_ipv4,
@@ -46,6 +46,6 @@ pub use cidr::{
     parse_ipv4, parse_ipv6,
 };
 pub use flags::{has_tcp_flag, tcp_flag_mask, write_tcp_flags, TCP_FLAGS};
-pub use hex::{parse_hex, write_hex};
+pub use hex::{parse_hex, parse_hex_into, write_hex};
 pub use mac::{is_broadcast_mac, is_local_mac, is_multicast_mac, parse_mac};
 pub use names::*;
