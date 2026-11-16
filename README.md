@@ -509,6 +509,78 @@ pcapsql az://container/capture.pcap -e "SELECT * FROM tls"
 - Compression is recommended to reduce transfer time
 - Both legacy PCAP and PCAPNG formats are supported
 
+## DuckDB Extension
+
+The parsers and tables of pcapsql are also available inside
+[DuckDB](https://duckdb.org), as a loadable extension built from
+[`pcapsql-duckdb/`](pcapsql-duckdb/). It reads captures as table functions,
+so they can be queried next to anything else DuckDB reads.
+
+```sql
+-- One row per packet; a capture file can be named where a table goes
+SELECT count(*), min(timestamp), max(timestamp) FROM 'capture.pcap';
+
+-- One row per TCP header, with the frame's number and timestamp
+SELECT frame_number, timestamp, src_port, dst_port, tcp_flags_str(flags) AS flags
+FROM read_tcp('capture.pcap')
+WHERE dst_port = 443;
+
+-- Several captures, plain or compressed, with the file each row is from
+SELECT filename, count(*) AS queries
+FROM read_dns(['monday/*.pcapng.gz', 'tuesday.pcap'], filename := true)
+WHERE is_query
+GROUP BY ALL;
+
+-- What can be read
+SELECT name, description FROM pcap_protocols();
+```
+
+What it offers:
+
+- `read_pcap(files)` for packets and `read_<table>(files)` for each of 27
+  protocol tables (`read_ethernet`, `read_ipv4`, `read_tcp`, `read_dns`,
+  `read_tls`, ...), with the columns of the tables above plus a `timestamp`
+  on every table.
+- Legacy pcap and pcapng, plain, gzip or zstd; a path, a glob or a list.
+- Files are opened through DuckDB's file system.
+- Projection pushdown, filter pushdown on `frame_number` and `timestamp`,
+  and parallel scans of large uncompressed captures, in capture order.
+- Sixteen scalar functions and six macros for addresses, TCP flags and
+  protocol numbers (`ip4_to_string`, `ip_in_cidr`, `format_mac`, ...).
+
+What it does not have yet: the stream tables (`tcp_connections`,
+`tls_sessions`, `http_messages`, `http2`), TLS decryption, and the SQL
+functions of the command-line tool beyond those sixteen.
+
+**Requirements.** DuckDB 2.0.0, on Linux (x86-64, arm64) or macOS (arm64).
+The extension uses DuckDB's C API v2, which is not stable yet, so a build
+loads in exactly one DuckDB release.
+
+**Install.** Each [GitHub release](https://github.com/mtottenh/pcapsql/releases)
+that includes the extension has one archive per platform,
+`pcapsql-duckdb-extension-<version>-duckdb-<DuckDB version>-<platform>.tar.gz`,
+holding `pcapsql.duckdb_extension`. These builds are not signed, so DuckDB
+has to be started with `-unsigned` (or `allow_unsigned_extensions`), and
+`LOAD` takes the path of the file, whose name must stay as it is:
+
+```sh
+tar -xzf pcapsql-duckdb-extension-*-linux_amd64.tar.gz
+duckdb -unsigned -c "LOAD '$PWD/pcapsql.duckdb_extension'; SELECT * FROM pcap_protocols();"
+```
+
+Installation with `INSTALL pcapsql FROM community` is prepared
+([`pcapsql-duckdb/community/`](pcapsql-duckdb/community/)) but the extension
+has not been submitted to DuckDB's community repository yet.
+
+**Documentation.**
+
+- [Function reference](docs/duckdb-extension-reference.md): every table
+  function, parameter, scalar function, macro and setting.
+- [`pcapsql-duckdb/README.md`](pcapsql-duckdb/README.md): building from
+  source, and how scans, files, filters and parallelism behave.
+- [Upgrade runbook](docs/duckdb-upgrade-runbook.md): moving the extension to
+  a new DuckDB release.
+
 ## License
 
 MIT

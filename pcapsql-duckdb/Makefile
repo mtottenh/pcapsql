@@ -4,14 +4,17 @@
 #   make release            build/release/pcapsql.duckdb_extension
 #   make test_release       run test/sql against it (DuckDB's Python package)
 #   make load_test_release  LOAD it in the stock DuckDB command-line shell
+#   make check_reference_release  docs/duckdb-extension-reference.md lists what it registers
 #   make itest              in-process tests (itest/) against a linked libduckdb
-#   make check              duckdb_neo containment, no std::fs in the extension, and fmt and
-#                           clippy for itest/
+#   make check              duckdb_neo containment, no std::fs in the extension, the pins of the
+#                           DuckDB release agree, and fmt and clippy for itest/
+#   make canary             build against the newest duckdb-neo (scripts/canary.sh)
 #
 # `debug`, `test_debug` and `load_test_debug` do the same for an unoptimised build.
 
 .PHONY: all configure debug release test test_debug test_release load_test load_test_debug load_test_release
-.PHONY: itest lint_itest check_containment check_no_std_fs check clean clean_all
+.PHONY: check_reference check_reference_debug check_reference_release
+.PHONY: itest lint_itest check_containment check_no_std_fs check_pins check canary clean clean_all
 
 PROJ_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
@@ -19,7 +22,8 @@ EXTENSION_NAME=pcapsql
 
 # Every function of the DuckDB C API v2 is unstable, so the binary is stamped C_STRUCT_UNSTABLE
 # and loads only in exactly TARGET_DUCKDB_VERSION. This version, the `duckdb-neo` pin in the
-# Cargo.toml files and scripts/duckdb-release.sha256 change together.
+# Cargo.toml files, scripts/duckdb-release.sha256 and the other places `make check_pins` compares
+# change together; docs/duckdb-upgrade-runbook.md is the procedure.
 USE_UNSTABLE_C_API=1
 CAPI_VERSION=2
 TARGET_DUCKDB_VERSION=v2.0.0
@@ -53,6 +57,13 @@ load_test_debug:
 load_test_release:
 	scripts/load-test.sh build/release/$(EXTENSION_FILENAME) $(TARGET_DUCKDB_VERSION) $(EXTENSION_VERSION)
 
+# The function reference against what the artifact registers in the DuckDB command-line shell.
+check_reference: check_reference_debug
+check_reference_debug:
+	scripts/check-reference.sh build/debug/$(EXTENSION_FILENAME) $(TARGET_DUCKDB_VERSION)
+check_reference_release:
+	scripts/check-reference.sh build/release/$(EXTENSION_FILENAME) $(TARGET_DUCKDB_VERSION)
+
 # itest/ is its own cargo workspace (see its Cargo.toml) and links the libduckdb of the release.
 ITEST_CARGO = lib=$$(DUCKDB_VERSION=$(TARGET_DUCKDB_VERSION) scripts/fetch-duckdb.sh lib) && \
 	DUCKDB_LIB_DIR="$$lib" DUCKDB_DOWNLOAD_LIB=0 cargo
@@ -70,7 +81,16 @@ check_containment:
 check_no_std_fs:
 	scripts/check-no-std-fs.sh
 
-check: check_containment check_no_std_fs lint_itest
+check_pins:
+	scripts/check-pins.sh
+
+check: check_containment check_no_std_fs check_pins lint_itest
+
+# Not part of `check`: it needs the network, and its failure is news about DuckDB, not about this
+# tree. `make canary CANARY=main` builds against the main branch of duckdb-rs.
+CANARY ?= crates
+canary:
+	scripts/canary.sh $(CANARY)
 
 clean: clean_build
 	cargo clean --package pcapsql-duckdb-ext --package pcapsql-duckdb

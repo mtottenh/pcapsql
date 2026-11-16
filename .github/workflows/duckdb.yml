@@ -3,6 +3,9 @@ name: DuckDB extension
 # Builds the loadable extension and tests it against the DuckDB release it targets. Every job
 # calls the targets of pcapsql-duckdb/Makefile, so a failure reproduces locally with the same
 # command. DuckDB itself comes from the GitHub release (scripts/fetch-duckdb.sh) and from PyPI.
+#
+# This is the linux_amd64 build of the runner, for every push and pull request. The builds that
+# are distributed (every platform, in DuckDB's build containers) are duckdb-dist.yml.
 
 on:
   push:
@@ -57,6 +60,9 @@ jobs:
       - name: LOAD in the DuckDB command-line shell
         run: make -C pcapsql-duckdb load_test_release
 
+      - name: The function reference lists everything the artifact registers
+        run: make -C pcapsql-duckdb check_reference_release
+
       - uses: actions/upload-artifact@v4
         with:
           name: pcapsql-duckdb-extension-linux_amd64
@@ -100,7 +106,7 @@ jobs:
         run: make -C pcapsql-duckdb lint_itest
 
   containment:
-    name: duckdb_neo stays inside the engine glue
+    name: duckdb_neo stays inside the engine glue; the DuckDB pins agree
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -112,3 +118,8 @@ jobs:
       # What `make check_no_std_fs` runs.
       - name: Check that the extension opens files only through DuckDB
         run: pcapsql-duckdb/scripts/check-no-std-fs.sh
+
+      # What `make check_pins` runs. It reads the submodule's commit from the index, not from a
+      # checkout.
+      - name: Check that every place that names the DuckDB release agrees
+        run: pcapsql-duckdb/scripts/check-pins.sh

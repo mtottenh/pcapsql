@@ -29,6 +29,15 @@
 //! it projects one column of its choosing), so the row count is set on the vectors that are
 //! there and their rows are NULL.
 //!
+//! One vector of the chunk may be a *constant*: a VARCHAR column that is not the scan layer's
+//! and has the same value in every row of the chunk (the `filename` column of a scan function,
+//! whose chunks never span two files). [`ChunkWriter::with_constant`] is told which vector it
+//! is; the scan layer's columns are then the other vectors, in order, and [`finish`] stores the
+//! value in every row it reports. It is stored through `duckdb-neo`'s checked writer, not
+//! through the pointers below.
+//!
+//! [`finish`]: ChunkWriter::finish
+//!
 //! # Soundness
 //!
 //! This is the only module of the crate with `unsafe` code. `duckdb-neo`'s checked writers
@@ -79,6 +88,8 @@ pub struct ChunkWriter<'chunk> {
     chunk: DataChunkRef<'chunk>,
     /// One per output column; empty when the output has no columns.
     columns: Box<[Column]>,
+    /// The vector that is not the scan layer's, and the text every row of it gets.
+    constant: Option<(usize, Box<str>)>,
     /// Complete rows stored so far: the index of the row being written.
     row: usize,
     /// Rows the chunk may hold; no vector is written at or past it.
@@ -101,8 +112,29 @@ impl<'chunk> ChunkWriter<'chunk> {
     /// As [`new`](Self::new), for a writer that is full after `limit` rows, or at the chunk's
     /// capacity if that is less. A limit of zero is an error: a sink holds at least one row.
     pub fn with_row_limit(
+        chunk: DataChunkRef<'chunk>,
+        columns: &[OutColumn],
+        limit: usize,
+    ) -> Result<Self> {
+        Self::build(chunk, columns, None, limit)
+    }
+
+    /// As [`new`](Self::new), for a chunk whose vector `vector` is a VARCHAR that is not one of
+    /// `columns`: every row of it is `text`. `columns` are the other vectors of the chunk, in
+    /// the chunk's order.
+    pub fn with_constant(
+        chunk: DataChunkRef<'chunk>,
+        columns: &[OutColumn],
+        vector: usize,
+        text: &str,
+    ) -> Result<Self> {
+        Self::build(chunk, columns, Some((vector, text.into())), usize::MAX)
+    }
+
+    fn build(
         mut chunk: DataChunkRef<'chunk>,
         columns: &[OutColumn],
+        constant: Option<(usize, Box<str>)>,
         limit: usize,
     ) -> Result<Self> {
         let limit = limit.min(chunk.capacity()?);
@@ -119,20 +151,32 @@ impl<'chunk> ChunkWriter<'chunk> {
                 "pcapsql: DuckDB handed the scan an output chunk without vectors",
             ));
         }
-        if !columns.is_empty() && columns.len() != vectors {
+        let constant_vector = constant.as_ref().map(|(vector, _)| *vector);
+        if let Some(vector) = constant_vector {
+            if vector >= vectors {
+                return Err(Error::invalid_input(format!(
+                    "pcapsql: the output chunk has {vectors} vectors and no vector {vector}"
+                )));
+            }
+            // Fail now, not in `finish`, if the vector is not a VARCHAR.
+            chunk.get_vector_at_mut::<String>(vector)?;
+        }
+        let own = vectors - usize::from(constant_vector.is_some());
+        if !columns.is_empty() && columns.len() != own {
             return Err(Error::invalid_input(format!(
-                "pcapsql: the scan produces {} columns and the output chunk has {vectors}",
+                "pcapsql: the scan produces {} columns and the output chunk has {own}",
                 columns.len()
             )));
         }
 
         let mut built = Vec::with_capacity(columns.len());
         for (index, column) in columns.iter().enumerate() {
-            match Column::new(&mut chunk, index, column.kind, limit) {
+            let vector = vector_of(constant_vector, index);
+            match Column::new(&mut chunk, vector, column.kind, limit) {
                 Ok(column) => built.push(column),
                 Err(error) => {
                     // The vectors sized so far must not be taken for rows.
-                    let _ = resize(&mut chunk, &built, 0);
+                    let _ = resize(&mut chunk, &built, constant_vector, 0);
                     return Err(error);
                 }
             }
@@ -140,6 +184,7 @@ impl<'chunk> ChunkWriter<'chunk> {
         Ok(Self {
             chunk,
             columns: built.into(),
+            constant,
             row: 0,
             limit,
             error: None,
@@ -171,15 +216,34 @@ impl<'chunk> ChunkWriter<'chunk> {
         self.finished = true;
         // The pointers die here, before any vector is resized (invariant 3).
         let columns = std::mem::take(&mut self.columns);
+        let constant = self.constant.as_ref().map(|(vector, _)| *vector);
         if let Some(error) = self.error.take() {
-            let _ = resize(&mut self.chunk, &columns, 0);
+            let _ = resize(&mut self.chunk, &columns, constant, 0);
             return Err(error);
         }
-        if let Err(error) = resize(&mut self.chunk, &columns, self.row) {
-            let _ = resize(&mut self.chunk, &columns, 0);
+        let stored = resize(&mut self.chunk, &columns, constant, self.row)
+            .and_then(|()| self.store_constant());
+        if let Err(error) = stored {
+            let _ = resize(&mut self.chunk, &columns, constant, 0);
             return Err(error);
         }
         Ok(self.row)
+    }
+
+    /// Store the constant in every row of its vector, which has been sized to the row count.
+    fn store_constant(&mut self) -> Result<()> {
+        let Some((vector, text)) = &self.constant else {
+            return Ok(());
+        };
+        if self.row == 0 {
+            return Ok(());
+        }
+        let mut vector = self.chunk.get_vector_at_mut::<String>(*vector)?;
+        let mut writer = vector.writer()?;
+        for row in 0..self.row {
+            writer.set(row, text)?;
+        }
+        Ok(())
     }
 
     /// The current row and the storage of column `col`.
@@ -211,18 +275,47 @@ impl Drop for ChunkWriter<'_> {
             // Not finished: an error or a panic is on its way out of `exec`. The vectors were
             // sized to the limit for writing; leave no rows behind.
             let columns = std::mem::take(&mut self.columns);
-            let _ = resize(&mut self.chunk, &columns, 0);
+            let constant = self.constant.as_ref().map(|(vector, _)| *vector);
+            let _ = resize(&mut self.chunk, &columns, constant, 0);
         }
     }
 }
 
+/// The vector of the scan layer's column `column` in a chunk whose vector `constant` is not
+/// the scan layer's: the columns are the other vectors, in order.
+fn vector_of(constant: Option<usize>, column: usize) -> usize {
+    match constant {
+        Some(constant) if column >= constant => column + 1,
+        _ => column,
+    }
+}
+
+/// The scan layer's column that vector `vector` holds; `None` for the constant vector.
+fn column_of(constant: Option<usize>, vector: usize) -> Option<usize> {
+    match constant {
+        Some(constant) if vector == constant => None,
+        Some(constant) if vector > constant => Some(vector - 1),
+        _ => Some(vector),
+    }
+}
+
 /// Size every vector of `chunk` to `rows` rows and every list child to the items its rows use.
-/// With no `columns` (an output without columns) the rows of every vector become NULL.
-fn resize(chunk: &mut DataChunkRef<'_>, columns: &[Column], rows: usize) -> Result<()> {
+/// With no `columns` (an output without columns) the rows of every vector but the `constant`
+/// one become NULL.
+fn resize(
+    chunk: &mut DataChunkRef<'_>,
+    columns: &[Column],
+    constant: Option<usize>,
+    rows: usize,
+) -> Result<()> {
     for index in 0..chunk.col_count() {
         let mut vector = chunk.get_vector_at_mut::<Unknown>(index)?;
         vector.set_size(rows)?;
-        match columns.get(index).map(|column| &column.data) {
+        let Some(column) = column_of(constant, index) else {
+            // The constant vector: `finish` stores its rows.
+            continue;
+        };
+        match columns.get(column).map(|column| &column.data) {
             Some(Data::List(list)) => {
                 let used = if rows == 0 { 0 } else { list.used };
                 match list.items {

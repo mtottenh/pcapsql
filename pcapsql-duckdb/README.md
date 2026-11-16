@@ -6,8 +6,14 @@ The pcapsql extension for DuckDB, on the DuckDB C API v2 through
 
 Every function of the C API v2 is still unstable, so a build loads in exactly
 one DuckDB release: **2.0.0** today. `TARGET_DUCKDB_VERSION` in the `Makefile`,
-the `duckdb-neo` pin in the `Cargo.toml` files and
-`scripts/duckdb-release.sha256` name that release and change together.
+the `duckdb-neo` pin in the `Cargo.toml` files,
+`scripts/duckdb-release.sha256` and a few more places name that release and
+change together: `make check_pins` fails when they disagree, and
+[`docs/duckdb-upgrade-runbook.md`](../docs/duckdb-upgrade-runbook.md) is the
+procedure for moving them.
+
+Every function, parameter and setting is listed in
+[`docs/duckdb-extension-reference.md`](../docs/duckdb-extension-reference.md).
 
 ## Layout
 
@@ -17,7 +23,9 @@ the `duckdb-neo` pin in the `Cargo.toml` files and
 | `ext/` | The loadable extension, a `cdylib` named `pcapsql` that holds only the entrypoint |
 | `itest/` | In-process tests: links libduckdb, registers the same entrypoint statically, runs SQL from `cargo test` |
 | `test/sql/` | sqllogictest files, run against the built `pcapsql.duckdb_extension` |
-| `extension-ci-tools/` | Git submodule with DuckDB's makefiles and the script that stamps the extension metadata |
+| `extension-ci-tools/` | Git submodule with DuckDB's makefiles and the script that stamps the extension metadata, on the branch DuckDB's community-extensions repository builds this DuckDB release with |
+| `community/` | The descriptor for DuckDB's community-extensions repository, and how to submit it |
+| `scripts/` | What the make targets run: fetching the DuckDB release, the load test, and the checks |
 
 `itest/` is a cargo workspace of its own. It needs `duckdb-neo`'s
 `build-extension-static` feature, the loadable extension needs
@@ -35,8 +43,11 @@ make configure          # once: Python venv with DuckDB 2.0.0 and its SQL test r
 make release            # build/release/pcapsql.duckdb_extension
 make test_release       # test/sql against the artifact, in DuckDB's Python package
 make load_test_release  # LOAD the artifact in the DuckDB command-line shell
+make check_reference_release  # the function reference lists what the artifact registers
 make itest              # in-process tests against libduckdb
-make check              # duckdb_neo containment; no std::fs in the extension; fmt and clippy for itest/
+make check              # duckdb_neo containment; no std::fs in the extension; the DuckDB pins agree;
+                        # fmt and clippy for itest/
+make canary             # build against the newest duckdb-neo on crates.io (CANARY=main: duckdb-rs main)
 ```
 
 `make debug`, `make test_debug` and `make load_test_debug` do the same for an
@@ -66,12 +77,36 @@ The artifact is unsigned, so DuckDB has to be started with `-unsigned`, and
 duckdb -unsigned -c "LOAD '$PWD/build/release/pcapsql.duckdb_extension'; SELECT * FROM pcap_protocols();"
 ```
 
+## Distribution
+
+| Workflow | When | What |
+|---|---|---|
+| `duckdb.yml` | Every push and pull request | Builds for `linux_amd64` on the runner; SQL tests, load test, reference check, `itest`, the containment and pin checks |
+| `duckdb-dist.yml` | Pushes to `main` that touch the extension; called by `release.yml` | Builds `linux_amd64`, `linux_arm64` and `osx_arm64` with the reusable workflow of `extension-ci-tools` (Linux in its manylinux containers), then runs the SQL tests and the load test against each uploaded artifact on a runner of its platform |
+| `release.yml` | A `v*` tag | Calls `duckdb-dist.yml` and attaches `pcapsql-duckdb-extension-<tag>-duckdb-<DuckDB version>-<platform>.tar.gz` for each platform, and a `SHA256SUMS` file, to the GitHub release |
+| `duckdb-canary.yml` | Weekly, and by hand | `scripts/canary.sh` against the newest `duckdb-neo` on crates.io and against `duckdb-rs` main |
+
+`duckdb-dist.yml` is the build DuckDB's community-extensions repository runs
+for [`community/description.yml`](community/description.yml): the same
+reusable workflow, at the commit the submodule is at, with
+`build_directory: pcapsql-duckdb`.
+
+Platforms that are not built:
+
+- **Windows.** `pcapsql-core` does not compile for Windows: its netlink
+  parser uses `netlink-packet-route`, which is Unix-only, and its manifest
+  lists most dependencies under `[target.'cfg(unix)'.dependencies]`.
+- **WebAssembly.** Not shown to build; see U10 in the roadmap.
+- `osx_amd64` and the musl and MinGW variants are opt-in platforms of
+  `extension-ci-tools` and are not opted into.
+
 ## Usage
 
-A capture is read with a table function: `read_<table>(file)` for one table,
-or `read_pcap(file, protocol := '<table>')`, which reads `frames` unless a
-protocol is named. `pcap_protocols()` lists the tables and
-`pcap_schema('<table>')` the columns of one.
+A capture is read with a table function: `read_<table>(files)` for one table,
+or `read_pcap(files, protocol := '<table>')`, which reads `frames` unless a
+protocol is named. `files` is a path, a glob pattern, or a list of either.
+`pcap_protocols()` lists the tables and `pcap_schema('<table>')` the columns
+of one.
 
 ```sql
 -- One row per packet: frame_number, timestamp, length, original_length, link_type, raw_data
@@ -104,26 +139,145 @@ WHERE d.is_query AND i.encap_depth = d.encap_depth;
 
 -- Views make a capture look like a database
 CREATE VIEW tcp AS SELECT * FROM read_tcp('capture.pcap');
+
+-- Several captures: a pattern, a list, a list of patterns
+SELECT count(*) FROM read_tcp('captures/*.pcap');
+SELECT filename, count(*) AS queries
+FROM read_dns(['monday/*.pcapng.gz', 'tuesday.pcap'], filename := true)
+WHERE is_query
+GROUP BY ALL;
+
+-- A range of frames or a time window is applied while the capture is read
+SELECT * FROM read_tcp('capture.pcap') WHERE frame_number <= 1000;
+SELECT count(*) FROM read_dns('capture.pcap')
+WHERE timestamp >= TIMESTAMP '2024-05-01 12:00:00' AND timestamp < TIMESTAMP '2024-05-01 12:05:00';
+
+-- A capture file named where a table goes is read_pcap of it: its frames
+SELECT count(*), min(timestamp), max(timestamp) FROM 'capture.pcap';
+SELECT * FROM 'captures/*.pcapng.gz' WHERE length > 1400;
 ```
 
-**Files.** The file is opened through DuckDB's file system, so DuckDB's
-access rules apply (`enable_external_access`, `allowed_directories`). Legacy
-pcap and pcapng are read, plain or compressed with gzip or zstd; the format
-and the compression are recognised from the first bytes of the file, not from
-its name. One file per call: a list of files or a glob is not accepted yet.
+**Files.** Every file is listed and opened through DuckDB's file system, so
+DuckDB's access rules apply (`enable_external_access`,
+`allowed_directories`). Legacy pcap and pcapng are read, plain or compressed
+with gzip or zstd; the format and the compression are recognised from the
+first bytes of the file, not from its name.
+
+**Several files.** The one positional argument is a path, a glob pattern
+(`*`, `?`, `[...]`, and `**` for any depth of directories, as DuckDB's file
+system matches them), or a list of paths and patterns. The files of one call
+may differ in format and compression; all are read as the same table.
+
+- The files are read in the order of the list; the files a pattern matches
+  are read in ascending order of their paths, compared byte by byte (so
+  `B.pcap` before `a.pcap`, and `a10.pcap` before `a9.pcap`).
+- Nothing is removed: a file that is listed twice, or matched by two entries,
+  is read twice.
+- A pattern that matches no file is an error that names the pattern. So is a
+  path that does not exist.
+- Every file is opened when the statement is bound, before any row is read:
+  one file that is not a capture fails the statement, with its path in the
+  message.
+- `frame_number` is the number of a frame within its file: it starts at 1 in
+  each file. `(filename, frame_number)` identifies a frame of a call, and is
+  what to join two tables of several captures on.
+- `filename := true` adds a `filename VARCHAR` column after the table's
+  columns, with the path of the file each row is from, as it was matched. It
+  is a parameter of the call: `pcap_schema()` lists the columns of the table,
+  without it.
+- A view over a pattern lists the files each time it is queried, as a view
+  over `read_csv('*.csv')` does: a file that has appeared since is read. A
+  prepared statement reads the files that matched when it was prepared.
+
+DuckDB's multi-file options (`hive_partitioning`, `union_by_name`) are not
+offered.
+
+**`FROM 'capture.pcap'`.** A table name that ends in `.pcap`, `.pcapng` or
+`.cap`, optionally followed by `.gz` or `.zst`, in any case, is read as
+`read_pcap('<name>')`, the `frames` table; a pattern with such an ending
+(`'dir/*.pcap'`) reads every file it matches. Here the name decides, since
+there is nothing else to go by; a capture under another name, another table,
+`strict` and `filename` need the function. A table, a view or a common table
+expression of that name comes first: DuckDB only asks the extension about a
+name it does not find in the catalog. Names with a schema in front
+(`main."x.pcap"`) are not answered.
 
 **Rows.** `frames` has a row per packet. A protocol table has a row per
 occurrence of the protocol in a packet, so a tunnelled packet (VXLAN, GRE,
 GTP, IP-in-IP) has several rows in `ethernet`, `ipv4` or `udp`: `encap_depth`
 is 0 for the outermost and counts up, and `tunnel_type` and `tunnel_id` name
 the enclosing tunnel. `WHERE encap_depth = 0` selects the outermost headers.
-Rows come back in capture order.
+Rows come back in capture order, and the files of a call one after the other
+in the order they are read, without an `ORDER BY` and on any number of
+threads.
 
 **Columns.** Every table starts with `frame_number` and `timestamp`
 (`TIMESTAMP_NS`, as exact as the capture records it), so a protocol table
 needs no join with `frames` for the time of a packet. Only the columns a query
 uses are produced, and only the protocols and fields they need are parsed: a
 query of `frames`, or `count(*)` and `frame_number` of it, parses no protocol.
+
+**Filters.** A scan applies filters on `frame_number` and `timestamp` itself,
+before a packet is parsed, and reads less of the capture for them. Everything
+else in a `WHERE` clause is DuckDB's to apply to the rows the scan returns, as
+before. The rows are the same either way.
+
+What the scan filters by, returning exactly the rows the filter keeps:
+
+- `frame_number` compared with a constant: `=`, `<`, `<=`, `>`, `>=`, with
+  the constant on either side. Any integer will do (`frame_number > -1` is
+  every frame, as it is in DuckDB).
+- `timestamp` compared with a constant of a timestamp type, a `DATE`, or text
+  DuckDB reads as a timestamp: `timestamp >= TIMESTAMP '2024-05-01 12:00:00'`,
+  `timestamp < '2024-05-02'`. DuckDB converts the constant to nanoseconds, so
+  the comparison is on the nanoseconds the capture records.
+- Any `AND` of these.
+
+What it filters by with a frame to spare at each end: two bounds on the same
+column, which is what a range or a time window is, written as `BETWEEN` or as
+two comparisons. DuckDB hands such a pair to the scan as one range without
+saying whether its ends are included (the C API of DuckDB 2.0.0 does not
+expose that), so the scan reads the range with both ends included.
+
+Every filter also stays in DuckDB's plan, and `EXPLAIN` shows it: DuckDB
+applies it to the rows the scan returns, which removes the frames at the ends
+of a range and costs a comparison per returned row otherwise. A filter that
+left the plan would be known only to the scan, and DuckDB, which tells two
+scans apart by their plans, would take two scans of one file with different
+filters in one statement (a `UNION ALL`, a join) for the same scan and give
+both the rows of one.
+
+What it leaves alone: `<>`, `IN`, `OR`, a comparison with another column or
+with an expression, a filter on a cast of the column (`timestamp::DATE = ...`,
+and `frame_number < 2.5`, where DuckDB casts the column), and filters on every
+other column. A prepared statement's parameter is no obstacle: DuckDB plans
+such a statement again for each execution, with the value in place.
+
+What is saved:
+
+- A capture read on one thread (compressed, remote, small, or `threads = 1`)
+  is read from its start in any case; the read ends after the last frame an
+  upper bound on `frame_number` admits. `WHERE frame_number <= 1000` on a
+  20 GB `.pcap.gz` reads a thousand packets (not with `strict := true`: see
+  "Truncated captures"). A bound on `timestamp` does not
+  end the read (timestamps need not ascend), but the packets outside it are
+  not parsed.
+- A capture read in partitions (below) is only read where the filter can
+  match: the pass that finds the places to cut records the smallest and
+  largest timestamp between them, and the stretches the filter rules out are
+  not read again. The stretch at the end of a capture is always read unless
+  an upper bound on `frame_number` rules it out, in case packets were
+  appended since. The stretches are `pcapsql_index_stride` frames long
+  (65,536), so a time window saves reading within large captures; it does
+  not let a scan of many small captures skip those outside the window.
+- A filter no frame can satisfy (`frame_number < 1`) opens no file.
+
+With several files, a filter on `frame_number` applies to the frames of each
+file, which are numbered from 1: `frame_number <= 10` is the first ten frames
+of every file.
+
+`SET pcapsql_filter_pushdown = false` leaves every filter to DuckDB. The
+setting is read when a statement is planned.
 
 **Truncated captures.** A capture that ends inside a record (a capture cut
 short, or one still being written) returns the rows of its complete packets
@@ -133,29 +287,94 @@ result. With `strict := true` it is an error instead:
 ```sql
 SELECT count(*) FROM read_frames('still-being-written.pcap', strict := true);
 -- Invalid Input Error: read_frames: 'still-being-written.pcap' is truncated: the capture ends
--- inside a record (54 bytes follow frame 17, the last complete one, ...)
+-- inside the record that follows frame 17, the last complete one; ...
 ```
 
-Any other problem with the file (it cannot be read, a record or a compressed
+A query that stops early (a `LIMIT`, or a filter with an upper bound on
+`frame_number`, which ends the read) may never get to the end of the capture.
+Without `strict`, a scan on one thread then reports nothing, and a scan in
+partitions (below), which has a worker at the end of the capture from the
+start, may or may not log the warning.
+
+With `strict := true` the whole capture must be intact, whatever the query
+reads of it, on any number of threads: a scan in partitions checks the end of
+the capture when it starts, and a scan on one thread whose read an upper bound
+on `frame_number` ended reads on to the end of the file (without parsing) to
+check it. Either way the query fails. That makes `WHERE frame_number <= 1000`
+with `strict := true` read the whole capture. A `LIMIT` is the exception: a
+scan on one thread that DuckDB stops calling once it has its rows does not
+look further, so it returns them.
+
+With several files each is treated on its own: the warning names the file,
+there is one per truncated file, and the files after it are read in full.
+
+Any other problem with a file (it cannot be read, a record or a compressed
 stream is damaged) fails the query in either mode: a scan does not end early
 without saying so.
 
+**Parallel scans.** A local, uncompressed capture of 4 MiB or more is split
+into as many partitions as DuckDB has threads, and each partition is scanned
+by one thread. The rows are the same and in the same order as on one thread:
+the scan tells DuckDB which partition a chunk of rows is from, and DuckDB
+keeps the partitions in order wherever order matters (a plain `SELECT`,
+`LIMIT`, `CREATE TABLE AS`, `INSERT`). To find where a capture can be cut, the
+scan first reads the header of every record, once, when the query starts; that
+pass reads the whole file, so the first row of a large capture that is not in
+the page cache takes as long as reading it. Compressed captures and captures
+on a remote file system (`s3://`, `https://`) are read on one thread, and so
+is a capture with a damaged record, which is reported where the scan gets to
+it.
+
+With several files, the partitions of all of them are one queue, in file
+order, that the threads take from: a large file is split as above, any other
+file is one partition, and eight small captures are read by eight threads,
+one each.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `pcapsql_parallel_scan` | `true` | `false` reads every capture on one thread, as `SET threads = 1` does for the whole query |
+| `pcapsql_parallel_min_file_size` | 4194304 | The size in bytes from which a capture is split |
+| `pcapsql_index_stride` | 65536 | Frames between two places a capture can be cut at. A capture of no more frames than this is not split, and none is split into more parts than it has such places |
+| `pcapsql_filter_pushdown` | `true` | `false` leaves every filter to DuckDB, which then applies it to the rows of a scan of the whole capture (see "Filters") |
+
+The second and third are for experiments and tests; their defaults are those
+of the DataFusion engine.
+
 **Diagnostics.** With `CALL enable_logging(level = 'debug')`, each scan writes
-one record of type `pcapsql` to `duckdb_logs` that names the columns it
-produces and the protocols and fields it parses.
+a record of type `pcapsql` to `duckdb_logs` for every file, which names the
+file, the columns the scan produces, the protocols and fields it parses, and
+how many partitions it reads the file in and why, and the range of frame
+numbers and timestamps (in nanoseconds) it filters by, if any; and one record
+per partition, with the worker that scanned it, its file, the number of
+packets it read and, under a filter, how many of them the filter rejected
+unparsed.
 
 ## What is registered
+
+[`docs/duckdb-extension-reference.md`](../docs/duckdb-extension-reference.md)
+is the reference, checked against the built artifact by
+`make check_reference_release`. This section adds where each part is
+implemented and how it relates to the DataFusion engine.
 
 The scan functions, one implementation registered under 29 names:
 
 | Function | Result |
 |---|---|
-| `read_pcap(file, protocol := 'frames', strict := false)` | The rows of the table `protocol` names (any case); an unknown one is an error |
-| `read_<table>(file, strict := false)` for each of the 28 tables of `pcap_protocols()` | The rows of that table: `read_frames`, `read_ethernet`, `read_ipv4`, `read_tcp`, `read_dns`, ... |
+| `read_pcap(files, protocol := 'frames', strict := false, filename := false)` | The rows of the table `protocol` names (any case); an unknown one is an error |
+| `read_<table>(files, strict := false, filename := false)` for each of the 28 tables of `pcap_protocols()` | The rows of that table: `read_frames`, `read_ethernet`, `read_ipv4`, `read_tcp`, `read_dns`, ... |
 
-`file` is the only positional argument and must be a `VARCHAR` path;
-`protocol` and `strict` are named parameters. A scan runs on one thread.
-`src/engine/table.rs` describes which callback does what.
+`files` is the only positional argument: a `VARCHAR` path or pattern, or a
+list of them. `protocol`, `strict` and `filename` are named parameters.
+`src/engine/table.rs` describes which callback does what, how the files are
+expanded, how a capture is split into partitions and why the rows keep their
+order.
+
+A replacement scan, which answers a table name that is a capture path
+(`FROM 'x.pcap'`, see "Usage") with `read_pcap` of it.
+
+Four settings: `pcapsql_parallel_scan`, `pcapsql_parallel_min_file_size` and
+`pcapsql_index_stride`, described under "Parallel scans" above, and
+`pcapsql_filter_pushdown`, under "Filters".
 
 Two table functions, which list what the shared catalogue
 (`pcapsql_core::scan::Catalog`) says the extension reads:
@@ -238,7 +457,10 @@ the DuckDB side of it.
 
 | Module | What it does |
 |---|---|
-| `table.rs` | `PcapScan`, the table function behind every scan function: binds the table and the file, maps DuckDB's projection to a `ScanPlan`, and in each `exec` steps core's `PartitionScan` into a `ChunkWriter` until the chunk is full |
+| `table.rs` | `PcapScan`, the table function behind every scan function: binds the table, expands the files argument (`FileSystem::glob`) and probes every file, maps DuckDB's projection and the pushed-down predicate to a `ScanPlan`, cuts each capture into partitions and leaves out what the predicate rules out (core's `BoundaryIndex`, `partition_target` and `PartitionQueue`, one queue over all files), has each worker claim a partition, and in each `exec` steps core's `PartitionScan` into a `ChunkWriter` until the chunk is full; reports the partition's ordinal as DuckDB's batch index |
+| `replacement.rs` | The replacement scan: which table names are capture paths, and `read_pcap` as the answer |
+| `pushdown.rs` | Filter pushdown: reads the filter expressions DuckDB offers a scan and turns what they say about `frame_number` and `timestamp` into core's `FramePredicate`, which the scan filters by. It accepts none, so DuckDB keeps applying each; its header says why, lists every shape that is read exactly with the reason it is exact, and what is not read |
+| `settings.rs` | The four settings, and what a scan reads of DuckDB's (`threads`) |
 | `types.rs` | The DuckDB logical type of each column kind of the catalogue (the table above), and the name DuckDB prints for it |
 | `writer.rs` | `ChunkWriter`: stores the rows the shared scan layer produces (`pcapsql_core::scan::RowSink`) in the output chunk of one `exec` call |
 | `fs.rs` | `DuckFile`: a buffered `std::io::Read` over a file opened through DuckDB's file system, for core's `ReadPacketReader` |
@@ -252,8 +474,11 @@ accepts an oversized chunk and then fails with an error that invalidates the
 database. `finish` gives the chunk its row count; a writer dropped without it
 leaves the chunk empty. For an output without columns it only counts: DuckDB
 hands a scan at least one vector even for `count(*)`, and the rows of a vector
-nobody wrote are NULL. It is the one module with `unsafe` code, and its header
-states the invariants that make the pointer writes sound.
+nobody wrote are NULL. One vector of a chunk can be a constant the scan layer
+does not write: the `filename` column, which `finish` fills with the path of
+the one file the rows of the chunk are from. It is the one module with
+`unsafe` code, and its header states the invariants that make the pointer
+writes sound.
 
 `DuckFile` reads 1 MiB at a time from a local file and 4 MiB from a remote
 one, never more than the file holds. `DuckFile::open` starts at the first
@@ -272,6 +497,32 @@ Tests, in `itest/`:
   covers the columns of every function against `pcap_schema()`, the arguments
   and their errors, projection, what a scan parses, and the progress it
   reports.
+- `tests/scan_parallel.rs` runs the same queries on one partition and on
+  several, at 1, 2, 4 and 8 threads, and compares rows and their order: every
+  table of the corpus captures, generated captures of many chunks, tunnelled
+  packets where a capture is cut, truncated and damaged captures, compressed
+  ones, a capture that is damaged while it is being scanned, and plans that
+  are run again. It reads back from DuckDB's log how each scan was split and
+  which worker scanned which partition.
+- `tests/multi_file.rs` reads several captures in one call (a list, a
+  pattern, a list of patterns; legacy and pcapng, plain, gzip and zstd) and
+  compares, cell by cell and in order, with the rows of each file's own scan
+  one after the other, at 1, 2, 4 and 8 threads, split into partitions and
+  not. It covers the order of the files, a file read twice, what cannot be
+  read, the `filename` column and its projection, a truncated file among
+  whole ones, how the partitions of several files are spread, the
+  replacement scan and what comes before it, and a view over a pattern.
+- `tests/filter_pushdown.rs` runs random and chosen filters on `frame_number`
+  and `timestamp` (and filters the scan must leave to DuckDB) with
+  `pcapsql_filter_pushdown` on and off and compares the rows, at 1 and 4
+  threads, split and not: generated captures with ascending, shuffled and
+  pre-1970 timestamps, compressed ones, the corpus captures over every
+  table, and several files at once. It also checks that `EXPLAIN` still
+  shows every filter, that two differently filtered scans of one capture in
+  one statement keep their own rows, which partitions and how many packets
+  a scan reads for a time window and for a frame range (from the scan's log
+  records), where the read of a gzip capture ends, prepared statements with
+  parameters, and what a filter does to the report of a truncated capture.
 - `tests/golden_differential.rs` runs the queries of the DataFusion golden
   corpus over the same captures and compares with the snapshots committed in
   `pcapsql-datafusion/tests/golden/`. `build.rs` takes the captures and the
@@ -311,6 +562,9 @@ The scan functions:
   has them, and every protocol table has the `timestamp` column.
 - `strict` is new. A truncated capture used to end the scan without a word,
   and so did a read error.
+- Several captures are read by one call (a list, a glob pattern), with a
+  `filename` column on request, and `FROM 'x.pcap'` reads a capture.
+- Filters on `frame_number` and `timestamp` are applied by the scan.
 - The file is opened through DuckDB's file system, so
   `enable_external_access = false` now stops a scan.
 

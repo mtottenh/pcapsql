@@ -1,0 +1,50 @@
+name: DuckDB extension canary
+
+# Builds the extension against a newer duckdb-neo than the pinned one: the newest release on
+# crates.io, and the main branch of duckdb-rs. The DuckDB C API v2 is unstable, so either can
+# stop compiling at any time; this shows it before a DuckDB release makes the upgrade urgent.
+#
+# A failure here is news about DuckDB, not a defect of this repository: the workflow runs on a
+# schedule and by hand only, and no other workflow depends on it. What to do about a failure is
+# in docs/duckdb-upgrade-runbook.md. pcapsql-duckdb/scripts/canary.sh is the whole job and runs
+# locally the same way (`make -C pcapsql-duckdb canary`).
+
+on:
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  canary:
+    name: Against duckdb-neo from ${{ matrix.source }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        source: [crates, main]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache DuckDB release
+        uses: actions/cache@v4
+        with:
+          path: pcapsql-duckdb/.duckdb-release
+          key: ${{ runner.os }}-duckdb-release-${{ hashFiles('pcapsql-duckdb/scripts/duckdb-release.sha256') }}
+
+      - name: Build and test against the candidate
+        run: make -C pcapsql-duckdb canary CANARY=${{ matrix.source }}

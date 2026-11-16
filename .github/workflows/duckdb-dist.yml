@@ -1,0 +1,105 @@
+name: DuckDB extension distribution
+
+# Builds pcapsql.duckdb_extension for every platform it is distributed for, the way DuckDB's
+# community-extensions repository will build it, and then loads each artifact in the DuckDB
+# release it targets on a runner of that platform.
+#
+# The build is DuckDB's reusable workflow from extension-ci-tools. It runs `make configure_ci`,
+# `make release` and `make test_release` in `build_directory` (Linux builds run in the manylinux
+# container of extension-ci-tools/docker, so the binaries load on older distributions too). The
+# commit after `@` and `ci_tools_version` is the one the pcapsql-duckdb/extension-ci-tools
+# submodule is at; `duckdb_version` is TARGET_DUCKDB_VERSION of pcapsql-duckdb/Makefile.
+# pcapsql-duckdb/scripts/check-pins.sh fails when they drift, and
+# docs/duckdb-upgrade-runbook.md says how to move them.
+#
+# Platforms: linux_amd64, linux_arm64, osx_arm64. Not built, and excluded in
+# pcapsql-duckdb/community/description.yml too:
+#   - windows_amd64 and windows_amd64_mingw: pcapsql-core does not compile for Windows (its
+#     netlink parser depends on a Unix-only crate).
+#   - wasm_mvp, wasm_eh, wasm_threads: not shown to build (roadmap section 10, U10).
+# The remaining platforms of extension-ci-tools/config/distribution_matrix.json are opt-in and
+# not opted into.
+#
+# This workflow is not run for pull requests: .github/workflows/duckdb.yml builds and tests
+# linux_amd64 there. release.yml calls it for a tag and attaches the artifacts to the release.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "pcapsql-duckdb/**"
+      - "pcapsql-core/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/duckdb-dist.yml"
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@c286b12cee2aa16b714e76d0b46e530fcdb6dc05 # v2.0-cyanoptera
+    with:
+      extension_name: pcapsql
+      duckdb_version: v2.0.0
+      ci_tools_version: c286b12cee2aa16b714e76d0b46e530fcdb6dc05
+      build_directory: pcapsql-duckdb
+      extra_toolchains: rust;python3
+      exclude_archs: windows_amd64;windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads
+      # `auto` would leave out linux_arm64 and osx_arm64 for some events.
+      reduced_ci_mode: disabled
+
+  # The reusable workflow runs the SQL tests on osx_arm64 only (its makefile skips them for
+  # linux_amd64, its script for linux_arm64), and never starts the DuckDB shell. This job takes
+  # each artifact as it was uploaded and runs both: test/sql in DuckDB's Python package, and
+  # scripts/load-test.sh in the release's command-line shell.
+  verify:
+    name: Load ${{ matrix.duckdb_arch }} in DuckDB
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - duckdb_arch: linux_amd64
+            runner: ubuntu-24.04
+          - duckdb_arch: linux_arm64
+            runner: ubuntu-24.04-arm
+          - duckdb_arch: osx_arm64
+            runner: macos-15
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache DuckDB release
+        uses: actions/cache@v4
+        with:
+          path: pcapsql-duckdb/.duckdb-release
+          key: ${{ runner.os }}-${{ runner.arch }}-duckdb-release-${{ hashFiles('pcapsql-duckdb/scripts/duckdb-release.sha256') }}
+
+      # Where `make release` would have put it.
+      - name: Download the artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: pcapsql-v2.0.0-extension-${{ matrix.duckdb_arch }}
+          path: pcapsql-duckdb/build/release
+
+      - name: Configure (Python venv with DuckDB and its SQL test runner)
+        run: make -C pcapsql-duckdb configure
+
+      - name: SQL tests (test/sql)
+        run: make -C pcapsql-duckdb test_release
+
+      - name: LOAD in the DuckDB command-line shell
+        run: make -C pcapsql-duckdb load_test_release
+
+      - name: The function reference lists everything the artifact registers
+        run: make -C pcapsql-duckdb check_reference_release

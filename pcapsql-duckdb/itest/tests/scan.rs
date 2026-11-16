@@ -212,7 +212,8 @@ fn bad_arguments_are_bind_errors_that_say_what_is_wrong() -> Result<()> {
     let short = fixture.write("short.pcap", &golden::capture("eth")[..10]);
     let missing = fixture.path("missing.pcap");
 
-    let cases: Vec<(String, &[&str])> = vec![
+    let cases: Vec<(String, &[&str])> =
+        vec![
         // The protocol.
         (
             format!("read_pcap('{path}', protocol := 'nope')"),
@@ -255,15 +256,12 @@ fn bad_arguments_are_bind_errors_that_say_what_is_wrong() -> Result<()> {
         ),
         (
             "read_frames(42)".to_owned(),
-            &["read_frames: the capture file must be a VARCHAR path, not INTEGER"],
+            &["read_frames: the capture files must be a VARCHAR path or pattern, or a list of \
+               them, not INTEGER"],
         ),
         (
             "read_frames('')".to_owned(),
             &["read_frames: the capture file must not be an empty path"],
-        ),
-        (
-            format!("read_frames(['{path}'])"),
-            &["read_frames: a list of capture files is not supported yet"],
         ),
         ("read_frames()".to_owned(), &["read_frames"]),
         // The file itself.
@@ -577,7 +575,7 @@ fn logged_scans(connection: &Connection) -> Vec<String> {
     let scans = column(
         connection,
         "SELECT message FROM duckdb_logs WHERE type = 'pcapsql' AND log_level = 'DEBUG' \
-         ORDER BY timestamp, context_id",
+         AND message LIKE '%: scanning %' ORDER BY timestamp, context_id",
     )
     .unwrap();
     connection
@@ -804,6 +802,13 @@ fn a_scan_reports_its_progress_as_the_share_of_the_file_read() -> Result<()> {
     let capture = golden::legacy(mixed_frames(250_000));
     let path = fixture.write("long.pcap", &capture);
     connection.execute("SET progress_bar_time = 0", Parameters::None)?;
+    // One partition, read by the thread that also updates the progress, between the slices of
+    // its task: the samples then follow the scan. With several partitions (the capture is
+    // large enough) DuckDB updates the progress when that thread has finished a slice of its
+    // own partition, by when the others are nearly through theirs, and a sampler may see
+    // nothing between the first read and the end. `scan_parallel.rs` has the test for that
+    // case, which reads the progress between the chunks of a result.
+    connection.execute("SET pcapsql_parallel_scan = false", Parameters::None)?;
     let tracker = QueryProgressTracker::new(&connection)?;
 
     let done = Arc::new(AtomicBool::new(false));
