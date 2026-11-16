@@ -14,7 +14,7 @@
 //! of the protocol tables is not a column here (the `*_packets` views and
 //! frame-join fusion serve it).
 
-use arrow::datatypes::{Field, Schema};
+use arrow::datatypes::Schema;
 use pcapsql_core::scan::Catalog;
 
 use crate::query::arrow_schema::table_def_to_arrow_schema;
@@ -60,37 +60,10 @@ pub fn all_table_schemas() -> Vec<(&'static str, Schema)> {
         .collect()
 }
 
-/// Strip the protocol prefix from a field name.
-///
-/// Examples:
-/// - `"dns.query_name"` -> `"query_name"`
-/// - `"tcp.src_port"` -> `"src_port"`
-/// - `"frame_number"` -> `"frame_number"` (unchanged)
-pub fn strip_protocol_prefix(field_name: &str) -> &str {
-    field_name
-        .find('.')
-        .map(|idx| &field_name[idx + 1..])
-        .unwrap_or(field_name)
-}
-
-/// Create a new field with the protocol prefix stripped.
-pub fn normalize_field(field: &Field) -> Field {
-    let new_name = strip_protocol_prefix(field.name());
-    Field::new(new_name, field.data_type().clone(), field.is_nullable())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::datatypes::{DataType, TimeUnit};
-
-    #[test]
-    fn test_strip_protocol_prefix() {
-        assert_eq!(strip_protocol_prefix("dns.query_name"), "query_name");
-        assert_eq!(strip_protocol_prefix("tcp.src_port"), "src_port");
-        assert_eq!(strip_protocol_prefix("frame_number"), "frame_number");
-        assert_eq!(strip_protocol_prefix("ipv4.src_ip"), "src_ip");
-    }
+    use arrow::datatypes::{DataType, Field, TimeUnit};
 
     #[test]
     fn test_all_tables_have_frame_number() {

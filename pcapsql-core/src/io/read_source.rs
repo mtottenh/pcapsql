@@ -13,10 +13,10 @@ use crate::error::{Error, PcapError};
 use crate::io::decompress::{Compression, DecompressReader};
 use crate::io::index::BoundaryIndex;
 use crate::io::pcap_stream::{Delivered, GenericPcapReader, Pause, PcapFormat};
+use crate::io::probe::StreamHeader;
 use crate::io::source::{
     starts_at_header, synth_header_for, PacketPosition, PacketRange, PacketReader, PacketRef,
 };
-use crate::io::stdin::StreamHeader;
 
 /// The `Read` stack under a [`ReadPacketReader`]: bytes that come before the
 /// stream (a probed head or a synthesized header, possibly empty), then the

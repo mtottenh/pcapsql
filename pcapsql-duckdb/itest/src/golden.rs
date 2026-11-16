@@ -1,8 +1,8 @@
 //! The golden corpus of the DataFusion frontend, and captures made with its frame builders.
 //!
-//! `build.rs` copies the frame builders, the capture builders and the query corpus out of
-//! `pcapsql-datafusion/tests/golden_corpus.rs`; they are included below, unchanged and private
-//! to this module. The functions here are what the tests use:
+//! The frame builders, the capture builders and the query corpus are `pcapsql_testgen::corpus`,
+//! the module `pcapsql-datafusion/tests/golden_corpus.rs` takes them from too. The functions
+//! here are what the tests use:
 //!
 //! - [`capture`] and [`queries`]: the corpus captures and the queries whose results are the
 //!   committed DataFusion snapshots ([`snapshot`]);
@@ -10,16 +10,16 @@
 //!   writers [`legacy`], [`legacy_nanos`], [`pcapng`]: captures for the scan tests, built from
 //!   the same byte-exact frame builders.
 
-// The extract is a test file's helpers: not all of them are used here.
-#![allow(dead_code)]
-
 use std::path::PathBuf;
 
+use pcapsql_testgen::corpus::{
+    corpus_capture, dns_query, eth, http_capture, ipv4, routing_capture, sll2_capture, sll_capture,
+    to_capture, tunnels_capture, udp, views_capture, vxlan, Capture, CORPUS, ETH_IP4,
+    LINKTYPE_ETHERNET, MAC_A, MAC_B,
+};
 use pcapsql_testgen::{
     legacy_pcap, GenPacket, LegacyVariant, PcapngInterface, PcapngPacket, PcapngSection,
 };
-
-include!(concat!(env!("OUT_DIR"), "/golden_corpus_extract.rs"));
 
 /// The names of the corpus captures, as [`capture`] takes them.
 pub const CAPTURES: [&str; 6] = ["eth", "sll", "sll2", "http", "routing", "tunnels"];

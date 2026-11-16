@@ -68,10 +68,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Each crate declares its minimum Rust version: 1.87 for `pcapsql-core` and
   1.88 for the CLI. An older compiler gives a clear error.
 
+### Removed
+
+- `pcapsql-datafusion`: the unused public functions `to_arrow_type`,
+  `to_arrow_field`, `descriptors_to_arrow_schema`,
+  `protocol_to_arrow_schema`, `field_value_to_scalar`,
+  `strip_protocol_prefix` and `normalize_field`.
+
 ### Fixed
 
 - A streaming query without `ORDER BY` could return rows out of capture
   order.
+- `--filter` failed when the query contained non-ASCII text.
 
 ## [0.4.1] - 2026-10-24
 
