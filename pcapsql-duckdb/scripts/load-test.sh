@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# LOAD the built extension in the stock DuckDB command-line shell, call each kind of function,
-# read captures, summarize them and write one.
+# LOAD the built extension in the stock DuckDB command-line shell, call each kind of function
+# (table, scalar, aggregate, macro), read captures, summarize them and write one.
 #
 #   load-test.sh <path to pcapsql.duckdb_extension> <DuckDB version> <extension version>
 #
@@ -49,7 +49,9 @@ SELECT count(*) FROM duckdb_functions() WHERE function_type = 'scalar' AND funct
     'ospf_packet_type_name', 'ospf_lsa_type_name', 'gtp_message_type_name', 'ntp_mode_name',
     'ntp_stratum_name', 'tls_record_type_name', 'tls_version_name', 'is_private_ip', 'is_loopback_ip',
     'is_multicast_ip', 'is_multicast_ip6', 'is_link_local_ip6', 'mac_is_broadcast', 'mac_is_multicast',
-    'mac_is_local');
+    'mac_is_local', 'hdr_count', 'hdr_min', 'hdr_max', 'hdr_mean', 'hdr_stdev', 'hdr_percentile',
+    'hdr_buckets', 'hdr_ascii');
+SELECT function_name, parameter_types::VARCHAR, return_type FROM duckdb_functions() WHERE function_type = 'aggregate' AND function_name LIKE 'hdr%';
 SELECT ip6_to_string(ip6('2001:db8::1')), mac_to_string(mac('AABBCCDDEEFF')), pcap_hex(pcap_unhex('0xDEAD'));
 SELECT ip_in_cidr(ip4('192.168.1.100'), '192.168.0.0/16'), ip6_in_cidr(ip6('fe80::1'), 'fe80::/10'), ip_in_cidr(1, 'bogus') IS NULL;
 SELECT tcp_flags_str(18), has_tcp_flag(18, 'syn'), dns_type_name(28), dns_rcode_name(3), ip_proto_name(6), ethertype_name(2048);
@@ -94,6 +96,11 @@ SELECT frame_number, relative_time(timestamp, '$captures/dns.cap') FROM read_dns
 SELECT count(*) FROM duckdb_functions() WHERE function_type = 'macro' AND function_name IN (
     'format_ip4', 'format_ip6', 'format_mac', 'format_ip4_list', 'format_ip6_list', 'format_mac_list',
     'start_time', 'end_time', 'relative_time');
+SELECT hdr_count(h), hdr_min(h), hdr_max(h), round(hdr_mean(h), 3), hdr_percentile(h, 0.5), hdr_percentile(h, 99), lower(hex(h)) FROM (SELECT hdr_histogram(length) AS h FROM read_frames('$captures/dns.cap'));
+SELECT hdr_buckets(hdr_histogram(length))::VARCHAR, typeof(hdr_buckets(hdr_histogram(length))) FROM read_frames('$scratch/dns.cap.gz');
+SELECT parse_filename(filename), hdr_count(hdr_histogram(length)), hdr_max(hdr_histogram(length) FILTER (frame_number <= 10)), hdr_count(hdr_histogram(NULL::INT)) FROM read_frames(['$captures/v6*', '$captures/dns.cap'], filename := true) GROUP BY ALL ORDER BY ALL;
+SELECT hdr_count('not a histogram'::BLOB) IS NULL, hdr_buckets(NULL) IS NULL, hdr_ascii(hdr_histogram(i)) FROM range(0) t(i);
+SELECT string_split(hdr_ascii(hdr_histogram(length)), chr(10))[1] FROM read_frames('$captures/dns.cap');
 "
 expected="pcapsql,true,$extension_version
 32
@@ -102,7 +109,8 @@ timestamp,TIMESTAMP_NS,false
 src_mac,BLOB,true
 3232235777,192.168.1.1,true,true
 5000,5000
-40
+48
+hdr_histogram,[ANY],BLOB
 2001:db8::1,aa:bb:cc:dd:ee:ff,dead
 true,true,true
 \"SYN,ACK\",true,AAAA,NXDOMAIN,TCP,IPv4
@@ -165,7 +173,14 @@ dns.cap.gz,2005-03-30 08:47:46.496046,2005-03-30 08:52:25.375359,38,278.879313,1
 1999-03-11 13:45:02.141757,2007-08-05 19:16:44.219461,TIMESTAMP_NS
 3,4.005222
 4,4.837355
-9"
+9
+38,67,299,97.553,83.0,299.0,1c8493130000002600000000000000020000000000000001000000000000012b3ff00000000000008501020308020308040403040302080002070205020506050403021102190613043102db0102
+\"[{'lo': 64, 'hi': 127, 'count': 31}, {'lo': 128, 'hi': 255, 'count': 6}, {'lo': 256, 'hi': 511, 'count': 1}]\",\"STRUCT(lo UBIGINT, hi UBIGINT, count UBIGINT)[]\"
+dns.cap,38,299,0
+v6-http.cap,55,211,0
+v6.pcap,161,511,0
+true,true,(empty histogram)
+38 samples | min 67 | max 299 | mean 97.6 | stdev 40.7"
 
 actual=$("$duckdb" -unsigned -csv -noheader -c "$sql")
 if [ "$actual" != "$expected" ]; then

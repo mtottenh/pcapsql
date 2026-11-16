@@ -1,0 +1,140 @@
+# name: test/sql/histogram.test
+# description: the aggregate hdr_histogram and the hdr_* functions that read a histogram
+# group: [pcapsql]
+
+# The in-process tests (itest/tests/histogram.rs) compare these with the kernels over many
+# inputs, and itest/tests/golden_differential.rs with the command-line tool; this file checks
+# the built artifact. The captures are the seeds of the reader fuzzer, relative to
+# pcapsql-duckdb/.
+
+require pcapsql
+
+query TTTT
+SELECT function_name, function_type, parameter_types::VARCHAR, return_type FROM duckdb_functions()
+WHERE function_name LIKE 'hdr%' ORDER BY function_name;
+----
+hdr_ascii	scalar	[BLOB]	VARCHAR
+hdr_buckets	scalar	[BLOB]	STRUCT(lo UBIGINT, hi UBIGINT, count UBIGINT)[]
+hdr_count	scalar	[BLOB]	UBIGINT
+hdr_histogram	aggregate	[ANY]	BLOB
+hdr_max	scalar	[BLOB]	UBIGINT
+hdr_mean	scalar	[BLOB]	DOUBLE
+hdr_min	scalar	[BLOB]	UBIGINT
+hdr_percentile	scalar	[BLOB, DOUBLE]	DOUBLE
+hdr_stdev	scalar	[BLOB]	DOUBLE
+
+# A column of a capture: the statistics, and the bytes the command-line tool returns for it
+query IIIRRRRT
+SELECT hdr_count(h), hdr_min(h), hdr_max(h), round(hdr_mean(h), 6), round(hdr_stdev(h), 6),
+       hdr_percentile(h, 0.5), hdr_percentile(h, 99), lower(hex(h))
+FROM (SELECT hdr_histogram(length) AS h FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dns.cap'));
+----
+38	67	299	97.552632	40.743548	83.0	299.0	1c8493130000002600000000000000020000000000000001000000000000012b3ff00000000000008501020308020308040403040302080002070205020506050403021102190613043102db0102
+
+query T
+SELECT hdr_buckets(hdr_histogram(length)) FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dns.cap');
+----
+[{'lo': 64, 'hi': 127, 'count': 31}, {'lo': 128, 'hi': 255, 'count': 6}, {'lo': 256, 'hi': 511, 'count': 1}]
+
+query III
+SELECT lo, hi, count
+FROM (SELECT unnest(hdr_buckets(hdr_histogram(length)), recursive := true)
+      FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dns.cap'))
+ORDER BY lo;
+----
+64	127	31
+128	255	6
+256	511	1
+
+query T
+SELECT unnest(string_split(rtrim(hdr_ascii(hdr_histogram(length)), chr(10)), chr(10)))
+FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dns.cap');
+----
+38 samples | min 67 | max 299 | mean 97.6 | stdev 40.7
+ bucket        count     pct     cum bar
+ 64-127           31   81.6%   81.6% ########################################
+128-255            6   15.8%   97.4% ########
+256-511            1    2.6%  100.0% #
+
+# A histogram per group, on one thread and on four
+statement ok
+CREATE TABLE numbers AS SELECT i FROM range(300000) t(i);
+
+statement ok
+SET threads = 4;
+
+query IIII
+SELECT count(*), sum(hdr_count(h)), min(hdr_min(h)), max(hdr_max(h)) >= 299999
+FROM (SELECT i % 1000 AS g, hdr_histogram(i) AS h FROM numbers GROUP BY g);
+----
+1000	300000	0	true
+
+query IIRR
+SELECT g, hdr_count(h), hdr_percentile(h, 0.5), hdr_percentile(h, 1.0)
+FROM (SELECT i % 1000 AS g, hdr_histogram(i % 7) AS h FROM numbers GROUP BY g)
+WHERE g < 3 ORDER BY g;
+----
+0	300	3.0	6.0
+1	300	3.0	6.0
+2	300	3.0	6.0
+
+statement ok
+RESET threads;
+
+# NULL, negative numbers and NaN are not recorded; fractions are cut off
+query IIII
+SELECT hdr_count(hdr_histogram(v)), hdr_min(hdr_histogram(v)), hdr_max(hdr_histogram(v)),
+       hdr_count(hdr_histogram(v) FILTER (v > 2))
+FROM (VALUES (1.9), (NULL), (-5.0), ('nan'::DOUBLE), (2.5), (7.99)) t(v);
+----
+3	1	7	2
+
+query II
+SELECT hdr_count(hdr_histogram(DISTINCT v)), hdr_max(hdr_histogram(v))
+FROM (VALUES (12.50::DECIMAL(6, 2)), (12.75), (300), (-0.01)) t(v);
+----
+3	301
+
+# No rows and no values: an empty histogram, not NULL
+query IIIRRTT
+SELECT h IS NULL, hdr_count(h), hdr_max(h), hdr_mean(h), hdr_percentile(h, 0.5), hdr_buckets(h), hdr_ascii(h)
+FROM (SELECT hdr_histogram(i) AS h FROM range(10) t(i) WHERE i > 100);
+----
+false	0	0	0.0	0.0	[]	(empty histogram)
+
+# As a window function
+query III
+SELECT i, hdr_count(hdr_histogram(i) OVER (ORDER BY i)),
+       hdr_max(hdr_histogram(i) OVER (ORDER BY i ROWS BETWEEN 1 PRECEDING AND CURRENT ROW))
+FROM range(1, 5) t(i) ORDER BY i;
+----
+1	1	1
+2	2	2
+3	3	3
+4	4	4
+
+# What is not a histogram is NULL, never an error
+query IIIIIIII
+SELECT hdr_count(b), hdr_min(b), hdr_max(b), hdr_mean(b), hdr_stdev(b), hdr_percentile(b, 0.5),
+       hdr_buckets(b), hdr_ascii(b)
+FROM (VALUES ('not a histogram'::BLOB), (''::BLOB), (NULL)) t(b);
+----
+NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL
+NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL
+NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL
+
+# The values are numbers
+statement error
+SELECT hdr_histogram(query_name) FROM read_dns('../fuzz/corpus/fuzz_pcap_reader/dns.cap');
+----
+hdr_histogram: the values must be numbers (an integer type, FLOAT, DOUBLE or DECIMAL), not VARCHAR
+
+statement error
+SELECT hdr_histogram(timestamp) FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dns.cap');
+----
+not TIMESTAMP_NS
+
+statement error
+SELECT hdr_histogram(length, 3) FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dns.cap');
+----
+hdr_histogram

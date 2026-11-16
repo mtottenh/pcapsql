@@ -25,6 +25,7 @@
 //! SELECT format_mac(mac('aabbccddeeff'));  -- aa:bb:cc:dd:ee:ff
 //! SELECT * FROM pcap_time_range('logs/*.pcap');  -- filename, start_time, end_time, frames, ...
 //! SELECT relative_time(timestamp, 'capture.pcap') FROM read_tcp('capture.pcap');
+//! SELECT hdr_percentile(hdr_histogram(length), 0.99) FROM read_frames('capture.pcap');
 //! COPY (SELECT * FROM read_frames('a.pcap') WHERE length > 1000) TO 'b.pcap' (FORMAT pcap);
 //! ```
 //!
@@ -32,14 +33,15 @@
 //! tables among them, and one `read_<proto>_packets` per packets view), `pcap_protocols()`,
 //! `pcap_views()` and
 //! `pcap_schema()`, `pcap_time_range()` and the macros over it (`start_time`, `end_time`,
-//! `relative_time`), the forty scalar functions, the six `format_*` macros and the copy format
-//! `pcap`; the README
+//! `relative_time`), the forty-eight scalar functions, the aggregate function `hdr_histogram`,
+//! the six `format_*` macros and the copy format `pcap`; the README
 //! lists them. None of them has logic of its own. The scan functions run the shared scan layer,
 //! `pcapsql_core::scan`, which the DataFusion engine runs too: the tables and columns are those
 //! of `pcapsql_core::scan::Catalog`, the views those of `pcapsql_core::scan::PacketsView` (each
 //! a join the scan layer evaluates frame by frame, in the same pass), and its driver decides
 //! what every row holds. The scalar functions are loops over the kernels of
-//! `pcapsql_core::format`, and the copy format gives the rows of a query to
+//! `pcapsql_core::format`, the aggregate function keeps one of them per group
+//! (`engine::aggregate`), and the copy format gives the rows of a query to
 //! `pcapsql_core::io::PcapWriter` (`engine::copy`, through [`engine::fs::DuckSink`]).
 //!
 //! What is here is the DuckDB side: `engine::table` is the table function behind every scan

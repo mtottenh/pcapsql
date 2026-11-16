@@ -35,7 +35,7 @@ cloud-all = ["s3", "gcs", "azure"]
 
 [dependencies]
 # Our core library
-pcapsql-core = { version = "0.4.2", path = "../pcapsql-core" }
+pcapsql-core = { version = "0.4.2", path = "../pcapsql-core", features = ["histogram"] }
 
 # DataFusion ecosystem
 arrow.workspace = true
@@ -59,9 +59,6 @@ serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-
-# HdrHistogram for latency analysis
-hdrhistogram.workspace = true
 
 # SQLite database support
 rusqlite.workspace = true

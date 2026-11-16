@@ -689,9 +689,10 @@ capture. The stream tables have exactly DataFusion's columns.
 | Packet timestamps | `TIMESTAMP_NS` |
 | Lists | `USMALLINT[]`, `UINTEGER[]`, `VARCHAR[]`, `BLOB[]` |
 
-Forty scalar functions. Each is a loop over a kernel of
+Forty-eight scalar functions. Each is a loop over a kernel of
 `pcapsql_core::format`, the same kernels the DataFusion engine calls, so the
-two engines give the same answer. A NULL argument gives NULL, and so does an
+two engines give the same answer. Forty are in the table below; the eight
+that read a histogram are under "Histograms". A NULL argument gives NULL, and so does an
 argument the function cannot use (text that is not an address, a BLOB of the
 wrong length): no function raises an error for its input. An address is what
 the tables store, a `UINTEGER` for IPv4 and a `BLOB` of 16 or 6 bytes for
@@ -745,6 +746,88 @@ text made of the number.
 The integer arguments have exactly the type of the column they are meant for.
 A literal that fits is accepted (`ip_proto_name(6)`); a column of another
 integer type needs a cast (`ip4_to_string(x::UINTEGER)`).
+
+### Histograms
+
+An aggregate function and eight scalar functions that read what it returns:
+the DataFusion engine's `hdr_*` functions
+(`src/engine/aggregate.rs`, `src/engine/scalar/mod.rs`).
+
+| Function | Result |
+|---|---|
+| `hdr_histogram(value) -> BLOB` (aggregate) | The histogram of the values of a group, serialized (HdrHistogram's V2 encoding). `value` is any integer type, `FLOAT`, `DOUBLE` or `DECIMAL` |
+| `hdr_count(BLOB) -> UBIGINT`, `hdr_min`, `hdr_max` | The number of values, the smallest and the largest (to two significant digits) |
+| `hdr_mean(BLOB) -> DOUBLE`, `hdr_stdev` | Their mean and standard deviation |
+| `hdr_percentile(BLOB, DOUBLE) -> DOUBLE` | The value at a percentile: a fraction (`0.99`) or, above 1, a percentage (`99`) |
+| `hdr_buckets(BLOB) -> STRUCT(lo UBIGINT, hi UBIGINT, count UBIGINT)[]` | The recorded range in at most 64 buckets on a logarithmic scale |
+| `hdr_ascii(BLOB) -> VARCHAR` | The histogram drawn as text |
+
+The kernels were in the DataFusion crate and are now
+`pcapsql_core::format::histogram` (behind core's feature `histogram`, because
+the `hdrhistogram` crate needs Rust 1.88 and core 1.87); DataFusion's
+functions are wrappers of them as these are. So the two engines agree on
+what is recorded (an unsigned 64-bit integer; NULL, negative numbers and NaN
+not at all; the integer part of a fraction), on every statistic, on the
+buckets and the picture, and on the bytes: for the same values recorded by
+one worker the `BLOB` is the same in both, and a `BLOB` of one is read by
+the other. A group without a value is an empty histogram, not NULL, and a
+`BLOB` that is not a histogram is NULL for every function, as in DataFusion.
+
+What differs from the DataFusion functions:
+
+- `hdr_histogram` takes one argument. DataFusion's accepts more and ignores
+  them (its help shows a `sigfigs` argument that has no effect).
+- A value that is not a number is refused when the statement is bound;
+  DataFusion returns an empty histogram for such a column. A `DECIMAL` is
+  recorded (its integer part), where DataFusion ignores the column, and so
+  is a `HUGEINT`, which DataFusion does not have.
+- The list of `hdr_buckets` is DuckDB's `STRUCT(lo, hi, count)[]`:
+  `unnest(..., recursive := true)` makes rows and columns of it.
+
+How DuckDB runs it, and what follows:
+
+- **One function, one `ANY` parameter.** DuckDB 2.0.0 refuses a second
+  aggregate function of a name through the C API (`GetAlterInfo not
+  implemented`), so there is no overload per type: `bind` looks at the type
+  of the argument and `update` reads the vector as that type.
+- **Parallel aggregation.** DuckDB aggregates into a table per thread and
+  combines them (`combine`: the kernel's `merge`). The answers are the same
+  on any number of threads. The bytes can differ in one field of the
+  header, the highest value the histogram has room for, which depends on
+  how the values were split and in which order the parts were merged; the
+  kernel's documentation has the details. On one thread the bytes are those
+  of the kernel's `merge` into an empty histogram, which is also what
+  DataFusion returns.
+- **`FILTER`, `DISTINCT`, `OVER`** come with the aggregate function API and
+  work. The function is registered as not depending on the order of its
+  rows.
+- **The panic guard** covers every callback, `init` included, which
+  `duckdb-neo` cannot let fail (it aborts the process on a panic there,
+  because DuckDB destroys every state afterwards). `engine::guard` keeps
+  each state in a slot that holds either the state or the message of the
+  panic that kept it from being made, so `init` always returns something
+  DuckDB can destroy and the next callback fails the query.
+- **Memory.** A histogram is 2 KiB of counts for values up to 255 and 1 KiB
+  more per doubling of its largest value, per group, until the group is
+  returned; DuckDB then destroys the state and the histogram is freed.
+  **DuckDB 2.0.0 does not destroy the states of groups it never returns**: a
+  grouped aggregation under a `LIMIT` without an `ORDER BY`, or a statement
+  that fails while its groups are combined or returned, leaves the
+  histograms of the other groups allocated for the life of the process
+  (`RadixHTGlobalSinkState::Destroy` returns at once in the state every
+  hash aggregation starts in). This is so for every aggregate function
+  whose state owns memory; DuckDB's own mostly allocate from an arena of the
+  operator, which the aggregate callbacks of the C API do not have. Nothing in the
+  callbacks can free a state whose `destroy` is not called. `ORDER BY`
+  before `LIMIT`, or reading the result to its end, frees everything. A fix
+  on this side would keep the histograms in a pool owned by the bind data
+  (which DuckDB does destroy) with the states as indices into it; it is not
+  done.
+- **List of structs.** `hdr_buckets` is the first function here that returns
+  one. `src/engine/nested.rs` stores it through `duckdb-neo`'s checked list
+  and struct writers (no `unsafe`): the buckets of a chunk are collected
+  first, then the list entries, then one vector per field. It is general in
+  the number of fields and their (one, fixed-width) type.
 
 Nine macros, registered by the extension like the functions (they are not
 `CREATE MACRO` statements run on a connection, and are not stored in a
@@ -911,6 +994,27 @@ Tests, in `itest/`:
   and `pcap_schema()` of a view. (That the definitions are DataFusion's views
   is checked on that side: `packets_views_equal_the_shared_fused_scans` in
   `pcapsql-datafusion/tests/golden_corpus.rs`.)
+- `tests/histogram.rs` compares `hdr_histogram` and the functions that read
+  it with the kernels: synthetic columns of every number type (NULLs, no
+  rows, one row, negative numbers, fractions, NaN and infinity, the largest
+  `UBIGINT`, `DECIMAL` of each width, `HUGEINT`), `frames.length` and
+  `ipv4.total_length` per protocol of the 25 captures of the fuzzing corpus
+  on one and four threads, a latency column, 3,000 groups over a table
+  scanned on four threads (where the bytes show that `combine` ran),
+  `FILTER`, `DISTINCT` and windows, and BLOBs that are not histograms (every
+  single-bit change of one included): NULL, never an error. A histogram of
+  the kernel is read by DuckDB and DuckDB's by the kernel, and on one thread
+  the bytes are equal.
+- `tests/histogram_memory.rs` runs an aggregation of 60,000 groups ten times
+  and checks that the process does not grow.
+- `tests/guard_aggregate.rs` panics in each callback of a guarded aggregate
+  function, `init` included, counts the states that are made and dropped
+  (none is left by a statement that is read to its end), and pins what
+  DuckDB 2.0.0 does with the states of groups it does not return.
+- `tests/nested.rs` drives `engine::nested::write_struct_lists` with test
+  functions of other field types and counts: NULL and empty lists, chunks
+  with more items than rows, rows that share items, and vectors it must
+  refuse.
 - `tests/time_range.rs` compares `pcap_time_range` with what a scan of the
   frames finds over the captures of the fuzzing corpus and generated ones
   (nanoseconds, gzip and zstd, pcapng, frames out of time order, no frames,
@@ -920,8 +1024,9 @@ Tests, in `itest/`:
 - `tests/golden_differential.rs` runs the queries of the DataFusion golden
   corpus over the same captures and compares with the snapshots committed in
   `pcapsql-datafusion/tests/golden/`, the queries over `*_packets` views
-  (a view is `read_<proto>_packets` here) and over the stream tables
-  included. The captures and the
+  (a view is `read_<proto>_packets` here), over the stream tables, of the
+  time functions and of the histogram functions included (one of them
+  compares the serialized histogram byte for byte). The captures and the
   queries are `pcapsql_testgen::corpus`, which
   `pcapsql-datafusion/tests/golden_corpus.rs` uses too. The file
   lists which queries are compared, which are not and why, and what is

@@ -560,6 +560,11 @@ What it offers:
 - Forty scalar functions and six macros for addresses, TCP flags and
   protocol numbers (`ip4_to_string`, `ip_in_cidr`, `is_private_ip`,
   `icmp_type_name`, `format_mac`, ...).
+- The histogram functions: the aggregate `hdr_histogram(value)` and
+  `hdr_percentile`, `hdr_count`, `hdr_min`, `hdr_max`, `hdr_mean`,
+  `hdr_stdev`, `hdr_buckets` and `hdr_ascii`, which read what it returns. A
+  histogram made here is one the command-line tool reads, and the other way
+  round.
 - `pcap_time_range(files)`: the first and last timestamp and the number of
   frames of each capture, from one pass over its records; and over it the
   time functions of the command-line tool with the capture as an argument,
@@ -573,9 +578,11 @@ What it offers:
   written as a classic pcap file, with nanosecond timestamps unless
   `PRECISION 'us'` is given. Not pcapng, and not compressed.
 
-What it does not have yet, of the SQL functions of the command-line tool:
-the `hdr_*` histogram functions. For its date and time functions (`epoch`,
-`strftime`, ...) DuckDB has its own.
+Of the SQL functions of the command-line tool it has all but the six date
+and time helpers (`strftime`, `datetime`, `date`, `time`, `epoch`,
+`epoch_ms`), which DuckDB has of its own; the
+[function reference](docs/duckdb-extension-reference.md) lists the
+equivalents.
 
 **Requirements.** DuckDB 2.0.0, on Linux (x86-64, arm64) or macOS (arm64).
 The extension uses DuckDB's C API v2, which is not stable yet, so a build

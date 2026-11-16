@@ -929,15 +929,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "crossbeam-channel"
-version = "0.5.17"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "98b0cc327b5bc766e7fda9c9260cc0fa81b43a8e240440422dff70788e3f9ef1"
-dependencies = [
- "crossbeam-utils",
-]
-
-[[package]]
 name = "crossbeam-deque"
 version = "0.8.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2164,7 +2155,6 @@ checksum = "f49d1053f4708f0af3cf9fc5bffc7e68a914a3c45becb231c80068c9c3f78bea"
 dependencies = [
  "base64 0.22.1",
  "byteorder",
- "crossbeam-channel",
  "flate2",
  "nom 8.0.0",
  "num-traits",
@@ -3163,6 +3153,7 @@ dependencies = [
  "compact_str",
  "etherparse",
  "flate2",
+ "hdrhistogram",
  "hex",
  "hpack-patched",
  "httparse",
@@ -3207,7 +3198,6 @@ dependencies = [
  "dirs",
  "flate2",
  "futures",
- "hdrhistogram",
  "hex",
  "indicatif",
  "nom 7.1.3",
