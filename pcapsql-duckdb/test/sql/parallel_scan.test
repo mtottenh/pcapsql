@@ -8,11 +8,11 @@
 
 require pcapsql
 
-query TTT
+query TTTT
 SELECT current_setting('pcapsql_parallel_scan'), current_setting('pcapsql_parallel_min_file_size'),
-       current_setting('pcapsql_index_stride');
+       current_setting('pcapsql_index_stride'), current_setting('pcapsql_index_cache');
 ----
-true	4194304	65536
+true	4194304	65536	true
 
 statement error
 SET pcapsql_index_stride = 0;
@@ -62,6 +62,40 @@ SELECT frame_number FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dns.cap') 
 
 statement ok
 CREATE TABLE partitioned AS SELECT * FROM read_udp('../fuzz/corpus/fuzz_pcap_reader/dns.cap');
+
+# The scans after the first split the capture by the index the first one built
+query I
+SELECT count(*) FROM duckdb_logs
+WHERE type = 'pcapsql'
+  AND message LIKE '%partitions: 4 (of 38 frames, cut at checkpoints 5 frames apart; index kept from an earlier scan)%';
+----
+2
+
+# Without the cache every scan builds the index again
+statement ok
+SET pcapsql_index_cache = false;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) = (SELECT count(*) FROM partitioned) FROM read_udp('../fuzz/corpus/fuzz_pcap_reader/dns.cap');
+----
+true
+
+query I
+SELECT count(*) FROM duckdb_logs
+WHERE type = 'pcapsql' AND message LIKE '%partitions: 4 (of 38 frames, cut at checkpoints 5 frames apart)%';
+----
+1
+
+statement error
+SET pcapsql_index_cache = NULL;
+----
+pcapsql_index_cache must not be NULL
+
+statement ok
+RESET pcapsql_index_cache;
 
 statement ok
 SET pcapsql_parallel_scan = false;

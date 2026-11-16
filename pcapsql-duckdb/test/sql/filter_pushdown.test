@@ -220,9 +220,10 @@ SELECT count(*) FROM duckdb_logs WHERE type = 'pcapsql' AND message LIKE '%filte
 ----
 0
 
+# The whole capture, in four partitions, by the index the scan with frame_number > 30 kept
 query I
 SELECT count(*) FROM duckdb_logs WHERE type = 'pcapsql'
-AND message LIKE '%partitions: 4 (of 38 frames, cut at checkpoints 5 frames apart)%';
+AND message LIKE '%partitions: 4 (of 38 frames, cut at checkpoints 5 frames apart; index kept from an earlier scan)%';
 ----
 1
 

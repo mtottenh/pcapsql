@@ -147,6 +147,21 @@ impl DuckFile {
     pub fn buffer_capacity(&self) -> usize {
         self.buffer.len()
     }
+
+    /// Fill `out` from byte `offset` of the file, in one call into DuckDB and without the
+    /// buffer: the position [`Read`] reads from does not move. A file that ends before `out`
+    /// is full is an error.
+    ///
+    /// For a few bytes at scattered offsets, where a buffered read would ask for a buffer's
+    /// worth at each.
+    pub fn read_exact_at(&mut self, offset: u64, out: &mut [u8]) -> Result<()> {
+        let at = usize::try_from(offset).map_err(|_| {
+            duckdb_neo::Error::invalid_parameter(format!(
+                "file offset {offset} is beyond what this platform can address"
+            ))
+        })?;
+        self.file.read_exact_at(at, out)
+    }
 }
 
 impl Read for DuckFile {

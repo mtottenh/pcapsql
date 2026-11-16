@@ -174,7 +174,7 @@ upgrade.
 |---|---|---|
 | The multi-file wrapper forwards neither named parameters nor filter pushdown (D9, U6) | `engine/table/` does its own multi-file handling | `hive_partitioning`, `union_by_name` through DuckDB's wrapper |
 | A `BETWEEN` node does not say whether its bounds are inclusive | `engine/pushdown.rs` uses a range without accepting it | Accepting ranges, so `EXPLAIN` shows no filter for a time window |
-| The file API has no modification time | No index cache (`pcapsql_index_cache_dir` is not implemented) | Caching the boundary index; partitioning remote captures |
+| The file API has no modification time | The index cache is in memory only and tells a changed file by its size and some of its bytes (`engine/table/index_cache.rs`); `pcapsql_index_cache_dir` is not implemented | Keeping the boundary index on disk, a surer check of a kept one; partitioning remote captures |
 | No statistics callback, no `file_row_number` virtual column | Roadmap P9 | Min/max of `timestamp` and `frame_number` from the index |
 | Table functions and the file system are unstable API | The `C_STRUCT_UNSTABLE` stamp; this runbook | Roadmap P9: one build for many DuckDB releases |
 

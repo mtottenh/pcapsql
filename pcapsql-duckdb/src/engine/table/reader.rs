@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use duckdb_neo::{connection::Context, Result};
 use pcapsql_core::io::{
-    Compression, DecompressReader, PacketRange, ReadPacketReader, StreamHeader,
+    Compression, DecompressReader, PacketPosition, PacketRange, ReadPacketReader, StreamHeader,
 };
 use pcapsql_core::scan::PartitionScan;
 
@@ -23,6 +23,9 @@ pub(super) struct Scanning {
     pub(super) file: usize,
     /// The number of the partition's first frame.
     pub(super) first_frame: u64,
+    /// Where the next partition starts, by the index, if the partition is not the last of
+    /// its file: where the partition must end when it is read to its end.
+    pub(super) end: Option<PacketPosition>,
 }
 
 impl PcapScan {
@@ -78,6 +81,7 @@ impl PcapScan {
             fault,
             file: number,
             first_frame,
+            end: range.end.clone(),
         })
     }
 }

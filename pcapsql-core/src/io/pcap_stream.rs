@@ -52,6 +52,16 @@ use pcap_parser::{LegacyPcapReader, PcapBlockOwned, PcapError as PcapParserError
 use crate::error::{Error, PcapError};
 use crate::io::PacketRef;
 
+/// The pcapng block types that are frames: the Enhanced Packet Block and the Simple Packet
+/// Block. The reader numbers these blocks and no others, and so does the index pass
+/// (`io::index`). Every other block is passed over, the obsolete Packet Block (type 2) among
+/// them, which `pcap_parser` does not decode. A test of the reader and the index pass
+/// (`read_source`) holds the three to the same list.
+pub const PCAPNG_FRAME_BLOCK_TYPES: [u32; 2] = [
+    pcap_parser::pcapng::EPB_MAGIC,
+    pcap_parser::pcapng::SPB_MAGIC,
+];
+
 /// Initial buffer size for pcap_parser readers (256 KiB).
 ///
 /// Frames larger than this are handled by growing the buffer on demand (see the

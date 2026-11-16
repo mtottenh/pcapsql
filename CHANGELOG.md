@@ -67,6 +67,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the extension can be read by the CLI, and the reverse.
 - `pcapsql-core`: the histogram functions are in `format::histogram`, behind
   the `histogram` feature.
+- DuckDB extension: the setting `pcapsql_index_cache` (default `true`). A
+  scan that splits a capture keeps the capture's index in memory. A later
+  scan of the same file in the same database uses it and does not read the
+  file first. `false` turns this off. The reference says how a changed file
+  is found, and what is missed. A file rewritten in place with the same size
+  can be missed, and then frame numbers can be wrong with no error.
 
 ### Changed
 
@@ -154,6 +160,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   several threads are used.
 - Performance (DuckDB extension): a call with several files splits a file
   only when there are more threads than files.
+- Performance (DuckDB extension): the second scan of a large capture in a
+  database starts at once, and splits the capture for all threads, also in
+  a call with several files. On a 938 MB capture on 4 threads,
+  `SELECT count(*) FROM read_frames(...)` took 0.10 s the second time
+  (0.30 s with the index cache off), and a `read_udp` query of four
+  columns took 0.20 s (0.44 s).
+- Behaviour change (DuckDB extension): a scan in partitions fails if a
+  partition does not end where the next one starts. This means that the
+  file changed after its index was built. Before, the scan could return
+  wrong rows.
 
 ### Removed
 
