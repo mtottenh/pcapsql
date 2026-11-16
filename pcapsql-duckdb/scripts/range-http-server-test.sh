@@ -19,6 +19,10 @@ cleanup() {
     rm -rf "$scratch"
 }
 trap cleanup EXIT
+fail() {
+    echo "range-http-server-test: FAILED: $*" >&2
+    exit 1
+}
 
 directory=$scratch/served
 size=100000
@@ -31,19 +35,18 @@ echo inside > "$directory/sub/x"
 log=$scratch/requests.log
 python3 "$here/range-http-server.py" --directory "$directory" --port-file "$scratch/port" --log "$log" &
 server_pid=$!
-for _ in $(seq 100); do
+# Up to 30 seconds, for a slow runner.
+for _ in $(seq 300); do
     [ -s "$scratch/port" ] && break
+    kill -0 "$server_pid" 2>/dev/null || fail "the server did not start"
     sleep 0.1
 done
+[ -s "$scratch/port" ] || fail "the server did not report its port in 30 seconds"
 url=http://127.0.0.1:$(cat "$scratch/port")
 
 checks=0
 ok() {
     checks=$((checks + 1))
-}
-fail() {
-    echo "range-http-server-test: FAILED: $*" >&2
-    exit 1
 }
 # <count> bytes of a.bin from <offset>.
 slice() {

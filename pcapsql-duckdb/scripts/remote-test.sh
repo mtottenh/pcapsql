@@ -122,12 +122,13 @@ log=$scratch/requests.log
 : > "$log"
 python3 "$here/range-http-server.py" --directory "$served" --port-file "$scratch/port" --log "$log" &
 server_pid=$!
-for _ in $(seq 100); do
+# Up to 30 seconds, for a slow runner.
+for _ in $(seq 300); do
     [ -s "$scratch/port" ] && break
     kill -0 "$server_pid" 2>/dev/null || fail "the HTTP server did not start"
     sleep 0.1
 done
-[ -s "$scratch/port" ] || fail "the HTTP server did not report its port"
+[ -s "$scratch/port" ] || fail "the HTTP server did not report its port in 30 seconds"
 base=http://127.0.0.1:$(cat "$scratch/port")
 echo "remote-test: serving $(find "$served" -type f | wc -l | tr -d ' ') captures at $base"
 

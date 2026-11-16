@@ -26,6 +26,7 @@ import http.server
 import os
 import re
 import shutil
+import socketserver
 import sys
 import threading
 import urllib.parse
@@ -152,6 +153,13 @@ class Server(http.server.ThreadingHTTPServer):
         self.directory = directory
         self.log = open(log_path, "a", encoding="utf-8")
         self.log_lock = threading.Lock()
+
+    def server_bind(self):
+        # HTTPServer.server_bind also looks up the host name of the address with socket.getfqdn.
+        # On macOS that lookup can take longer than the scripts wait for the port, and the name
+        # is used only by CGI handlers.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
     def handle_error(self, request, client_address):
         # A client that hangs up is not news; anything else is.
