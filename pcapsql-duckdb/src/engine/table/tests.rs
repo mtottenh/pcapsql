@@ -3,6 +3,7 @@ use pcapsql_core::scan::FramePredicate;
 
 use super::args::DEFAULT_PROTOCOL;
 use super::function::has_wildcard;
+use super::layout::thread_share;
 use super::report::parsed_protocols;
 use super::*;
 
@@ -376,4 +377,33 @@ fn the_row_estimate_grows_with_the_file_and_is_never_zero() {
     assert_eq!(estimated_rows(512 * 1000, &plain), 1000);
     assert_eq!(estimated_rows(512 * 1000, &header(Compression::Gzip)), 4000);
     assert!(estimated_rows(u64::MAX, &header(Compression::Gzip)) > 0);
+}
+
+/// A file is split for its share of the threads, by size and rounded: files that are a
+/// thread's worth each are not split at all.
+#[test]
+fn a_file_is_split_for_its_share_of_the_threads() {
+    const GB: u64 = 1 << 30;
+    // The only file of a scan, and a scan whose size `bind` knew smaller than the file is now.
+    assert_eq!(thread_share(4, GB, GB), 4);
+    assert_eq!(thread_share(4, GB, 0), 4);
+    assert_eq!(thread_share(4, GB, GB / 2), 4);
+    // Files of one size.
+    assert_eq!(thread_share(4, GB, 2 * GB), 2);
+    assert_eq!(thread_share(4, GB, 3 * GB), 1);
+    assert_eq!(thread_share(4, GB, 4 * GB), 1);
+    assert_eq!(thread_share(8, GB, 4 * GB), 2);
+    assert_eq!(thread_share(16, GB, 3 * GB), 5);
+    // More files than threads: no file has a thread to itself, and none is split.
+    assert_eq!(thread_share(4, GB, 9 * GB), 0);
+    // A large file among small ones gets nearly all of them, the small ones none.
+    assert_eq!(thread_share(8, 100 * GB, 103 * GB), 8);
+    assert_eq!(thread_share(8, GB, 103 * GB), 0);
+    assert_eq!(thread_share(4, 3 * GB, 4 * GB), 3);
+    // Sizes near the top of the range do not overflow.
+    assert_eq!(
+        thread_share(usize::MAX, u64::MAX - 1, u64::MAX),
+        usize::MAX - 1
+    );
+    assert_eq!(thread_share(1, GB, 4 * GB), 0);
 }

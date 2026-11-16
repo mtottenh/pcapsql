@@ -38,7 +38,7 @@ mod build;
 mod codec;
 mod synth;
 
-pub use build::build_boundary_index;
+pub use build::{build_boundary_index, build_boundary_index_to};
 pub use synth::{synth_legacy_header, synth_pcapng_header};
 
 /// Default checkpoint stride: one checkpoint every 65536 frames.
@@ -737,6 +737,85 @@ mod build_tests {
                     _ => assert!(cp.interface_state.is_none()),
                 }
             }
+        }
+    }
+
+    /// An index built up to a frame is the index of the capture cut after
+    /// that frame, whatever comes after it in the source.
+    #[test]
+    fn an_index_built_to_a_frame_is_that_of_the_capture_cut_there() {
+        for format in [Format::LegacyLeMicro, Format::LegacyBeNano, Format::Pcapng] {
+            let spec = CaptureSpec {
+                format,
+                seed: 11,
+                packet_count: 23,
+                min_size: 14,
+                max_size: 90,
+                link_type: 1,
+                interfaces: vec![6],
+                sections: 1,
+                add_interface_midstream: false,
+                if_tsoffset: 0,
+            };
+            let capture = generate(&spec);
+            let len = capture.bytes.len() as u64;
+            let build_with = |bytes: &[u8], stride, last_frame| {
+                build_boundary_index_to(
+                    Cursor::new(bytes),
+                    pcap_format(format),
+                    stride,
+                    len,
+                    None,
+                    0,
+                    last_frame,
+                )
+                .expect("build index")
+            };
+            let build = |bytes: &[u8], last_frame| build_with(bytes, 4, last_frame);
+            let whole = build(&capture.bytes, None);
+            assert_eq!(whole.packet_count, 23);
+            // Where every frame's record starts.
+            let starts: Vec<usize> = build_with(&capture.bytes, 1, None)
+                .checkpoints
+                .iter()
+                .map(|c| c.byte_offset as usize)
+                .collect();
+            assert_eq!(starts.len(), 23);
+            for last in [1u64, 4, 5, 9, 22, 23, 24, 1000] {
+                let to = build(&capture.bytes, Some(last));
+                let frames = last.min(23);
+                assert_eq!(to.packet_count, frames, "{format:?} {last}");
+                // The checkpoints the whole index has up to that frame, and
+                // nothing of the frames after it: not even their timestamps
+                // in the last window.
+                let kept: Vec<&Checkpoint> = whole
+                    .checkpoints
+                    .iter()
+                    .filter(|c| c.frame_number <= frames)
+                    .collect();
+                assert_eq!(to.checkpoints.len(), kept.len(), "{format:?} {last}");
+                for (a, b) in to.checkpoints.iter().zip(&kept) {
+                    assert_eq!(a.frame_number, b.frame_number);
+                    assert_eq!(a.byte_offset, b.byte_offset);
+                    assert_eq!(a.interface_state, b.interface_state);
+                }
+                // The same index as that of the bytes up to the next frame.
+                let cut = starts
+                    .get(frames as usize)
+                    .copied()
+                    .unwrap_or(capture.bytes.len());
+                let prefix = build(&capture.bytes[..cut], None);
+                assert_eq!(to.packet_count, prefix.packet_count, "{format:?} {last}");
+                assert_eq!(to.checkpoints, prefix.checkpoints, "{format:?} {last}");
+                assert_eq!(to.link_type, whole.link_type);
+                assert_eq!(to.source_len, len);
+            }
+            // Nothing after the frame is read: garbage there is not an error.
+            let cut = starts[9];
+            let mut damaged = capture.bytes[..cut].to_vec();
+            damaged.extend_from_slice(&[0xFF; 64]);
+            let to = build(&damaged, Some(9));
+            assert_eq!(to.packet_count, 9, "{format:?}");
         }
     }
 

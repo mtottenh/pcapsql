@@ -121,7 +121,8 @@ WHERE frame_number IN (1, 5, 38) AND frame_number <> 5;
 1
 38
 
-# A capture in partitions: only the checkpoint window the filter leaves is read
+# A capture in partitions: only the checkpoint window the filter leaves is read, and the pass
+# that finds the windows stops at the last frame the filter admits
 statement ok
 SET threads = 4;
 
@@ -143,7 +144,7 @@ SELECT frame_number FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dns.cap') 
 
 query I
 SELECT count(*) FROM duckdb_logs WHERE type = 'pcapsql'
-AND message LIKE '%partitions: 1 (of 38 frames, cut at checkpoints 5 frames apart; the filter leaves 5 frames in 1 of 4 partitions)%';
+AND message LIKE '%partitions: 1 (of the first 14 frames, cut at checkpoints 5 frames apart; the filter leaves 4 frames in 1 of 3 partitions)%';
 ----
 1
 

@@ -687,6 +687,30 @@ All are global.
 SET pcapsql_parallel_scan = false;
 ```
 
+What a split costs, and when there is none. A capture has no index of its
+records, so before a capture is scanned in partitions it is read once, on one
+thread, for the places to split it at, and nothing of that is kept for the
+next statement. The pass takes about as long as `SELECT count(*) FROM
+read_frames(...)` on one thread (a quarter of a second per gigabyte where it
+was measured; the roadmap, section 8.2, has the numbers). A query that parses
+a protocol repays it two to three times over on four threads; a query that
+needs little of the capture does not:
+
+- A capture is split for its share of DuckDB's threads: its share of the
+  bytes of all files of the call, rounded. Four captures of one size on four
+  threads are read one per thread and none is split; a large capture beside
+  small ones is split for nearly all the threads.
+- With an upper bound on `frame_number` in the `WHERE` clause the pass ends
+  at the last frame the bound admits (unless `strict := true`, which looks at
+  the end of the capture).
+- A `LIMIT` is not known to the scan. `SELECT * FROM read_tcp('big.pcap')
+  LIMIT 10` on several threads waits for the pass over the whole capture
+  first; `SET pcapsql_parallel_scan = false`, `SET threads = 1` or a bound on
+  `frame_number` avoids that.
+- A scan that parses nothing (`frames` columns only) gains little from a
+  split and nothing for `count(*)`: reading the capture is most of its work,
+  and the pass reads it once more.
+
 ## Replacement scan
 
 A table name that ends in `.pcap`, `.pcapng` or `.cap`, optionally followed by
