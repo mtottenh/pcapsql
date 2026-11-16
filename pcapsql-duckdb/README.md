@@ -458,7 +458,7 @@ The scan functions, one implementation registered under 50 names:
 
 `files` is the only positional argument: a `VARCHAR` path or pattern, or a
 list of them. `protocol`, `strict` and `filename` are named parameters.
-`src/engine/table.rs` describes which callback does what, how the files are
+`src/engine/table/mod.rs` describes which callback does what, how the files are
 expanded, how a capture is split into partitions and why the rows keep their
 order.
 
@@ -555,7 +555,7 @@ the DuckDB side of it.
 
 | Module | What it does |
 |---|---|
-| `table.rs` | `PcapScan`, the table function behind every scan function: binds the table or view (a view is one fused scan of the plan, `PacketsView::scan`, where a table is one table scan; nothing else differs), expands the files argument (`FileSystem::glob`) and probes every file, maps DuckDB's projection and the pushed-down predicate to a `ScanPlan`, cuts each capture into partitions and leaves out what the predicate rules out (core's `BoundaryIndex`, `partition_target` and `PartitionQueue`, one queue over all files), has each worker claim a partition, and in each `exec` steps core's `PartitionScan` into a `ChunkWriter` until the chunk is full; reports the partition's ordinal as DuckDB's batch index |
+| `table/` | `PcapScan`, the table function behind every scan function: binds the table or view (a view is one fused scan of the plan, `PacketsView::scan`, where a table is one table scan; nothing else differs), expands the files argument (`FileSystem::glob`) and probes every file, maps DuckDB's projection and the pushed-down predicate to a `ScanPlan`, cuts each capture into partitions and leaves out what the predicate rules out (core's `BoundaryIndex`, `partition_target` and `PartitionQueue`, one queue over all files), has each worker claim a partition, and in each `exec` steps core's `PartitionScan` into a `ChunkWriter` until the chunk is full; reports the partition's ordinal as DuckDB's batch index |
 | `replacement.rs` | The replacement scan: which table names are capture paths, and `read_pcap` as the answer |
 | `pushdown.rs` | Filter pushdown: reads the filter expressions DuckDB offers a scan and turns what they say about `frame_number` and `timestamp` into core's `FramePredicate`, which the scan filters by. It accepts none, so DuckDB keeps applying each; its header says why, lists every shape that is read exactly with the reason it is exact, and what is not read |
 | `settings.rs` | The four settings, and what a scan reads of DuckDB's (`threads`) |

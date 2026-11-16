@@ -1,11 +1,10 @@
 //! `pcap_protocols()`, `pcap_views()` and `pcap_schema(name)`: what the extension can read, from
-//! the same definitions the scans use (`pcapsql_core::scan`: its `Catalog` of tables and its
-//! `PacketsView`s).
+//! the same definitions the scans use (`engine::relation`, which takes them from
+//! `pcapsql_core::scan`).
 //!
-//! [`scan_tables`] and [`exposed_columns`] say which tables and columns of the catalogue this
-//! engine offers, and [`views`] which views. A [`Relation`] is one of either: what a scan
-//! function reads. `pcap_protocols()` lists the tables, `pcap_views()` the views, and
-//! `pcap_schema` the columns of either.
+//! `pcap_protocols()` lists the tables, `pcap_views()` the views, and `pcap_schema` the columns
+//! of either. The three are one table function, [`ListingFunction`], which differ in their
+//! columns and in the rows `bind` computes.
 //!
 //! The views are not rows of `pcap_protocols()`: that function lists the protocol tables, one
 //! per parser, and what it returned before there were views is what it returns now.
@@ -22,172 +21,38 @@ use duckdb_neo::{
     Error, Result,
 };
 use pcapsql_core::scan::{
-    Catalog, ColId, ColKind, ColumnDef, ColumnSource, FramePredicate, OutCol, OutColumn,
-    PacketsView, RowSink, ScanPlan, TableDef, TableId, TableKind, TableScan,
+    ColKind, ColumnSource, OutCol, OutColumn, PacketsView, RowSink, TableDef, TableKind,
 };
 
-use super::{guard, types, writer::ChunkWriter};
+use super::{
+    guard,
+    relation::{exposed_columns, scan_tables, views, Relation, WHERE_TO_LOOK},
+    types,
+    writer::ChunkWriter,
+};
 
 pub(super) fn register(extension: &Extension) -> Result<()> {
-    guard::table_function("pcap_protocols", SignatureBuilder::new(), PcapProtocols)
+    let protocols = ListingFunction {
+        columns: PROTOCOL_COLUMNS,
+        rows: |_| Ok(protocol_rows()),
+    };
+    guard::table_function("pcap_protocols", SignatureBuilder::new(), protocols)
         .register(extension)?;
-    guard::table_function("pcap_views", SignatureBuilder::new(), PcapViews).register(extension)?;
+    let views = ListingFunction {
+        columns: VIEW_COLUMNS,
+        rows: |_| Ok(view_rows()),
+    };
+    guard::table_function("pcap_views", SignatureBuilder::new(), views).register(extension)?;
+    let schema = ListingFunction {
+        columns: SCHEMA_COLUMNS,
+        rows: |arguments| Ok(schema_rows(schema_relation(arguments)?)),
+    };
     guard::table_function(
         "pcap_schema",
         SignatureBuilder::new().param(FunctionParameter::new::<String>("protocol")),
-        PcapSchema,
+        schema,
     )
     .register(extension)
-}
-
-/// The tables of the catalogue this engine reads: `frames` and the protocol tables, in
-/// catalogue order.
-///
-/// The stream tables (`tcp_connections`, `tls_sessions`, `http_messages`, `http2`) are in the
-/// catalogue but are built by stream analysis, which the extension does not run yet.
-pub(super) fn scan_tables() -> impl Iterator<Item = (TableId, &'static TableDef)> {
-    Catalog::builtin()
-        .tables()
-        .filter(|(_, table)| !table.is_stream())
-}
-
-/// The table `name`, if the engine reads it (see [`scan_tables`]).
-pub(super) fn scan_table(name: &str) -> Option<(TableId, &'static TableDef)> {
-    Catalog::builtin()
-        .table(name)
-        .filter(|(_, table)| !table.is_stream())
-}
-
-/// The columns of `table` this engine exposes, in table order: every column of the catalogue,
-/// the opt-in ones included. That is the `timestamp` of the protocol tables, which DuckDB needs
-/// because it cannot fuse a join against `frames` (decision D5 of the roadmap).
-pub(super) fn exposed_columns(table: &TableDef) -> impl Iterator<Item = (ColId, &ColumnDef)> {
-    table.columns()
-}
-
-/// The `*_packets` views this engine reads: all of those the scan layer defines, in its order.
-pub(super) fn views() -> &'static [PacketsView] {
-    PacketsView::all()
-}
-
-/// Where a message about an unknown table or view sends the reader.
-pub(super) const WHERE_TO_LOOK: &str =
-    "pcap_protocols() lists the tables and pcap_views() the views";
-
-/// What a scan function reads: a table of the catalogue, or a `*_packets` view.
-#[derive(Debug, Clone, Copy)]
-pub(super) enum Relation {
-    /// One of [`scan_tables`].
-    Table(TableId),
-    /// One of [`views`]: a join of tables on the frame, which the scan layer evaluates frame
-    /// by frame as one output of the pass (a fused scan).
-    View(&'static PacketsView),
-}
-
-/// Which of the frame's own columns a declared column is. A filter on one of these says which
-/// frames a scan must read (`engine::pushdown`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum FrameColumn {
-    Number,
-    Timestamp,
-}
-
-/// A column a scan function declares to DuckDB.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct Declared {
-    pub(super) name: &'static str,
-    /// What it stores, a timestamp in this engine's unit.
-    pub(super) kind: ColKind,
-    pub(super) nullable: bool,
-    pub(super) frame: Option<FrameColumn>,
-}
-
-impl Relation {
-    /// The table or view called `name`, if the engine reads it.
-    pub(super) fn find(name: &str) -> Option<Relation> {
-        match scan_table(name) {
-            Some((table, _)) => Some(Relation::Table(table)),
-            None => views()
-                .iter()
-                .find(|view| view.name == name)
-                .map(Relation::View),
-        }
-    }
-
-    pub(super) fn name(self) -> &'static str {
-        match self {
-            Relation::Table(table) => Catalog::builtin().get(table).name,
-            Relation::View(view) => view.name,
-        }
-    }
-
-    /// The columns a scan of the relation returns, in order: a table's exposed columns, a
-    /// view's columns.
-    pub(super) fn columns(self) -> Vec<Declared> {
-        match self {
-            Relation::Table(table) => exposed_columns(Catalog::builtin().get(table))
-                .map(|(_, column)| Declared {
-                    name: column.name,
-                    kind: types::column_kind(column),
-                    nullable: column.nullable,
-                    frame: match column.source {
-                        ColumnSource::FrameNumber => Some(FrameColumn::Number),
-                        ColumnSource::Timestamp => Some(FrameColumn::Timestamp),
-                        _ => None,
-                    },
-                })
-                .collect(),
-            Relation::View(view) => view
-                .columns()
-                .iter()
-                .map(|column| Declared {
-                    name: column.name,
-                    kind: column.kind_in(types::TIMESTAMPS),
-                    nullable: column.nullable,
-                    frame: if column.is_frame_number {
-                        Some(FrameColumn::Number)
-                    } else if column.is_timestamp {
-                        Some(FrameColumn::Timestamp)
-                    } else {
-                        None
-                    },
-                })
-                .collect(),
-        }
-    }
-
-    /// The plan of a scan of `columns` (indices into [`columns`](Self::columns), in output
-    /// order) over the frames `frames` accepts. Either way it has one output: the table's
-    /// rows, or the view's joined rows.
-    ///
-    /// # Panics
-    ///
-    /// If an index is not a column of the relation.
-    pub(super) fn plan(self, columns: &[usize], frames: FramePredicate) -> ScanPlan {
-        let mut plan = ScanPlan {
-            frames,
-            timestamps: types::TIMESTAMPS,
-            ..ScanPlan::default()
-        };
-        match self {
-            Relation::Table(table) => {
-                let exposed: Vec<ColId> = exposed_columns(Catalog::builtin().get(table))
-                    .map(|(id, _)| id)
-                    .collect();
-                let columns = columns.iter().map(|&index| exposed[index]).collect();
-                plan.tables.push(TableScan::new(table, columns));
-            }
-            Relation::View(view) => plan.fused.push(view.scan(columns)),
-        }
-        plan
-    }
-}
-
-/// Everything a scan function can read: the tables, then the views.
-pub(super) fn relations() -> impl Iterator<Item = Relation> {
-    scan_tables()
-        .map(|(table, _)| Relation::Table(table))
-        .chain(views().iter().map(Relation::View))
 }
 
 /// The `kind` column of `pcap_protocols()`.
@@ -264,33 +129,14 @@ impl Listing {
     }
 }
 
-const PROTOCOL_COLUMNS: &[OutColumn] = &[
-    column("name", ColKind::Str),
-    column("description", ColKind::Str),
-    column("field_count", ColKind::U32),
-    column("kind", ColKind::Str),
-];
-
-/// The rows of `pcap_protocols()`: one per table of [`scan_tables`], sorted by name.
-fn protocol_rows() -> Vec<Vec<Cell>> {
-    let mut tables: Vec<&TableDef> = scan_tables().map(|(_, table)| table).collect();
-    tables.sort_by_key(|table| table.name);
-    tables
-        .into_iter()
-        .map(|table| {
-            vec![
-                Cell::Text(table.name),
-                Cell::Text(table.description),
-                Cell::Count(exposed_columns(table).count() as u32),
-                Cell::Text(kind_name(table.kind)),
-            ]
-        })
-        .collect()
+/// A listing function: a table function whose rows are computed at bind. The three differ in
+/// their columns and in how `bind` gets the rows from the call's arguments.
+struct ListingFunction {
+    columns: &'static [OutColumn],
+    rows: fn(&[BindArgument]) -> Result<Vec<Vec<Cell>>>,
 }
 
-struct PcapProtocols;
-
-impl TableFunctionCallbacks for PcapProtocols {
+impl TableFunctionCallbacks for ListingFunction {
     type BindData = Listing;
     /// Index of the next row to emit.
     type GlobalState = AtomicUsize;
@@ -299,12 +145,12 @@ impl TableFunctionCallbacks for PcapProtocols {
     fn bind(
         &self,
         context: &Context,
-        _arguments: Vec<BindArgument>,
+        arguments: Vec<BindArgument>,
         bind_handle: BindFunctionHandle<'_>,
     ) -> Result<Self::BindData> {
         Listing {
-            columns: PROTOCOL_COLUMNS,
-            rows: protocol_rows(),
+            columns: self.columns,
+            rows: (self.rows)(&arguments)?,
         }
         .bind(context, &bind_handle)
     }
@@ -330,6 +176,30 @@ impl TableFunctionCallbacks for PcapProtocols {
         let next_row = next_row.expect("init_global_state always returns a state");
         listing.emit(next_row, output)
     }
+}
+
+const PROTOCOL_COLUMNS: &[OutColumn] = &[
+    column("name", ColKind::Str),
+    column("description", ColKind::Str),
+    column("field_count", ColKind::U32),
+    column("kind", ColKind::Str),
+];
+
+/// The rows of `pcap_protocols()`: one per table of [`scan_tables`], sorted by name.
+fn protocol_rows() -> Vec<Vec<Cell>> {
+    let mut tables: Vec<&TableDef> = scan_tables().map(|(_, table)| table).collect();
+    tables.sort_by_key(|table| table.name);
+    tables
+        .into_iter()
+        .map(|table| {
+            vec![
+                Cell::Text(table.name),
+                Cell::Text(table.description),
+                Cell::Count(exposed_columns(table).count() as u32),
+                Cell::Text(kind_name(table.kind)),
+            ]
+        })
+        .collect()
 }
 
 const VIEW_COLUMNS: &[OutColumn] = &[
@@ -357,50 +227,6 @@ fn view_rows() -> Vec<Vec<Cell>> {
         .collect()
 }
 
-struct PcapViews;
-
-impl TableFunctionCallbacks for PcapViews {
-    type BindData = Listing;
-    /// Index of the next row to emit.
-    type GlobalState = AtomicUsize;
-    type LocalState = ();
-
-    fn bind(
-        &self,
-        context: &Context,
-        _arguments: Vec<BindArgument>,
-        bind_handle: BindFunctionHandle<'_>,
-    ) -> Result<Self::BindData> {
-        Listing {
-            columns: VIEW_COLUMNS,
-            rows: view_rows(),
-        }
-        .bind(context, &bind_handle)
-    }
-
-    fn init_global_state(
-        &self,
-        _context: &Context,
-        _bind_data: &Self::BindData,
-        _column_data: InitColumnData<'_>,
-    ) -> Result<Option<Self::GlobalState>> {
-        Ok(Some(AtomicUsize::new(0)))
-    }
-
-    fn exec(
-        &self,
-        _context: &Context,
-        listing: &Self::BindData,
-        _local_state: Option<&mut Self::LocalState>,
-        next_row: Option<&Self::GlobalState>,
-        output: DataChunkRef<'_>,
-        _column_info: ExecColumnInfo<'_>,
-    ) -> Result<()> {
-        let next_row = next_row.expect("init_global_state always returns a state");
-        listing.emit(next_row, output)
-    }
-}
-
 const SCHEMA_COLUMNS: &[OutColumn] = &[
     column("column_name", ColKind::Str),
     column("column_type", ColKind::Str),
@@ -423,66 +249,28 @@ fn schema_rows(relation: Relation) -> Vec<Vec<Cell>> {
         .collect()
 }
 
-struct PcapSchema;
-
-impl TableFunctionCallbacks for PcapSchema {
-    type BindData = Listing;
-    /// Index of the next row to emit.
-    type GlobalState = AtomicUsize;
-    type LocalState = ();
-
-    fn bind(
-        &self,
-        context: &Context,
-        arguments: Vec<BindArgument>,
-        bind_handle: BindFunctionHandle<'_>,
-    ) -> Result<Self::BindData> {
-        let name = arguments
-            .first()
-            .and_then(|argument| argument.value.as_ref())
-            .map(|value| value.get::<String>())
-            .transpose()?
-            .flatten()
-            .ok_or_else(|| Error::invalid_input("pcap_schema: the protocol must not be NULL"))?;
-        // The names are lower case; any case is accepted, as the extension always did.
-        let relation = Relation::find(&name.to_ascii_lowercase()).ok_or_else(|| {
-            Error::invalid_input(format!(
-                "pcap_schema: there is no protocol table '{name}'; {WHERE_TO_LOOK}"
-            ))
-        })?;
-        Listing {
-            columns: SCHEMA_COLUMNS,
-            rows: schema_rows(relation),
-        }
-        .bind(context, &bind_handle)
-    }
-
-    fn init_global_state(
-        &self,
-        _context: &Context,
-        _bind_data: &Self::BindData,
-        _column_data: InitColumnData<'_>,
-    ) -> Result<Option<Self::GlobalState>> {
-        Ok(Some(AtomicUsize::new(0)))
-    }
-
-    fn exec(
-        &self,
-        _context: &Context,
-        listing: &Self::BindData,
-        _local_state: Option<&mut Self::LocalState>,
-        next_row: Option<&Self::GlobalState>,
-        output: DataChunkRef<'_>,
-        _column_info: ExecColumnInfo<'_>,
-    ) -> Result<()> {
-        let next_row = next_row.expect("init_global_state always returns a state");
-        listing.emit(next_row, output)
-    }
+/// The table or view the one argument of `pcap_schema` names.
+fn schema_relation(arguments: &[BindArgument]) -> Result<Relation> {
+    let name = arguments
+        .first()
+        .and_then(|argument| argument.value.as_ref())
+        .map(|value| value.get::<String>())
+        .transpose()?
+        .flatten()
+        .ok_or_else(|| Error::invalid_input("pcap_schema: the protocol must not be NULL"))?;
+    // The names are lower case; any case is accepted, as the extension always did.
+    Relation::find(&name.to_ascii_lowercase()).ok_or_else(|| {
+        Error::invalid_input(format!(
+            "pcap_schema: there is no protocol table '{name}'; {WHERE_TO_LOOK}"
+        ))
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::relation::{relations, scan_table};
+    use pcapsql_core::scan::Catalog;
 
     fn text(cell: &Cell) -> &'static str {
         match cell {

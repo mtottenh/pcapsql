@@ -125,6 +125,7 @@ use std::ops::Bound;
 use std::sync::Mutex;
 
 use duckdb_neo::{
+    enums::LogicalTypeID,
     expression::{Expression, ExpressionType},
     table_function::PushdownData,
     types::TimestampNsValue,
@@ -409,13 +410,13 @@ impl Pushed {
         let declared = offered.get_column_index(expression.reference_index()?)?;
         // The type is checked too: a predicate is about the values the scan stores.
         let (column, stored) = if Some(declared) == self.frame_number {
-            (Column::FrameNumber, "UBIGINT")
+            (Column::FrameNumber, LogicalTypeID::UBigInt)
         } else if Some(declared) == self.timestamp {
-            (Column::Timestamp, "TIMESTAMP_NS")
+            (Column::Timestamp, LogicalTypeID::TimestampNs)
         } else {
             return Ok(None);
         };
-        let as_stored = expression.return_type()?.to_text()? == stored;
+        let as_stored = expression.return_type()?.id()? == stored;
         Ok(as_stored.then_some(column))
     }
 
@@ -426,6 +427,8 @@ impl Pushed {
                 .map_or(Operand::Other, Operand::Column)),
             ExpressionType::OperatorCast => {
                 // The one cast that keeps every value and the order: UBIGINT to HUGEINT.
+                // By its text, not its id: a type defined on top of HUGEINT under another
+                // name has the same id, and its cast is whatever was registered for it.
                 if expression.child_count()? != 1
                     || expression.return_type()?.to_text()? != "HUGEINT"
                 {
@@ -442,10 +445,10 @@ impl Pushed {
                 if value.is_null()? {
                     return Ok(Operand::Other);
                 }
-                let operand = match value.logical_type()?.to_text()?.as_str() {
-                    "UBIGINT" => value.get::<u64>()?.map(Operand::Unsigned),
-                    "HUGEINT" => value.get::<i128>()?.map(Operand::Wide),
-                    "TIMESTAMP_NS" => value
+                let operand = match value.logical_type()?.id()? {
+                    LogicalTypeID::UBigInt => value.get::<u64>()?.map(Operand::Unsigned),
+                    LogicalTypeID::HugeInt => value.get::<i128>()?.map(Operand::Wide),
+                    LogicalTypeID::TimestampNs => value
                         .get::<TimestampNsValue>()?
                         .map(|nanos| Operand::Nanos(nanos.0)),
                     _ => None,

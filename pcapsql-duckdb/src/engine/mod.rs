@@ -4,23 +4,27 @@
 //! that touches either is kept below this module. `scripts/check-neo-containment.sh` enforces
 //! that in CI.
 
+// Public: what the in-process tests (`itest/`) drive on their own, beside the functions
+// `register` registers.
 pub mod fs;
 pub mod guard;
-mod macros;
-pub mod pushdown;
-mod registry;
-pub mod replacement;
-mod scalar;
-pub mod settings;
-mod table;
 pub mod types;
 pub mod writer;
+
+mod listing;
+mod macros;
+mod pushdown;
+mod relation;
+mod replacement;
+mod scalar;
+mod settings;
+mod table;
 
 use duckdb_neo::{extension::Extension, Result};
 
 /// Register every pcapsql function with the extension that is being loaded.
 pub fn register(extension: &Extension) -> Result<()> {
-    registry::register(extension)?;
+    listing::register(extension)?;
     // Before the scan functions, which read them.
     settings::register(extension)?;
     table::register(extension)?;

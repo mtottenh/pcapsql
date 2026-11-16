@@ -94,12 +94,19 @@ pcapsql-duckdb/
   src/
     lib.rs                # pub fn register(ext_or_conn) -> Result<()>
     engine/               # the only code that imports duckdb_neo
-      table.rs            # TableFunctionCallbacks impls, builder wiring
+      table/              # the scan functions
+        mod.rs            # TableFunctionCallbacks impls, builder wiring, the scan's state
+        args.rs           # signature, the files argument and its expansion, named parameters
+        layout.rs         # the partitions of a file, the row estimate
+        reader.rs         # the reader stack of a partition
+        report.rs         # log lines, read and truncation errors
       types.rs            # ColKind -> DuckDB logical type
       writer.rs           # ChunkWriter: RowSink over a DataChunkRef
       fs.rs               # DuckFile: Read adapter over duckdb_neo::file::File
       pushdown.rs         # Expression -> FramePredicate
-      scalar.rs, macros.rs, replacement.rs, options.rs, registry.rs
+      relation.rs         # the tables and views the engine reads, as scan plans
+      listing.rs          # pcap_protocols(), pcap_views(), pcap_schema()
+      scalar.rs, macros.rs, replacement.rs, settings.rs
       guard.rs            # catch_unwind + error conversion for every callback
   ext/                    # cdylib "pcapsql": entrypoint only, feature build-extension
   itest/                  # in-process tests: build-extension-static + linked libduckdb

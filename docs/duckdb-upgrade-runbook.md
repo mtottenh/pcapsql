@@ -133,10 +133,10 @@ so that is where the changes are. Expect them, by how exposed each file is:
 | File | Depends on |
 |---|---|
 | `engine/pushdown.rs` | The filter-pushdown and expression API, the part most likely to be redesigned |
-| `engine/table.rs` | Table function callbacks, bind arguments, batch indices, the file system's glob |
+| `engine/table/` | Table function callbacks (`mod.rs`), bind arguments and the file system's glob (`args.rs`), batch indices |
 | `engine/writer.rs` | Vector layout: data pointers, validity, string and list storage, chunk capacity |
 | `engine/fs.rs` | The file API |
-| `engine/scalar.rs`, `macros.rs`, `settings.rs`, `replacement.rs`, `registry.rs` | Registration builders |
+| `engine/scalar.rs`, `macros.rs`, `settings.rs`, `replacement.rs`, `listing.rs` | Registration builders |
 
 Nothing outside `pcapsql-duckdb/` should change. If the shared scan layer
 (`pcapsql_core::scan`) has to change to fit a new DuckDB API, that is a
@@ -172,7 +172,7 @@ upgrade.
 
 | Limit in 2.0.0 | Where | What lifting it allows |
 |---|---|---|
-| The multi-file wrapper forwards neither named parameters nor filter pushdown (D9, U6) | `engine/table.rs` does its own multi-file handling | `hive_partitioning`, `union_by_name` through DuckDB's wrapper |
+| The multi-file wrapper forwards neither named parameters nor filter pushdown (D9, U6) | `engine/table/` does its own multi-file handling | `hive_partitioning`, `union_by_name` through DuckDB's wrapper |
 | A `BETWEEN` node does not say whether its bounds are inclusive | `engine/pushdown.rs` uses a range without accepting it | Accepting ranges, so `EXPLAIN` shows no filter for a time window |
 | The file API has no modification time | No index cache (`pcapsql_index_cache_dir` is not implemented) | Caching the boundary index; partitioning remote captures |
 | No statistics callback, no `file_row_number` virtual column | Roadmap P9 | Min/max of `timestamp` and `frame_number` from the index |
