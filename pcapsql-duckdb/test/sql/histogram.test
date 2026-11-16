@@ -16,7 +16,7 @@ WHERE function_name LIKE 'hdr%' ORDER BY function_name;
 hdr_ascii	scalar	[BLOB]	VARCHAR
 hdr_buckets	scalar	[BLOB]	STRUCT(lo UBIGINT, hi UBIGINT, count UBIGINT)[]
 hdr_count	scalar	[BLOB]	UBIGINT
-hdr_histogram	aggregate	[ANY]	BLOB
+hdr_histogram	aggregate	[ANY, ANY]	BLOB
 hdr_max	scalar	[BLOB]	UBIGINT
 hdr_mean	scalar	[BLOB]	DOUBLE
 hdr_min	scalar	[BLOB]	UBIGINT
@@ -134,7 +134,104 @@ SELECT hdr_histogram(timestamp) FROM read_frames('../fuzz/corpus/fuzz_pcap_reade
 ----
 not TIMESTAMP_NS
 
+# The number of significant figures: 0 to 5, 2 without it
+query IIIIR
+SELECT s, hdr_count(h), hdr_min(h), hdr_max(h), hdr_percentile(h, 0.5) FROM (
+    SELECT 0 AS s, hdr_histogram(v, 0) AS h FROM (VALUES (3), (1999), (123456)) t(v) UNION ALL
+    SELECT 1, hdr_histogram(v, 1) FROM (VALUES (3), (1999), (123456)) t(v) UNION ALL
+    SELECT 2, hdr_histogram(v, 2) FROM (VALUES (3), (1999), (123456)) t(v) UNION ALL
+    SELECT 3, hdr_histogram(v, 3::UTINYINT) FROM (VALUES (3), (1999), (123456)) t(v) UNION ALL
+    SELECT 4, hdr_histogram(v, sigfigs := 4) FROM (VALUES (3), (1999), (123456)) t(v) UNION ALL
+    SELECT 5, hdr_histogram(v, 2 + 3) FROM (VALUES (3), (1999), (123456)) t(v))
+ORDER BY s;
+----
+0	3	2	131071	2047.0
+1	3	3	126975	2047.0
+2	3	3	123903	1999.0
+3	3	3	123519	1999.0
+4	3	3	123459	1999.0
+5	3	3	123456	1999.0
+
+# The default is 2, byte for byte; the precision is in the bytes (the fourth word: 3)
+query IT
+SELECT hdr_histogram(length) = hdr_histogram(length, 2), lower(hex(hdr_histogram(length, 3)))
+FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dns.cap');
+----
+true	1c849313000000260000000000000003000000000000000100000000000000023ff00000000000008501020308020308040403040302080002070205020506050403021102190613043102850202
+
+# Many groups on four threads: the states DuckDB combines all have the call's precision. The
+# largest value of group g is 299000 + g, which three figures keep within 0.1 % and two do not.
+statement ok
+SET threads = 4;
+
+query IIIII
+SELECT s, count(*), sum(hdr_count(h)), bool_and(hdr_max(h) - (299000 + g) <= (299000 + g) // 1000),
+       bool_and(hdr_min(h) = g)
+FROM (SELECT 2 AS s, i % 1000 AS g, hdr_histogram(i, 2) AS h FROM numbers GROUP BY g
+      UNION ALL
+      SELECT 3, i % 1000 AS g, hdr_histogram(i, 3) AS h FROM numbers GROUP BY g)
+GROUP BY s ORDER BY s;
+----
+2	1000	300000	false	false
+3	1000	300000	true	true
+
+statement ok
+RESET threads;
+
+# Three figures give tighter percentiles than two: the exact ones are 14990 and 18990
+query RRRR
+SELECT hdr_percentile(h2, 0.5), hdr_percentile(h3, 0.5), hdr_percentile(h2, 0.9), hdr_percentile(h3, 0.9)
+FROM (SELECT hdr_histogram(10000 + 10 * i) AS h2, hdr_histogram(10000 + 10 * i, 3) AS h3
+      FROM range(1000) t(i));
+----
+15039.0	14991.0	19071.0	18991.0
+
+query T
+SELECT hdr_buckets(hdr_histogram(10000 + 10 * i, 3)) FROM range(1000) t(i);
+----
+[{'lo': 8192, 'hi': 16383, 'count': 639}, {'lo': 16384, 'hi': 32767, 'count': 361}]
+
+query T
+SELECT unnest(string_split(rtrim(hdr_ascii(hdr_histogram(10000 + 10 * i, 3)), chr(10)), chr(10)))
+FROM range(1000) t(i);
+----
+1000 samples | min 10000 | max 19999 | mean 14996.0 | stdev 2886.7
+     bucket        count     pct     cum bar
+ 8192-16383          639   63.9%   63.9% ########################################
+16384-32767          361   36.1%  100.0% #######################
+
+# What is not a precision is refused when the statement is bound
 statement error
-SELECT hdr_histogram(length, 3) FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dns.cap');
+SELECT hdr_histogram(length, 6) FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dns.cap');
+----
+hdr_histogram: the number of significant figures (the second argument) must be a constant integer from 0 to 5, not 6
+
+statement error
+SELECT hdr_histogram(length, -1) FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dns.cap');
+----
+must be a constant integer from 0 to 5, not -1
+
+statement error
+SELECT hdr_histogram(length, NULL) FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dns.cap');
+----
+must be a constant integer from 0 to 5, not NULL
+
+statement error
+SELECT hdr_histogram(length, 2.5) FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dns.cap');
+----
+must be a constant integer from 0 to 5, not a DECIMAL(2,1)
+
+statement error
+SELECT hdr_histogram(length, '3') FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dns.cap');
+----
+must be a constant integer from 0 to 5, not a VARCHAR
+
+statement error
+SELECT hdr_histogram(length, frame_number % 3) FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dns.cap');
+----
+must be a constant integer from 0 to 5, not a value that is not a constant
+
+statement error
+SELECT hdr_histogram(length, 3, 4) FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dns.cap');
 ----
 hdr_histogram

@@ -126,12 +126,13 @@ const COMPARED: &[(&str, Option<(&str, &str)>)] = &[
     ("u05_http2_empty", None),
     ("u09_http_vs_http_messages", None),
     // The histogram functions: the same statistics, the same buckets, and in `h02` the same
-    // bytes of the serialized histogram.
+    // bytes of the serialized histogram; `h06` with one significant figure.
     ("h01_hdr_statistics", None),
     ("h02_hdr_bytes", None),
     ("h03_hdr_group_by", None),
     ("h04_hdr_buckets", None),
     ("h05_hdr_no_rows", None),
+    ("h06_hdr_sigfigs", None),
     // The time functions, which here take the capture: `{capture}` is its path.
     (
         "q24_time_udfs",

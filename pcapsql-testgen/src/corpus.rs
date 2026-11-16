@@ -1103,7 +1103,9 @@ pub const CORPUS: &[(Capture, &str, &str)] = &[
     // --- histograms: the hdr_* functions over a column of the capture. The
     //     DuckDB extension runs these too (its golden differential), so the
     //     snapshots are what both engines answer; h02 is the serialized
-    //     histogram itself, byte for byte ---
+    //     histogram itself, byte for byte. h06 keeps one significant figure,
+    //     so its answers differ from h01's; not its bytes, which (above 2 *
+    //     10^sigfigs) depend on how the partial states were merged ---
     (
         Capture::Eth,
         "h01_hdr_statistics",
@@ -1138,6 +1140,15 @@ pub const CORPUS: &[(Capture, &str, &str)] = &[
          hdr_mean(h) AS mean, hdr_percentile(h, 0.5) AS p50, \
          hdr_buckets(h) AS buckets \
          FROM (SELECT hdr_histogram(length) AS h FROM frames WHERE frame_number < 0) t",
+    ),
+    (
+        Capture::Eth,
+        "h06_hdr_sigfigs",
+        "SELECT hdr_count(h) AS n, hdr_min(h) AS lo, hdr_max(h) AS hi, \
+         hdr_mean(h) AS mean, hdr_stdev(h) AS stdev, \
+         hdr_percentile(h, 0.5) AS p50, hdr_percentile(h, 99.0) AS p99, \
+         hdr_buckets(h) AS buckets \
+         FROM (SELECT hdr_histogram(length, 1) AS h FROM frames) t",
     ),
     // --- the same table referenced twice in one query ---
     (

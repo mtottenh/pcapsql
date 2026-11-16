@@ -5,7 +5,8 @@
 //! The histogram is an [HdrHistogram](https://hdrhistogram.org): its memory
 //! does not grow with the number of values, only (in steps) with the
 //! largest, and a value is kept to a number of significant decimal digits
-//! ([`DEFAULT_SIGFIGS`]: within 1 %). It lives behind the `histogram`
+//! ([`DEFAULT_SIGFIGS`]: within 1 %; from [`MIN_SIGFIGS`] to [`MAX_SIGFIGS`]
+//! on request, see [Precision](#precision)). It lives behind the `histogram`
 //! feature of this crate, which is off by default: the `hdrhistogram` crate
 //! needs a newer compiler than the rest of the library.
 //!
@@ -15,7 +16,7 @@
 //!
 //! | SQL | Kernel |
 //! |---|---|
-//! | `hdr_histogram(value)` (aggregate) | [`HdrHistogram::record`], [`record_signed`](HdrHistogram::record_signed), [`record_wide`](HdrHistogram::record_wide), [`record_float`](HdrHistogram::record_float); [`merge`](HdrHistogram::merge) for partial states; [`serialize`](HdrHistogram::serialize) for the result |
+//! | `hdr_histogram(value [, sigfigs])` (aggregate) | [`checked_sigfigs`] and [`HdrHistogram::with_sigfigs`] for the precision; [`HdrHistogram::record`], [`record_signed`](HdrHistogram::record_signed), [`record_wide`](HdrHistogram::record_wide), [`record_float`](HdrHistogram::record_float); [`merge`](HdrHistogram::merge) for partial states; [`serialize`](HdrHistogram::serialize) for the result |
 //! | `hdr_count`, `hdr_min`, `hdr_max`, `hdr_mean`, `hdr_stdev` | [`HdrHistogram::deserialize`], then [`len`](HdrHistogram::len), [`min`](HdrHistogram::min), [`max`](HdrHistogram::max), [`mean`](HdrHistogram::mean), [`stdev`](HdrHistogram::stdev) |
 //! | `hdr_percentile(hist, p)` | [`HdrHistogram::percentile`] |
 //! | `hdr_buckets(hist)` | [`HdrHistogram::buckets`] |
@@ -28,6 +29,31 @@
 //! of fractions of a unit is scaled before it is recorded), and NaN is not
 //! recorded. There is no value outside the range of a histogram: it grows
 //! to hold the largest it is given, up to `u64::MAX`.
+//!
+//! # Precision
+//!
+//! A histogram keeps `sigfigs` significant decimal digits of a value: every
+//! value up to `2 * 10^sigfigs` exactly, and a larger one to within one part
+//! in `10^sigfigs`. The SQL functions use [`DEFAULT_SIGFIGS`] unless the call
+//! asks for another number from [`MIN_SIGFIGS`] to [`MAX_SIGFIGS`]
+//! ([`checked_sigfigs`]), the range HdrHistogram offers.
+//!
+//! Each digit costs memory: a histogram is an array of 64-bit counts whose
+//! length grows with the precision and (in steps, one per doubling) with the
+//! largest value recorded ([`HdrHistogram::memory_size`]). Roughly:
+//!
+//! | `sigfigs` | Values up to | Each doubling of the largest value after that | The whole range of a `u64` |
+//! |---|---|---|---|
+//! | 0 | 3: 24 bytes | 8 bytes | 0.5 KiB |
+//! | 1 | 31: 256 bytes | 128 bytes | 7.6 KiB |
+//! | 2 | 255: 2 KiB | 1 KiB | 58 KiB |
+//! | 3 | 2047: 16 KiB | 8 KiB | 440 KiB |
+//! | 4 | 32767: 256 KiB | 128 KiB | 6.4 MiB |
+//! | 5 | 262143: 2 MiB | 1 MiB | 48 MiB |
+//!
+//! The precision is part of the serialized form, so whatever reads a
+//! histogram reads it at the precision it was built with. Merging keeps the
+//! precision of the histogram merged into.
 //!
 //! # The serialized form
 //!
@@ -56,6 +82,23 @@ use thiserror::Error;
 /// The significant decimal digits a histogram of the SQL functions keeps
 /// of a value: 2, so a value is reported within 1 %.
 pub const DEFAULT_SIGFIGS: u8 = 2;
+
+/// The fewest significant decimal digits a histogram keeps: 0, a value to
+/// within a factor of two.
+pub const MIN_SIGFIGS: u8 = 0;
+
+/// The most significant decimal digits a histogram keeps: 5, the most
+/// HdrHistogram offers.
+pub const MAX_SIGFIGS: u8 = 5;
+
+/// `value` as a number of significant digits, when it is one a histogram
+/// can keep: from [`MIN_SIGFIGS`] to [`MAX_SIGFIGS`]. What the SQL functions
+/// accept as the precision of `hdr_histogram(value, sigfigs)`.
+pub fn checked_sigfigs(value: i128) -> Option<u8> {
+    u8::try_from(value)
+        .ok()
+        .filter(|sigfigs| (MIN_SIGFIGS..=MAX_SIGFIGS).contains(sigfigs))
+}
 
 /// The most buckets [`HdrHistogram::buckets`] and
 /// [`HdrHistogram::write_ascii`] produce.
@@ -103,9 +146,21 @@ impl Default for HdrHistogram {
 impl HdrHistogram {
     /// An empty histogram that keeps `sigfigs` significant decimal digits of
     /// a value and grows to hold whatever is recorded. `None` for more
-    /// than five digits, which HdrHistogram does not offer.
+    /// than [`MAX_SIGFIGS`] digits, which HdrHistogram does not offer.
     pub fn with_sigfigs(sigfigs: u8) -> Option<Self> {
         Histogram::new(sigfigs).ok().map(|inner| Self { inner })
+    }
+
+    /// The significant decimal digits this histogram keeps of a value.
+    pub fn sigfigs(&self) -> u8 {
+        self.inner.sigfig()
+    }
+
+    /// The bytes the histogram holds: its counts (which grow with the
+    /// precision and the largest value recorded) and itself. See
+    /// [Precision](self#precision).
+    pub fn memory_size(&self) -> usize {
+        std::mem::size_of::<Self>() + self.inner.distinct_values() * std::mem::size_of::<u64>()
     }
 
     /// Record a value.
@@ -471,6 +526,157 @@ mod tests {
             assert!(HdrHistogram::with_sigfigs(sigfigs).is_some(), "{sigfigs}");
         }
         assert!(HdrHistogram::with_sigfigs(6).is_none());
+    }
+
+    /// Values from 0 to past a million, some below `2 * 10^sigfigs` and
+    /// some far above it.
+    const SPREAD: [u64; 14] = [
+        0, 1, 2, 3, 19, 20, 199, 1999, 2001, 12_345, 99_999, 123_456, 1_234_567, 98_765_432,
+    ];
+
+    fn of_sigfigs(sigfigs: u8, values: &[u64]) -> HdrHistogram {
+        let mut hist = HdrHistogram::with_sigfigs(sigfigs).unwrap();
+        for &value in values {
+            hist.record(value);
+        }
+        hist
+    }
+
+    #[test]
+    fn the_accepted_precisions_are_those_hdrhistogram_offers() {
+        for value in -1..=7_i128 {
+            let expected = (0..=5).contains(&value).then_some(value as u8);
+            assert_eq!(checked_sigfigs(value), expected, "{value}");
+            if let Some(sigfigs) = expected {
+                assert!(HdrHistogram::with_sigfigs(sigfigs).is_some());
+            }
+        }
+        for value in [i128::MIN, i128::from(u8::MAX), 256, 258, i128::MAX] {
+            assert_eq!(checked_sigfigs(value), None, "{value}");
+        }
+        assert_eq!(
+            (MIN_SIGFIGS, DEFAULT_SIGFIGS, MAX_SIGFIGS),
+            (0, 2, 5),
+            "the documented range"
+        );
+        assert_eq!(HdrHistogram::default().sigfigs(), DEFAULT_SIGFIGS);
+    }
+
+    #[test]
+    fn each_precision_keeps_its_digits() {
+        for sigfigs in MIN_SIGFIGS..=MAX_SIGFIGS {
+            let exact_below = 2 * 10_u64.pow(u32::from(sigfigs));
+            for &value in &SPREAD {
+                let hist = of_sigfigs(sigfigs, &[value]);
+                let (low, high) = (hist.min(), hist.max());
+                if value < exact_below {
+                    assert_eq!((low, high), (value, value), "{sigfigs}: {value}");
+                } else {
+                    // Within one part in 10^sigfigs (for 0 digits: within a factor of two).
+                    let tolerance = value / 10_u64.pow(u32::from(sigfigs));
+                    assert!(low <= value && value <= high, "{sigfigs}: {value}");
+                    assert!(high - low <= tolerance, "{sigfigs}: {value}: {low}..{high}");
+                }
+            }
+
+            // The precision is in the encoding: what reads it answers at that precision, and
+            // its bytes are the same again.
+            let hist = of_sigfigs(sigfigs, &SPREAD);
+            assert_eq!(hist.sigfigs(), sigfigs);
+            let bytes = hist.serialize().unwrap();
+            let read = HdrHistogram::deserialize(&bytes).unwrap();
+            assert_eq!(read.sigfigs(), sigfigs);
+            assert_eq!(read.serialize().unwrap(), bytes);
+            assert_eq!((read.len(), read.min(), read.max()), (14, 0, hist.max()));
+            assert_eq!(read.mean(), hist.mean());
+            for p in [0.0, 0.25, 0.5, 0.9, 0.99, 1.0] {
+                assert_eq!(read.percentile(p), hist.percentile(p), "{sigfigs}: {p}");
+            }
+            assert_eq!(
+                read.buckets().collect::<Vec<_>>(),
+                hist.buckets().collect::<Vec<_>>()
+            );
+            assert_eq!(
+                read.buckets().map(|bucket| bucket.count).sum::<u64>(),
+                14,
+                "{sigfigs}"
+            );
+            assert_eq!(render_ascii(&read), render_ascii(&hist));
+
+            // Merging partial histograms of a precision keeps it, and gives what recording
+            // all the values does.
+            let (low_half, high_half) = SPREAD.split_at(7);
+            let mut merged = of_sigfigs(sigfigs, high_half);
+            merged.merge(&of_sigfigs(sigfigs, low_half)).unwrap();
+            assert_eq!(merged.sigfigs(), sigfigs);
+            assert_eq!(merged.len(), 14);
+            for p in [0.0, 0.5, 0.99, 1.0] {
+                assert_eq!(merged.percentile(p), hist.percentile(p), "{sigfigs}: {p}");
+            }
+            assert_eq!(render_ascii(&merged), render_ascii(&hist));
+        }
+    }
+
+    #[test]
+    fn more_digits_give_tighter_percentiles() {
+        // 1000 distinct values from 10,000 to 19,990: two digits keep them to steps of 64 or
+        // so, five keep each.
+        let values: Vec<u64> = (0..1000).map(|i| 10_000 + 10 * i).collect();
+        let error = |sigfigs: u8| {
+            let hist = of_sigfigs(sigfigs, &values);
+            [0.1, 0.5, 0.9, 0.99]
+                .iter()
+                .map(|&p| {
+                    let exact = values[(p * values.len() as f64).ceil() as usize - 1] as f64;
+                    (hist.percentile(p) - exact).abs()
+                })
+                .fold(0.0, f64::max)
+        };
+        let errors: Vec<f64> = (MIN_SIGFIGS..=MAX_SIGFIGS).map(error).collect();
+        for pair in errors.windows(2) {
+            assert!(pair[1] <= pair[0], "{errors:?}");
+        }
+        assert!(errors[3] < errors[2], "{errors:?}");
+        assert_eq!(errors[5], 0.0, "{errors:?}");
+    }
+
+    #[test]
+    fn the_memory_of_each_precision() {
+        // (sigfigs, the largest value of the first allocation, its counts, the counts a
+        // doubling adds, the counts for the whole range of a u64): the table of the module
+        // documentation, at 8 bytes a count.
+        for (sigfigs, first_range, first_counts, doubling, all_counts) in [
+            (0, 3, 3, 1, 65),
+            (1, 31, 32, 16, 976),
+            (2, 255, 256, 128, 7424),
+            (3, 2047, 2048, 1024, 56_320),
+            (4, 32_767, 32_768, 16_384, 835_584),
+            (5, 262_143, 262_144, 131_072, 6_291_456),
+        ] {
+            let overhead = std::mem::size_of::<HdrHistogram>();
+            let empty = HdrHistogram::with_sigfigs(sigfigs).unwrap();
+            assert_eq!(
+                empty.memory_size(),
+                overhead + first_counts * 8,
+                "{sigfigs}"
+            );
+            let first = of_sigfigs(sigfigs, &[first_range]);
+            assert_eq!(first.memory_size(), empty.memory_size(), "{sigfigs}");
+            let grown = of_sigfigs(sigfigs, &[first_range + 1]);
+            assert_eq!(
+                grown.memory_size(),
+                overhead + (first_counts + doubling) * 8,
+                "{sigfigs}"
+            );
+            let doubled = of_sigfigs(sigfigs, &[2 * first_range + 2]);
+            assert_eq!(
+                doubled.memory_size(),
+                overhead + (first_counts + 2 * doubling) * 8,
+                "{sigfigs}"
+            );
+            let all = of_sigfigs(sigfigs, &[u64::MAX]);
+            assert_eq!(all.memory_size(), overhead + all_counts * 8, "{sigfigs}");
+        }
     }
 
     #[test]

@@ -11,7 +11,9 @@
 use std::path::Path;
 
 use duckdb_neo::{connection::Connection, Parameters, Result};
-use pcapsql_core::format::histogram::{HdrHistogram, MAX_BUCKETS};
+use pcapsql_core::format::histogram::{
+    HdrHistogram, DEFAULT_SIGFIGS, MAX_BUCKETS, MAX_SIGFIGS, MIN_SIGFIGS,
+};
 use pcapsql_core::scan::testing::Cell;
 use pcapsql_duckdb_itest::{column, connect, reference_rows, rows, value};
 
@@ -62,7 +64,12 @@ fn kernel_answers(histogram: &HdrHistogram) -> Answers {
 /// The histogram a function reads when it is given the one that recorded `values`: the
 /// kernel's, through its serialized form.
 fn histogram_of(values: impl IntoIterator<Item = u64>) -> HdrHistogram {
-    let mut histogram = HdrHistogram::default();
+    histogram_at(DEFAULT_SIGFIGS, values)
+}
+
+/// [`histogram_of`] for a histogram that keeps `sigfigs` digits.
+fn histogram_at(sigfigs: u8, values: impl IntoIterator<Item = u64>) -> HdrHistogram {
+    let mut histogram = HdrHistogram::with_sigfigs(sigfigs).unwrap();
     for value in values {
         histogram.record(value);
     }
@@ -138,7 +145,13 @@ fn the_functions_and_their_types() -> Result<()> {
                 "STRUCT(lo UBIGINT, hi UBIGINT, count UBIGINT)[]"
             ]),
             row(&["hdr_count", "scalar", "[histogram]", "[BLOB]", "UBIGINT"]),
-            row(&["hdr_histogram", "aggregate", "[value]", "[ANY]", "BLOB"]),
+            row(&[
+                "hdr_histogram",
+                "aggregate",
+                "[value, sigfigs]",
+                "[ANY, ANY]",
+                "BLOB"
+            ]),
             row(&["hdr_max", "scalar", "[histogram]", "[BLOB]", "UBIGINT"]),
             row(&["hdr_mean", "scalar", "[histogram]", "[BLOB]", "DOUBLE"]),
             row(&["hdr_min", "scalar", "[histogram]", "[BLOB]", "UBIGINT"]),
@@ -385,10 +398,10 @@ fn what_is_not_a_number_is_refused_when_the_statement_is_bound() -> Result<()> {
         )
         .is_err());
     }
-    // One argument: the DataFusion engine's function takes more and ignores them.
+    // One or two arguments.
     for sql in [
         "SELECT hdr_histogram()",
-        "SELECT hdr_histogram(i, 3) FROM range(3) t(i)",
+        "SELECT hdr_histogram(i, 3, 4) FROM range(3) t(i)",
     ] {
         let error = rows(&connection, sql).unwrap_err();
         assert!(error.message.contains("hdr_histogram"), "{sql}: {error}");
@@ -854,6 +867,261 @@ fn the_picture_is_the_kernel_s_text() -> Result<()> {
             "SELECT hdr_ascii(hdr_histogram(v)) FROM (SELECT 1 AS v WHERE false)"
         )?,
         "(empty histogram)"
+    );
+    Ok(())
+}
+
+/// Values that each precision keeps differently: exact ones, and ones two digits round.
+const SPREAD: &str = "(0), (1), (3), (19), (199), (1999), (2001), (12345), (99999), (123456), \
+                      (1234567), (98765432), (NULL)";
+const SPREAD_RECORDED: [u64; 12] = [
+    0, 1, 3, 19, 199, 1999, 2001, 12345, 99999, 123456, 1234567, 98765432,
+];
+
+/// The bytes of the one histogram `sql` returns, as hex.
+fn hex_of(connection: &Connection, sql: &str) -> Result<String> {
+    value(connection, &format!("SELECT lower(hex(h)) FROM ({sql}) q"))
+}
+
+#[test]
+fn each_precision_answers_as_the_kernel_does() -> Result<()> {
+    let connection = connect()?;
+    for sigfigs in MIN_SIGFIGS..=MAX_SIGFIGS {
+        let sql = format!("SELECT hdr_histogram(v, {sigfigs}) AS h FROM (VALUES {SPREAD}) t(v)");
+        let expected = histogram_at(sigfigs, SPREAD_RECORDED);
+        for threads in [1, 4] {
+            connection.execute(format!("SET threads = {threads}"), Parameters::None)?;
+            assert_eq!(
+                answers_of(&connection, &sql),
+                kernel_answers(&expected),
+                "{sigfigs} figures, {threads} threads"
+            );
+        }
+        // On one thread, the kernel's bytes: the one state that saw the rows merged into the
+        // state of the result, which `init` made with the call's precision.
+        connection.execute("SET threads = 1", Parameters::None)?;
+        let mut merged = HdrHistogram::with_sigfigs(sigfigs).unwrap();
+        merged.merge(&expected).unwrap();
+        let bytes = hex_of(&connection, &sql)?;
+        assert_eq!(bytes, hex(&merged.serialize().unwrap()), "{sigfigs}");
+        let read = HdrHistogram::deserialize(&merged.serialize().unwrap()).unwrap();
+        assert_eq!(read.sigfigs(), sigfigs);
+    }
+
+    // Without `sigfigs`, two figures: the bytes of `sigfigs` 2 and of the kernel's default.
+    let default = hex_of(
+        &connection,
+        &format!("SELECT hdr_histogram(v) AS h FROM (VALUES {SPREAD}) t(v)"),
+    )?;
+    let two = hex_of(
+        &connection,
+        &format!("SELECT hdr_histogram(v, 2) AS h FROM (VALUES {SPREAD}) t(v)"),
+    )?;
+    assert_eq!(default, two);
+    let mut merged = HdrHistogram::default();
+    merged.merge(&histogram_of(SPREAD_RECORDED)).unwrap();
+    assert_eq!(default, hex(&merged.serialize().unwrap()));
+
+    // A parameter of a prepared statement: DuckDB binds the statement again with its value.
+    connection.execute(
+        format!(
+            "PREPARE with_sigfigs AS SELECT {} FROM (
+                 SELECT hdr_histogram(v, ?) AS h FROM (VALUES {SPREAD}) t(v)) q",
+            every_answer("h")
+        ),
+        Parameters::None,
+    )?;
+    for sigfigs in [1_u8, 4] {
+        let result = rows(&connection, &format!("EXECUTE with_sigfigs({sigfigs})"))?;
+        assert_eq!(
+            answers(&result[0]),
+            kernel_answers(&histogram_at(sigfigs, SPREAD_RECORDED)),
+            "{sigfigs}"
+        );
+    }
+    let error = rows(&connection, "EXECUTE with_sigfigs(9)").unwrap_err();
+    assert!(error.message.contains("from 0 to 5, not 9"), "{error}");
+
+    // Any integer type, and a constant expression.
+    let expected = kernel_answers(&histogram_at(3, SPREAD_RECORDED));
+    for sigfigs in [
+        "3::TINYINT",
+        "3::UTINYINT",
+        "3::BIGINT",
+        "3::UBIGINT",
+        "3::HUGEINT",
+        "3::UHUGEINT",
+        "1 + 2",
+        "CAST('3' AS INTEGER)",
+    ] {
+        assert_eq!(
+            answers_of(
+                &connection,
+                &format!("SELECT hdr_histogram(v, {sigfigs}) AS h FROM (VALUES {SPREAD}) t(v)")
+            ),
+            expected,
+            "{sigfigs}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_precision_that_is_not_one_is_refused_when_the_statement_is_bound() -> Result<()> {
+    let connection = connect()?;
+    connection.execute(
+        "CREATE TABLE t AS SELECT i AS v FROM range(10) t(i)",
+        Parameters::None,
+    )?;
+    for (sigfigs, what) in [
+        ("6", "6"),
+        ("-1", "-1"),
+        ("256", "256"),
+        (
+            "170141183460469231731687303715884105727",
+            "170141183460469231731687303715884105727",
+        ),
+        (
+            "340282366920938463463374607431768211455::UHUGEINT",
+            "340282366920938463463374607431768211455",
+        ),
+        ("NULL", "NULL"),
+        ("NULL::INTEGER", "NULL"),
+        ("2.5", "a DECIMAL(2,1)"),
+        ("3.0::DOUBLE", "a DOUBLE"),
+        ("3::DECIMAL(3, 0)", "a DECIMAL(3,0)"),
+        ("'3'", "a VARCHAR"),
+        ("true", "a BOOLEAN"),
+        ("v", "a value that is not a constant"),
+        ("v % 3", "a value that is not a constant"),
+        ("(SELECT 3)", "a value that is not a constant"),
+        ("(random() * 3)::INTEGER", "a value that is not a constant"),
+    ] {
+        let sql = format!("SELECT hdr_histogram(v, {sigfigs}) FROM t");
+        let error = rows(&connection, &sql).unwrap_err();
+        let expected = format!(
+            "hdr_histogram: the number of significant figures (the second argument) must be a \
+             constant integer from 0 to 5, not {what}"
+        );
+        assert!(error.message.contains(&expected), "{sql}: {error}");
+        // Nothing ran: EXPLAIN binds the statement and fails the same way.
+        assert!(
+            rows(&connection, &format!("EXPLAIN {sql}")).is_err(),
+            "{sql}"
+        );
+    }
+    // Also where there are no rows and no groups.
+    let error = rows(
+        &connection,
+        "SELECT v, hdr_histogram(v, 9) FROM t WHERE false GROUP BY v",
+    )
+    .unwrap_err();
+    assert!(error.message.contains("from 0 to 5, not 9"), "{error}");
+    assert_eq!(value(&connection, "SELECT 42")?, "42");
+    Ok(())
+}
+
+#[test]
+fn parallel_aggregation_combines_states_of_the_call_s_precision() -> Result<()> {
+    // Fewer groups than `GROUPED`: a state of three figures for values up to 1.2 million is
+    // some 100 KiB (the table of the kernel's documentation), and DuckDB keeps one per group
+    // and thread.
+    const GROUPS: u64 = 1_000;
+    let connection = connect()?;
+    connection.execute(NUMBERS, Parameters::None)?;
+    connection.execute("SET threads = 4", Parameters::None)?;
+    for sigfigs in [1_u8, 3] {
+        let select = format!(
+            "SELECT g, lower(hex(h)), {} FROM (
+                 SELECT i % {GROUPS} AS g, hdr_histogram(i, {sigfigs}) AS h FROM numbers GROUP BY g) q
+             ORDER BY g",
+            every_answer("h")
+        );
+        let result = rows(&connection, &select)?;
+        assert_eq!(result.len() as u64, GROUPS);
+        let mut combined = 0;
+        for (group, cells) in result.iter().enumerate() {
+            let group = group as u64;
+            let values = || (group..ROWS).step_by(GROUPS as usize);
+            if group.is_multiple_of(37) {
+                assert_eq!(
+                    answers(&cells[2..]),
+                    kernel_answers(&histogram_at(sigfigs, values())),
+                    "group {group}, {sigfigs} figures"
+                );
+            }
+            assert_eq!(cells[2], (ROWS / GROUPS).to_string(), "group {group}");
+            let mut recorded = HdrHistogram::with_sigfigs(sigfigs).unwrap();
+            values().for_each(|i| recorded.record(i));
+            // Every state, the empty ones DuckDB combined into included, had the precision:
+            // a state of another would have given the result its own.
+            assert_eq!(cells[3], recorded.min().to_string(), "group {group}");
+            assert_eq!(cells[4], recorded.max().to_string(), "group {group}");
+            if cells[1] != hex(&recorded.serialize().unwrap()) {
+                combined += 1;
+            }
+        }
+        assert!(
+            combined as u64 > GROUPS / 2,
+            "{combined} of {GROUPS} groups were combined"
+        );
+    }
+    // And a window, whose states DuckDB makes and combines in its own way.
+    let result = rows(
+        &connection,
+        "SELECT i, hdr_max(hdr_histogram(i, 3) OVER (ORDER BY i ROWS BETWEEN 2 PRECEDING AND CURRENT ROW)),
+                hdr_count(hdr_histogram(i, 0) OVER (PARTITION BY i % 3))
+         FROM range(20000, 30000) t(i) ORDER BY i",
+    )?;
+    let mut finer = 0;
+    for cells in &result {
+        let i: u64 = cells[0].parse().unwrap();
+        assert_eq!(cells[1], histogram_at(3, [i]).max().to_string(), "row {i}");
+        // Two figures would say otherwise for most rows.
+        if cells[1] != histogram_of([i]).max().to_string() {
+            finer += 1;
+        }
+        // 10,000 values in three partitions; zero figures count them as well.
+        let partition = (20_000..30_000).filter(|j| j % 3 == i % 3).count();
+        assert_eq!(cells[2], partition.to_string(), "row {i}");
+    }
+    assert!(finer > 5_000, "{finer}");
+    assert_eq!(result.len(), 10_000);
+    Ok(())
+}
+
+#[test]
+fn three_figures_give_tighter_percentiles_than_two() -> Result<()> {
+    let connection = connect()?;
+    // 10,000 to 19,990 in steps of 10: the exact median is 14,990 and the 90th percentile 18,990.
+    let percentiles = |sigfigs: u8| -> Result<Vec<f64>> {
+        Ok(rows(
+            &connection,
+            &format!(
+                "SELECT hdr_percentile(h, 0.5), hdr_percentile(h, 0.9), hdr_max(h)
+                 FROM (SELECT hdr_histogram(10000 + 10 * i, {sigfigs}) AS h FROM range(1000) t(i))"
+            ),
+        )?[0]
+            .iter()
+            .map(|cell| cell.parse().unwrap())
+            .collect())
+    };
+    let (two, three) = (percentiles(2)?, percentiles(3)?);
+    for (exact, (two, three)) in [14_990.0, 18_990.0, 19_990.0]
+        .iter()
+        .zip(two.iter().zip(&three))
+    {
+        assert!(
+            (three - exact).abs() < (two - exact).abs(),
+            "{exact}: {two} {three}"
+        );
+        assert!((three - exact).abs() <= exact / 1000.0, "{exact}: {three}");
+    }
+    // The buckets and the picture read the precision from the BLOB too.
+    let sql = "SELECT hdr_histogram(10000 + 10 * i, 3) AS h FROM range(1000) t(i)";
+    assert_eq!(
+        answers_of(&connection, sql),
+        kernel_answers(&histogram_at(3, (0..1000).map(|i| 10_000 + 10 * i)))
     );
     Ok(())
 }

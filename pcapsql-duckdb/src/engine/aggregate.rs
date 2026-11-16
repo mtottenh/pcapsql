@@ -1,10 +1,11 @@
-//! The aggregate function `hdr_histogram(value)`: a histogram of the values of a group, as the
-//! `BLOB` the `hdr_*` scalar functions read (`engine::scalar`).
+//! The aggregate function `hdr_histogram(value [, sigfigs])`: a histogram of the values of a
+//! group, as the `BLOB` the `hdr_*` scalar functions read (`engine::scalar`).
 //!
 //! ```sql
 //! SELECT hdr_percentile(h, 0.99), hdr_max(h)
 //! FROM (SELECT hdr_histogram(length) AS h FROM read_frames('capture.pcap'));
 //! SELECT dst_port, hdr_ascii(hdr_histogram(length)) FROM read_tcp('capture.pcap') GROUP BY ALL;
+//! SELECT hdr_percentile(hdr_histogram(length, 3), 0.99) FROM read_frames('capture.pcap');
 //! ```
 //!
 //! Like the scalar functions, it has no logic of its own: the state of a group is a
@@ -14,7 +15,7 @@
 //!
 //! | Callback | Work |
 //! |---|---|
-//! | `init` | An empty histogram |
+//! | `init` | An empty histogram of the call's precision (from the bind data) |
 //! | `update` | Record the value of every row that is not NULL in the histogram of its group |
 //! | `combine` | Merge the histogram of a partial state into another (parallel aggregation, windows) |
 //! | `finalize` | Serialize the histogram of each group |
@@ -22,13 +23,31 @@
 //!
 //! All of them run under the panic guard, `init` too ([`guard::Aggregate`]).
 //!
+//! # Precision
+//!
+//! `sigfigs` is the number of significant decimal digits the histograms of the call keep: a
+//! constant integer from 0 to 5 (`pcapsql_core::format::histogram::checked_sigfigs`), 2 when
+//! it is left out. `bind` reads it and keeps it in the bind data ([`Call`]), which DuckDB gives
+//! `init`: every state of the call, the empty ones `combine` merges into included, has its
+//! precision. A `sigfigs` of another type than an integer, NULL, out of range or not a constant
+//! is refused when the statement is bound. A parameter of a prepared statement (`?`) has no
+//! type when the statement is prepared: `bind` says so with DuckDB's "parameter not resolved"
+//! error, and DuckDB binds the statement again with the value when it is executed. (A
+//! parameter with a cast, `?::INTEGER`, has a type but no value when the statement is
+//! prepared, and is refused as not a constant.)
+//!
+//! It is the second parameter of the one function, `ANY` (no cast: `2.5` is refused, not
+//! rounded), with the default 2: DuckDB 2.0.0 cannot add a second aggregate function of a name
+//! through the C API, so there is no overload with two parameters. Like `value` it can be
+//! passed by name too (`sigfigs := 3`), which the DataFusion engine does not offer.
+//!
 //! # Values
 //!
 //! The argument is declared `ANY` and `bind` accepts the types that are numbers ([`Input`]):
 //! the integers of every width, `HUGEINT` and `UHUGEINT` included, `FLOAT`, `DOUBLE` and
 //! `DECIMAL`. Each is read as it is stored, so no value passes through a type that cannot hold
 //! it. Anything else is refused when the statement is bound, with a message that names the
-//! type. (One function with one `ANY` parameter, not one function per type: DuckDB 2.0.0
+//! type. (One function with an `ANY` parameter, not one function per type: DuckDB 2.0.0
 //! cannot add a second aggregate function of a name through the C API.)
 //!
 //! What is recorded of a value is the kernel's business: an unsigned integer as it is, a
@@ -71,7 +90,9 @@ use duckdb_neo::{
     vector::{ReadableNativeElement, Unknown, Vector},
     DuckDBType, Error, Result,
 };
-use pcapsql_core::format::histogram::{HdrHistogram, HistogramError};
+use pcapsql_core::format::histogram::{
+    checked_sigfigs, HdrHistogram, HistogramError, DEFAULT_SIGFIGS, MAX_SIGFIGS, MIN_SIGFIGS,
+};
 
 use super::guard::{self, Aggregate, Slots, SourceSlots};
 use super::scalar::readable;
@@ -83,11 +104,16 @@ pub(super) fn register(extension: &Extension) -> Result<()> {
     let documentation = FunctionDocumentationBuilder::new()
         .description(
             "A histogram of the values of a group, as the BLOB the hdr_* functions read. \
-             NULL and negative values are not recorded; fractions are cut off.",
+             NULL and negative values are not recorded; fractions are cut off. sigfigs, a \
+             constant from 0 to 5, is the number of significant digits kept of a value \
+             (default 2).",
         )
-        .add_example("", "hdr_percentile(hdr_histogram(length), 0.99)");
+        .add_example("", "hdr_percentile(hdr_histogram(length), 0.99)")
+        .add_example("", "hdr_percentile(hdr_histogram(length, 3), 0.99)");
     let signature = SignatureBuilder::new()
         .param(FunctionParameter::new::<Any>("value"))
+        // `ANY`: what is not an integer is refused by `bind` rather than cast to one.
+        .param(FunctionParameter::new::<Any>("sigfigs").default_value(i32::from(DEFAULT_SIGFIGS)))
         .return_type(BlobValue::logical_type(extension)?)
         .documentation(documentation);
     guard::aggregate_function(NAME, signature, Histogram)
@@ -99,6 +125,15 @@ pub(super) fn register(extension: &Extension) -> Result<()> {
 
 /// `hdr_histogram`.
 struct Histogram;
+
+/// What `bind` learned of a call, which every later callback is given.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Call {
+    /// How the values are stored.
+    input: Input,
+    /// The significant digits the histograms of the call keep.
+    sigfigs: u8,
+}
 
 /// How the values of a call are stored: what `bind` learned from the type of the argument.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,6 +233,60 @@ where
     })
 }
 
+/// The error for a `sigfigs` that is not a precision; `what` says what it is. The DataFusion
+/// engine's message is the same.
+fn sigfigs_error(what: impl std::fmt::Display) -> Error {
+    Error::invalid_input(format!(
+        "{NAME}: the number of significant figures (the second argument) must be a constant \
+         integer from {MIN_SIGFIGS} to {MAX_SIGFIGS}, not {what}"
+    ))
+}
+
+/// The precision argument `index` of a call asks for.
+fn sigfigs_of(arguments: &BindArguments<'_>, index: usize) -> Result<u8> {
+    let logical_type = arguments.logical_type(index)?;
+    let unsigned = match logical_type.id()? {
+        LogicalTypeID::SqlNull => return Err(sigfigs_error("NULL")),
+        // A parameter of a prepared statement without a type yet: DuckDB binds the statement
+        // again when it knows it.
+        LogicalTypeID::Unknown => {
+            return Err(Error {
+                code: DuckDBError::QueryParameterNotResolved,
+                message: format!("{NAME}: the number of significant figures is not known yet"),
+            })
+        }
+        LogicalTypeID::TinyInt
+        | LogicalTypeID::SmallInt
+        | LogicalTypeID::Integer
+        | LogicalTypeID::BigInt
+        | LogicalTypeID::HugeInt => false,
+        LogicalTypeID::UTinyInt
+        | LogicalTypeID::USmallInt
+        | LogicalTypeID::UInteger
+        | LogicalTypeID::UBigInt
+        | LogicalTypeID::UHugeInt => true,
+        _ => {
+            let name = logical_type
+                .to_text()
+                .unwrap_or_else(|_| "this type".to_owned());
+            return Err(sigfigs_error(format_args!("a {name}")));
+        }
+    };
+    let Some(value) = arguments.value(index)? else {
+        return Err(sigfigs_error("a value that is not a constant"));
+    };
+    if unsigned {
+        let number = value.get::<u128>()?.ok_or_else(|| sigfigs_error("NULL"))?;
+        i128::try_from(number)
+            .ok()
+            .and_then(checked_sigfigs)
+            .ok_or_else(|| sigfigs_error(number))
+    } else {
+        let number = value.get::<i128>()?.ok_or_else(|| sigfigs_error("NULL"))?;
+        checked_sigfigs(number).ok_or_else(|| sigfigs_error(number))
+    }
+}
+
 /// The error of a kernel, as the function's.
 fn kernel_error(error: HistogramError) -> Error {
     Error {
@@ -207,7 +296,7 @@ fn kernel_error(error: HistogramError) -> Error {
 }
 
 impl Aggregate for Histogram {
-    type BindData = Input;
+    type BindData = Call;
     type State = HdrHistogram;
 
     fn bind(
@@ -215,9 +304,9 @@ impl Aggregate for Histogram {
         _context: &Context,
         arguments: BindArguments<'_>,
         _result_type: ReturnTypeHandle<'_>,
-    ) -> Result<Input> {
+    ) -> Result<Call> {
         let logical_type = arguments.logical_type(0)?;
-        Input::of(&logical_type)?.ok_or_else(|| {
+        let input = Input::of(&logical_type)?.ok_or_else(|| {
             let name = logical_type
                 .to_text()
                 .unwrap_or_else(|_| "this type".to_owned());
@@ -225,24 +314,32 @@ impl Aggregate for Histogram {
                 "{NAME}: the values must be numbers (an integer type, FLOAT, DOUBLE or DECIMAL), \
                  not {name}"
             ))
-        })
+        })?;
+        // DuckDB passes the default of `sigfigs` when the call leaves it out.
+        let sigfigs = match arguments.len()? {
+            1 => DEFAULT_SIGFIGS,
+            _ => sigfigs_of(&arguments, 1)?,
+        };
+        Ok(Call { input, sigfigs })
     }
 
-    fn init(&self, _bind_data: Option<&Input>) -> HdrHistogram {
-        HdrHistogram::default()
+    fn init(&self, call: Option<&Call>) -> HdrHistogram {
+        // DuckDB gives `init` the bind data of the call, as every callback.
+        let sigfigs = call.map_or(DEFAULT_SIGFIGS, |call| call.sigfigs);
+        HdrHistogram::with_sigfigs(sigfigs).expect("bind accepts only precisions there are")
     }
 
     fn update(
         &self,
-        input: Option<&Input>,
+        call: Option<&Call>,
         data: &mut VectorCollection,
         mut states: Slots<'_, '_, HdrHistogram>,
     ) -> Result<()> {
-        let input = input.ok_or_else(|| {
+        let call = call.ok_or_else(|| {
             Error::invalid_input(format!("{NAME}: DuckDB gave update no bind data"))
         })?;
         let states = &mut states;
-        match *input {
+        match call.input {
             Input::I8 => record_rows::<i8>(data, states, |h, v| h.record_signed((*v).into())),
             Input::I16 => record_rows::<i16>(data, states, |h, v| h.record_signed((*v).into())),
             Input::I32 => record_rows::<i32>(data, states, |h, v| h.record_signed((*v).into())),
@@ -270,7 +367,7 @@ impl Aggregate for Histogram {
 
     fn combine(
         &self,
-        _bind_data: Option<&Input>,
+        _bind_data: Option<&Call>,
         source: &SourceSlots<'_, '_, HdrHistogram>,
         mut target: Slots<'_, '_, HdrHistogram>,
     ) -> Result<()> {
@@ -286,7 +383,7 @@ impl Aggregate for Histogram {
 
     fn finalize(
         &self,
-        _bind_data: Option<&Input>,
+        _bind_data: Option<&Call>,
         states: &[&HdrHistogram],
         result: Vector<'_, Unknown>,
         result_offset: usize,

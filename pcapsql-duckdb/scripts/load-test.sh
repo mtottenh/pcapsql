@@ -101,6 +101,7 @@ SELECT hdr_buckets(hdr_histogram(length))::VARCHAR, typeof(hdr_buckets(hdr_histo
 SELECT parse_filename(filename), hdr_count(hdr_histogram(length)), hdr_max(hdr_histogram(length) FILTER (frame_number <= 10)), hdr_count(hdr_histogram(NULL::INT)) FROM read_frames(['$captures/v6*', '$captures/dns.cap'], filename := true) GROUP BY ALL ORDER BY ALL;
 SELECT hdr_count('not a histogram'::BLOB) IS NULL, hdr_buckets(NULL) IS NULL, hdr_ascii(hdr_histogram(i)) FROM range(0) t(i);
 SELECT string_split(hdr_ascii(hdr_histogram(length)), chr(10))[1] FROM read_frames('$captures/dns.cap');
+SELECT hdr_max(hdr_histogram(length, 1)), hdr_max(hdr_histogram(length, 3)), hdr_max(hdr_histogram(length, 2)) FROM read_frames('$captures/dns.cap');
 "
 expected="pcapsql,true,$extension_version
 32
@@ -110,7 +111,7 @@ src_mac,BLOB,true
 3232235777,192.168.1.1,true,true
 5000,5000
 48
-hdr_histogram,[ANY],BLOB
+hdr_histogram,\"[ANY, ANY]\",BLOB
 2001:db8::1,aa:bb:cc:dd:ee:ff,dead
 true,true,true
 \"SYN,ACK\",true,AAAA,NXDOMAIN,TCP,IPv4
@@ -180,7 +181,8 @@ dns.cap,38,299,0
 v6-http.cap,55,211,0
 v6.pcap,161,511,0
 true,true,(empty histogram)
-38 samples | min 67 | max 299 | mean 97.6 | stdev 40.7"
+38 samples | min 67 | max 299 | mean 97.6 | stdev 40.7
+303,298,299"
 
 actual=$("$duckdb" -unsigned -csv -noheader -c "$sql")
 if [ "$actual" != "$expected" ]; then

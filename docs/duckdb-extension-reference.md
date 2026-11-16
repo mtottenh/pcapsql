@@ -522,13 +522,25 @@ tool, on the same code (`pcapsql_core::format::histogram`, an
 [HdrHistogram](https://hdrhistogram.org)): a histogram one of the two made
 is one the other reads, and for the same values both give the same answers.
 
-A histogram keeps its values to two significant decimal digits (within 1 %),
-whatever their number, and grows with the largest of them: 2 KiB for values
-up to 255, 1 KiB more for each doubling of the largest value after that,
-about 60 KiB for the whole range of a `UBIGINT`. That is per group while the
-aggregation runs; the result is a compact encoding of the counts.
+A histogram keeps its values to a number of significant decimal digits,
+two (within 1 %) unless the call asks for another, whatever their number,
+and grows with the largest of them. Its memory is per group while the
+aggregation runs, and grows steeply with the digits; the result is a compact
+encoding of the counts:
 
-### `hdr_histogram(value)`
+| Significant digits | Memory for values up to | Each doubling of the largest value after that | The whole range of a `UBIGINT` |
+|---|---|---|---|
+| 0 | 3: 24 bytes | 8 bytes | 0.5 KiB |
+| 1 | 31: 256 bytes | 128 bytes | 7.6 KiB |
+| 2 (default) | 255: 2 KiB | 1 KiB | 58 KiB |
+| 3 | 2047: 16 KiB | 8 KiB | 440 KiB |
+| 4 | 32767: 256 KiB | 128 KiB | 6.4 MiB |
+| 5 | 262143: 2 MiB | 1 MiB | 48 MiB |
+
+So a grouped `hdr_histogram(value, 5)` over 1,000 groups needs at least
+2 GiB, and `hdr_histogram(value, 4)` of values up to a million nearly 1 GiB.
+
+### `hdr_histogram(value [, sigfigs])`
 
 An aggregate function. Returns the histogram of the values of its group as a
 `BLOB`: HdrHistogram's V2 encoding, which other HdrHistogram implementations
@@ -538,6 +550,23 @@ read too.
   to `UHUGEINT`), `FLOAT`, `DOUBLE` or `DECIMAL`. Any other type is refused
   when the statement is bound. A column is read as it is stored, without a
   cast in between.
+- `sigfigs`, optional, is the number of significant decimal digits the
+  histogram keeps of a value: an integer from 0 to 5, 2 when it is left
+  out. A histogram of `sigfigs` digits holds every value below
+  `2 * 10^sigfigs` exactly and a larger one to within one part in
+  `10^sigfigs` (0 digits: within a factor of two), so more digits give
+  closer percentiles, minimums and maximums, at the cost in memory above.
+  It is passed by position (`hdr_histogram(rtt, 3)`) or by name
+  (`hdr_histogram(rtt, sigfigs := 3)`), must be a constant
+  of an integer type (`3`, `1 + 2`, `3::UTINYINT`), and is the same for
+  every group of the call. NULL, a number outside 0 to 5, a value of
+  another type (`2.5`, `'3'`) and an expression that is not a constant (a
+  column, a subquery) are refused when the statement is bound:
+  `hdr_histogram: the number of significant figures (the second argument)
+  must be a constant integer from 0 to 5, not ...`. A parameter of a
+  prepared statement is a constant (`hdr_histogram(rtt, ?)`), without a
+  cast. The digits are stored in the histogram, so the functions that read
+  it need not be told.
 - What is recorded is an unsigned 64-bit integer. NULL is not recorded, nor
   is a negative number, nor NaN. Of a number with a fraction the integer
   part is recorded, so scale a column of fractions first
@@ -554,8 +583,10 @@ read too.
   histograms and in which order those were combined. Equal values give
   equal bytes when one worker recorded them all (a capture read as one
   partition, or `SET threads = 1`, without `GROUP BY`), and always when they
-  are below 256; those are the bytes the command-line tool returns for
-  them. Compare histograms by what the functions below say of them.
+  are below those the table above gives the first memory for (up to 255
+  for two digits); those
+  are the bytes the command-line tool returns for them. Compare histograms
+  by what the functions below say of them.
 - DuckDB 2.0.0 frees the histogram of a group when it returns the group. The
   histograms of groups a statement never returns stay allocated until the
   process ends: a grouped `hdr_histogram` under a `LIMIT` without an
@@ -564,17 +595,18 @@ read too.
   them all. (This is DuckDB's handling of every aggregate function that
   owns memory, see `pcapsql-duckdb/README.md`.)
 
-One argument: the second argument the command-line tool's function accepts
-is ignored there, and is not accepted here.
+The command-line tool's `hdr_histogram` takes the same arguments (`sigfigs`
+by position only), accepts and refuses the same `sigfigs` with the same
+message, and with the same values and `sigfigs` gives the same answers.
 
 ### Reading a histogram
 
 | Function | Returns | Result |
 |---|---|---|
 | `hdr_count(histogram BLOB)` | `UBIGINT` | The number of values recorded |
-| `hdr_min(histogram BLOB)` | `UBIGINT` | The smallest value recorded, to two digits: the lowest value the histogram cannot tell from it. 0 for an empty histogram |
-| `hdr_max(histogram BLOB)` | `UBIGINT` | The largest value recorded, to two digits: the highest value the histogram cannot tell from it, which is at least the value. 0 for an empty histogram |
-| `hdr_mean(histogram BLOB)` | `DOUBLE` | The mean of the values, each to two digits. 0 for an empty histogram |
+| `hdr_min(histogram BLOB)` | `UBIGINT` | The smallest value recorded, to the histogram's digits: the lowest value the histogram cannot tell from it. 0 for an empty histogram |
+| `hdr_max(histogram BLOB)` | `UBIGINT` | The largest value recorded, to the histogram's digits: the highest value the histogram cannot tell from it, which is at least the value. 0 for an empty histogram |
+| `hdr_mean(histogram BLOB)` | `DOUBLE` | The mean of the values, each to the histogram's digits. 0 for an empty histogram |
 | `hdr_stdev(histogram BLOB)` | `DOUBLE` | Their standard deviation. 0 for an empty histogram |
 | `hdr_percentile(histogram BLOB, percentile DOUBLE)` | `DOUBLE` | The value at a percentile, given as a fraction (`0.99`) or, above 1, as a percentage (`99`). 0 for an empty histogram |
 | `hdr_buckets(histogram BLOB)` | `STRUCT(lo UBIGINT, hi UBIGINT, count UBIGINT)[]` | The recorded range in buckets on a logarithmic scale, each with its bounds (both included) and the number of values in it. Powers of two (`1-1`, `2-3`, `4-7`, ...) from the smallest value to the largest, empty buckets between them included; at most 64, and powers of ten when powers of two would be more. The counts add up to `hdr_count`. The empty list for an empty histogram |
@@ -586,6 +618,9 @@ raises an error for its input.
 ```sql
 SELECT hdr_count(h), hdr_percentile(h, 0.5), hdr_percentile(h, 0.99), hdr_max(h)
 FROM (SELECT hdr_histogram(length) AS h FROM read_frames('capture.pcap'));
+
+-- Three significant digits: percentiles within 0.1 %
+SELECT hdr_percentile(hdr_histogram(length, 3), 0.99) FROM read_frames('capture.pcap');
 
 -- A histogram per group, and its buckets as rows
 SELECT dst_port, unnest(hdr_buckets(hdr_histogram(length)), recursive := true)

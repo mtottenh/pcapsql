@@ -755,8 +755,8 @@ the DataFusion engine's `hdr_*` functions
 
 | Function | Result |
 |---|---|
-| `hdr_histogram(value) -> BLOB` (aggregate) | The histogram of the values of a group, serialized (HdrHistogram's V2 encoding). `value` is any integer type, `FLOAT`, `DOUBLE` or `DECIMAL` |
-| `hdr_count(BLOB) -> UBIGINT`, `hdr_min`, `hdr_max` | The number of values, the smallest and the largest (to two significant digits) |
+| `hdr_histogram(value [, sigfigs]) -> BLOB` (aggregate) | The histogram of the values of a group, serialized (HdrHistogram's V2 encoding). `value` is any integer type, `FLOAT`, `DOUBLE` or `DECIMAL`; `sigfigs`, a constant integer from 0 to 5 (default 2), is the number of significant digits it keeps |
+| `hdr_count(BLOB) -> UBIGINT`, `hdr_min`, `hdr_max` | The number of values, the smallest and the largest (to the histogram's significant digits) |
 | `hdr_mean(BLOB) -> DOUBLE`, `hdr_stdev` | Their mean and standard deviation |
 | `hdr_percentile(BLOB, DOUBLE) -> DOUBLE` | The value at a percentile: a fraction (`0.99`) or, above 1, a percentage (`99`) |
 | `hdr_buckets(BLOB) -> STRUCT(lo UBIGINT, hi UBIGINT, count UBIGINT)[]` | The recorded range in at most 64 buckets on a logarithmic scale |
@@ -775,8 +775,11 @@ the other. A group without a value is an empty histogram, not NULL, and a
 
 What differs from the DataFusion functions:
 
-- `hdr_histogram` takes one argument. DataFusion's also accepts a second
-  one and ignores it (it was once documented as a precision).
+- `hdr_histogram(value, sigfigs)` takes the same `sigfigs` in both and
+  refuses the same ones with the same message, except for the name of a
+  type in it (`DECIMAL(2,1)` here, `Float64` there for `2.5`). Here it can
+  also be passed by name (`sigfigs := 3`), DuckDB's syntax for an argument
+  with a default.
 - Both refuse a value that is not a number when the statement is planned,
   and both record the integer part of a `DECIMAL`. A `HUGEINT` is recorded
   too, a type DataFusion does not have.
@@ -785,10 +788,15 @@ What differs from the DataFusion functions:
 
 How DuckDB runs it, and what follows:
 
-- **One function, one `ANY` parameter.** DuckDB 2.0.0 refuses a second
+- **One function, two `ANY` parameters.** DuckDB 2.0.0 refuses a second
   aggregate function of a name through the C API (`GetAlterInfo not
-  implemented`), so there is no overload per type: `bind` looks at the type
-  of the argument and `update` reads the vector as that type.
+  implemented`), so there is no overload per type, nor one with and one
+  without `sigfigs`: `sigfigs` is a positional parameter with the default
+  2, and `ANY` so that DuckDB does not cast `2.5` to an integer. `bind`
+  looks at the type of the value, and reads `sigfigs` as a constant
+  (refusing what is not one); `update` reads the vector as that type, and
+  `init` makes every state, the empty ones `combine` merges into included,
+  with the precision `bind` kept in the bind data.
 - **Parallel aggregation.** DuckDB aggregates into a table per thread and
   combines them (`combine`: the kernel's `merge`). The answers are the same
   on any number of threads. The bytes can differ in one field of the

@@ -231,7 +231,7 @@ wrapped lookup. String parameters take any string type.
 
 | Function | Description |
 |----------|-------------|
-| `hdr_histogram(value)` | Build histogram (aggregate function) |
+| `hdr_histogram(value [, sigfigs])` | Build histogram (aggregate function); `sigfigs` is the significant digits kept, a constant 0-5, default 2 |
 | `hdr_percentile(hist, 0.99)` | Extract percentile from histogram |
 | `hdr_count/min/max/mean(hist)` | Extract statistics from histogram |
 | `hdr_buckets(hist)` | Distribution as log-scale bucket rows (explode with `UNNEST`) |
@@ -560,7 +560,7 @@ What it offers:
 - Forty scalar functions and six macros for addresses, TCP flags and
   protocol numbers (`ip4_to_string`, `ip_in_cidr`, `is_private_ip`,
   `icmp_type_name`, `format_mac`, ...).
-- The histogram functions: the aggregate `hdr_histogram(value)` and
+- The histogram functions: the aggregate `hdr_histogram(value [, sigfigs])` and
   `hdr_percentile`, `hdr_count`, `hdr_min`, `hdr_max`, `hdr_mean`,
   `hdr_stdev`, `hdr_buckets` and `hdr_ascii`, which read what it returns. A
   histogram made here is one the command-line tool reads, and the other way
