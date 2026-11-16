@@ -67,6 +67,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `pcapsql-core` builds for Windows.
 - Each crate declares its minimum Rust version: 1.87 for `pcapsql-core` and
   1.88 for the CLI. An older compiler gives a clear error.
+- Performance: scans of `frames` and `udp` no longer allocate memory for
+  each packet. Address text is written without `format!`.
+- Performance: a SQL function with a constant argument, for example
+  `ip_in_cidr(src_ip, '10.0.0.0/8')`, parses the constant once per query.
+  In the CLI, `ip_in_cidr` went from 30 to 0.6 ns per row.
 
 ### Removed
 
