@@ -29,6 +29,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   their DuckDB types.
 - DuckDB extension: 16 scalar functions and 6 `format_*` macros. They give
   the same results as the CLI.
+- DuckDB extension: a large uncompressed capture is read by several threads.
+- DuckDB extension: the scan functions accept a list of files or a glob.
+  `filename := true` adds the file name as a column.
+- DuckDB extension: `SELECT * FROM 'x.pcap'` reads the `frames` table. This
+  also works for `.pcapng`, `.cap` and their `.gz` and `.zst` forms.
+- DuckDB extension: filters on `frame_number` and `timestamp` skip the
+  packets they exclude.
+- DuckDB extension: the settings `pcapsql_parallel_scan`,
+  `pcapsql_parallel_min_file_size`, `pcapsql_index_stride` and
+  `pcapsql_filter_pushdown`.
+- DuckDB extension: release builds for Linux and macOS, and a function
+  reference in `docs/duckdb-extension-reference.md`.
 
 ### Changed
 
@@ -48,6 +60,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Some scalar results change to match the CLI. For example,
     `tcp_flags_str(0)` is `''`, not `NONE`, and an unknown IP protocol is
     `Proto 200`, not `PROTO200`.
+- DuckDB extension: the error for a truncated capture names the last
+  complete frame.
 
 ## [0.4.1] - 2026-10-24
 
