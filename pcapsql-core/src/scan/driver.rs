@@ -267,9 +267,14 @@ impl<R: PacketReader, O: FrameObserver> PartitionScan<R, O> {
     /// call. When several outputs are waiting, each call returns one of
     /// them, before any packet is read.
     ///
-    /// An error is the reader's (the scan can be stepped again when the
-    /// reader can be read again, as after a read timeout) or the
-    /// observer's.
+    /// An error is the reader's or the observer's. The rows of packets
+    /// consumed before it are in the sinks and counted in
+    /// [`stats`](PartitionScan::stats). Stepping again is only meaningful
+    /// when the reader says it can be read again: after a read timeout
+    /// ([`PacketReader::take_read_timeout`]) the next step carries on where
+    /// this one stopped. After any other reader error (a malformed or
+    /// truncated record, a failed read) or an observer error, stop
+    /// stepping the partition.
     ///
     /// # Panics
     ///
@@ -304,6 +309,9 @@ impl<R: PacketReader, O: FrameObserver> PartitionScan<R, O> {
         let frames = plan.frames();
         let filtered = *filtered;
         let mut failed = None;
+        // Packets consumed in this call, for the stats when the reader fails
+        // after delivering some (its count is then lost with the result).
+        let mut consumed = 0u64;
         let delivered = reader.process_packets_flow(max_packets, |packet| {
             // True when the frame after this one cannot match either: the
             // scan ends once this one is consumed.
@@ -322,6 +330,7 @@ impl<R: PacketReader, O: FrameObserver> PartitionScan<R, O> {
                     .is_none_or(|next| frames.past_end(next));
                 if !frames.accepts(&packet) {
                     stats.skipped += 1;
+                    consumed += 1;
                     if last {
                         *ended = true;
                         return ControlFlow::Break(Pause::After);
@@ -337,6 +346,7 @@ impl<R: PacketReader, O: FrameObserver> PartitionScan<R, O> {
                 stats.min_ts_ns = stats.min_ts_ns.min(packet.timestamp_ns);
                 stats.max_ts_ns = stats.max_ts_ns.max(packet.timestamp_ns);
                 if let Err(error) = observer.observe(&packet, &layers) {
+                    consumed += 1;
                     failed = Some(error);
                     return ControlFlow::Break(Pause::After);
                 }
@@ -345,18 +355,32 @@ impl<R: PacketReader, O: FrameObserver> PartitionScan<R, O> {
                 // Rows of the frame are waiting for a full sink: the reader
                 // keeps the packet and shows it again.
                 Routed::Redeliver => ControlFlow::Break(Pause::Before),
-                Routed::Consumed if last => {
-                    *ended = true;
-                    ControlFlow::Break(Pause::After)
+                Routed::Consumed => {
+                    consumed += 1;
+                    if last {
+                        *ended = true;
+                        ControlFlow::Break(Pause::After)
+                    } else if router.has_flush() {
+                        ControlFlow::Break(Pause::After)
+                    } else {
+                        ControlFlow::Continue(())
+                    }
                 }
-                Routed::Consumed if router.has_flush() => ControlFlow::Break(Pause::After),
-                Routed::Consumed => ControlFlow::Continue(()),
             }
-        })?;
-        stats.packets += delivered.consumed as u64;
+        });
+        // Rows already in the sinks are counted whether or not the reader
+        // failed.
         for (index, rows) in stats.rows.iter_mut().enumerate() {
             *rows = router.rows(OutputId(index as u16));
         }
+        let delivered = match delivered {
+            Ok(delivered) => delivered,
+            Err(error) => {
+                stats.packets += consumed;
+                return Err(error);
+            }
+        };
+        stats.packets += delivered.consumed as u64;
         if let Some(error) = failed {
             return Err(error);
         }
@@ -432,6 +456,9 @@ mod tests {
         next: usize,
         /// Fail the read before this frame index, once.
         fail_before: Option<usize>,
+        /// Fail there even after delivering packets in the same call (a
+        /// malformed record), instead of reporting those first (a timeout).
+        fail_hard: bool,
         /// The highest frame number shown to a callback.
         shown: u64,
     }
@@ -469,6 +496,7 @@ mod tests {
                 frames: (0..count).map(frame).collect(),
                 next: 0,
                 fail_before: None,
+                fail_hard: false,
                 shown: 0,
             }
         }
@@ -482,7 +510,7 @@ mod tests {
             let mut consumed = 0;
             while consumed < max && self.next < self.frames.len() {
                 if self.fail_before == Some(self.next) {
-                    if consumed > 0 {
+                    if consumed > 0 && !self.fail_hard {
                         break;
                     }
                     self.fail_before = None;
@@ -799,6 +827,20 @@ mod tests {
         assert_eq!(scan.step(&mut sinks, 100).unwrap(), Step::End);
         assert_eq!(numbers(sinks[0].take_rows()), [1, 2, 3, 4]);
         assert_eq!(scan.reader().position().frame_number, 4);
+    }
+
+    /// A reader that fails after delivering packets in the same call: the
+    /// packets and rows already written are still counted.
+    #[test]
+    fn a_read_error_after_delivering_keeps_the_counts() {
+        let mut scan = scan(4, &[("frames", None), ("udp", None)]);
+        scan.reader_mut().fail_before = Some(2);
+        scan.reader_mut().fail_hard = true;
+        let mut sinks = sinks(scan.plan(), None);
+        assert!(scan.step(&mut sinks, 100).is_err());
+        assert_eq!(numbers(sinks[0].take_rows()), [1, 2]);
+        assert_eq!(scan.stats().packets, 2);
+        assert_eq!(*scan.stats().rows, [2, 2]);
     }
 
     /// A frame range gives the rows of exactly its frames, to every output
