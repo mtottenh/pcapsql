@@ -1,0 +1,191 @@
+# name: test/sql/read_pcap.test
+# description: read_pcap(file, protocol := ...) and read_<table>(file) scan a capture
+# group: [pcapsql]
+
+# The captures are small real ones the repository already has, as seeds of the reader fuzzer
+# (fuzz/corpus/fuzz_pcap_reader). The paths are relative to pcapsql-duckdb/, where `make
+# test_release` runs the tests. The in-process tests (itest/) cover the scans in depth; this
+# file checks that the built artifact reads captures.
+
+statement error
+SELECT * FROM read_pcap('../fuzz/corpus/fuzz_pcap_reader/dns.cap');
+----
+read_pcap
+
+require pcapsql
+
+# One function per table of pcap_protocols(), and the generic one
+query I
+SELECT count(*) FROM duckdb_functions()
+WHERE function_type = 'table' AND function_name IN (SELECT 'read_' || name FROM pcap_protocols());
+----
+28
+
+query TTT
+SELECT function_name, parameters, parameter_types FROM duckdb_functions()
+WHERE function_name IN ('read_pcap', 'read_tcp') ORDER BY function_name;
+----
+read_pcap	[file, protocol, strict]	[ANY, VARCHAR, BOOLEAN]
+read_tcp	[file, strict]	[ANY, BOOLEAN]
+
+# read_pcap reads frames unless a protocol is named
+query IIII
+SELECT count(*), min(frame_number), max(frame_number), sum(length)
+FROM read_pcap('../fuzz/corpus/fuzz_pcap_reader/dns.cap');
+----
+38	1	38	3706
+
+query ITIII
+SELECT frame_number, timestamp, length, original_length, link_type
+FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dns.cap') WHERE frame_number <= 2;
+----
+1	2005-03-30 08:47:46.496046	70	70	1
+2	2005-03-30 08:47:46.496576	98	98	1
+
+query T
+SELECT DISTINCT typeof(timestamp) FROM read_pcap('../fuzz/corpus/fuzz_pcap_reader/dns.cap', protocol := 'udp');
+----
+TIMESTAMP_NS
+
+# The columns are those pcap_schema() lists, in order
+query I
+SELECT count(*) FROM (
+    SELECT row_number() OVER () AS position, column_name, column_type
+    FROM (DESCRIBE SELECT * FROM read_dns('../fuzz/corpus/fuzz_pcap_reader/dns.cap'))
+) described
+FULL JOIN (
+    SELECT row_number() OVER () AS position, column_name, column_type FROM pcap_schema('dns')
+) listed USING (position)
+WHERE described.column_name IS DISTINCT FROM listed.column_name
+   OR described.column_type IS DISTINCT FROM listed.column_type;
+----
+0
+
+# A protocol table, with the scalar functions on its columns
+query ITTTIT
+SELECT frame_number, is_query, query_name, dns_type_name(query_type), answer_count, format_ip4_list(answer_ip4s)
+FROM read_dns('../fuzz/corpus/fuzz_pcap_reader/dns.cap') WHERE frame_number BETWEEN 9 AND 12;
+----
+9	true	www.netbsd.org	A	0	[]
+10	false	www.netbsd.org	A	1	[204.152.190.12]
+11	true	www.netbsd.org	AAAA	0	[]
+12	false	www.netbsd.org	AAAA	1	[]
+
+# AAAA answers are in answer_ip6s; a response without any has an empty list, not NULL
+query IT
+SELECT frame_number, array_to_string(list_transform(answer_ip6s, lambda a: ip6_to_string(a)), ' ')
+FROM read_dns('../fuzz/corpus/fuzz_pcap_reader/dns.cap') WHERE len(answer_ip6s) > 0;
+----
+12	2001:4f8:4:7:2e0:81ff:fe52:9a6b
+14	2001:4f8:4:7:2e0:81ff:fe52:9a6b
+24	2001:4f8:0:2::d
+
+query III
+SELECT count(*), count(answer_ip6s), count(answer_ip4s) FROM read_dns('../fuzz/corpus/fuzz_pcap_reader/dns.cap');
+----
+38	38	38
+
+# The generic function and the per-table one are the same scan; a table without rows is empty
+query III
+SELECT (SELECT count(*) FROM read_udp('../fuzz/corpus/fuzz_pcap_reader/dns.cap')),
+       (SELECT count(*) FROM read_pcap('../fuzz/corpus/fuzz_pcap_reader/dns.cap', protocol := 'UDP')),
+       (SELECT count(*) FROM read_tcp('../fuzz/corpus/fuzz_pcap_reader/dns.cap'));
+----
+38	38	0
+
+# Every table has the frame's timestamp, so a protocol table needs no join for it
+query IT
+SELECT count(*), bool_and(d.timestamp = f.timestamp)
+FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dns.cap') f
+JOIN read_dns('../fuzz/corpus/fuzz_pcap_reader/dns.cap') d USING (frame_number);
+----
+38	true
+
+# A tunnelled packet is a row per occurrence of a protocol; encap_depth = 0 is the outermost
+query ITTI
+SELECT frame_number, format_ip4(src_ip), format_ip4(dst_ip), encap_depth
+FROM read_ipv4('../fuzz/corpus/fuzz_pcap_reader/vxlan_simple.pcap') WHERE frame_number = 1;
+----
+1	10.1.1.1	10.1.1.2	0
+1	192.168.1.1	192.168.1.2	1
+
+query IIITITI
+SELECT frame_number, src_port, dst_port, flag_syn, encap_depth, tunnel_type, tunnel_id
+FROM read_tcp('../fuzz/corpus/fuzz_pcap_reader/vxlan_simple.pcap') WHERE frame_number IN (1, 5);
+----
+1	20000	443	true	1	vxlan	200
+5	20004	443	true	1	vxlan	200
+
+query ITTITI
+SELECT frame_number, format_mac(src_mac), format_mac(dst_mac), encap_depth, tunnel_type, tunnel_id
+FROM read_ethernet('../fuzz/corpus/fuzz_pcap_reader/vxlan_simple.pcap') WHERE frame_number = 3;
+----
+3	00:aa:bb:cc:dd:01	00:aa:bb:cc:dd:02	0	NULL	NULL
+3	de:ad:be:ef:00:01	de:ad:be:ef:00:02	1	vxlan	200
+
+query ITI
+SELECT encap_depth, tunnel_type, count(*)
+FROM read_ipv4('../fuzz/corpus/fuzz_pcap_reader/triple_encap_vxlan_ipinip.pcap') GROUP BY ALL ORDER BY ALL;
+----
+0	NULL	100
+2	ip4inip6	100
+
+# A pcapng capture
+query III
+SELECT count(*), count(DISTINCT frame_number), epoch_ns(min(timestamp))
+FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/ldap-ssl.pcapng');
+----
+36	36	1422673532664962000
+
+query III
+SELECT count(*), min(src_port), max(dst_port) FROM read_tcp('../fuzz/corpus/fuzz_pcap_reader/ldap-ssl.pcapng');
+----
+36	389	37386
+
+# strict := true changes nothing for a complete capture
+query I
+SELECT count(*) FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dns.cap', strict := true);
+----
+38
+
+# Errors are bind errors that say what is wrong
+statement error
+SELECT * FROM read_pcap('../fuzz/corpus/fuzz_pcap_reader/dns.cap', protocol := 'nope');
+----
+read_pcap: there is no protocol table 'nope'; pcap_protocols() lists the tables
+
+statement error
+SELECT * FROM read_pcap('../fuzz/corpus/fuzz_pcap_reader/dns.cap', 'dns');
+----
+No function matches
+
+statement error
+SELECT * FROM read_tcp('../fuzz/corpus/fuzz_pcap_reader/no-such-capture.pcap');
+----
+no-such-capture.pcap
+
+statement error
+SELECT * FROM read_tcp('test/sql/read_pcap.test');
+----
+is not a capture file pcapsql can read
+
+statement error
+SELECT * FROM read_tcp(NULL);
+----
+read_tcp: the capture file must not be NULL
+
+statement error
+SELECT * FROM read_tcp(['../fuzz/corpus/fuzz_pcap_reader/dns.cap']);
+----
+read_tcp: a list of capture files is not supported yet
+
+statement error
+SELECT * FROM read_tcp('../fuzz/corpus/fuzz_pcap_reader/dns.cap', strict := NULL);
+----
+read_tcp: strict must be a constant and must not be NULL
+
+# The stream tables have no function yet
+statement error
+SELECT * FROM read_tcp_connections('../fuzz/corpus/fuzz_pcap_reader/dns.cap');
+----
+read_tcp_connections

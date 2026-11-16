@@ -15,17 +15,18 @@ SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM pcap_protocols());
 name	VARCHAR
 description	VARCHAR
 field_count	UINTEGER
+kind	VARCHAR
 
-# The parsers of pcapsql-core's default registry, plus the frames pseudo-protocol
+# frames and the 27 protocol tables of the shared catalogue
 query I
 SELECT count(*) FROM pcap_protocols();
 ----
 28
 
-query TTI
-SELECT name, description, field_count FROM pcap_protocols() WHERE name = 'frames';
+query TTIT
+SELECT name, description, field_count, kind FROM pcap_protocols() WHERE name = 'frames';
 ----
-frames	Raw frame metadata (timestamp, length, etc.)	5
+frames	Raw frame metadata (timestamp, length, etc.)	6	frames
 
 query TT
 SELECT name, description FROM pcap_protocols() WHERE name IN ('dns', 'ethernet', 'ipv6', 'tcp', 'tls');
@@ -46,6 +47,30 @@ query I
 SELECT count(*) FROM pcap_protocols() WHERE field_count = 0 OR description = '';
 ----
 0
+
+# One frames table; every other table holds the layers of one protocol
+query TI
+SELECT kind, count(*) FROM pcap_protocols() GROUP BY kind ORDER BY kind;
+----
+frames	1
+protocol	27
+
+# The stream tables of the catalogue are not read by the extension yet
+query I
+SELECT count(*) FROM pcap_protocols() WHERE name IN ('tcp_connections', 'tls_sessions', 'http_messages', 'http2');
+----
+0
+
+# field_count is the number of columns pcap_schema() lists
+query II
+SELECT field_count, (SELECT count(*) FROM pcap_schema('ethernet')) FROM pcap_protocols() WHERE name = 'ethernet';
+----
+8	8
+
+query I
+SELECT field_count = (SELECT count(*) FROM pcap_schema('dns')) FROM pcap_protocols() WHERE name = 'dns';
+----
+true
 
 # The function takes no arguments
 statement error

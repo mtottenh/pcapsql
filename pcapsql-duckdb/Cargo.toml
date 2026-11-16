@@ -28,4 +28,3 @@ pcapsql-core = { path = "../pcapsql-core" }
 # version targets (2.0.0). Bump together with TARGET_DUCKDB_VERSION in the Makefile.
 duckdb-neo = { version = "=0.20000.2", default-features = false }
 
-hex.workspace = true

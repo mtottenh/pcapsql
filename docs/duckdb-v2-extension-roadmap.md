@@ -299,9 +299,12 @@ of P1. P3 to P6 are independent of each other after P2 and can be reordered.
 
 | Phase | State |
 |---|---|
-| P0 Spike and scaffolding | done: artifact builds and loads in the DuckDB 2.0.0 CLI, 35 in-process tests, CI workflow written (not yet run on GitHub) |
-| P1 Core seams and shared scan layer | S0, S1, S2, S3, S6 done; S4a in progress; S5 next. Scan benchmark numbers for S1 onward still to be taken |
-| P2 to P9 | not started |
+| P0 Spike and scaffolding | done. The CI workflow is written and has not yet run on GitHub |
+| P1 Core seams and shared scan layer | done: S0 to S5, S6 and S7. Open: the scan benchmark gate. A first comparison of the pre-S1 code against S5 on a loaded machine was within a few percent on most single-partition cases, with the TCP-options case 8 to 16 percent slower on very few samples; a clean run is still to be taken |
+| P2 Sequential reader | done: `read_<table>` and `read_pcap`, scalars, macros, `pcap_schema`, `pcap_protocols`. 45 golden-corpus queries match the DataFusion snapshots; every table matches the core driver cell by cell |
+| P3 Projection, cardinality, progress | done except the benchmark exit check. The cardinality is an estimate from the file size |
+| P4 Parallel scans | in progress |
+| P5 to P9 | not started |
 
 ### P0: Spike and scaffolding
 

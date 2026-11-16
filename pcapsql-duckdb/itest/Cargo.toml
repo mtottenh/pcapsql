@@ -15,6 +15,15 @@ publish = false
 pcapsql-duckdb = { path = "..", default-features = false, features = ["static"] }
 # Links libduckdb from DUCKDB_LIB_DIR; `make itest` fetches the matching release.
 duckdb-neo = { version = "=0.20000.2", default-features = false, features = ["build-extension-static"] }
+# The sink trait and its conformance suite, for the test-only `chunk_rows` function; the packet
+# reader; and the kernels, to compare what the SQL functions return with what the kernels return.
+pcapsql-core = { path = "../../pcapsql-core" }
+# The deterministic capture writer the golden corpus of the DataFusion frontend is built with
+# (src/golden.rs), and the temporary directory the captures are written to.
+pcapsql-testgen = { path = "../../pcapsql-testgen" }
+tempfile = "3"
 
 [dev-dependencies]
-tempfile = "3"
+# To write gzip- and zstd-compressed captures.
+flate2 = "1"
+zstd = "0.13"

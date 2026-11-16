@@ -1,0 +1,62 @@
+# name: test/sql/hex.test
+# description: pcap_hex() and pcap_unhex() convert between BLOBs and lowercase hexadecimal text
+# group: [pcapsql]
+
+require pcapsql
+
+query TT
+SELECT typeof(pcap_hex(''::BLOB)), typeof(pcap_unhex('00'));
+----
+VARCHAR	BLOB
+
+query TTT
+SELECT pcap_hex('\xDE\xAD\xBE\xEF'::BLOB), pcap_hex('\x00\x0F'::BLOB), pcap_hex(''::BLOB) = '';
+----
+deadbeef	000f	true
+
+# Any case, surrounding whitespace and a 0x prefix are accepted
+query TTTTI
+SELECT hex(pcap_unhex('deadbeef')), hex(pcap_unhex('DeAdBeEf')), hex(pcap_unhex('  dead ')), hex(pcap_unhex('0xdead')), octet_length(pcap_unhex(''));
+----
+DEADBEEF	DEADBEEF	DEAD	DEAD	0
+
+# Text that is not hexadecimal is NULL, not an error
+query TTTT
+SELECT pcap_unhex('abc'), pcap_unhex('zz'), pcap_unhex('de ad'), pcap_unhex('de:ad');
+----
+NULL	NULL	NULL	NULL
+
+query TT
+SELECT pcap_hex(NULL), pcap_unhex(NULL);
+----
+NULL	NULL
+
+# pcap_hex takes a BLOB, not a number
+statement error
+SELECT pcap_hex(1);
+----
+No function matches
+
+# NULLs are kept row by row
+query T
+SELECT pcap_hex(pcap_unhex(x)) FROM (VALUES ('01'), (NULL), ('odd'), ('FF00')) t(x);
+----
+01
+NULL
+NULL
+ff00
+
+# Round trip over more rows than one vector holds, with values longer than DuckDB stores inline
+query III
+SELECT count(*), count(b), bool_and(pcap_hex(b) = h)
+FROM (SELECT h, pcap_unhex(h) AS b
+      FROM (SELECT CASE WHEN i % 5 <> 0 THEN repeat(format('{:04x}', i), (1 + i % 40)::INTEGER) END AS h FROM range(5000) t(i)));
+----
+5000	4000	true
+
+# Agrees with DuckDB's own hex() and from_hex()
+query TT
+SELECT bool_and(pcap_hex(from_hex(h)) = lower(hex(from_hex(h)))), bool_and(pcap_unhex(h) = from_hex(h))
+FROM (SELECT format('{:032x}', i * 7919) AS h FROM range(3000) t(i));
+----
+true	true

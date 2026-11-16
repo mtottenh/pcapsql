@@ -4,14 +4,22 @@
 //! that touches either is kept below this module. `scripts/check-neo-containment.sh` enforces
 //! that in CI.
 
+pub mod fs;
 pub mod guard;
+mod macros;
 mod registry;
 mod scalar;
+mod table;
+pub mod types;
+pub mod writer;
 
 use duckdb_neo::{extension::Extension, Result};
 
 /// Register every pcapsql function with the extension that is being loaded.
 pub fn register(extension: &Extension) -> Result<()> {
     registry::register(extension)?;
-    scalar::register(extension)
+    table::register(extension)?;
+    scalar::register(extension)?;
+    // After the scalars: the macro bodies call them.
+    macros::register(extension)
 }
