@@ -203,6 +203,10 @@ pub enum ColumnSource {
     /// [stream table](TableKind::Stream) at the end of the pass. There is no
     /// per-packet source.
     Stream,
+    /// Computed from several members of a fused join
+    /// ([`FusedValue`](super::FusedValue)). No table column has this
+    /// source: it is that of an output column of the join.
+    Computed,
 }
 
 /// One column of a table.

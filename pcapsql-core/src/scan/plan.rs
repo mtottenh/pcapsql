@@ -12,10 +12,12 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::sync::Arc;
 
 use super::catalog::{
     Catalog, ColId, ColKind, ColumnSource, TableDef, TableId, TableKind, TimestampUnit,
 };
+use super::fused::{FusedCell, FusedFilterPlan, FusedMemberPlan, FusedPlan};
 use super::predicate::{CompiledPredicate, FramePredicate, RowPredicate};
 use crate::{ParseScope, ProtocolRegistry};
 
@@ -75,7 +77,9 @@ pub struct MemberJoin {
     pub kind: JoinKind,
     /// Index of the member whose keys this one is compared with.
     pub with: usize,
-    /// Whether `encap_depth` must be equal too.
+    /// Whether `encap_depth` must be equal too. Not allowed when either
+    /// side is `frames`, which has no `encap_depth`
+    /// ([`PlanError::FramesDepthJoin`]).
     pub depth: bool,
 }
 
@@ -89,16 +93,87 @@ pub struct FusedMember {
     pub join: Option<MemberJoin>,
 }
 
+/// What one output column of a [`FusedScan`] holds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FusedValue {
+    /// A column of a member's table: NULL in a row where a left-joined
+    /// member has no match.
+    Column {
+        /// The member.
+        member: u16,
+        /// A column of that member's table.
+        column: ColId,
+    },
+    /// The first of these member columns that is not NULL, as SQL's
+    /// `COALESCE`; NULL when all are. The columns must have the same kind.
+    Coalesce(Vec<(u16, ColId)>),
+    /// A text chosen by which members have a row: the label of the first
+    /// member listed that does, `otherwise` when none does. It is SQL's
+    /// `CASE WHEN m.frame_number IS NOT NULL THEN label ... ELSE otherwise
+    /// END` over left-joined members.
+    Present {
+        /// The members to look at, in order, each with its label.
+        cases: Vec<(u16, &'static str)>,
+        /// The label when none of them has a row.
+        otherwise: &'static str,
+    },
+}
+
+/// One output column of a [`FusedScan`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FusedColumn {
+    /// The column's name in the output. `None`: the name of the table
+    /// column, which only a [`FusedValue::Column`] has.
+    pub name: Option<&'static str>,
+    /// What it holds.
+    pub value: FusedValue,
+}
+
+impl From<(u16, ColId)> for FusedColumn {
+    /// The column `column` of member `member`, under its own name.
+    fn from((member, column): (u16, ColId)) -> Self {
+        Self {
+            name: None,
+            value: FusedValue::Column { member, column },
+        }
+    }
+}
+
+/// An exact filter on the joined rows of a [`FusedScan`]: a row is kept if
+/// and only if the member has a row in it and the column's value is one of
+/// `any_of`, as SQL's `member.column IN (...)` in a `WHERE` (a NULL is not
+/// in the list). Unlike a [`RowPredicate`] it is not conservative: no engine
+/// applies it again.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FusedFilter {
+    /// The member.
+    pub member: u16,
+    /// An integer column of that member's protocol table, filled from a
+    /// parser field.
+    pub column: ColId,
+    /// The values that keep a row.
+    pub any_of: Vec<i64>,
+}
+
 /// A join of tables on `frame_number`, produced per frame from the frame's
 /// own layers instead of by a join operator.
+///
+/// The rows are those of the SQL join, every match included: for each frame
+/// the members' rows are that frame's layers of each member's table (the
+/// frame itself for `frames`), joined in member order, and the frame's
+/// joined rows come out in the order of nested loops over the members, the
+/// root outermost and each member's rows in layer order. Frames come in
+/// capture order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FusedScan {
     /// In join order; `members[0]` is the root.
     pub members: Vec<FusedMember>,
-    /// The output columns in output order: the member, and a column of that
-    /// member's table.
-    pub columns: Vec<(u16, ColId)>,
-    /// At most this many rows are wanted, per partition.
+    /// The output columns in output order.
+    pub columns: Vec<FusedColumn>,
+    /// Which joined rows are wanted; `None` for all of them.
+    pub filter: Option<FusedFilter>,
+    /// At most this many rows are wanted, per partition (counted after the
+    /// filter).
     pub fetch: Option<u64>,
 }
 
@@ -158,6 +233,15 @@ pub enum PlanError {
         /// What is wrong with it.
         reason: &'static str,
     },
+    /// A fused join member joined on `encap_depth`
+    /// ([`MemberJoin::depth`]) where it or the member it joins is `frames`,
+    /// which has no `encap_depth`: the join could never match.
+    FramesDepthJoin {
+        /// Its index in [`ScanPlan::fused`].
+        fused: usize,
+        /// The index of the member in [`FusedScan::members`].
+        member: usize,
+    },
     /// More outputs or output columns than an [`OutputId`] or [`OutCol`]
     /// can number.
     TooLarge,
@@ -185,6 +269,11 @@ impl fmt::Display for PlanError {
             PlanError::InvalidFused { fused, reason } => {
                 write!(f, "fused join {fused}: {reason}")
             }
+            PlanError::FramesDepthJoin { fused, member } => write!(
+                f,
+                "fused join {fused}: member {member} joins on encap_depth with frames, \
+                 which has no encap_depth"
+            ),
             PlanError::TooLarge => write!(f, "the plan has too many outputs or columns"),
         }
     }
@@ -195,7 +284,8 @@ impl std::error::Error for PlanError {}
 /// One column of an output.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OutColumn {
-    /// The column's name in its table.
+    /// The column's name: in its table or, for a column of a fused join
+    /// that was given one ([`FusedColumn::name`]), in the join's output.
     pub name: &'static str,
     /// What it stores, timestamps in the plan's unit.
     pub kind: ColKind,
@@ -216,6 +306,8 @@ pub struct OutputPlan {
     predicate: Option<CompiledPredicate>,
     fetch: Option<u64>,
     feed: Feed,
+    /// The join, of a fused output.
+    fused: Option<Arc<FusedPlan>>,
 }
 
 /// What an output's rows are made from.
@@ -235,6 +327,11 @@ impl OutputPlan {
     /// What the output's rows are made from.
     pub(crate) fn feed(&self) -> Feed {
         self.feed
+    }
+
+    /// The resolved join of a fused output.
+    pub(crate) fn fused(&self) -> Option<&Arc<FusedPlan>> {
+        self.fused.as_ref()
     }
 
     /// The row predicate, if it can drop any row. It keeps per-row lookup
@@ -396,6 +493,7 @@ impl ScanPlan {
                     TableKind::Frames => Feed::Frames,
                     _ => Feed::Layer(table.name),
                 },
+                fused: None,
             });
         }
 
@@ -407,7 +505,7 @@ impl ScanPlan {
             if fused.members.is_empty() {
                 return Err(invalid("no members"));
             }
-            let mut members = Vec::with_capacity(fused.members.len());
+            let mut members: Vec<&TableDef> = Vec::with_capacity(fused.members.len());
             for (i, member) in fused.members.iter().enumerate() {
                 let table = table_of(member.table)?;
                 if table.is_stream() {
@@ -420,26 +518,112 @@ impl ScanPlan {
                     (_, Some(join)) if join.with >= i => {
                         return Err(invalid("a member can only join an earlier member"))
                     }
+                    (_, Some(join))
+                        if join.depth
+                            && (table.kind == TableKind::Frames
+                                || members[join.with].kind == TableKind::Frames) =>
+                    {
+                        return Err(PlanError::FramesDepthJoin {
+                            fused: index,
+                            member: i,
+                        })
+                    }
                     (_, Some(_)) => {}
                 }
                 members.push(table);
             }
+            // A column of a member, as an output column and for the parse.
+            let member_column =
+                |member: u16, column: ColId, needs: &mut FieldNeeds| -> Result<_, PlanError> {
+                    let m = usize::from(member);
+                    let table = *members
+                        .get(m)
+                        .ok_or_else(|| invalid("a column names a member the join does not have"))?;
+                    let left = matches!(
+                        fused.members[m].join,
+                        Some(MemberJoin {
+                            kind: JoinKind::Left,
+                            ..
+                        })
+                    );
+                    let out = self.out_column(table, column, left)?;
+                    needs.want(fused.members[m].table, table, [column]);
+                    Ok((m, out))
+                };
             let mut resolved = Vec::with_capacity(fused.columns.len());
-            for (member, column) in &fused.columns {
-                let m = usize::from(*member);
-                let table = *members
-                    .get(m)
-                    .ok_or_else(|| invalid("a column names a member the join does not have"))?;
-                let left = matches!(
-                    fused.members[m].join,
-                    Some(MemberJoin {
-                        kind: JoinKind::Left,
-                        ..
-                    })
-                );
-                resolved.push(self.out_column(table, *column, left)?);
-                needs.want(fused.members[m].table, table, [*column]);
+            let mut cells = Vec::with_capacity(fused.columns.len());
+            for column in &fused.columns {
+                let (out, cell) = match &column.value {
+                    FusedValue::Column { member, column: id } => {
+                        let (m, out) = member_column(*member, *id, &mut needs)?;
+                        (out, FusedCell::column(m, &out))
+                    }
+                    FusedValue::Coalesce(arguments) => {
+                        let mut columns = Vec::with_capacity(arguments.len());
+                        for (member, id) in arguments {
+                            columns.push(member_column(*member, *id, &mut needs)?);
+                        }
+                        let (_, first) = *columns
+                            .first()
+                            .ok_or_else(|| invalid("a COALESCE without arguments"))?;
+                        if columns.iter().any(|(_, out)| out.kind != first.kind) {
+                            return Err(invalid("the arguments of a COALESCE differ in kind"));
+                        }
+                        let out = OutColumn {
+                            name: first.name,
+                            kind: first.kind,
+                            nullable: columns.iter().all(|(_, out)| out.nullable),
+                            source: ColumnSource::Computed,
+                        };
+                        (out, FusedCell::coalesce(&columns))
+                    }
+                    FusedValue::Present { cases, otherwise } => {
+                        if cases
+                            .iter()
+                            .any(|(member, _)| usize::from(*member) >= members.len())
+                        {
+                            return Err(invalid("a column names a member the join does not have"));
+                        }
+                        let out = OutColumn {
+                            name: "",
+                            kind: ColKind::Str,
+                            nullable: false,
+                            source: ColumnSource::Computed,
+                        };
+                        let cases = cases.iter().map(|(m, label)| (usize::from(*m), *label));
+                        (out, FusedCell::present(cases.collect(), otherwise))
+                    }
+                };
+                let name = match (column.name, &column.value) {
+                    (Some(name), _) => name,
+                    (None, FusedValue::Column { .. }) => out.name,
+                    (None, _) => return Err(invalid("a computed column needs a name")),
+                };
+                resolved.push(OutColumn { name, ..out });
+                cells.push(cell);
             }
+            let filter = match &fused.filter {
+                None => None,
+                Some(filter) => {
+                    let (m, out) = member_column(filter.member, filter.column, &mut needs)?;
+                    let integer = matches!(
+                        out.kind,
+                        ColKind::U8
+                            | ColKind::U16
+                            | ColKind::U32
+                            | ColKind::U64
+                            | ColKind::I8
+                            | ColKind::I64
+                    );
+                    let ColumnSource::Field(field) = out.source else {
+                        return Err(invalid("the filter is not on a parser field"));
+                    };
+                    if !integer {
+                        return Err(invalid("the filter is not on an integer column"));
+                    }
+                    Some(FusedFilterPlan::new(m, field, out.kind, &filter.any_of))
+                }
+            };
             // A member with no output column is still parsed: its rows
             // decide which joined rows exist.
             for (member, table) in fused.members.iter().zip(&members) {
@@ -448,12 +632,26 @@ impl ScanPlan {
             if resolved.len() > usize::from(u16::MAX) {
                 return Err(PlanError::TooLarge);
             }
+            let plan = FusedPlan {
+                members: fused
+                    .members
+                    .iter()
+                    .zip(&members)
+                    .map(|(member, table)| FusedMemberPlan {
+                        layer: (table.kind != TableKind::Frames).then_some(table.name),
+                        join: member.join,
+                    })
+                    .collect(),
+                cells: cells.into(),
+                filter,
+            };
             outputs.push(OutputPlan {
                 table: None,
                 columns: resolved.into(),
                 predicate: None,
                 fetch: fused.fetch,
                 feed: Feed::Fused,
+                fused: Some(Arc::new(plan)),
             });
         }
         if outputs.len() > usize::from(u16::MAX) {
@@ -482,6 +680,7 @@ impl ScanPlan {
                 predicate: None,
                 fetch: scan.fetch,
                 feed: Feed::Stream,
+                fused: None,
             });
         }
 
@@ -911,12 +1110,13 @@ mod tests {
                     },
                 ],
                 columns: vec![
-                    (0, col("frames", "timestamp")),
-                    (1, col("tcp", "dst_port")),
-                    (1, col("tcp", "encap_depth")),
-                    (2, col("ipv4", "encap_depth")),
-                    (2, col("ipv4", "ttl")),
+                    (0, col("frames", "timestamp")).into(),
+                    (1, col("tcp", "dst_port")).into(),
+                    (1, col("tcp", "encap_depth")).into(),
+                    (2, col("ipv4", "encap_depth")).into(),
+                    (2, col("ipv4", "ttl")).into(),
                 ],
+                filter: None,
                 fetch: Some(3),
             }],
             ..ScanPlan::default()
@@ -975,7 +1175,8 @@ mod tests {
                         }),
                     },
                 ],
-                columns: vec![(0, cols("frames", &["frame_number"])[0])],
+                columns: vec![(0, cols("frames", &["frame_number"])[0]).into()],
+                filter: None,
                 fetch: None,
             }],
             ..ScanPlan::default()
@@ -1017,6 +1218,7 @@ mod tests {
                     join: None
                 }],
                 columns: vec![],
+                filter: None,
                 fetch: None,
             })),
             PlanError::UnknownTable(nowhere)
@@ -1042,7 +1244,8 @@ mod tests {
                     table: id("udp"),
                     join: None
                 }],
-                columns: vec![(0, bad_column)],
+                columns: vec![(0, bad_column).into()],
+                filter: None,
                 fetch: None,
             })),
             unknown("udp")
@@ -1150,6 +1353,7 @@ mod tests {
                     join: None,
                 }],
                 columns: vec![],
+                filter: None,
                 fetch: None,
             }],
             ..ScanPlan::default()
@@ -1174,7 +1378,8 @@ mod tests {
             let plan = ScanPlan {
                 fused: vec![FusedScan {
                     members,
-                    columns,
+                    columns: columns.into_iter().map(Into::into).collect(),
+                    filter: None,
                     fetch: None,
                 }],
                 ..ScanPlan::default()
@@ -1209,6 +1414,7 @@ mod tests {
             fused: vec![FusedScan {
                 members: vec![member("frames", None), member("tls_sessions", inner(0))],
                 columns: vec![],
+                filter: None,
                 fetch: None,
             }],
             ..ScanPlan::default()
@@ -1217,5 +1423,237 @@ mod tests {
             compile(&plan).unwrap_err(),
             PlanError::NotAPacketTable("tls_sessions")
         );
+    }
+
+    /// `frames` has no `encap_depth`: a depth join on either side of it
+    /// could never match, so it does not compile.
+    #[test]
+    fn depth_joins_with_frames_are_errors() {
+        let join = |with, depth| {
+            Some(MemberJoin {
+                kind: JoinKind::Left,
+                with,
+                depth,
+            })
+        };
+        let member = |table: &str, join| FusedMember {
+            table: id(table),
+            join,
+        };
+        let compiled = |members: Vec<FusedMember>| {
+            let plan = ScanPlan {
+                fused: vec![FusedScan {
+                    members,
+                    columns: vec![],
+                    filter: None,
+                    fetch: None,
+                }],
+                ..ScanPlan::default()
+            };
+            compile(&plan)
+        };
+        // frames on the left.
+        let error = compiled(vec![
+            member("frames", None),
+            member("udp", join(0, false)),
+            member("ipv4", join(0, true)),
+        ])
+        .unwrap_err();
+        assert_eq!(
+            error,
+            PlanError::FramesDepthJoin {
+                fused: 0,
+                member: 2
+            }
+        );
+        assert!(error.to_string().contains("encap_depth"), "{error}");
+        // frames on the right.
+        assert_eq!(
+            compiled(vec![member("udp", None), member("frames", join(0, true))]).unwrap_err(),
+            PlanError::FramesDepthJoin {
+                fused: 0,
+                member: 1
+            }
+        );
+        // Without depth, or between protocol tables, it compiles.
+        assert!(compiled(vec![member("udp", None), member("frames", join(0, false))]).is_ok());
+        assert!(compiled(vec![
+            member("frames", None),
+            member("udp", join(0, false)),
+            member("ipv4", join(1, true)),
+        ])
+        .is_ok());
+    }
+
+    /// `frames`, `tcp` on the frame, `ipv4` and `ipv6` left-joined on the
+    /// level of `tcp`.
+    fn tcp_join(columns: Vec<FusedColumn>, filter: Option<FusedFilter>) -> ScanPlan {
+        let join = |kind, with, depth| Some(MemberJoin { kind, with, depth });
+        ScanPlan {
+            fused: vec![FusedScan {
+                members: vec![
+                    FusedMember {
+                        table: id("frames"),
+                        join: None,
+                    },
+                    FusedMember {
+                        table: id("tcp"),
+                        join: join(JoinKind::Inner, 0, false),
+                    },
+                    FusedMember {
+                        table: id("ipv4"),
+                        join: join(JoinKind::Left, 1, true),
+                    },
+                    FusedMember {
+                        table: id("ipv6"),
+                        join: join(JoinKind::Left, 1, true),
+                    },
+                ],
+                columns,
+                filter,
+                fetch: None,
+            }],
+            ..ScanPlan::default()
+        }
+    }
+
+    #[test]
+    fn computed_columns_of_a_fused_join_are_named_typed_and_parsed() {
+        let col = |table: &str, name: &str| cols(table, &[name])[0];
+        let plan = tcp_join(
+            vec![
+                FusedColumn {
+                    name: Some("src_ip_v4"),
+                    value: FusedValue::Column {
+                        member: 2,
+                        column: col("ipv4", "src_ip"),
+                    },
+                },
+                FusedColumn {
+                    name: Some("ttl"),
+                    value: FusedValue::Coalesce(vec![
+                        (2, col("ipv4", "ttl")),
+                        (3, col("ipv6", "hop_limit")),
+                    ]),
+                },
+                FusedColumn {
+                    name: Some("family"),
+                    value: FusedValue::Present {
+                        cases: vec![(2, "v4"), (3, "v6")],
+                        otherwise: "none",
+                    },
+                },
+                (1, col("tcp", "encap_depth")).into(),
+            ],
+            Some(FusedFilter {
+                member: 1,
+                column: col("tcp", "dst_port"),
+                any_of: vec![80, 443],
+            }),
+        );
+        let compiled = compile(&plan).unwrap();
+        let columns: Vec<_> = compiled.outputs()[0]
+            .columns
+            .iter()
+            .map(|c| (c.name, c.kind, c.nullable, c.source))
+            .collect();
+        assert_eq!(
+            columns,
+            [
+                (
+                    "src_ip_v4",
+                    ColKind::U32,
+                    true,
+                    ColumnSource::Field("src_ip")
+                ),
+                ("ttl", ColKind::U8, true, ColumnSource::Computed),
+                ("family", ColKind::Str, false, ColumnSource::Computed),
+                ("encap_depth", ColKind::U8, false, ColumnSource::EncapDepth),
+            ]
+        );
+        // Every argument of a computed column, and the filter's column, is
+        // extracted.
+        let projections = compiled.scope().projections();
+        let fields = |protocol: &str| {
+            let mut fields: Vec<&str> = projections[protocol].iter().map(String::as_str).collect();
+            fields.sort_unstable();
+            fields
+        };
+        assert_eq!(fields("ipv4"), ["src_ip", "ttl"]);
+        assert_eq!(fields("ipv6"), ["hop_limit"]);
+        assert_eq!(fields("tcp"), ["dst_port"]);
+    }
+
+    #[test]
+    fn malformed_computed_columns_and_filters_are_errors() {
+        let col = |table: &str, name: &str| cols(table, &[name])[0];
+        let reason = |plan: ScanPlan| match compile(&plan).unwrap_err() {
+            PlanError::InvalidFused { fused: 0, reason } => reason,
+            other => panic!("{other:?}"),
+        };
+        let computed = |name, value| tcp_join(vec![FusedColumn { name, value }], None);
+        assert_eq!(
+            reason(computed(Some("x"), FusedValue::Coalesce(vec![]))),
+            "a COALESCE without arguments"
+        );
+        assert_eq!(
+            reason(computed(
+                Some("x"),
+                FusedValue::Coalesce(vec![(2, col("ipv4", "ttl")), (1, col("tcp", "dst_port"))])
+            )),
+            "the arguments of a COALESCE differ in kind"
+        );
+        assert_eq!(
+            reason(computed(
+                None,
+                FusedValue::Coalesce(vec![(2, col("ipv4", "ttl"))])
+            )),
+            "a computed column needs a name"
+        );
+        assert_eq!(
+            reason(computed(
+                Some("x"),
+                FusedValue::Present {
+                    cases: vec![(4, "no such member")],
+                    otherwise: "",
+                }
+            )),
+            "a column names a member the join does not have"
+        );
+        assert_eq!(
+            reason(computed(
+                Some("x"),
+                FusedValue::Coalesce(vec![(9, col("ipv4", "ttl"))])
+            )),
+            "a column names a member the join does not have"
+        );
+
+        let filtered = |member, column| {
+            tcp_join(
+                vec![],
+                Some(FusedFilter {
+                    member,
+                    column,
+                    any_of: vec![1],
+                }),
+            )
+        };
+        assert_eq!(
+            reason(filtered(1, col("tcp", "encap_depth"))),
+            "the filter is not on a parser field"
+        );
+        assert_eq!(
+            reason(filtered(0, col("frames", "frame_number"))),
+            "the filter is not on a parser field"
+        );
+        assert_eq!(
+            reason(filtered(3, col("ipv6", "src_ip"))),
+            "the filter is not on an integer column"
+        );
+        assert_eq!(
+            reason(filtered(7, col("tcp", "dst_port"))),
+            "a column names a member the join does not have"
+        );
+        assert!(compile(&filtered(1, col("tcp", "dst_port"))).is_ok());
     }
 }

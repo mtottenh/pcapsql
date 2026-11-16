@@ -48,8 +48,8 @@
 //! if and only if the predicate accepts it. A packet it rejects is consumed
 //! from the reader and nothing else: it is not parsed, not routed, not shown
 //! to the [`FrameObserver`] and not counted against a row cap. (An observer
-//! therefore sees the accepted frames only. That is what a fused join built
-//! in an observer needs. Stream reassembly needs every packet, and
+//! therefore sees the accepted frames only. Stream reassembly needs every
+//! packet, and
 //! [`ScanPlan::compile`](super::ScanPlan::compile) refuses a plan that has
 //! both stream tables and a frame predicate.)
 //!
@@ -118,8 +118,7 @@ pub struct ScanStats {
     /// The latest timestamp of an accepted packet, in nanoseconds;
     /// `i64::MIN` before the first one.
     pub max_ts_ns: i64,
-    /// Rows written per output, indexed by [`OutputId`]. Outputs the scan
-    /// does not route (fused joins, for now) stay at 0.
+    /// Rows written per output, indexed by [`OutputId`].
     pub rows: Box<[u64]>,
 }
 
@@ -150,7 +149,7 @@ impl Default for ScanStats {
 /// Sees every frame of a partition scan that the plan's frame predicate
 /// accepts (every frame, when there is none) once, parsed, before its rows
 /// are routed: the hook for what a frontend derives from frames besides the
-/// routed rows (stream reassembly, outputs it builds itself).
+/// routed rows (stream reassembly).
 ///
 /// It is a type parameter of [`PartitionScan`], so the call is static and a
 /// scan without an observer ([`NoObserver`]) pays nothing for the hook. The
@@ -201,9 +200,10 @@ impl FrameObserver for NoObserver {
 /// One partition of a compiled scan, read step by step. See the
 /// [module](self) documentation.
 ///
-/// The outputs it writes are the plan's `frames` and protocol-table outputs
-/// (what a [`Router`] routes). Fused joins and stream tables are not built
-/// here yet; a frontend that has them builds them in its [`FrameObserver`].
+/// The outputs it writes are the plan's per-packet outputs (what a
+/// [`Router`] routes): `frames`, the protocol tables and the fused joins.
+/// Stream tables are not built here yet; a frontend that has them builds
+/// them in its [`FrameObserver`].
 pub struct PartitionScan<R: PacketReader, O: FrameObserver = NoObserver> {
     reader: R,
     plan: Arc<CompiledScan>,
@@ -262,10 +262,9 @@ impl<R: PacketReader, O: FrameObserver> PartitionScan<R, O> {
     /// partition also ends where the predicate accepts no later frame.
     ///
     /// `sinks[i]` is the sink of output `i` of the plan
-    /// ([`CompiledScan::outputs`]); a slice that stops before the fused
-    /// joins will do. On `Flush`, empty that output's sink before the next
-    /// call. When several outputs are waiting, each call returns one of
-    /// them, before any packet is read.
+    /// ([`CompiledScan::outputs`]). On `Flush`, empty that output's sink
+    /// before the next call. When several outputs are waiting, each call
+    /// returns one of them, before any packet is read.
     ///
     /// An error is the reader's or the observer's. The rows of packets
     /// consumed before it are in the sinks and counted in
@@ -400,7 +399,7 @@ impl<R: PacketReader, O: FrameObserver> PartitionScan<R, O> {
     }
 
     /// True when `output` takes no further row: it reached its row cap or
-    /// was closed. Always false for an output the scan does not route.
+    /// was closed.
     pub fn output_done(&self, output: OutputId) -> bool {
         self.router.is_done(output)
     }

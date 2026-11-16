@@ -41,6 +41,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pcapsql_filter_pushdown`.
 - DuckDB extension: release builds for Linux and macOS, and a function
   reference in `docs/duckdb-extension-reference.md`.
+- DuckDB extension: `read_<protocol>_packets(files)` for each of the 21
+  `*_packets` views, and `pcap_views()` to list them.
 
 ### Changed
 

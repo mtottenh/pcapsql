@@ -1,8 +1,14 @@
-//! `pcap_protocols()` and `pcap_schema(protocol)`: what the extension can read, from the same
-//! catalogue the scans use (`pcapsql_core::scan::Catalog`).
+//! `pcap_protocols()`, `pcap_views()` and `pcap_schema(name)`: what the extension can read, from
+//! the same definitions the scans use (`pcapsql_core::scan`: its `Catalog` of tables and its
+//! `PacketsView`s).
 //!
 //! [`scan_tables`] and [`exposed_columns`] say which tables and columns of the catalogue this
-//! engine offers; the two functions list exactly those.
+//! engine offers, and [`views`] which views. A [`Relation`] is one of either: what a scan
+//! function reads. `pcap_protocols()` lists the tables, `pcap_views()` the views, and
+//! `pcap_schema` the columns of either.
+//!
+//! The views are not rows of `pcap_protocols()`: that function lists the protocol tables, one
+//! per parser, and what it returned before there were views is what it returns now.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -16,8 +22,8 @@ use duckdb_neo::{
     Error, Result,
 };
 use pcapsql_core::scan::{
-    Catalog, ColId, ColKind, ColumnDef, ColumnSource, OutCol, OutColumn, RowSink, TableDef,
-    TableId, TableKind,
+    Catalog, ColId, ColKind, ColumnDef, ColumnSource, FramePredicate, OutCol, OutColumn,
+    PacketsView, RowSink, ScanPlan, TableDef, TableId, TableKind, TableScan,
 };
 
 use super::{guard, types, writer::ChunkWriter};
@@ -25,6 +31,7 @@ use super::{guard, types, writer::ChunkWriter};
 pub(super) fn register(extension: &Extension) -> Result<()> {
     guard::table_function("pcap_protocols", SignatureBuilder::new(), PcapProtocols)
         .register(extension)?;
+    guard::table_function("pcap_views", SignatureBuilder::new(), PcapViews).register(extension)?;
     guard::table_function(
         "pcap_schema",
         SignatureBuilder::new().param(FunctionParameter::new::<String>("protocol")),
@@ -56,6 +63,131 @@ pub(super) fn scan_table(name: &str) -> Option<(TableId, &'static TableDef)> {
 /// because it cannot fuse a join against `frames` (decision D5 of the roadmap).
 pub(super) fn exposed_columns(table: &TableDef) -> impl Iterator<Item = (ColId, &ColumnDef)> {
     table.columns()
+}
+
+/// The `*_packets` views this engine reads: all of those the scan layer defines, in its order.
+pub(super) fn views() -> &'static [PacketsView] {
+    PacketsView::all()
+}
+
+/// Where a message about an unknown table or view sends the reader.
+pub(super) const WHERE_TO_LOOK: &str =
+    "pcap_protocols() lists the tables and pcap_views() the views";
+
+/// What a scan function reads: a table of the catalogue, or a `*_packets` view.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum Relation {
+    /// One of [`scan_tables`].
+    Table(TableId),
+    /// One of [`views`]: a join of tables on the frame, which the scan layer evaluates frame
+    /// by frame as one output of the pass (a fused scan).
+    View(&'static PacketsView),
+}
+
+/// Which of the frame's own columns a declared column is. A filter on one of these says which
+/// frames a scan must read (`engine::pushdown`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FrameColumn {
+    Number,
+    Timestamp,
+}
+
+/// A column a scan function declares to DuckDB.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Declared {
+    pub(super) name: &'static str,
+    /// What it stores, a timestamp in this engine's unit.
+    pub(super) kind: ColKind,
+    pub(super) nullable: bool,
+    pub(super) frame: Option<FrameColumn>,
+}
+
+impl Relation {
+    /// The table or view called `name`, if the engine reads it.
+    pub(super) fn find(name: &str) -> Option<Relation> {
+        match scan_table(name) {
+            Some((table, _)) => Some(Relation::Table(table)),
+            None => views()
+                .iter()
+                .find(|view| view.name == name)
+                .map(Relation::View),
+        }
+    }
+
+    pub(super) fn name(self) -> &'static str {
+        match self {
+            Relation::Table(table) => Catalog::builtin().get(table).name,
+            Relation::View(view) => view.name,
+        }
+    }
+
+    /// The columns a scan of the relation returns, in order: a table's exposed columns, a
+    /// view's columns.
+    pub(super) fn columns(self) -> Vec<Declared> {
+        match self {
+            Relation::Table(table) => exposed_columns(Catalog::builtin().get(table))
+                .map(|(_, column)| Declared {
+                    name: column.name,
+                    kind: types::column_kind(column),
+                    nullable: column.nullable,
+                    frame: match column.source {
+                        ColumnSource::FrameNumber => Some(FrameColumn::Number),
+                        ColumnSource::Timestamp => Some(FrameColumn::Timestamp),
+                        _ => None,
+                    },
+                })
+                .collect(),
+            Relation::View(view) => view
+                .columns()
+                .iter()
+                .map(|column| Declared {
+                    name: column.name,
+                    kind: column.kind_in(types::TIMESTAMPS),
+                    nullable: column.nullable,
+                    frame: if column.is_frame_number {
+                        Some(FrameColumn::Number)
+                    } else if column.is_timestamp {
+                        Some(FrameColumn::Timestamp)
+                    } else {
+                        None
+                    },
+                })
+                .collect(),
+        }
+    }
+
+    /// The plan of a scan of `columns` (indices into [`columns`](Self::columns), in output
+    /// order) over the frames `frames` accepts. Either way it has one output: the table's
+    /// rows, or the view's joined rows.
+    ///
+    /// # Panics
+    ///
+    /// If an index is not a column of the relation.
+    pub(super) fn plan(self, columns: &[usize], frames: FramePredicate) -> ScanPlan {
+        let mut plan = ScanPlan {
+            frames,
+            timestamps: types::TIMESTAMPS,
+            ..ScanPlan::default()
+        };
+        match self {
+            Relation::Table(table) => {
+                let exposed: Vec<ColId> = exposed_columns(Catalog::builtin().get(table))
+                    .map(|(id, _)| id)
+                    .collect();
+                let columns = columns.iter().map(|&index| exposed[index]).collect();
+                plan.tables.push(TableScan::new(table, columns));
+            }
+            Relation::View(view) => plan.fused.push(view.scan(columns)),
+        }
+        plan
+    }
+}
+
+/// Everything a scan function can read: the tables, then the views.
+pub(super) fn relations() -> impl Iterator<Item = Relation> {
+    scan_tables()
+        .map(|(table, _)| Relation::Table(table))
+        .chain(views().iter().map(Relation::View))
 }
 
 /// The `kind` column of `pcap_protocols()`.
@@ -234,19 +366,91 @@ impl TableFunctionCallbacks for PcapProtocols {
     }
 }
 
+const VIEW_COLUMNS: &[OutColumn] = &[
+    column("name", ColKind::Str),
+    column("description", ColKind::Str),
+    column("protocol", ColKind::Str),
+    column("column_count", ColKind::U32),
+];
+
+/// The rows of `pcap_views()`: one per view of [`views`], sorted by name, with the protocol
+/// table it has a row per row of.
+fn view_rows() -> Vec<Vec<Cell>> {
+    let mut views: Vec<&PacketsView> = views().iter().collect();
+    views.sort_by_key(|view| view.name);
+    views
+        .into_iter()
+        .map(|view| {
+            vec![
+                Cell::Text(view.name),
+                Cell::Text(view.description),
+                Cell::Text(view.anchor),
+                Cell::Count(view.columns().len() as u32),
+            ]
+        })
+        .collect()
+}
+
+struct PcapViews;
+
+impl TableFunctionCallbacks for PcapViews {
+    type BindData = Listing;
+    /// Index of the next row to emit.
+    type GlobalState = AtomicUsize;
+    type LocalState = ();
+
+    fn bind(
+        &self,
+        context: &Context,
+        _arguments: Vec<BindArgument>,
+        bind_handle: BindFunctionHandle<'_>,
+    ) -> Result<Self::BindData> {
+        Listing {
+            columns: VIEW_COLUMNS,
+            rows: view_rows(),
+        }
+        .bind(context, &bind_handle)
+    }
+
+    fn init_global_state(
+        &self,
+        _context: &Context,
+        _bind_data: &Self::BindData,
+        _column_data: InitColumnData<'_>,
+    ) -> Result<Option<Self::GlobalState>> {
+        Ok(Some(AtomicUsize::new(0)))
+    }
+
+    fn exec(
+        &self,
+        _context: &Context,
+        listing: &Self::BindData,
+        _local_state: Option<&mut Self::LocalState>,
+        next_row: Option<&Self::GlobalState>,
+        output: DataChunkRef<'_>,
+        _column_info: ExecColumnInfo<'_>,
+    ) -> Result<()> {
+        let next_row = next_row.expect("init_global_state always returns a state");
+        listing.emit(next_row, output)
+    }
+}
+
 const SCHEMA_COLUMNS: &[OutColumn] = &[
     column("column_name", ColKind::Str),
     column("column_type", ColKind::Str),
     column("nullable", ColKind::Bool),
 ];
 
-/// The rows of `pcap_schema(table)`: one per column a scan of the table returns, in order.
-fn schema_rows(table: &TableDef) -> Vec<Vec<Cell>> {
-    exposed_columns(table)
-        .map(|(_, column)| {
+/// The rows of `pcap_schema(name)`: one per column a scan of the table or view returns, in
+/// order.
+fn schema_rows(relation: Relation) -> Vec<Vec<Cell>> {
+    relation
+        .columns()
+        .into_iter()
+        .map(|column| {
             vec![
                 Cell::Text(column.name),
-                Cell::Text(types::sql_name(types::column_kind(column))),
+                Cell::Text(types::sql_name(column.kind)),
                 Cell::Flag(column.nullable),
             ]
         })
@@ -274,16 +478,15 @@ impl TableFunctionCallbacks for PcapSchema {
             .transpose()?
             .flatten()
             .ok_or_else(|| Error::invalid_input("pcap_schema: the protocol must not be NULL"))?;
-        // Table names are lower case; any case is accepted, as the extension always did.
-        let (_, table) = scan_table(&name.to_ascii_lowercase()).ok_or_else(|| {
+        // The names are lower case; any case is accepted, as the extension always did.
+        let relation = Relation::find(&name.to_ascii_lowercase()).ok_or_else(|| {
             Error::invalid_input(format!(
-                "pcap_schema: there is no protocol table '{name}'; \
-                 pcap_protocols() lists the tables"
+                "pcap_schema: there is no protocol table '{name}'; {WHERE_TO_LOOK}"
             ))
         })?;
         Listing {
             columns: SCHEMA_COLUMNS,
-            rows: schema_rows(table),
+            rows: schema_rows(relation),
         }
         .bind(context, &bind_handle)
     }
@@ -345,10 +548,9 @@ mod tests {
             let name = text(&row[0]);
             // No table is left with the fallback description.
             assert_ne!(text(&row[1]), "Protocol parser", "{name}");
-            let (_, table) = scan_table(name).unwrap();
             assert_eq!(
                 row[2],
-                Cell::Count(schema_rows(table).len() as u32),
+                Cell::Count(schema_rows(Relation::find(name).unwrap()).len() as u32),
                 "{name}"
             );
             let kind = if name == "frames" {
@@ -362,8 +564,7 @@ mod tests {
 
     #[test]
     fn frames_schema_follows_the_catalogue() {
-        let (_, frames) = scan_table("frames").unwrap();
-        let rows: Vec<(&str, &str, bool)> = schema_rows(frames)
+        let rows: Vec<(&str, &str, bool)> = schema_rows(Relation::find("frames").unwrap())
             .iter()
             .map(|row| (text(&row[0]), text(&row[1]), row[2] == Cell::Flag(true)))
             .collect();
@@ -382,8 +583,8 @@ mod tests {
 
     #[test]
     fn protocol_tables_expose_the_opt_in_timestamp_second() {
-        for (_, table) in scan_tables().filter(|(_, table)| table.kind == TableKind::Protocol) {
-            let rows = schema_rows(table);
+        for (id, table) in scan_tables().filter(|(_, table)| table.kind == TableKind::Protocol) {
+            let rows = schema_rows(Relation::Table(id));
             let names: Vec<&str> = rows.iter().map(|row| text(&row[0])).collect();
             assert_eq!(names[..2], ["frame_number", "timestamp"], "{}", table.name);
             assert_eq!(text(&rows[1][1]), "TIMESTAMP_NS", "{}", table.name);
@@ -409,6 +610,60 @@ mod tests {
         assert_eq!(column_type("ipv4", "src_ip"), ("UINTEGER", true));
         assert_eq!(column_type("ipv6", "src_ip"), ("BLOB", true));
         assert_eq!(column_type("tcp", "encap_depth"), ("UTINYINT", false));
+    }
+
+    #[test]
+    fn views_are_listed_by_name_with_their_protocol() {
+        let rows = view_rows();
+        let names: Vec<&str> = rows.iter().map(|row| text(&row[0])).collect();
+        assert!(names.is_sorted(), "{names:?}");
+        assert_eq!(names.len(), 21);
+        // None is a row of `pcap_protocols()`, and none has a table's name.
+        let tables: Vec<&str> = protocol_rows().iter().map(|row| text(&row[0])).collect();
+        for row in &rows {
+            assert_eq!(row.len(), VIEW_COLUMNS.len());
+            let name = text(&row[0]);
+            assert!(!tables.contains(&name), "{name}");
+            assert!(!text(&row[1]).is_empty(), "{name}");
+            // The protocol is a table the engine reads.
+            assert!(tables.contains(&text(&row[2])), "{name}");
+            let relation = Relation::find(name).unwrap();
+            assert!(matches!(relation, Relation::View(_)), "{name}");
+            assert_eq!(relation.name(), name);
+            assert_eq!(
+                row[3],
+                Cell::Count(schema_rows(relation).len() as u32),
+                "{name}"
+            );
+        }
+        let tcp = rows
+            .iter()
+            .find(|row| text(&row[0]) == "tcp_packets")
+            .unwrap();
+        assert_eq!(text(&tcp[2]), "tcp");
+        assert_eq!(tcp[3], Cell::Count(20));
+    }
+
+    #[test]
+    fn a_view_s_schema_is_its_columns_in_this_engine_s_types() {
+        let rows: Vec<(&str, &str, bool)> = schema_rows(Relation::find("arp_packets").unwrap())
+            .iter()
+            .map(|row| (text(&row[0]), text(&row[1]), row[2] == Cell::Flag(true)))
+            .collect();
+        assert_eq!(rows[0], ("frame_number", "UBIGINT", false));
+        assert_eq!(rows[1], ("timestamp", "TIMESTAMP_NS", false));
+        // A left-joined layer's columns can be NULL; the anchor's level cannot.
+        assert!(rows.contains(&("src_mac", "BLOB", true)), "{rows:?}");
+        assert!(
+            rows.contains(&("encap_depth", "UTINYINT", false)),
+            "{rows:?}"
+        );
+        // The names of every relation are distinct, so `find` is unambiguous.
+        let mut names = std::collections::HashSet::new();
+        for relation in relations() {
+            assert!(names.insert(relation.name()), "{}", relation.name());
+        }
+        assert_eq!(names.len(), 28 + 21);
     }
 
     #[test]

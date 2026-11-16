@@ -47,6 +47,19 @@ use crate::{FieldHint, FieldValue, ParseResult};
 /// An empty list is an empty list, not NULL.
 #[inline]
 pub fn write_value<S: RowSink>(sink: &mut S, col: OutCol, kind: ColKind, value: &FieldValue<'_>) {
+    coerce(sink, col, kind, value);
+}
+
+/// [`write_value`], always inlined into its caller.
+///
+/// The row writer of the protocol tables ([`write_layer_row`]) is the inner
+/// loop of every scan and calls this directly, so that the coercion is part
+/// of that loop whatever else is compiled for the same sink: a function of
+/// this size is otherwise only inlined while it has a single caller, and the
+/// writer of fused joins is a second one. Everything else calls
+/// [`write_value`], which the compiler may keep out of line.
+#[inline(always)]
+fn coerce<S: RowSink>(sink: &mut S, col: OutCol, kind: ColKind, value: &FieldValue<'_>) {
     match kind {
         ColKind::U8 => {
             let v = match value {
@@ -374,12 +387,98 @@ impl Source {
     }
 }
 
+/// How one column is filled: its source, its kind, and where its field was
+/// found in the previous row.
+///
+/// [`write_layer`](Self::write_layer) and [`write_frame`](Self::write_frame)
+/// write one cell, for the writer of fused joins, whose rows take their
+/// cells from several layers. They say what [`write_layer_row`] and
+/// [`write_frame_row`] say for a whole row; those two keep their own loops,
+/// which are the inner loops of a table scan and stay exactly as they were
+/// before there were fused joins.
 #[derive(Clone, Debug)]
-struct Cell {
+pub(crate) struct Cell {
     source: Source,
     kind: ColKind,
     /// Where the field was found in the previous row.
     hint: FieldHint,
+}
+
+impl Cell {
+    pub(crate) fn new(column: &OutColumn) -> Self {
+        Self {
+            source: Source::of(column),
+            kind: column.kind,
+            hint: FieldHint::default(),
+        }
+    }
+
+    /// The cell of a column of `kind` filled from the parser field `name`.
+    pub(crate) fn field(name: &'static str, kind: ColKind) -> Self {
+        Self {
+            source: Source::Field(name),
+            kind,
+            hint: FieldHint::default(),
+        }
+    }
+
+    /// Write the column's cell of the row of one parsed `layer` of `packet`.
+    #[inline]
+    pub(crate) fn write_layer<S: RowSink>(
+        &mut self,
+        sink: &mut S,
+        col: OutCol,
+        packet: &PacketRef<'_>,
+        layer: &ParseResult<'_>,
+    ) {
+        match self.source {
+            Source::Field(name) => match layer.get_hinted(name, &mut self.hint) {
+                Some(value) => write_value(sink, col, self.kind, value),
+                None => sink.null(col),
+            },
+            Source::FrameNumber => sink.u64(col, packet.frame_number),
+            Source::EncapDepth => sink.u8(col, layer.encap_depth),
+            Source::TunnelType => match layer.tunnel_type.as_str() {
+                Some(name) => sink.str(col, name),
+                None => sink.null(col),
+            },
+            Source::TunnelId => match layer.tunnel_id {
+                Some(id) => sink.u64(col, id),
+                None => sink.null(col),
+            },
+            Source::TimestampMicros => sink.timestamp(col, packet.timestamp_ns / 1_000),
+            Source::TimestampNanos => sink.timestamp(col, packet.timestamp_ns),
+            Source::CapturedLen => sink.u32(col, packet.captured_len),
+            Source::OriginalLen => sink.u32(col, packet.original_len),
+            Source::LinkType => sink.u16(col, packet.link_type),
+            Source::RawData => sink.bytes(col, packet.data),
+            Source::Null => sink.null(col),
+        }
+    }
+
+    /// Write the column's cell of the row of `packet` itself.
+    #[inline]
+    pub(crate) fn write_frame<S: RowSink>(
+        &self,
+        sink: &mut S,
+        col: OutCol,
+        packet: &PacketRef<'_>,
+    ) {
+        match self.source {
+            Source::FrameNumber => sink.u64(col, packet.frame_number),
+            Source::TimestampMicros => sink.timestamp(col, packet.timestamp_ns / 1_000),
+            Source::TimestampNanos => sink.timestamp(col, packet.timestamp_ns),
+            Source::CapturedLen => sink.u32(col, packet.captured_len),
+            Source::OriginalLen => sink.u32(col, packet.original_len),
+            Source::LinkType => sink.u16(col, packet.link_type),
+            Source::RawData => sink.bytes(col, packet.data),
+            Source::EncapDepth
+            | Source::TunnelType
+            | Source::TunnelId
+            | Source::Field(_)
+            | Source::Null => sink.null(col),
+        }
+    }
 }
 
 /// How the columns of one output are filled, with the per-column lookup
@@ -405,14 +504,7 @@ impl FieldResolver {
     /// ([`OutputPlan::columns`](super::OutputPlan::columns)).
     pub fn new(columns: &[OutColumn]) -> Self {
         Self {
-            cells: columns
-                .iter()
-                .map(|column| Cell {
-                    source: Source::of(column),
-                    kind: column.kind,
-                    hint: FieldHint::default(),
-                })
-                .collect(),
+            cells: columns.iter().map(Cell::new).collect(),
         }
     }
 
@@ -445,7 +537,7 @@ pub fn write_layer_row<S: RowSink>(
         let col = OutCol(index as u16);
         match cell.source {
             Source::Field(name) => match layer.get_hinted(name, &mut cell.hint) {
-                Some(value) => write_value(sink, col, cell.kind, value),
+                Some(value) => coerce(sink, col, cell.kind, value),
                 None => sink.null(col),
             },
             Source::FrameNumber => sink.u64(col, packet.frame_number),

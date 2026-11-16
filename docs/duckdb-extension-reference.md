@@ -17,8 +17,8 @@ pushdown, parallel scans, truncated captures) is described in
 
 | Kind | Count | Names |
 |---|---|---|
-| Scan table functions | 29 | `read_pcap`, and `read_<table>` for each of the 28 tables |
-| Listing table functions | 2 | `pcap_protocols`, `pcap_schema` |
+| Scan table functions | 50 | `read_pcap`, `read_<table>` for each of the 28 tables, and `read_<view>` for each of the 21 `*_packets` views |
+| Listing table functions | 3 | `pcap_protocols`, `pcap_views`, `pcap_schema` |
 | Scalar functions | 16 | `ip4`, `ip4_to_string`, `ip6`, `ip6_to_string`, `mac`, `mac_to_string`, `ip_in_cidr`, `ip6_in_cidr`, `tcp_flags_str`, `has_tcp_flag`, `dns_type_name`, `dns_rcode_name`, `ip_proto_name`, `ethertype_name`, `pcap_hex`, `pcap_unhex` |
 | Macros | 6 | `format_ip4`, `format_ip6`, `format_mac`, `format_ip4_list`, `format_ip6_list`, `format_mac_list` |
 | Settings | 4 | `pcapsql_parallel_scan`, `pcapsql_parallel_min_file_size`, `pcapsql_index_stride`, `pcapsql_filter_pushdown` |
@@ -28,8 +28,8 @@ pushdown, parallel scans, truncated captures) is described in
 
 ### `read_pcap(files, protocol := 'frames', strict := false, filename := false)`
 
-Reads one table from one or more capture files. Without `protocol` it reads
-`frames`, one row per packet.
+Reads one table or one `*_packets` view from one or more capture files.
+Without `protocol` it reads `frames`, one row per packet.
 
 ```sql
 SELECT * FROM read_pcap('capture.pcap') LIMIT 10;
@@ -74,6 +74,44 @@ tables and their functions:
 
 The column counts are those of `pcap_protocols()`; `pcap_schema('<table>')`
 lists the columns of a table with their types.
+
+### `read_<view>(files, strict := false, filename := false)`
+
+One function per `*_packets` view, equal to `read_pcap` with that view's name
+as `protocol`. A view is a protocol's rows joined, in one pass over the
+capture, with the frame's timestamp and the lower layers of the same
+encapsulation level; its rows are those of the join of the corresponding
+`read_<table>` functions on `frame_number`. Parameters, input files, ordering
+and pushdown are those of every scan function. The 21 views:
+
+| Function | View | Anchor table | Columns | What a row is |
+|---|---|---|---|---|
+| `read_arp_packets(files)` | `arp_packets` | `arp` | 15 | ARP requests and replies with Ethernet context |
+| `read_bgp_packets(files)` | `bgp_packets` | `bgp` | 40 | BGP messages with TCP/IP context |
+| `read_dhcp_packets(files)` | `dhcp_packets` | `dhcp` | 28 | DHCP messages with UDP/IP context |
+| `read_dns_packets(files)` | `dns_packets` | `dns` | 33 | DNS queries and responses with transport detection (UDP/TCP/DoT/DoH) |
+| `read_gre_packets(files)` | `gre_packets` | `gre` | 16 | GRE tunneled packets with IP context |
+| `read_gtp_packets(files)` | `gtp_packets` | `gtp` | 21 | GTP tunneled packets with UDP/IP context |
+| `read_http_packets(files)` | `http_packets` | `http` | 21 | HTTP requests and responses with TCP/IP context |
+| `read_icmp_packets(files)` | `icmp_packets` | `icmp` | 16 | ICMP messages with IPv4 context |
+| `read_icmpv6_packets(files)` | `icmpv6_packets` | `icmpv6` | 31 | ICMPv6 messages with IPv6 context (including NDP and MLD) |
+| `read_ipsec_packets(files)` | `ipsec_packets` | `ipsec` | 13 | IPsec (ESP/AH) packets with IP context |
+| `read_mld_packets(files)` | `mld_packets` | `icmpv6` | 13 | MLD messages (Multicast Listener Discovery queries and reports) |
+| `read_mpls_packets(files)` | `mpls_packets` | `mpls` | 12 | MPLS labeled packets with Ethernet context |
+| `read_ndp_packets(files)` | `ndp_packets` | `icmpv6` | 24 | NDP messages (Router/Neighbor Solicitation/Advertisement, Redirect) |
+| `read_ntp_packets(files)` | `ntp_packets` | `ntp` | 23 | NTP messages with UDP/IP context |
+| `read_ospf_packets(files)` | `ospf_packets` | `ospf` | 31 | OSPF routing messages with IPv4 context |
+| `read_quic_packets(files)` | `quic_packets` | `quic` | 23 | QUIC packets with UDP/IP context |
+| `read_ssh_packets(files)` | `ssh_packets` | `ssh` | 26 | SSH packets with TCP/IP context |
+| `read_tcp_packets(files)` | `tcp_packets` | `tcp` | 20 | TCP packets with IP addresses and frame metadata |
+| `read_tls_packets(files)` | `tls_packets` | `tls` | 17 | TLS records with TCP/IP context |
+| `read_udp_packets(files)` | `udp_packets` | `udp` | 15 | UDP packets with IP addresses and frame metadata |
+| `read_vxlan_packets(files)` | `vxlan_packets` | `vxlan` | 12 | VXLAN encapsulated frames with UDP/IP context |
+
+Every table a view joins is parsed even when the query selects none of its
+columns, because its rows decide which joined rows exist. The command-line
+tool's views `packets`, `tunneled_packets`, `ip4_in_ip6` and `ip6_in_ip6`
+are not available: they join layers of different encapsulation levels.
 
 The stream tables of the pcapsql command-line tool (`tcp_connections`,
 `tls_sessions`, `http_messages`, `http2`) are not available in the extension.
@@ -155,9 +193,20 @@ One row per table the extension reads, sorted by name.
 | `field_count` | `UINTEGER` | The number of columns |
 | `kind` | `VARCHAR` | `frames` for the table of packets, `protocol` for a protocol's table |
 
+### `pcap_views()`
+
+One row per `*_packets` view, sorted by name.
+
+| Column | Type | Meaning |
+|---|---|---|
+| `name` | `VARCHAR` | The view's name: a `protocol` of `read_pcap` and the suffix of its `read_<view>` function |
+| `description` | `VARCHAR` | What the view holds |
+| `protocol` | `VARCHAR` | The table whose rows the view is built on |
+| `column_count` | `UINTEGER` | The number of columns |
+
 ### `pcap_schema(protocol)`
 
-One row per column of the table `protocol` (`VARCHAR`, any case; an unknown
+One row per column of the table or view `protocol` (`VARCHAR`, any case; an unknown
 name is an error), in column order. The argument must be a constant.
 
 | Column | Type | Meaning |

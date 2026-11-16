@@ -12,11 +12,19 @@
 //! [`FuseFrameJoins`] is a logical optimizer rule, run last, that recognizes
 //! such a join tree in the optimized plan and replaces it with a scan of a
 //! synthetic table (a [`FrameJoinProvider`] carrying a [`FrameJoinSpec`]).
-//! The parse pass then builds that table directly
-//! ([`crate::query::builders::FusedBatchBuilder`]): per packet it evaluates
-//! the joins over the frame's own rows, which is exact SQL semantics (inner
-//! and left joins, every match, nulls for a missing left side) over a handful
-//! of rows, with no join operator left in the plan.
+//! The parse pass then builds that table directly (the spec becomes a
+//! `pcapsql_core::scan::FusedScan`, an output of the pass like a protocol
+//! table): per packet the scan layer evaluates the joins over the frame's
+//! own rows, which is exact SQL semantics (inner and left joins, every
+//! match, nulls for a missing left side) over a handful of rows, with no join
+//! operator left in the plan.
+//!
+//! The scan layer also defines the `*_packets` views themselves as fixed
+//! fused scans (`pcapsql_core::scan::PacketsView`), for engines that have no
+//! optimizer rule to find them (the DuckDB extension). This engine does not
+//! use those definitions: its views are SQL ([`crate::query::views`]) and
+//! this rule fuses whatever join qualifies, a view's or a user's. The two
+//! must describe the same tables; `tests/golden_corpus.rs` compares them.
 //!
 //! # What fuses
 //!
@@ -149,11 +157,12 @@ impl FrameJoinSpec {
                         column: column.column.clone(),
                     })
                 })?;
-            columns.push((u16::try_from(column.member).map_err(|_| invalid())?, id));
+            columns.push((u16::try_from(column.member).map_err(|_| invalid())?, id).into());
         }
         Ok(FusedScan {
             members,
             columns,
+            filter: None,
             fetch: fetch.map(|rows| rows as u64),
         })
     }

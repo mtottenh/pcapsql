@@ -1446,6 +1446,139 @@ const ONE_HEADER_PER_LEVEL: &str = "\
 /// query would otherwise establish as a side effect.
 const FRESH_ENGINE_QUERIES: &[&str] = &["q24_time_udfs", "q25_time_range_only"];
 
+/// A capture for the `*_packets` views, of the protocols no capture of the
+/// query corpus has (ESP, MPLS, QUIC), plain, over IPv6 and inside a VXLAN
+/// tunnel. No corpus query reads it: the views are compared with the shared
+/// fused scans over it (`packets_views_equal_the_shared_fused_scans`), and
+/// the DuckDB extension's tests read it too.
+fn views_capture() -> Vec<u8> {
+    let esp = |spi: u32, seq: u32| {
+        let mut p = Vec::new();
+        p.extend_from_slice(&spi.to_be_bytes());
+        p.extend_from_slice(&seq.to_be_bytes());
+        p.extend_from_slice(&[0xEE; 16]); // ciphertext
+        p
+    };
+    // One label stack entry: 20-bit label, traffic class 0, bottom-of-stack
+    // flag, TTL 64.
+    let label =
+        |label: u32, bottom: bool| ((label << 12) | (u32::from(bottom) << 8) | 64).to_be_bytes();
+    let mpls = |labels: &[u32], payload: &[u8]| {
+        let mut p = Vec::new();
+        for (i, l) in labels.iter().enumerate() {
+            p.extend_from_slice(&label(*l, i + 1 == labels.len()));
+        }
+        p.extend_from_slice(payload);
+        p
+    };
+    // QUIC v1 Initial: long header, an 8-byte destination connection id, no
+    // source id, no token, 16 bytes of protected payload.
+    let quic_initial = {
+        let mut p = vec![0xC0, 0, 0, 0, 1, 8];
+        p.extend_from_slice(&[0x51; 8]);
+        p.extend_from_slice(&[0, 0, 16]);
+        p.extend_from_slice(&[0xAA; 16]);
+        p
+    };
+    // A short-header packet of the same connection.
+    let quic_short = {
+        let mut p = vec![0x40];
+        p.extend_from_slice(&[0x51; 8]);
+        p.extend_from_slice(&[0xBB; 12]);
+        p
+    };
+    let (a, b) = ([10, 0, 0, 1], [10, 0, 0, 2]);
+    let frames = vec![
+        // 1: ESP over IPv4.
+        eth(MAC_B, MAC_A, ETH_IP4, &ipv4(a, b, 50, 1, &esp(0x1001, 1))),
+        // 2: ESP over IPv6.
+        eth(
+            MAC_B,
+            MAC_A,
+            ETH_IP6,
+            &ipv6(IP6_A, IP6_B, 50, &esp(0x1002, 7)),
+        ),
+        // 3: one MPLS label over UDP.
+        eth(
+            MAC_B,
+            MAC_A,
+            0x8847,
+            &mpls(&[100], &ipv4(a, b, 17, 3, &udp(4000, 5000, b"mpls"))),
+        ),
+        // 4: a stack of two labels over TCP.
+        eth(
+            MAC_A,
+            MAC_B,
+            0x8847,
+            &mpls(
+                &[200, 300],
+                &ipv4(b, a, 6, 4, &tcp(80, 4001, 1, 1, 0x10, b"")),
+            ),
+        ),
+        // 5: a QUIC Initial to port 443.
+        eth(
+            MAC_B,
+            MAC_A,
+            ETH_IP4,
+            &ipv4(a, b, 17, 5, &udp(50000, 443, &quic_initial)),
+        ),
+        // 6: a short-header reply, over IPv6.
+        eth(
+            MAC_A,
+            MAC_B,
+            ETH_IP6,
+            &ipv6(IP6_B, IP6_A, 17, &udp(443, 50000, &quic_short)),
+        ),
+        // 7: the Initial inside a VXLAN tunnel: `udp` at two levels, `quic`
+        // at the inner one.
+        eth(
+            MAC_B,
+            MAC_A,
+            ETH_IP4,
+            &ipv4(
+                [192, 0, 2, 1],
+                [192, 0, 2, 2],
+                17,
+                7,
+                &udp(
+                    49152,
+                    4789,
+                    &vxlan(
+                        77,
+                        &eth(
+                            MAC_B,
+                            MAC_A,
+                            ETH_IP4,
+                            &ipv4(a, b, 17, 8, &udp(50000, 443, &quic_initial)),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+        // 8: ESP inside the same tunnel.
+        eth(
+            MAC_B,
+            MAC_A,
+            ETH_IP4,
+            &ipv4(
+                [192, 0, 2, 1],
+                [192, 0, 2, 2],
+                17,
+                9,
+                &udp(
+                    49152,
+                    4789,
+                    &vxlan(
+                        77,
+                        &eth(MAC_B, MAC_A, ETH_IP4, &ipv4(a, b, 50, 10, &esp(0x1003, 2))),
+                    ),
+                ),
+            ),
+        ),
+    ];
+    to_capture(frames, LINKTYPE_ETHERNET)
+}
+
 // ---------------------------------------------------------------------------
 // Harness
 // ---------------------------------------------------------------------------
@@ -1813,4 +1946,246 @@ async fn ntp_table_materializes_with_real_units() {
     // SELECT * exercises every column's builder.
     let all = run(&eng, "SELECT * FROM ntp").await;
     assert!(all.contains("| 2 "), "{all}");
+}
+
+// ---------------------------------------------------------------------------
+// The `*_packets` views against the shared fused scans
+// ---------------------------------------------------------------------------
+
+/// The rows of `batches` as text, a string per cell, NULL spelled out.
+fn row_texts(batches: &[arrow::record_batch::RecordBatch]) -> Vec<Vec<String>> {
+    use arrow::util::display::{ArrayFormatter, FormatOptions};
+    let options = FormatOptions::default().with_null("NULL");
+    let mut rows = Vec::new();
+    for batch in batches {
+        let columns: Vec<ArrayFormatter<'_>> = batch
+            .columns()
+            .iter()
+            .map(|column| ArrayFormatter::try_new(column.as_ref(), &options).expect("formatter"))
+            .collect();
+        for row in 0..batch.num_rows() {
+            rows.push(columns.iter().map(|c| c.value(row).to_string()).collect());
+        }
+    }
+    rows
+}
+
+/// The rows of a view as `pcapsql_core::scan` defines it: one pass over the
+/// capture at `path` with the view's fused scan as the only output, into an
+/// Arrow sink small enough to fill in the middle of a frame.
+fn fused_view(
+    path: &Path,
+    view: &pcapsql_core::scan::PacketsView,
+) -> (arrow::datatypes::Schema, Vec<Vec<String>>) {
+    use pcapsql_core::io::{ReadPacketReader, StreamHeader};
+    use pcapsql_core::scan::{Catalog, PartitionScan, ScanPlan, Step, TimestampUnit};
+    use pcapsql_datafusion::query::arrow_schema::out_columns_to_arrow_schema;
+    use pcapsql_datafusion::query::builders::ArrowSink;
+
+    let registry = Arc::new(pcapsql_core::default_registry());
+    let plan = ScanPlan {
+        fused: vec![view.full_scan()],
+        timestamps: TimestampUnit::Micros,
+        ..ScanPlan::default()
+    }
+    .compile(Catalog::builtin(), &registry)
+    .expect("the view compiles");
+    let columns = plan.outputs()[0].columns.clone();
+    let schema = out_columns_to_arrow_schema(&columns);
+    let mut sink = ArrowSink::new(&columns, 3);
+
+    let mut file = std::io::BufReader::new(std::fs::File::open(path).expect("open the capture"));
+    let (header, head) = StreamHeader::probe(&mut file).expect("probe the capture");
+    let reader = ReadPacketReader::sequential(file, &header, head).expect("a reader");
+    let mut scan = PartitionScan::new(reader, Arc::new(plan), registry);
+    let mut batches = Vec::new();
+    loop {
+        match scan
+            .step(std::slice::from_mut(&mut sink), 64)
+            .expect("step")
+        {
+            Step::More => {}
+            Step::Flush(_) => batches.extend(sink.take_batch().expect("a batch")),
+            Step::Done | Step::End => break,
+        }
+    }
+    batches.extend(sink.take_batch().expect("a batch"));
+    (schema, row_texts(&batches))
+}
+
+/// Captures of real traffic, from the reader's fuzz corpus: protocols and
+/// encapsulations the hand-made corpus does not have.
+const REAL_CAPTURES: &[&str] = &[
+    "NTP_sync.pcap",
+    "arp-storm.pcap",
+    "dhcp.pcap",
+    "dns.cap",
+    "gre_keyed.pcap",
+    "gtp_user.pcap",
+    "http.pcap",
+    "ipinip.pcap",
+    "ipv4frags.pcap",
+    "ldap-ssl.pcapng",
+    "tcp-ecn-sample.pcap",
+    "tls12-dsb.pcapng",
+    "triple_encap_vxlan_ipinip.pcap",
+    "v6-http.cap",
+    "v6.pcap",
+    "vxlan_simple.pcap",
+];
+
+/// Every `*_packets` view that `pcapsql_core::scan` defines as a fused scan
+/// (`PacketsView`, what the DuckDB extension's `read_<proto>_packets`
+/// return) holds exactly what the SQL view of the same name holds here: the
+/// same columns (names, order, types) and the same rows, NULLs included.
+///
+/// The SQL view is evaluated by DataFusion's joins (the caching engine does
+/// not fuse). Its rows have no order of their own, so they are compared in
+/// `ORDER BY frame_number, encap_depth`, which is the order the fused scan
+/// produces by itself; rows that tie on both are compared as a set. The
+/// one-shot engine, whose optimizer fuses the view's joins onto the same
+/// core evaluator, must agree too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn packets_views_equal_the_shared_fused_scans() {
+    use pcapsql_core::scan::PacketsView;
+    use pcapsql_datafusion::query::views;
+
+    // The same set of views: every SQL view that is a join of one
+    // encapsulation level, under the same name and description.
+    let not_fused = ["tunneled_packets", "ip4_in_ip6", "ip6_in_ip6", "packets"];
+    let sql_views: Vec<_> = views::all_views()
+        .into_iter()
+        .filter(|view| !not_fused.contains(&view.name))
+        .collect();
+    assert_eq!(
+        sql_views.iter().map(|v| v.name).collect::<Vec<_>>(),
+        PacketsView::all()
+            .iter()
+            .map(|v| v.name)
+            .collect::<Vec<_>>()
+    );
+    for (sql, fused) in sql_views.iter().zip(PacketsView::all()) {
+        assert_eq!(sql.description, fused.description, "{}", sql.name);
+    }
+
+    let dir = TempDir::new().unwrap();
+    let mut captures: Vec<(String, PathBuf)> = Vec::new();
+    for (name, bytes) in [
+        ("eth", corpus_capture()),
+        ("sll", sll_capture()),
+        ("sll2", sll2_capture()),
+        ("http", http_capture()),
+        ("routing", routing_capture()),
+        ("tunnels", tunnels_capture()),
+        ("views", views_capture()),
+    ] {
+        let path = dir.path().join(format!("{name}.pcap"));
+        std::fs::write(&path, bytes).unwrap();
+        captures.push((name.to_owned(), path));
+    }
+    let real = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fuzz/corpus/fuzz_pcap_reader");
+    for name in REAL_CAPTURES {
+        captures.push(((*name).to_owned(), real.join(name)));
+    }
+
+    let mut failures = Vec::new();
+    let mut rows_per_view = std::collections::BTreeMap::new();
+    let mut ties = 0;
+    for (capture, path) in &captures {
+        let joined = engine(path, 2).await;
+        let streamed = QueryEngine::open(
+            SourceSpec::Path(path.clone()),
+            EngineOptions {
+                batch_size: 1000,
+                target_partitions: Some(2),
+                index_stride: Some(4),
+                retention: RetentionPolicy::None,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("build streaming engine");
+        for view in PacketsView::all() {
+            let case = format!("{} over {capture}", view.name);
+            let (schema, fused) = fused_view(path, view);
+
+            // The columns.
+            let table = joined.context().table(view.name).await.expect("the view");
+            let declared: Vec<(String, arrow::datatypes::DataType)> = table
+                .schema()
+                .fields()
+                .iter()
+                .map(|f| (f.name().clone(), f.data_type().clone()))
+                .collect();
+            let ours: Vec<(String, arrow::datatypes::DataType)> = schema
+                .fields()
+                .iter()
+                .map(|f| (f.name().clone(), f.data_type().clone()))
+                .collect();
+            if declared != ours {
+                failures.push(format!("{case}: columns {declared:?} != {ours:?}"));
+                continue;
+            }
+            let position = |name: &str| ours.iter().position(|(n, _)| n == name).unwrap();
+            let (frame, depth) = (position("frame_number"), position("encap_depth"));
+            let key = |row: &Vec<String>| -> (u64, u64) {
+                (row[frame].parse().unwrap(), row[depth].parse().unwrap())
+            };
+
+            // The fused scan's own order.
+            let keys: Vec<(u64, u64)> = fused.iter().map(key).collect();
+            if !keys.is_sorted() {
+                failures.push(format!("{case}: the fused rows are not in capture order"));
+            }
+            ties += keys.windows(2).filter(|pair| pair[0] == pair[1]).count();
+            let mut fused_sorted = fused.clone();
+            fused_sorted.sort();
+            *rows_per_view.entry(view.name).or_insert(0usize) += fused.len();
+
+            let sql = format!(
+                "SELECT * FROM {} ORDER BY frame_number, encap_depth",
+                view.name
+            );
+            for (engine, which) in [(&joined, "joins"), (&streamed, "one-shot")] {
+                let batches = engine
+                    .query(&sql)
+                    .await
+                    .unwrap_or_else(|e| panic!("{case}: {e}"));
+                let rows = row_texts(&batches);
+                if rows.iter().map(key).collect::<Vec<_>>() != keys {
+                    failures.push(format!(
+                        "{case} ({which}): {} rows in another order than the fused scan's {}",
+                        rows.len(),
+                        fused.len()
+                    ));
+                    continue;
+                }
+                let mut rows_sorted = rows;
+                rows_sorted.sort();
+                if let Some(n) = (0..rows_sorted.len()).find(|&n| rows_sorted[n] != fused_sorted[n])
+                {
+                    failures.push(format!(
+                        "{case} ({which}): a row differs\n  view:  {:?}\n  fused: {:?}",
+                        rows_sorted[n], fused_sorted[n]
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} differences:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+    // The comparison is not of empty tables: every view has rows somewhere.
+    let empty: Vec<_> = rows_per_view
+        .iter()
+        .filter(|(_, rows)| **rows == 0)
+        .map(|(name, _)| *name)
+        .collect();
+    assert!(empty.is_empty(), "no capture has rows for {empty:?}");
+    eprintln!(
+        "rows per view: {rows_per_view:?}; rows tying on (frame_number, encap_depth): {ties}"
+    );
 }
