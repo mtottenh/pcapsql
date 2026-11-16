@@ -226,6 +226,28 @@ pub fn icmpv6_code_name(t: u8, code: u8) -> Name {
             icmpv6_parameter_problem_code::UNRECOGNIZED_OPTION => {
                 Name::fixed("Unrecognized IPv6 Option")
             }
+            icmpv6_parameter_problem_code::INCOMPLETE_HEADER => {
+                Name::fixed("IPv6 First Fragment has incomplete IPv6 Header Chain")
+            }
+            icmpv6_parameter_problem_code::SR_UPPER_LAYER_HEADER => {
+                Name::fixed("SR Upper-layer Header Error")
+            }
+            icmpv6_parameter_problem_code::UNRECOGNIZED_NEXT_HEADER_INTERMEDIATE => {
+                Name::fixed("Unrecognized Next Header by Intermediate Node")
+            }
+            icmpv6_parameter_problem_code::EXTENSION_HEADER_TOO_BIG => {
+                Name::fixed("Extension Header Too Big")
+            }
+            icmpv6_parameter_problem_code::EXTENSION_HEADER_CHAIN_TOO_LONG => {
+                Name::fixed("Extension Header Chain Too Long")
+            }
+            icmpv6_parameter_problem_code::TOO_MANY_EXTENSION_HEADERS => {
+                Name::fixed("Too Many Extension Headers")
+            }
+            icmpv6_parameter_problem_code::TOO_MANY_OPTIONS => {
+                Name::fixed("Too Many Options in Extension Header")
+            }
+            icmpv6_parameter_problem_code::OPTION_TOO_BIG => Name::fixed("Option Too Big"),
             _ => Name::numbered("Parameter Problem (code ", code, ")"),
         },
         // Echo Request/Reply
@@ -350,6 +372,29 @@ mod tests {
 
         // Unknown type
         assert_eq!(icmpv6_type_name(99), "Type 99");
+    }
+
+    /// Every code IANA registers for ICMPv6 Parameter Problem (type 4).
+    #[test]
+    fn test_icmpv6_parameter_problem_codes() {
+        let problem = icmpv6_type::PARAMETER_PROBLEM;
+        let names = [
+            "Erroneous Header Field",
+            "Unrecognized Next Header",
+            "Unrecognized IPv6 Option",
+            "IPv6 First Fragment has incomplete IPv6 Header Chain",
+            "SR Upper-layer Header Error",
+            "Unrecognized Next Header by Intermediate Node",
+            "Extension Header Too Big",
+            "Extension Header Chain Too Long",
+            "Too Many Extension Headers",
+            "Too Many Options in Extension Header",
+            "Option Too Big",
+        ];
+        for (code, name) in names.iter().enumerate() {
+            assert_eq!(icmpv6_code_name(problem, code as u8), *name, "code {code}");
+        }
+        assert_eq!(icmpv6_code_name(problem, 11), "Parameter Problem (code 11)");
     }
 
     #[test]

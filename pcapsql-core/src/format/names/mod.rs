@@ -6,7 +6,7 @@
 //! name table of its own (`protocol/name_columns_tests.rs` checks every name
 //! column against its table here).
 //!
-//! Every function takes the number as stored in its column and returns a
+//! Every function takes the number as stored in its column. Most return a
 //! [`Name`]: a name of the table, or the table's text for a number without
 //! one, which carries the number (`TYPE999`, `Unknown (7)`). Each table
 //! keeps the text its registry is usually written in, so the text for a
@@ -15,6 +15,22 @@
 //! a [`Name`] is `Copy`, and writes itself to a [`fmt::Write`] sink (it is
 //! [`Display`](fmt::Display)) or into a parser's arena
 //! ([`FieldSink::name`](crate::protocol::FieldSink::name)).
+//!
+//! Three functions return plain text instead, with no number in it:
+//!
+//! - [`netlink_msg_type_name`] returns `&'static str`: the `NLMSG_*` name of
+//!   a control message type, and `PROTOCOL_SPECIFIC` for every other type
+//!   (what it means is up to the netlink family).
+//! - [`ecn_name`] returns `&'static str`: it looks at the two ECN bits only,
+//!   so every value has a name.
+//! - [`mpls_special_label_name`] returns `Option<&'static str>`: the name of
+//!   a special-purpose label (0-15), `Reserved` for an unassigned one, and
+//!   `None` for an ordinary label.
+//!
+//! Some names cover more than one number without carrying it: the
+//! [`icmpv6_code_name`] of a Packet Too Big message is `Packet Too Big`
+//! whatever its code, and the [`icmp_code_name`] and [`icmpv6_code_name`] of
+//! code 0 of a type with no code table is `No Code`.
 
 use std::borrow::Cow;
 use std::fmt;

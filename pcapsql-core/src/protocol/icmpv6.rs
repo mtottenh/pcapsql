@@ -55,12 +55,20 @@ pub mod time_exceeded_code {
     pub const FRAGMENT_REASSEMBLY_EXCEEDED: u8 = 1;
 }
 
-/// ICMPv6 Parameter Problem code constants.
+/// ICMPv6 Parameter Problem code constants (IANA "ICMPv6 Parameters",
+/// type 4; RFC 4443, RFC 7112, RFC 8754, RFC 8883).
 pub mod parameter_problem_code {
     pub const ERRONEOUS_HEADER: u8 = 0;
     pub const UNRECOGNIZED_NEXT_HEADER: u8 = 1;
     pub const UNRECOGNIZED_OPTION: u8 = 2;
     pub const INCOMPLETE_HEADER: u8 = 3;
+    pub const SR_UPPER_LAYER_HEADER: u8 = 4;
+    pub const UNRECOGNIZED_NEXT_HEADER_INTERMEDIATE: u8 = 5;
+    pub const EXTENSION_HEADER_TOO_BIG: u8 = 6;
+    pub const EXTENSION_HEADER_CHAIN_TOO_LONG: u8 = 7;
+    pub const TOO_MANY_EXTENSION_HEADERS: u8 = 8;
+    pub const TOO_MANY_OPTIONS: u8 = 9;
+    pub const OPTION_TOO_BIG: u8 = 10;
 }
 
 /// NDP option type constants.
