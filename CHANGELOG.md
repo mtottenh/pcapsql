@@ -82,6 +82,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `I/O error:`.
 - Performance (DuckDB extension): `ip_in_cidr` and `has_tcp_flag` with a
   constant pattern are faster on columns that contain NULLs.
+- Performance: parsers write fields into a reused buffer. A `udp` scan uses
+  about 35% fewer instructions. Scans of `tcp` and `http` no longer allocate
+  memory for each packet.
+- Performance: a scan no longer extracts the fields of the layers under the
+  table it reads, for example `ethernet` and `ipv4` under `udp`, or the
+  fields of a table it only counts. `count(*)` uses about 11% fewer
+  instructions on `udp` and `ethernet`, 25% on `dns` and 29% on `tcp`.
+  Reading 23 of the 24 fields of `tcp` used to cost 56% more than reading
+  all of them. It now costs about the same.
+- `pcapsql-core`: breaking change for code that implements or calls
+  `Protocol::parse`. A parser now writes to a `FieldSink` and returns
+  `Parsed`. `ParseResult` is removed. `FieldValue` is `Copy`.
+  `Protocol::parse_projected` takes a `FieldSet`, a set of positions in the
+  parser's new `Protocol::field_names()` list. An empty set means no field,
+  not every field.
 
 ### Removed
 
