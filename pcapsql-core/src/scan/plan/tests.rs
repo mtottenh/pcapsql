@@ -1045,11 +1045,12 @@ fn malformed_computed_columns_and_filters_are_errors() {
     assert!(compile(&filtered(1, col("tcp", "dst_port"))).is_ok());
 }
 
-/// A projection of more than half of a table's fields is not applied: the
-/// parser extracts every field, which costs less than asking a long list
-/// about each of them.
+/// A table is projected to the fields its columns read, however many: only
+/// every field of the table is no projection. A projection costs a bit
+/// test per field, so even most of a table's fields cost about what the
+/// full parse does.
 #[test]
-fn a_projection_of_most_of_a_tables_fields_is_not_applied() {
+fn a_projection_of_any_but_every_field_is_applied() {
     for table in ["tcp", "udp", "dns", "ipv4"] {
         let (_, def) = catalog().table(table).unwrap();
         let fields: Vec<ColId> = def
@@ -1075,13 +1076,9 @@ fn a_projection_of_most_of_a_tables_fields_is_not_applied() {
             let compiled = compile(&plan).unwrap();
             compiled.scope().projections().get(table).map(HashSet::len)
         };
-        let half = fields.len() / 2;
-        for count in 0..=fields.len() {
-            let expected = (count <= fields.len() - count).then_some(count);
-            assert_eq!(projected(count), expected, "{table}: {count} fields");
+        for count in 0..fields.len() {
+            assert_eq!(projected(count), Some(count), "{table}: {count} fields");
         }
-        assert_eq!(projected(0), Some(0), "{table}");
-        assert_eq!(projected(half), Some(half), "{table}");
-        assert_eq!(projected(fields.len() - half + 1), None, "{table}");
+        assert_eq!(projected(fields.len()), None, "{table}");
     }
 }

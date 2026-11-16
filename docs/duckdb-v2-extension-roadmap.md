@@ -350,7 +350,7 @@ of P1. P3 to P6 are independent of each other after P2 and can be reordered.
 | P0 Spike and scaffolding | done. The CI workflow is written and has not yet run on GitHub |
 | P1 Core seams and shared scan layer | done: S0 to S5, S6 and S7. Scan benchmark, pre-S1 code against S5, three interleaved runs each on an idle machine (thin LTO on both sides): one-shot queries equal or up to 10 percent faster; parse passes within the run-to-run spread, with the plain UDP pass 4 to 7 percent slower at the median and one VXLAN case 10 percent slower against a baseline that itself varied by 19 percent. The pre-allocation was restored later (section 8.1), with the other fixes of the performance review |
 | P2 Sequential reader | done: `read_<table>` and `read_pcap`, scalars, macros, `pcap_schema`, `pcap_protocols`. 45 golden-corpus queries match the DataFusion snapshots; every table matches the core driver cell by cell |
-| P3 Projection, cardinality, progress | done, the benchmark exit check with it (section 8.2): a row count costs 51 to 88 percent of all columns and one column 49 to 93 percent, on one thread. The layers under the table are parsed in full whatever is projected, which is the floor. The cardinality is an estimate from the file size |
+| P3 Projection, cardinality, progress | done, the benchmark exit check with it (section 8.2): a row count costs 51 to 88 percent of all columns and one column 49 to 93 percent, on one thread. Since the run the layers under the table are parsed with no field, which lowers the floor (8.2). The cardinality is an estimate from the file size |
 | P4 Parallel scans | done for local uncompressed captures, the benchmark exit check with it (section 8.2): a scan that parses a protocol is 1.8 to 2.7 times faster on four threads than on one, and four files 3.2 to 3.7 times. The index is rebuilt per scan (no cache: the file API exposes no modification time to validate one), by a pass on one thread that costs what counting the frames costs; it is what keeps the efficiency at 45 to 68 percent, and a `LIMIT` on a large capture waits for it |
 | P5 Multi-file, replacement scan, remote | done except the remote exit check: lists, globs, `filename`, and `FROM 'x.pcap'`, with the partition queue spanning the files. The HTTP test is written and has not run: `make remote_test_release` (`scripts/remote-test.sh`) reads captures through `httpfs` from a local HTTP server that answers Range requests and compares them with the files, and `duckdb.yml` and the `verify` job of `duckdb-dist.yml` run it, failing if `httpfs` cannot be installed. `httpfs` could not be installed where it was written, so there only the server was tested (with curl) and the test takes its skip path; until the first GitHub run no `http://` capture has been read. No `s3://` capture has been read, no secret tried (U7), and remote buffer sizes are untuned |
 | P6 Filter pushdown | done, with two limits found on the way. DuckDB 2.0.0 hands two bounds on one column to the scan as a single `BETWEEN` node whose inclusivity the C API does not expose, so a range is used to narrow the read but not accepted: `EXPLAIN` still shows the filter for a time window. And `plan_ranges` keeps the last checkpoint window of an indexed capture unless an upper frame bound excludes it, so a time window never rules out a whole file |
@@ -522,6 +522,50 @@ Reading:
   the "all" rows here. The drop is there and is 7 to 51 percent; nothing
   had said how large to expect it. The check is taken as met, with the
   floor above as what it leaves.
+
+**Projection below the table**, after the run (design document of the
+shared scan layer, 3.6.2). Every protocol a scan parses is projected to the
+fields something reads, so the layers under the table are parsed with no
+field: `ethernet`, `linux_sll`, `sll2`, `vlan`, `ipv4` and `ipv6` have a
+projected parse, as `tcp`, `udp` and `dns` had. A projection is a bit set
+over the parser's field list that the parser asks by position, so the plan
+projects a table however many of its fields are read. Measured on a capture
+of the same kinds of traffic as `mixed10m.pcap` (Ethernet/IPv4; of every 11
+frames 5 TCP segments with a timestamp option, among them HTTP requests and
+responses, 4 UDP datagrams to a port without a parser and 2 DNS messages),
+one thread, before and after. The run above counted the whole shell with
+cachegrind; here DuckDB's idle threads made two such counts of one query
+differ by more than the change, so these are callgrind's counts of the scan
+alone (DuckDB's `CV2TableExec`, the C API's exec callback, with the
+extension's `exec` under it), which repeat to 0.01 percent: instructions per
+packet of the capture, for 100,000 packets minus 20,000, over 80,000.
+
+| Query | Columns | Before | After |
+|---|---|---|---|
+| `read_frames` | `count(*)` | 888 | 886 |
+| `read_ethernet` | `count(*)` | 2,426 | 2,169 |
+| | `src_mac` | 2,547 | 2,315 |
+| `read_ipv4` | `count(*)` | 2,440 | 2,169 |
+| | `ttl` | 2,453 | 2,216 |
+| `read_udp` | `count(*)` | 2,350 | 2,122 |
+| | `dst_port` | 2,399 | 2,147 |
+| | all 9 | 2,580 | 2,383 |
+| `read_tcp` | `count(*)` | 2,600 | 2,320 |
+| | `dst_port` | 2,683 | 2,357 |
+| | 12 of its 24 fields | 3,417 | 2,772 |
+| | 23 of them | 3,599 | 3,441 |
+| | all 24 | 3,632 | 3,418 |
+| | all 29 columns | 3,720 | 3,505 |
+| `read_dns` | `count(*)` | 3,243 | 2,681 |
+| | `transaction_id` | 3,284 | 2,691 |
+| | `query_name` | 3,530 | 2,935 |
+| | all 27 | 3,925 | 3,423 |
+
+The floor of a protocol scan falls by a tenth (`ethernet`, `ipv4`, `udp`,
+`tcp`) to a sixth (`dns`): one column of `udp`, `tcp` or `dns` now costs
+less than a row count did. 23 of the 24 fields of `tcp`, projected now and
+parsed in full before (the threshold of "What changed on the way" below),
+cost 23 instructions more than all 24.
 
 #### Scaling with threads (P4)
 
@@ -772,6 +816,13 @@ Each was a cost the run showed, with a contained cure (CHANGELOG):
 | Four files on four threads are slower than with `pcapsql_parallel_scan = false` | Every file was split for all the threads, after a pass over each on one thread | `read_tcp`: 1.45 s (not split: 0.90); `read_frames` `count(*)`: 0.80 s (0.21) | A file is split for its share of the threads: 0.80 s, 0.22 s |
 | `WHERE frame_number <= 100000` takes 20 times longer on four threads than on one | The pass read the whole capture before a scan of its beginning | 0.65 s (one thread: 0.03); `BETWEEN 5000001 AND 5100000`: 0.62 s | The pass ends at the bound: 0.03 s; 0.33 s |
 
+Since the run, the projection below the table (section 8.1, the row after
+the projection results above) covers the first finding and makes the second
+cure unneeded: every parser with a projected parse reads an empty projection
+as no field, and a projection is a bit set the parser asks by position, so
+the plan projects a table whatever the number of its fields read, and the
+threshold is gone.
+
 Tried and not kept:
 
 - A table lookup for the projection's answers (a slot from a name's length
@@ -797,9 +848,8 @@ Not good, in the order of what it costs:
 1. The pass before a split (scaling at half efficiency, `LIMIT`, time
    windows, `frames`). An index built while the scan runs, or kept, is the
    next thing worth doing to the reader.
-2. Projection stops at the table: the layers under it are parsed in full.
-   `ethernet`, `ipv4` and `ipv6` would need a projected parse, and the
-   answers of a projection a cheaper form than a string comparison.
+2. Done since the run: projection reaches the layers under the table
+   ("Projection below the table" after the projection results above).
 3. Stream tables keep every connection until the capture ends: 0.5 GB for
    284,000 connections, 1.5 GB for 100,000 decrypted sessions.
 4. `COPY` writes on one thread.

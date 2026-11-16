@@ -405,30 +405,22 @@ impl FieldNeeds {
     }
 
     /// The field projection of `table`: the fields its wanted columns read,
-    /// or `None` when they read more than half of the fields the table has
-    /// a column for (the parser then runs unprojected).
-    ///
-    /// A projection is not free: a parser asks it about each of its fields,
-    /// for every packet, and an answer takes longer the more names there
-    /// are. With most of a table's fields in it, asking costs more than the
-    /// fields left out save: the 23 of `tcp`'s 24 fields took a third more
-    /// instructions than all 24 (roadmap of the DuckDB extension, section
-    /// 8.2), and half of them about as many as the unprojected parse.
+    /// or `None` when they read every field the table has a column for (the
+    /// parser then runs unprojected).
     fn projection(&self, id: TableId, table: &TableDef) -> Wanted {
         let wanted = &self.fields[&id];
-        let (mut read, mut left_out) = (0_usize, 0_usize);
+        let mut all = true;
         let mut fields = HashSet::new();
         for (col, def) in table.columns() {
             if let ColumnSource::Field(name) = def.source {
                 if wanted.contains(&col) {
                     fields.insert(name);
-                    read += 1;
                 } else {
-                    left_out += 1;
+                    all = false;
                 }
             }
         }
-        (read <= left_out && left_out > 0).then_some(fields)
+        (!all).then_some(fields)
     }
 }
 
