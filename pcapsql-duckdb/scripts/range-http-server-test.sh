@@ -121,7 +121,8 @@ verbose=$(curl -s -v -r 0-9 "$url/a.bin" -o "$scratch/1" --next -s -v -r 20-29 "
 if ! { cmp -s "$scratch/1" <(slice 0 10) && cmp -s "$scratch/2" <(slice 20 10) && cmp -s "$scratch/4" <(slice 99995 5); }; then
     fail "requests over one connection: wrong bodies"
 fi
-is "requests over one connection: reuses" "$(grep -c 'Re-using existing' <<<"$verbose")" 3
+# Older curl says "Re-using existing", newer "Reusing existing".
+is "requests over one connection: reuses" "$(grep -Ec 'Re-?using existing' <<<"$verbose")" 3
 
 # Twenty at once.
 for i in $(seq 20); do
