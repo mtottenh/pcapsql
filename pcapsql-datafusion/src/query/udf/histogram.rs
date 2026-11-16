@@ -54,6 +54,14 @@
 //!
 //! The histogram is serialized using HdrHistogram's V2 compressed format,
 //! which is compact and suitable for storage or network transfer.
+//!
+//! ## Kernels
+//!
+//! What a histogram records, how it is merged and serialized, its
+//! statistics, its buckets and its rendering are
+//! `pcapsql_core::format::histogram`, which the DuckDB extension's
+//! functions of the same names call too. What is here is the DataFusion
+//! side: the accumulator, the arrays and the signatures.
 
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -70,11 +78,9 @@ use datafusion::logical_expr::{
     Accumulator, AggregateUDF, AggregateUDFImpl, ColumnarValue, ScalarFunctionArgs, ScalarUDF,
     ScalarUDFImpl, Signature, Volatility,
 };
-use hdrhistogram::serialization::{Serializer as HdrSerializer, V2Serializer};
-use hdrhistogram::Histogram;
-
-// Default significant figures (2 = 1% precision)
-const DEFAULT_SIGFIGS: u8 = 2;
+use pcapsql_core::format::histogram::{
+    log_buckets, render_ascii, HdrHistogram, DEFAULT_SIGFIGS, MAX_BUCKETS,
+};
 
 // ============================================================================
 // hdr_histogram() UDAF - Streaming Histogram Builder
@@ -146,35 +152,24 @@ impl AggregateUDFImpl for HdrHistogramUdaf {
 /// - `evaluate`: Returns final serialized histogram
 #[derive(Debug)]
 struct HdrHistogramAccumulator {
-    histogram: Histogram<u64>,
+    histogram: HdrHistogram,
 }
 
 impl HdrHistogramAccumulator {
     fn new(sigfigs: u8) -> Self {
-        // Create histogram with auto-resize capability
-        // This allows recording any value without pre-specifying max
-        let histogram = Histogram::<u64>::new(sigfigs).expect("valid sigfigs");
+        // An auto-resizing histogram: any value can be recorded without
+        // pre-specifying a maximum.
+        let histogram = HdrHistogram::with_sigfigs(sigfigs).expect("valid sigfigs");
         Self { histogram }
     }
 
     fn serialize(&self) -> Vec<u8> {
-        let mut buf = Vec::new();
-        V2Serializer::new()
-            .serialize(&self.histogram, &mut buf)
-            .expect("histogram serialization");
-        buf
+        self.histogram.serialize().expect("histogram serialization")
     }
 
-    fn deserialize(bytes: &[u8]) -> DFResult<Histogram<u64>> {
-        use hdrhistogram::serialization::Deserializer;
-        let mut deserializer = Deserializer::new();
-        deserializer
-            .deserialize(&mut std::io::Cursor::new(bytes))
-            .map_err(|e| {
-                datafusion::error::DataFusionError::Execution(format!(
-                    "histogram deserialize error: {e}"
-                ))
-            })
+    fn deserialize(bytes: &[u8]) -> DFResult<HdrHistogram> {
+        HdrHistogram::deserialize(bytes)
+            .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))
     }
 }
 
@@ -188,31 +183,15 @@ impl Accumulator for HdrHistogramAccumulator {
         let values_array = &values[0];
 
         // Handle every numeric array type; anything else is ignored.
-        // Note: floats are truncated (`as u64`), so callers wanting
-        // sub-unit precision should scale values before recording.
-
-        // Signed and float inputs: skip negative values.
-        macro_rules! record_signed {
-            ($array_ty:ty) => {
-                if let Some(a) = values_array.as_any().downcast_ref::<$array_ty>() {
-                    for i in 0..a.len() {
-                        let v = a.value(i);
-                        if !a.is_null(i) && v >= 0 as _ {
-                            let _ = self.histogram.record(v as u64);
-                        }
-                    }
-                    return Ok(());
-                }
-            };
-        }
-
-        // Unsigned inputs: every value is recordable.
-        macro_rules! record_unsigned {
-            ($array_ty:ty) => {
+        // Note: floats are truncated and negative values are skipped (the
+        // core kernels), so callers wanting sub-unit precision should
+        // scale values before recording.
+        macro_rules! record {
+            ($array_ty:ty, $record:ident, $wide:ty) => {
                 if let Some(a) = values_array.as_any().downcast_ref::<$array_ty>() {
                     for i in 0..a.len() {
                         if !a.is_null(i) {
-                            let _ = self.histogram.record(a.value(i) as u64);
+                            self.histogram.$record(<$wide>::from(a.value(i)));
                         }
                     }
                     return Ok(());
@@ -220,16 +199,16 @@ impl Accumulator for HdrHistogramAccumulator {
             };
         }
 
-        record_signed!(Float64Array);
-        record_signed!(Float32Array);
-        record_signed!(Int64Array);
-        record_signed!(Int32Array);
-        record_signed!(Int16Array);
-        record_signed!(Int8Array);
-        record_unsigned!(UInt64Array);
-        record_unsigned!(UInt32Array);
-        record_unsigned!(UInt16Array);
-        record_unsigned!(UInt8Array);
+        record!(Float64Array, record_float, f64);
+        record!(Float32Array, record_float, f64);
+        record!(Int64Array, record_signed, i64);
+        record!(Int32Array, record_signed, i64);
+        record!(Int16Array, record_signed, i64);
+        record!(Int8Array, record_signed, i64);
+        record!(UInt64Array, record, u64);
+        record!(UInt32Array, record, u64);
+        record!(UInt16Array, record, u64);
+        record!(UInt8Array, record, u64);
         // Silently ignore non-numeric types
 
         Ok(())
@@ -255,10 +234,8 @@ impl Accumulator for HdrHistogramAccumulator {
                 let bytes = state_array.value(i);
                 if !bytes.is_empty() {
                     let other = Self::deserialize(bytes)?;
-                    self.histogram.add(&other).map_err(|e| {
-                        datafusion::error::DataFusionError::Execution(format!(
-                            "histogram merge error: {e}"
-                        ))
+                    self.histogram.merge(&other).map_err(|e| {
+                        datafusion::error::DataFusionError::Execution(e.to_string())
                     })?;
                 }
             }
@@ -330,111 +307,8 @@ pub fn create_hdr_ascii_udf() -> ScalarUDF {
 }
 
 // Helper to deserialize histogram from binary
-fn deserialize_histogram(bytes: &[u8]) -> Option<Histogram<u64>> {
-    use hdrhistogram::serialization::Deserializer;
-    let mut deserializer = Deserializer::new();
-    deserializer
-        .deserialize(&mut std::io::Cursor::new(bytes))
-        .ok()
-}
-
-// ----------------------------------------------------------------------------
-// Distribution helpers (log-scale bucketing + ASCII rendering)
-// ----------------------------------------------------------------------------
-
-/// Cap on bucket rows produced by `hdr_buckets` / `hdr_ascii`.
-const MAX_BUCKETS: usize = 64;
-
-/// Split the recorded value range into log-scale buckets.
-///
-/// Returns inclusive `(lo, hi, count)` rows covering the recorded range,
-/// including empty buckets so gaps in the distribution stay visible. Bucket
-/// edges are powers of two, aligned with the histogram's internal grid so
-/// every recorded value lands in exactly one bucket (bucket counts always sum
-/// back to the total). Falls back to powers of ten when the value range is
-/// too wide for `max_rows` binary buckets.
-fn log_buckets(hist: &Histogram<u64>, max_rows: usize) -> Vec<(u64, u64, u64)> {
-    if hist.is_empty() {
-        return Vec::new();
-    }
-
-    for base in [2.0_f64, 10.0] {
-        let mut rows = Vec::new();
-        let mut lo = 0_u64;
-        for iv in hist.iter_log(1, base) {
-            let hi = iv.value_iterated_to();
-            rows.push((lo, hi, iv.count_since_last_iteration()));
-            lo = hi.saturating_add(1);
-        }
-        // iter_log always leads with a [0,0] step and visits every bucket
-        // from 1 up; trim the empty run below the recorded minimum so the
-        // output starts at the real value range.
-        let first_nonzero = rows.iter().position(|r| r.2 > 0).unwrap_or(0);
-        rows.drain(0..first_nonzero);
-
-        if rows.len() <= max_rows || base == 10.0 {
-            return rows;
-        }
-    }
-    unreachable!()
-}
-
-/// Render an ASCII histogram with per-bucket counts and cumulative percent.
-fn render_ascii(hist: &Histogram<u64>) -> String {
-    use std::fmt::Write;
-
-    const BAR_WIDTH: usize = 40;
-
-    let total = hist.len();
-    if total == 0 {
-        return "(empty histogram)".to_string();
-    }
-    let rows = log_buckets(hist, MAX_BUCKETS);
-    let max_count = rows.iter().map(|r| r.2).max().unwrap_or(0).max(1);
-
-    let mut out = String::new();
-    let _ = writeln!(
-        out,
-        "{} samples | min {} | max {} | mean {:.1} | stdev {:.1}",
-        total,
-        hist.min(),
-        hist.max(),
-        hist.mean(),
-        hist.stdev()
-    );
-
-    let bucket_width = rows
-        .iter()
-        .map(|(lo, hi, _)| format!("{lo}-{hi}").len())
-        .max()
-        .unwrap_or(6)
-        .max(6);
-    let _ = writeln!(
-        out,
-        "{:>bw$} {:>12} {:>7} {:>7} bar",
-        "bucket",
-        "count",
-        "pct",
-        "cum",
-        bw = bucket_width
-    );
-
-    let mut cum = 0_u64;
-    for (lo, hi, count) in rows {
-        cum += count;
-        let bar_len = ((BAR_WIDTH as f64 * count as f64) / max_count as f64).round() as usize;
-        let _ = writeln!(
-            out,
-            "{:>bw$} {:>12} {:>6.1}% {:>6.1}% {}",
-            format!("{lo}-{hi}"),
-            count,
-            100.0 * count as f64 / total as f64,
-            100.0 * cum as f64 / total as f64,
-            "#".repeat(bar_len),
-            bw = bucket_width
-        );
-    }
-    out
+fn deserialize_histogram(bytes: &[u8]) -> Option<HdrHistogram> {
+    HdrHistogram::deserialize(bytes).ok()
 }
 
 /// Struct fields for a single bucket row.
@@ -509,11 +383,8 @@ impl ScalarUDFImpl for HdrPercentileUdf {
             .map(|(hist_opt, p_opt)| {
                 match (hist_opt, p_opt) {
                     (Some(bytes), Some(p)) => {
-                        deserialize_histogram(bytes).map(|hist| {
-                            // Support both 0-1 and 0-100 ranges
-                            let quantile = if p > 1.0 { p / 100.0 } else { p };
-                            hist.value_at_quantile(quantile) as f64
-                        })
+                        // Both the 0-1 and the 0-100 range are supported.
+                        deserialize_histogram(bytes).map(|hist| hist.percentile(p))
                     }
                     _ => None,
                 }
@@ -1062,5 +933,202 @@ mod tests {
         // max() is the highest *equivalent* value at the histogram's
         // significant-figure precision, so 65080 may quantize upward.
         assert!(acc.histogram.max() >= 65080);
+    }
+
+    // ------------------------------------------------------------------
+    // The SQL functions against the kernels they wrap. The DuckDB
+    // extension's functions are compared with the same kernels the same
+    // way (pcapsql-duckdb/itest/tests/histogram.rs), which is what makes
+    // the two engines answer alike.
+    // ------------------------------------------------------------------
+
+    use datafusion::prelude::SessionContext;
+
+    const PERCENTILES: [f64; 7] = [0.0, 0.25, 0.5, 0.9, 99.0, 99.9, 1.0];
+
+    /// Everything the scalar functions say of a histogram.
+    #[derive(Debug, PartialEq)]
+    struct Answers {
+        count: u64,
+        min: u64,
+        max: u64,
+        mean: f64,
+        stdev: f64,
+        percentiles: Vec<f64>,
+        buckets: Vec<(u64, u64, u64)>,
+        ascii: String,
+    }
+
+    /// What the kernel says of the histogram that recorded `values`, read
+    /// back from its serialized form as the SQL functions read it.
+    fn kernel_answers(values: &[u64]) -> Answers {
+        let mut recorded = HdrHistogram::default();
+        for &value in values {
+            recorded.record(value);
+        }
+        let hist = HdrHistogram::deserialize(&recorded.serialize().unwrap()).unwrap();
+        Answers {
+            count: hist.len(),
+            min: hist.min(),
+            max: hist.max(),
+            mean: hist.mean(),
+            stdev: hist.stdev(),
+            percentiles: PERCENTILES.iter().map(|&p| hist.percentile(p)).collect(),
+            buckets: log_buckets(&hist, MAX_BUCKETS),
+            ascii: render_ascii(&hist),
+        }
+    }
+
+    /// What the SQL functions say of the one histogram `sql` returns as `h`.
+    async fn sql_answers(ctx: &SessionContext, sql: &str) -> Answers {
+        let percentiles: Vec<String> = PERCENTILES
+            .iter()
+            .map(|p| format!("hdr_percentile(h, {p:?})"))
+            .collect();
+        let query = format!(
+            "SELECT hdr_count(h), hdr_min(h), hdr_max(h), hdr_mean(h), hdr_stdev(h), {}, \
+             hdr_buckets(h), hdr_ascii(h) FROM ({sql}) q",
+            percentiles.join(", ")
+        );
+        let batches = ctx.sql(&query).await.unwrap().collect().await.unwrap();
+        let batch = &batches[0];
+        assert_eq!(batch.num_rows(), 1, "{query}");
+        let unsigned = |column: usize| {
+            let array = batch.column(column);
+            array
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap()
+                .value(0)
+        };
+        let float = |column: usize| {
+            let array = batch.column(column);
+            array
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap()
+                .value(0)
+        };
+        let lists = batch.column(5 + PERCENTILES.len());
+        let lists = lists.as_any().downcast_ref::<ListArray>().unwrap();
+        assert!(lists.is_valid(0));
+        let structs = lists.value(0);
+        let structs = structs.as_any().downcast_ref::<StructArray>().unwrap();
+        let field = |index: usize| {
+            structs
+                .column(index)
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap()
+                .clone()
+        };
+        let (lo, hi, count) = (field(0), field(1), field(2));
+        let ascii = batch.column(6 + PERCENTILES.len());
+        Answers {
+            count: unsigned(0),
+            min: unsigned(1),
+            max: unsigned(2),
+            mean: float(3),
+            stdev: float(4),
+            percentiles: (0..PERCENTILES.len()).map(|i| float(5 + i)).collect(),
+            buckets: (0..structs.len())
+                .map(|i| (lo.value(i), hi.value(i), count.value(i)))
+                .collect(),
+            ascii: ascii
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .value(0)
+                .to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_sql_functions_answer_as_the_kernels_do() {
+        let ctx = SessionContext::new();
+        crate::query::udf::register_histogram_udfs(&ctx).unwrap();
+        let cases: [(&str, &str, &[u64]); 10] = [
+            (
+                "integers, some NULL",
+                "SELECT hdr_histogram(v) AS h FROM (VALUES (1), (NULL), (5), (5), (1000)) t(v)",
+                &[1, 5, 5, 1000],
+            ),
+            (
+                "one row",
+                "SELECT hdr_histogram(v) AS h FROM (VALUES (42)) t(v)",
+                &[42],
+            ),
+            (
+                "no rows",
+                "SELECT hdr_histogram(v) AS h FROM (VALUES (1), (2)) t(v) WHERE v > 5",
+                &[],
+            ),
+            (
+                "every row NULL",
+                "SELECT hdr_histogram(CAST(NULL AS BIGINT)) AS h FROM (VALUES (1), (2)) t(v)",
+                &[],
+            ),
+            (
+                "the largest values",
+                "SELECT hdr_histogram(arrow_cast(v, 'UInt64')) AS h FROM \
+                 (VALUES (18446744073709551615), (9223372036854775808), (1)) t(v)",
+                &[u64::MAX, 1 << 63, 1],
+            ),
+            (
+                "negative values are not recorded",
+                "SELECT hdr_histogram(v) AS h FROM \
+                 (VALUES (-1), (-9223372036854775808), (0), (7), (9223372036854775807)) t(v)",
+                &[0, 7, i64::MAX as u64],
+            ),
+            (
+                "fractions are cut off, NaN and negative numbers left out",
+                "SELECT hdr_histogram(v) AS h FROM (VALUES (1.5), (2.99), (-3.0), (1e30), \
+                 (CAST('NaN' AS DOUBLE)), (CAST('inf' AS DOUBLE)), (CAST('-inf' AS DOUBLE)), \
+                 (0.0), (0.99)) t(v)",
+                &[1, 2, u64::MAX, u64::MAX, 0, 0],
+            ),
+            (
+                "32-bit unsigned",
+                "SELECT hdr_histogram(arrow_cast(v, 'UInt32')) AS h FROM \
+                 (VALUES (4294967295), (136), (583), (65080)) t(v)",
+                &[4294967295, 136, 583, 65080],
+            ),
+            (
+                // Unlike in the DuckDB extension, which records the integer part.
+                "a DECIMAL column is not recorded",
+                "SELECT hdr_histogram(CAST(v AS DECIMAL(10, 2))) AS h FROM (VALUES (1.5), (20)) t(v)",
+                &[],
+            ),
+            (
+                "a column that is not a number is not recorded",
+                "SELECT hdr_histogram(v) AS h FROM (VALUES ('a'), ('b')) t(v)",
+                &[],
+            ),
+        ];
+        for (what, sql, recorded) in cases {
+            assert_eq!(
+                sql_answers(&ctx, sql).await,
+                kernel_answers(recorded),
+                "{what}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_a_blob_that_is_no_histogram_is_null() {
+        let ctx = SessionContext::new();
+        crate::query::udf::register_histogram_udfs(&ctx).unwrap();
+        for blob in ["X'00ff'", "X''", "CAST(NULL AS BYTEA)", "X'1c849313'"] {
+            let query = format!(
+                "SELECT hdr_count(h), hdr_min(h), hdr_max(h), hdr_mean(h), hdr_stdev(h), \
+                 hdr_percentile(h, 0.5), hdr_buckets(h), hdr_ascii(h) FROM (SELECT {blob} AS h) q"
+            );
+            let batches = ctx.sql(&query).await.unwrap().collect().await.unwrap();
+            let batch = &batches[0];
+            assert_eq!(batch.num_rows(), 1);
+            for column in batch.columns() {
+                assert!(column.is_null(0), "{blob}: {column:?}");
+            }
+        }
     }
 }

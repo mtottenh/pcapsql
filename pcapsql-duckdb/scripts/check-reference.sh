@@ -7,8 +7,10 @@
 # What the extension registers is asked of DuckDB, not of the sources: the functions and settings
 # the stock DuckDB shell (scripts/fetch-duckdb.sh) has after LOAD and did not have before. The
 # reference must
-#   - name every such table function, scalar function, macro and setting, in backticks:
-#     `name(...)` or `name`
+#   - name every such table function, scalar function, aggregate function, macro and setting,
+#     in backticks: `name(...)` or `name`
+#   - give the number of the scalar functions, of the aggregate functions and of the macros
+#     in its summary table: | Scalar functions | 48 |
 #   - name every parameter of the table functions: `name`, or `name := ...` in a signature
 #   - not name a function (`name(` in backticks) or a setting (`pcapsql_...`) that the shell does
 #     not have after LOAD. DuckDB's own functions pass: they exist too.
@@ -46,6 +48,7 @@ CREATE TEMP TABLE reference AS SELECT content AS doc FROM read_text('$reference'
 
 SELECT 'registered: ' || count(*) FILTER (kind = 'table') || ' table functions, '
     || count(*) FILTER (kind = 'scalar') || ' scalar functions, '
+    || count(*) FILTER (kind = 'aggregate') || ' aggregate functions, '
     || count(*) FILTER (kind = 'macro') || ' macros, '
     || count(*) FILTER (kind = 'setting') || ' settings'
 FROM registered;
@@ -53,6 +56,18 @@ FROM registered;
 SELECT 'MISSING from the reference: ' || kind || ' ' || name
 FROM registered, reference
 WHERE NOT (contains(doc, '\`' || name || '(') OR contains(doc, '\`' || name || '\`'))
+ORDER BY ALL;
+
+-- What duckdb_functions() calls a function is what the reference must count it as: its
+-- summary gives the number of each kind.
+SELECT 'MISSING from the reference: the count of ' || kind || ' functions, as | ' || label || ' | ' || n || ' |'
+FROM (
+    SELECT kind, count(*) AS n,
+           CASE kind WHEN 'scalar' THEN 'Scalar functions' WHEN 'aggregate' THEN 'Aggregate functions'
+                     ELSE 'Macros' END AS label
+    FROM registered WHERE kind IN ('scalar', 'aggregate', 'macro') GROUP BY kind
+), reference
+WHERE NOT contains(doc, '| ' || label || ' | ' || n || ' |')
 ORDER BY ALL;
 
 SELECT 'MISSING from the reference: parameter ' || parameter || ' of ' || string_agg(function_name, ', ' ORDER BY function_name)

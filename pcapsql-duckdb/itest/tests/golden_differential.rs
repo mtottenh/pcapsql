@@ -33,7 +33,8 @@
 //!   be told apart here; `scan.rs` compares cells, not text.)
 //! - **BLOB.** Arrow prints lower-case hexadecimal, DuckDB an escaped string.
 //! - **Lists.** Arrow prints `[a, b]` with an empty item for NULL; DuckDB quotes strings that
-//!   could be misread and prints `NULL`.
+//!   could be misread and prints `NULL`. Of a struct in a list Arrow prints `{lo: 1, hi: 2}`,
+//!   DuckDB `{'lo': 1, 'hi': 2}`.
 //! - **Timestamps.** DuckDB's are TIMESTAMP_NS, DataFusion's microseconds; Arrow prints
 //!   `2023-11-14T22:13:21.001`, DuckDB `2023-11-14 22:13:21.001`. The instant must be equal.
 //! - **The `timestamp` column of protocol tables**, which DataFusion's tables do not have: it is
@@ -124,6 +125,13 @@ const COMPARED: &[(&str, Option<(&str, &str)>)] = &[
     ("u04_stream_join_packet", None),
     ("u05_http2_empty", None),
     ("u09_http_vs_http_messages", None),
+    // The histogram functions: the same statistics, the same buckets, and in `h02` the same
+    // bytes of the serialized histogram.
+    ("h01_hdr_statistics", None),
+    ("h02_hdr_bytes", None),
+    ("h03_hdr_group_by", None),
+    ("h04_hdr_buckets", None),
+    ("h05_hdr_no_rows", None),
     // The time functions, which here take the capture: `{capture}` is its path.
     (
         "q24_time_udfs",
@@ -265,6 +273,11 @@ fn duckdb_table(connection: &Connection, sql: &str) -> Result<Table> {
         select.push(match column[1].as_str() {
             "BLOB" => format!("lower(hex({c}))"),
             "BLOB[]" => item("lower(hex(x))"),
+            // The names of the fields are not quoted by Arrow. (No field of a struct here is
+            // text, which could hold a quote of its own.)
+            list if list.starts_with("STRUCT(") && list.ends_with("[]") => {
+                item("replace(x::VARCHAR, '''', '')")
+            }
             list if list.ends_with("[]") => item("x::VARCHAR"),
             "TIMESTAMP_NS" | "TIMESTAMP" => format!("strftime({c}, '%Y-%m-%dT%H:%M:%S.%n')"),
             _ => c,

@@ -1,8 +1,8 @@
 # pcapsql DuckDB extension: function reference
 
 Everything the `pcapsql` extension registers in DuckDB: table functions and
-their parameters, scalar functions, macros, settings, the replacement scan,
-and the copy format.
+their parameters, scalar functions, an aggregate function, macros, settings,
+the replacement scan, and the copy format.
 
 This page describes the extension as built from this tree, for DuckDB 2.0.0.
 `make check_reference_release` in `pcapsql-duckdb/` compares it with what the
@@ -24,7 +24,8 @@ is described in
 | Scan table functions | 54 | `read_pcap`, `read_<table>` for each of the 32 tables (28 of packets, 4 of TCP streams), and `read_<view>` for each of the 21 `*_packets` views |
 | Listing table functions | 3 | `pcap_protocols`, `pcap_views`, `pcap_schema` |
 | Capture summary table function | 1 | `pcap_time_range` |
-| Scalar functions | 40 | `ip4`, `ip4_to_string`, `ip6`, `ip6_to_string`, `mac`, `mac_to_string`, `is_private_ip`, `is_loopback_ip`, `is_multicast_ip`, `is_multicast_ip6`, `is_link_local_ip6`, `mac_is_broadcast`, `mac_is_multicast`, `mac_is_local`, `ip_in_cidr`, `ip6_in_cidr`, `tcp_flags_str`, `has_tcp_flag`, `ethertype_name`, `ip_proto_name`, `dscp_name`, `ecn_name`, `icmp_type_name`, `icmp_code_name`, `icmpv6_type_name`, `icmpv6_code_name`, `dns_type_name`, `dns_class_name`, `dns_rcode_name`, `bgp_message_type_name`, `bgp_origin_name`, `ospf_packet_type_name`, `ospf_lsa_type_name`, `gtp_message_type_name`, `ntp_mode_name`, `ntp_stratum_name`, `tls_record_type_name`, `tls_version_name`, `pcap_hex`, `pcap_unhex` |
+| Scalar functions | 48 | `ip4`, `ip4_to_string`, `ip6`, `ip6_to_string`, `mac`, `mac_to_string`, `is_private_ip`, `is_loopback_ip`, `is_multicast_ip`, `is_multicast_ip6`, `is_link_local_ip6`, `mac_is_broadcast`, `mac_is_multicast`, `mac_is_local`, `ip_in_cidr`, `ip6_in_cidr`, `tcp_flags_str`, `has_tcp_flag`, `ethertype_name`, `ip_proto_name`, `dscp_name`, `ecn_name`, `icmp_type_name`, `icmp_code_name`, `icmpv6_type_name`, `icmpv6_code_name`, `dns_type_name`, `dns_class_name`, `dns_rcode_name`, `bgp_message_type_name`, `bgp_origin_name`, `ospf_packet_type_name`, `ospf_lsa_type_name`, `gtp_message_type_name`, `ntp_mode_name`, `ntp_stratum_name`, `tls_record_type_name`, `tls_version_name`, `pcap_hex`, `pcap_unhex`, `hdr_count`, `hdr_min`, `hdr_max`, `hdr_mean`, `hdr_stdev`, `hdr_percentile`, `hdr_buckets`, `hdr_ascii` |
+| Aggregate functions | 1 | `hdr_histogram` |
 | Macros | 9 | `format_ip4`, `format_ip6`, `format_mac`, `format_ip4_list`, `format_ip6_list`, `format_mac_list`, `start_time`, `end_time`, `relative_time` |
 | Settings | 5 | `pcapsql_parallel_scan`, `pcapsql_parallel_min_file_size`, `pcapsql_index_stride`, `pcapsql_filter_pushdown`, `pcapsql_keylog` |
 | Replacement scan | 1 | `FROM 'capture.pcap'` |
@@ -445,6 +446,10 @@ made of the number, as the table says. The name columns of the tables
 (`type_name` of `read_icmp`, `message_type_name` of `read_bgp`, ...) hold
 the same text.
 
+The eight functions that read a histogram (`hdr_count`, `hdr_percentile`,
+...) are scalar functions too, and follow the first rule: NULL for NULL and
+for a `BLOB` that is not a histogram. They are described under "Histograms".
+
 | Function | Returns | Result |
 |---|---|---|
 | `ip4(address VARCHAR)` | `UINTEGER` | The value of a dotted-quad IPv4 address |
@@ -499,6 +504,110 @@ SELECT ip4_to_string(src_ip), icmp_type_name(type), icmp_code_name(type, code)
 FROM read_icmp('capture.pcap') JOIN read_ipv4('capture.pcap') USING (frame_number)
 WHERE NOT is_private_ip(src_ip);
 ```
+
+## Histograms
+
+A histogram of the values of a column, built by an aggregate function and
+read by scalar functions. They are the `hdr_*` functions of the command-line
+tool, on the same code (`pcapsql_core::format::histogram`, an
+[HdrHistogram](https://hdrhistogram.org)): a histogram one of the two made
+is one the other reads, and for the same values both give the same answers.
+
+A histogram keeps its values to two significant decimal digits (within 1 %),
+whatever their number, and grows with the largest of them: 2 KiB for values
+up to 255, 1 KiB more for each doubling of the largest value after that,
+about 60 KiB for the whole range of a `UBIGINT`. That is per group while the
+aggregation runs; the result is a compact encoding of the counts.
+
+### `hdr_histogram(value)`
+
+An aggregate function. Returns the histogram of the values of its group as a
+`BLOB`: HdrHistogram's V2 encoding, which other HdrHistogram implementations
+read too.
+
+- `value` is a number: any integer type (`TINYINT` to `HUGEINT`, `UTINYINT`
+  to `UHUGEINT`), `FLOAT`, `DOUBLE` or `DECIMAL`. Any other type is refused
+  when the statement is bound. A column is read as it is stored, without a
+  cast in between.
+- What is recorded is an unsigned 64-bit integer. NULL is not recorded, nor
+  is a negative number, nor NaN. Of a number with a fraction the integer
+  part is recorded, so scale a column of fractions first
+  (`hdr_histogram(seconds * 1000)`). A number above 18446744073709551615
+  (a `HUGEINT`, a large `DOUBLE`, infinity) is recorded as that.
+- A group without a value to record, and an aggregate without `GROUP BY`
+  over no rows, is an empty histogram, not NULL: its `hdr_count` is 0.
+- `FILTER`, `DISTINCT` and `OVER` (a window) work as for DuckDB's own
+  aggregate functions. An `ORDER BY` in the call changes nothing.
+- DuckDB aggregates on several threads and combines their partial
+  histograms. The answers do not depend on that. The bytes of the `BLOB`
+  can: one field of the encoding's header (the highest value the histogram
+  has room for) depends on how the values were split into partial
+  histograms and in which order those were combined. Equal values give
+  equal bytes when one worker recorded them all (a capture read as one
+  partition, or `SET threads = 1`, without `GROUP BY`), and always when they
+  are below 256; those are the bytes the command-line tool returns for
+  them. Compare histograms by what the functions below say of them.
+- DuckDB 2.0.0 frees the histogram of a group when it returns the group. The
+  histograms of groups a statement never returns stay allocated until the
+  process ends: a grouped `hdr_histogram` under a `LIMIT` without an
+  `ORDER BY`, and a statement that fails while it returns its groups. An
+  `ORDER BY` before the `LIMIT`, or reading the result to its end, frees
+  them all. (This is DuckDB's handling of every aggregate function that
+  owns memory, see `pcapsql-duckdb/README.md`.)
+
+One argument: the second argument the command-line tool's function accepts
+is ignored there, and is not accepted here.
+
+### Reading a histogram
+
+| Function | Returns | Result |
+|---|---|---|
+| `hdr_count(histogram BLOB)` | `UBIGINT` | The number of values recorded |
+| `hdr_min(histogram BLOB)` | `UBIGINT` | The smallest value recorded, to two digits: the lowest value the histogram cannot tell from it. 0 for an empty histogram |
+| `hdr_max(histogram BLOB)` | `UBIGINT` | The largest value recorded, to two digits: the highest value the histogram cannot tell from it, which is at least the value. 0 for an empty histogram |
+| `hdr_mean(histogram BLOB)` | `DOUBLE` | The mean of the values, each to two digits. 0 for an empty histogram |
+| `hdr_stdev(histogram BLOB)` | `DOUBLE` | Their standard deviation. 0 for an empty histogram |
+| `hdr_percentile(histogram BLOB, percentile DOUBLE)` | `DOUBLE` | The value at a percentile, given as a fraction (`0.99`) or, above 1, as a percentage (`99`). 0 for an empty histogram |
+| `hdr_buckets(histogram BLOB)` | `STRUCT(lo UBIGINT, hi UBIGINT, count UBIGINT)[]` | The recorded range in buckets on a logarithmic scale, each with its bounds (both included) and the number of values in it. Powers of two (`1-1`, `2-3`, `4-7`, ...) from the smallest value to the largest, empty buckets between them included; at most 64, and powers of ten when powers of two would be more. The counts add up to `hdr_count`. The empty list for an empty histogram |
+| `hdr_ascii(histogram BLOB)` | `VARCHAR` | The histogram drawn as text: a line of statistics, a header, and a line per bucket with its count, its share, the cumulative share and a bar. `(empty histogram)` for an empty one |
+
+NULL gives NULL, and so does a `BLOB` that is not a histogram: none of these
+raises an error for its input.
+
+```sql
+SELECT hdr_count(h), hdr_percentile(h, 0.5), hdr_percentile(h, 0.99), hdr_max(h)
+FROM (SELECT hdr_histogram(length) AS h FROM read_frames('capture.pcap'));
+
+-- A histogram per group, and its buckets as rows
+SELECT dst_port, unnest(hdr_buckets(hdr_histogram(length)), recursive := true)
+FROM read_tcp('capture.pcap') GROUP BY dst_port;
+
+-- The picture, in the DuckDB shell: .mode list
+SELECT hdr_ascii(hdr_histogram(length)) FROM read_frames('capture.pcap');
+```
+
+## Functions of the command-line tool that DuckDB has
+
+The command-line tool's SQL functions are all here, under the same names,
+except those DuckDB provides itself. Of its capture time functions the three
+take the capture as an argument here ("Capture time"). Its six date and time
+helpers are not registered: DuckDB's own functions do the same, on the
+`TIMESTAMP_NS` of the tables, with these spellings (`ts` is a timestamp
+column):
+
+| Command-line tool | In DuckDB | Result |
+|---|---|---|
+| `strftime`, called with the format first | `strftime(ts, '%Y-%m-%d %H:%M')` | Text in a format. The timestamp comes first. `%f` is microseconds and `%n` nanoseconds |
+| `datetime` | `strftime(ts, '%Y-%m-%dT%H:%M:%S.%f')` | ISO 8601 text with microseconds |
+| `date` | `strftime(ts, '%Y-%m-%d')`, or `ts::DATE` for a `DATE` | The date |
+| `time` | `strftime(ts, '%H:%M:%S.%f')`, or `ts::TIME` for a `TIME` | The time of day |
+| `epoch` | `epoch(ts)` | Seconds since 1970 as a `DOUBLE` |
+| `epoch_ms` | `epoch_ms(ts)` | Milliseconds since 1970 as a `BIGINT` |
+
+On a capture with microsecond timestamps each returns what the command-line
+tool's function returns. The tool's window table functions (`tumble`, `hop`,
+`session`) are table functions, not among these, and the extension does not
+have them.
 
 ## Macros
 

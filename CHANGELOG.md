@@ -9,6 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **DuckDB extension: the `hdr_*` histogram functions.** The aggregate
+  function `hdr_histogram(value)` and the scalar functions that read what it
+  returns: `hdr_count`, `hdr_min`, `hdr_max`, `hdr_mean`, `hdr_stdev`,
+  `hdr_percentile(histogram, percentile)`, `hdr_buckets` (a
+  `STRUCT(lo UBIGINT, hi UBIGINT, count UBIGINT)[]`) and `hdr_ascii`. They
+  are the command-line tool's functions on the same code, so both engines
+  record the same of a value, answer the same, and read each other's
+  histograms: the serialized `BLOB` is HdrHistogram's V2 encoding in both,
+  and equal byte for byte when the values were recorded by one worker
+  (compared over a capture in the golden corpus). `value` is any integer
+  type up to `HUGEINT`, `FLOAT`, `DOUBLE` or `DECIMAL`, read as it is stored;
+  anything else is refused at bind. NULL, negative numbers and NaN are not
+  recorded, a fraction is cut off, and a group without a value is an empty
+  histogram, not NULL. Parallel aggregation combines partial histograms
+  (tested over 3,000 groups on four threads); `FILTER`, `DISTINCT` and
+  `OVER` work. A `BLOB` that is not a histogram is NULL for every function.
+  Every callback of the aggregate function runs under the panic guard, the
+  one that cannot fail (`init`) included. Different from the command-line
+  tool: one argument (its second one is accepted and ignored there), and
+  `DECIMAL` values are recorded where it ignores such a column. Known
+  limit, of DuckDB 2.0.0: the histograms of groups a statement never
+  returns (a grouped aggregation under `LIMIT` without `ORDER BY`, a
+  statement that fails while it returns its groups) are not freed until the
+  process ends, because DuckDB does not destroy those states.
+- **pcapsql-core: `format::histogram`**, behind the new feature `histogram`
+  (off by default: the `hdrhistogram` crate needs Rust 1.88, one release
+  more than the rest of the crate). The kernels of the `hdr_*` functions:
+  `HdrHistogram` (record, merge, serialize and deserialize, count, min,
+  max, mean, standard deviation, percentile), its log-scale buckets and its
+  text rendering.
+- **DuckDB extension: with these, every SQL function of the command-line
+  tool is in the extension** under its name, except the six date and time
+  helpers (`strftime`, `datetime`, `date`, `time`, `epoch`, `epoch_ms`),
+  which DuckDB has of its own; the function reference lists the DuckDB
+  spelling of each.
+
 - **DuckDB extension: `pcap_time_range(files)` and the capture time
   functions.** `pcap_time_range(files, strict := false)` returns one row per
   capture file: `filename`, `start_time` and `end_time` (`TIMESTAMP_NS`, the

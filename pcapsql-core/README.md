@@ -81,6 +81,7 @@ automatically.
 | `compress-bzip2` | No | Bzip2 decompression |
 | `compress-xz` | No | XZ decompression |
 | `compress-all` | No | All compression formats |
+| `histogram` | No | `format::histogram`: the HdrHistogram kernels of the `hdr_*` SQL functions. Needs Rust 1.88 (the `hdrhistogram` crate), one release more than the rest of the crate |
 
 ## Architecture
 

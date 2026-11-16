@@ -5,6 +5,10 @@
 //! `pcapsql_duckdb::register` installs. The entrypoint is the same as the loadable extension's
 //! (`../ext`); only the way DuckDB reaches it differs.
 //!
+//! (Two tests elsewhere do the same for one behaviour each: `guard.rs` for what an unguarded
+//! panic does to a database, and `guard_aggregate.rs` for the aggregate states DuckDB does not
+//! destroy.)
+//!
 //! The tests named `spike_*` do not test pcapsql. They pin down DuckDB 2.0.0 and `duckdb-neo`
 //! behaviour the design relies on (section 10 of `docs/duckdb-v2-extension-roadmap.md`), with
 //! test-only table functions, so that an upgrade of either shows what changed.

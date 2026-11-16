@@ -1,16 +1,18 @@
 //! Scalar functions: vector loops over the kernels of `pcapsql_core::format`.
 //!
-//! No function has logic of its own here. Each is one of seven loops, instantiated with a kernel:
+//! No function has logic of its own here. Each is one of eight loops, instantiated with a kernel:
 //!
 //! - [`Map`]: one argument, the kernel returns the value (`ip4`, `mac`, `mac_is_local`, ...);
 //! - [`MapInto`]: one argument, the kernel puts the value in a buffer the loop lends it and
 //!   returns the part it filled (`pcap_unhex`, `ip4_to_string`, `ip6_to_string`,
 //!   `mac_to_string`), or returns a static string (`ecn_name`, and through [`name`] the
 //!   functions that name a protocol number: `dns_type_name`, `icmp_type_name`, ...);
-//! - [`ZipInto`](map::ZipInto): the same for two arguments (through [`name_of_pair`],
-//!   `icmp_code_name` and `icmpv6_code_name`);
+//! - [`ZipInto`]: the same for two arguments (through [`name_of_pair`], `icmp_code_name` and
+//!   `icmpv6_code_name`; and `hdr_percentile`, whose buffer is the number it returns);
 //! - [`Format`]: one argument, the kernel writes text of any length (`tcp_flags_str`,
-//!   `pcap_hex`);
+//!   `pcap_hex`, `hdr_ascii`);
+//! - [`StructList`]: one argument, the kernel gives a list of rows (`hdr_buckets`), which
+//!   `engine::nested` stores as a `LIST(STRUCT)`;
 //! - [`Match`]: a value and a text pattern, tested for each row (`ip6_in_cidr`);
 //! - [`MatchPlain`]: the same for a fixed-width value whose test always has an answer
 //!   (`ip_in_cidr`, `has_tcp_flag`), with the answers of a chunk computed over slices of its
@@ -29,10 +31,15 @@
 //! address a `BLOB` of 16 or 6 bytes. A function of an IPv6 or MAC address returns NULL for a
 //! `BLOB` of another length, which is not an address.
 //!
+//! A histogram is the `BLOB` the aggregate function `hdr_histogram` returns
+//! (`engine::aggregate`), in either engine. The `hdr_*` functions here read it with the kernel
+//! that wrote it and return NULL for a `BLOB` that is not one, as the DataFusion engine's do.
+//!
 //! One module here has `unsafe` code, the second of the two places in the crate that do
 //! (`scripts/check-unsafe.sh`): `valid`, in [`plain`], borrows the values of rows of a flat
 //! vector as a slice when none of those rows is NULL, and says why it may.
 
+mod list;
 mod map;
 mod pattern;
 mod plain;
@@ -40,6 +47,7 @@ mod plain;
 use duckdb_neo::{
     data_chunk::VectorCollection,
     extension::Extension,
+    logical_type::LogicalType,
     scalar::ScalarCallbacks,
     signature::{FunctionDocumentationBuilder, FunctionParameter, SignatureBuilder},
     types::BlobValue,
@@ -47,8 +55,10 @@ use duckdb_neo::{
     DuckDBType, Result,
 };
 use pcapsql_core::format;
+use pcapsql_core::format::histogram::HdrHistogram;
 
-use self::map::{name, name_of_pair, Format, Ipv6Text, Map, MapInto};
+use self::list::StructList;
+use self::map::{name, name_of_pair, Format, Ipv6Text, Map, MapInto, ZipInto};
 use self::pattern::Match;
 use self::plain::{MatchPlain, TestPlain};
 use super::guard;
@@ -59,7 +69,8 @@ pub(super) fn register(extension: &Extension) -> Result<()> {
     register_cidr(extension)?;
     register_tcp_flags(extension)?;
     register_names(extension)?;
-    register_hex(extension)
+    register_hex(extension)?;
+    register_histograms(extension)
 }
 
 /// Addresses to and from text.
@@ -381,6 +392,107 @@ fn register_hex(extension: &Extension) -> Result<()> {
         )
 }
 
+/// The type `hdr_buckets` returns: the DataFusion engine's list of `lo`, `hi`, `count`.
+const BUCKETS_TYPE: &str = "STRUCT(lo UBIGINT, hi UBIGINT, count UBIGINT)[]";
+
+/// `f(BLOB) -> O`: a statistic of the histogram a BLOB encodes. NULL for a BLOB that is not a
+/// histogram.
+fn of_histogram<O, R>(
+    statistic: impl Fn(&HdrHistogram) -> R + Send + Sync + 'static,
+) -> impl ScalarCallbacks
+where
+    O: duckdb_neo::vector::WritableNativeElement + 'static,
+    R: std::borrow::Borrow<O::Write> + 'static,
+{
+    Map::<BlobValue, O, R, _>::new(move |bytes: &[u8]| {
+        HdrHistogram::deserialize(bytes)
+            .ok()
+            .map(|histogram| statistic(&histogram))
+    })
+}
+
+/// What a histogram (the BLOB of `hdr_histogram`) says.
+fn register_histograms(extension: &Extension) -> Result<()> {
+    Function::new("hdr_count", "The number of values a histogram recorded.")
+        .parameter::<BlobValue>("histogram")
+        .example("hdr_count(hdr_histogram(length))")
+        .register::<u64, _>(extension, of_histogram::<u64, u64>(HdrHistogram::len))?;
+    Function::new(
+        "hdr_min",
+        "The smallest value a histogram recorded, at its precision.",
+    )
+    .parameter::<BlobValue>("histogram")
+    .example("hdr_min(hdr_histogram(length))")
+    .register::<u64, _>(extension, of_histogram::<u64, u64>(HdrHistogram::min))?;
+    Function::new(
+        "hdr_max",
+        "The largest value a histogram recorded, at its precision.",
+    )
+    .parameter::<BlobValue>("histogram")
+    .example("hdr_max(hdr_histogram(length))")
+    .register::<u64, _>(extension, of_histogram::<u64, u64>(HdrHistogram::max))?;
+    Function::new("hdr_mean", "The mean of the values a histogram recorded.")
+        .parameter::<BlobValue>("histogram")
+        .example("hdr_mean(hdr_histogram(length))")
+        .register::<f64, _>(extension, of_histogram::<f64, f64>(HdrHistogram::mean))?;
+    Function::new(
+        "hdr_stdev",
+        "The standard deviation of the values a histogram recorded.",
+    )
+    .parameter::<BlobValue>("histogram")
+    .example("hdr_stdev(hdr_histogram(length))")
+    .register::<f64, _>(extension, of_histogram::<f64, f64>(HdrHistogram::stdev))?;
+    Function::new(
+        "hdr_percentile",
+        "The value at a percentile of a histogram, given as a fraction (0.99) or, above 1, \
+         as a percentage (99).",
+    )
+    .parameter::<BlobValue>("histogram")
+    .parameter::<f64>("percentile")
+    .example("hdr_percentile(hdr_histogram(length), 0.99)")
+    .register::<f64, _>(
+        extension,
+        // The value goes through the buffer of the loop, which is a number here.
+        ZipInto::<BlobValue, f64, f64, f64, _>::new(|bytes, percentile, value| {
+            *value = HdrHistogram::deserialize(bytes)
+                .ok()?
+                .percentile(*percentile);
+            Some(&*value)
+        }),
+    )?;
+    Function::new(
+        "hdr_ascii",
+        "A histogram drawn as text: its statistics, and a line per bucket with a bar.",
+    )
+    .parameter::<BlobValue>("histogram")
+    .example("hdr_ascii(hdr_histogram(length))")
+    .register::<String, _>(
+        extension,
+        Format::<BlobValue, _>::new(|bytes, out| {
+            HdrHistogram::deserialize(bytes).ok()?.write_ascii(out).ok()
+        }),
+    )?;
+    Function::new(
+        "hdr_buckets",
+        "The values of a histogram in buckets on a logarithmic scale: a list of lo, hi, count.",
+    )
+    .parameter::<BlobValue>("histogram")
+    .example("unnest(hdr_buckets(hdr_histogram(length)), recursive := true)")
+    .register_returning(
+        extension,
+        LogicalType::from_text(extension, BUCKETS_TYPE)?,
+        StructList::<BlobValue, u64, 3, _>::new(|bytes, buckets| {
+            let histogram = HdrHistogram::deserialize(bytes).ok()?;
+            buckets.extend(
+                histogram
+                    .buckets()
+                    .map(|bucket| [bucket.lo, bucket.hi, bucket.count]),
+            );
+            Some(())
+        }),
+    )
+}
+
 /// What a scalar function is registered with, apart from its implementation.
 struct Function {
     name: &'static str,
@@ -413,18 +525,28 @@ impl Function {
         extension: &Extension,
         implementation: T,
     ) -> Result<()> {
+        self.register_returning(extension, O::logical_type(extension)?, implementation)
+    }
+
+    /// [`register`](Self::register) for a return type no Rust type stands for.
+    fn register_returning<T: ScalarCallbacks>(
+        self,
+        extension: &Extension,
+        return_type: LogicalType,
+        implementation: T,
+    ) -> Result<()> {
         let signature = self
             .parameters
             .into_iter()
             .fold(SignatureBuilder::new(), SignatureBuilder::param)
-            .return_type(O::logical_type(extension)?)
+            .return_type(return_type)
             .documentation(self.documentation);
         guard::scalar_function(self.name, signature, implementation).register(extension)
     }
 }
 
 /// A vector in a storage kind the vector reader accepts.
-fn readable<T: NativeElement>(mut vector: Vector<'_, T>) -> Result<Vector<'_, T>> {
+pub(super) fn readable<T: NativeElement>(mut vector: Vector<'_, T>) -> Result<Vector<'_, T>> {
     // Sequence and FSST vectors have no selection-based view; DuckDB materialises them on request.
     if vector.storage_kind() == StorageKind::Other {
         vector.flatten()?;
