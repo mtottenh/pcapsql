@@ -294,8 +294,8 @@ pub enum ColKind {
     TsMicros, TsNanos,
     ListU16, ListU32, ListStr, ListBin, ListFixed(u16),
 }
-impl TryFrom<&DataKind> for ColKind { type Error = UnsupportedKind; /* ... */ }
-impl ColKind { pub fn data_kind(self) -> DataKind; }
+// As built there is no conversion from or to `DataKind`: the column lists
+// name their kinds, and a test compares them with the parsers' descriptors.
 
 /// Where a column's value comes from. Today three private enums say the same
 /// thing: ParsedSource and FrameSource (builders/protocol.rs:470-490) and
@@ -317,11 +317,10 @@ pub struct ColumnDef {
     /// DataFusion tables or the golden snapshots.
     pub default: bool,
 }
-pub enum TableKind { Frames, Protocol, Stream(StreamTable) }
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum StreamTable { TcpConnections, TlsSessions, HttpMessages, Http2 }
+pub enum TableKind { Frames, Protocol, Stream }  // a stream table is told from the others by its name
 pub struct TableDef {
     pub name: &'static str,
+    pub description: &'static str,  // the line a frontend lists the table with (`pcap_protocols()`)
     pub kind: TableKind,
     pub columns: Box<[ColumnDef]>,
     /// Columns the rows are ordered by (ProtocolScanExec::PROTOCOL_ORDERING today).
@@ -387,6 +386,11 @@ impl ScanPlan {
     /// Resolve everything a packet loop must not look up: the ParseScope
     /// (shared.rs:138-200 moved here), per-output column plans, layer routing.
     pub fn compile(&self, catalog: &Catalog, registry: &ProtocolRegistry)
+        -> Result<CompiledScan, PlanError>;
+    /// Until the driver builds stream tables (S4c), `compile` refuses a plan
+    /// that has any (it would give them no rows), and a frontend that builds
+    /// them itself, from a `FrameObserver`, compiles with this.
+    pub fn compile_with_streams(&self, catalog: &Catalog, registry: &ProtocolRegistry)
         -> Result<CompiledScan, PlanError>;
 }
 pub struct OutColumn { pub name: &'static str, pub kind: ColKind, pub nullable: bool, pub source: ColumnSource }

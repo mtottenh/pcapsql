@@ -195,41 +195,7 @@ fn kind_name(kind: TableKind) -> &'static str {
     match kind {
         TableKind::Frames => "frames",
         TableKind::Protocol => "protocol",
-        TableKind::Stream(_) => "stream",
-    }
-}
-
-fn protocol_description(name: &str) -> &'static str {
-    match name {
-        "ethernet" => "Ethernet II frames (Layer 2)",
-        "linux_sll" => "Linux cooked capture v1 (tcpdump -i any)",
-        "sll2" => "Linux cooked capture v2",
-        "netlink" => "Linux netlink messages (nlmon captures)",
-        "rtnetlink" => "Linux rtnetlink (route/link/address messages)",
-        "vlan" => "IEEE 802.1Q VLAN tags",
-        "arp" => "Address Resolution Protocol",
-        "mpls" => "Multiprotocol Label Switching",
-        "ipv4" => "Internet Protocol version 4",
-        "ipv6" => "Internet Protocol version 6",
-        "tcp" => "Transmission Control Protocol",
-        "udp" => "User Datagram Protocol",
-        "icmp" => "Internet Control Message Protocol",
-        "icmpv6" => "ICMPv6 for IPv6",
-        "dns" => "Domain Name System",
-        "dhcp" => "Dynamic Host Configuration Protocol",
-        "ntp" => "Network Time Protocol",
-        "http" => "HTTP/1.x request and status lines with headers (per packet)",
-        "tls" => "Transport Layer Security",
-        "ssh" => "Secure Shell Protocol",
-        "quic" => "QUIC Transport Protocol",
-        "vxlan" => "Virtual Extensible LAN",
-        "gre" => "Generic Routing Encapsulation",
-        "gtp" => "GPRS Tunneling Protocol",
-        "ipsec" => "IP Security (ESP/AH)",
-        "bgp" => "Border Gateway Protocol",
-        "ospf" => "Open Shortest Path First",
-        "frames" => "Raw frame metadata (timestamp, length, etc.)",
-        _ => "Protocol parser",
+        TableKind::Stream => "stream",
     }
 }
 
@@ -314,7 +280,7 @@ fn protocol_rows() -> Vec<Vec<Cell>> {
         .map(|table| {
             vec![
                 Cell::Text(table.name),
-                Cell::Text(protocol_description(table.name)),
+                Cell::Text(table.description),
                 Cell::Count(exposed_columns(table).count() as u32),
                 Cell::Text(kind_name(table.kind)),
             ]
@@ -546,8 +512,13 @@ mod tests {
         for row in &rows {
             assert_eq!(row.len(), PROTOCOL_COLUMNS.len());
             let name = text(&row[0]);
-            // No table is left with the fallback description.
-            assert_ne!(text(&row[1]), "Protocol parser", "{name}");
+            // The catalogue's description of the table.
+            assert_eq!(
+                text(&row[1]),
+                scan_table(name).unwrap().1.description,
+                "{name}"
+            );
+            assert!(!text(&row[1]).is_empty(), "{name}");
             assert_eq!(
                 row[2],
                 Cell::Count(schema_rows(Relation::find(name).unwrap()).len() as u32),
@@ -664,16 +635,5 @@ mod tests {
             assert!(names.insert(relation.name()), "{}", relation.name());
         }
         assert_eq!(names.len(), 28 + 21);
-    }
-
-    #[test]
-    fn test_protocol_descriptions() {
-        assert_eq!(protocol_description("tcp"), "Transmission Control Protocol");
-        assert_eq!(protocol_description("dns"), "Domain Name System");
-        assert_eq!(
-            protocol_description("frames"),
-            "Raw frame metadata (timestamp, length, etc.)"
-        );
-        assert_eq!(protocol_description("unknown"), "Protocol parser");
     }
 }

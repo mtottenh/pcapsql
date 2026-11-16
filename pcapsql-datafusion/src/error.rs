@@ -47,6 +47,18 @@ pub enum QueryError {
     /// Arrow error
     #[error("Arrow error: {0}")]
     Arrow(String),
+
+    /// A scan plan the scan layer does not compile. It reads as an
+    /// [`Execution`](Self::Execution) error, which is what it was reported
+    /// as before it had a variant.
+    #[error("Query execution error: {0}")]
+    Plan(pcapsql_core::scan::PlanError),
+}
+
+impl From<pcapsql_core::scan::PlanError> for QueryError {
+    fn from(err: pcapsql_core::scan::PlanError) -> Self {
+        QueryError::Plan(err)
+    }
 }
 
 impl From<datafusion::error::DataFusionError> for QueryError {
@@ -70,17 +82,6 @@ impl From<datafusion::error::DataFusionError> for Error {
 impl From<arrow::error::ArrowError> for Error {
     fn from(err: arrow::error::ArrowError) -> Self {
         Error::Query(QueryError::from(err))
-    }
-}
-
-// Allow conversion from our Error to pcapsql_core Error for ? operator
-impl From<Error> for pcapsql_core::Error {
-    fn from(err: Error) -> Self {
-        match err {
-            Error::Core(e) => e,
-            Error::Query(e) => pcapsql_core::Error::Io(std::io::Error::other(e.to_string())),
-            Error::Io(e) => pcapsql_core::Error::Io(e),
-        }
     }
 }
 

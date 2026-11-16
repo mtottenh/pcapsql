@@ -157,6 +157,12 @@ impl Default for ScanStats {
 /// scan owns the observer; [`PartitionScan::observer_mut`] reaches it
 /// between steps and [`PartitionScan::finish`] gives it back.
 pub trait FrameObserver {
+    /// What [`observe`](Self::observe) fails with, and with it
+    /// [`PartitionScan::step`]: the frontend's own error type, so that a
+    /// failure of what it derives from the frames reaches it as it was
+    /// raised. A reader's error ([`enum@Error`]) converts into it.
+    type Error: From<Error>;
+
     /// `packet` and its parsed `layers`, in the order
     /// [`parse_packet`](crate::parse_packet) returns them (parsed with the
     /// plan's scope).
@@ -169,7 +175,7 @@ pub trait FrameObserver {
         &mut self,
         packet: &PacketRef<'_>,
         layers: &[(&'static str, ParseResult<'_>)],
-    ) -> Result<(), Error>;
+    ) -> Result<(), Self::Error>;
 
     /// Whether the observer still needs frames once every routed output is
     /// done. While it does, the scan does not report [`Step::Done`]. It is
@@ -184,6 +190,8 @@ pub trait FrameObserver {
 pub struct NoObserver;
 
 impl FrameObserver for NoObserver {
+    type Error = Error;
+
     #[inline(always)]
     fn observe(
         &mut self,
@@ -199,13 +207,15 @@ impl FrameObserver for NoObserver {
     }
 }
 
-/// One partition of a compiled scan, read step by step. See the
-/// [module](self) documentation.
+/// One partition of a compiled scan, read step by step. What a step
+/// guarantees is written at the top of `scan/driver.rs`.
 ///
 /// The outputs it writes are the plan's per-packet outputs (what a
 /// [`Router`] routes): `frames`, the protocol tables and the fused joins.
 /// Stream tables are not built here yet; a frontend that has them builds
-/// them in its [`FrameObserver`].
+/// them in its [`FrameObserver`], and compiles its plan with
+/// [`ScanPlan::compile_with_streams`](super::ScanPlan::compile_with_streams)
+/// to say so.
 pub struct PartitionScan<R: PacketReader, O: FrameObserver = NoObserver> {
     reader: R,
     plan: Arc<CompiledScan>,
@@ -272,20 +282,24 @@ impl<R: PacketReader, O: FrameObserver> PartitionScan<R, O> {
     /// before the next call. When several outputs are waiting, each call
     /// returns one of them, before any packet is read.
     ///
-    /// An error is the reader's or the observer's. The rows of packets
-    /// consumed before it are in the sinks and counted in
-    /// [`stats`](PartitionScan::stats). Stepping again is only meaningful
-    /// when the reader says it can be read again: after a read timeout
-    /// ([`PacketReader::take_read_timeout`]) the next step carries on where
-    /// this one stopped. After any other reader error (a malformed or
-    /// truncated record, a failed read) or an observer error, stop
-    /// stepping the partition.
+    /// An error is the reader's, as the observer's error type, or the
+    /// observer's own. The rows of packets consumed before it are in the
+    /// sinks and counted in [`stats`](PartitionScan::stats). Stepping again
+    /// is only meaningful when the reader says it can be read again: after a
+    /// read timeout ([`PacketReader::take_read_timeout`]) the next step
+    /// carries on where this one stopped. After any other reader error (a
+    /// malformed or truncated record, a failed read) or an observer error,
+    /// stop stepping the partition.
     ///
     /// # Panics
     ///
     /// If `sinks` is shorter than the outputs a frame has rows for.
     #[inline]
-    pub fn step<S: RowSink>(&mut self, sinks: &mut [S], max_packets: usize) -> Result<Step, Error> {
+    pub fn step<S: RowSink>(
+        &mut self,
+        sinks: &mut [S],
+        max_packets: usize,
+    ) -> Result<Step, O::Error> {
         if let Some(output) = self.router.take_flush() {
             return Ok(Step::Flush(output));
         }
@@ -384,7 +398,7 @@ impl<R: PacketReader, O: FrameObserver> PartitionScan<R, O> {
             Ok(delivered) => delivered,
             Err(error) => {
                 stats.packets += consumed;
-                return Err(error);
+                return Err(error.into());
             }
         };
         stats.packets += delivered.consumed as u64;
@@ -643,6 +657,8 @@ mod tests {
     }
 
     impl FrameObserver for Seen {
+        type Error = Error;
+
         fn observe(
             &mut self,
             packet: &PacketRef<'_>,
@@ -818,6 +834,57 @@ mod tests {
         // The frame was consumed, and not routed.
         assert_eq!(scan.stats().packets, 3);
         assert_eq!(numbers(sinks[0].take_rows()), [1, 2]);
+    }
+
+    /// An observer fails with its own error type, and the step returns that
+    /// error as it was raised; a reader's error is converted into the type.
+    #[test]
+    fn a_step_fails_with_the_observer_s_error_type() {
+        #[derive(Debug, PartialEq)]
+        enum Failure {
+            Observer(u64),
+            Reader(String),
+        }
+        impl From<Error> for Failure {
+            fn from(error: Error) -> Self {
+                Failure::Reader(error.to_string())
+            }
+        }
+        struct FailsAt(u64);
+        impl FrameObserver for FailsAt {
+            type Error = Failure;
+
+            fn observe(
+                &mut self,
+                packet: &PacketRef<'_>,
+                _layers: &[(&'static str, ParseResult<'_>)],
+            ) -> Result<(), Failure> {
+                if packet.frame_number == self.0 {
+                    return Err(Failure::Observer(packet.frame_number));
+                }
+                Ok(())
+            }
+        }
+        let plan = plan(&[("frames", None)]);
+        let scan = |reader: Frames| {
+            PartitionScan::with_observer(
+                reader,
+                Arc::clone(&plan),
+                Arc::new(crate::default_registry()),
+                FailsAt(3),
+            )
+        };
+        let mut sinks = sinks(&plan, None);
+        assert_eq!(
+            scan(Frames::new(5)).step(&mut sinks, 100),
+            Err(Failure::Observer(3))
+        );
+        let mut reader = Frames::new(5);
+        reader.fail_before = Some(0);
+        assert!(matches!(
+            scan(reader).step(&mut sinks, 100),
+            Err(Failure::Reader(_))
+        ));
     }
 
     /// A read error leaves the scan where it was: the next step carries on.

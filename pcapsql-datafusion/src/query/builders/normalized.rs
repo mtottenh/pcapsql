@@ -255,6 +255,8 @@ impl NormalizedBatchSet {
 }
 
 impl FrameObserver for NormalizedBatchSet {
+    type Error = Error;
+
     /// Feed the stream subscriber. Called by the scan once per frame,
     /// before the frame's rows are routed.
     #[inline]
@@ -262,11 +264,11 @@ impl FrameObserver for NormalizedBatchSet {
         &mut self,
         packet: &PacketRef<'_>,
         layers: &[(&'static str, ParseResult<'_>)],
-    ) -> Result<(), pcapsql_core::Error> {
-        if let Some(subscriber) = self.subscriber.as_mut() {
-            subscriber.observe(packet, layers)?;
+    ) -> Result<(), Error> {
+        match self.subscriber.as_mut() {
+            Some(subscriber) => subscriber.observe(packet, layers),
+            None => Ok(()),
         }
-        Ok(())
     }
 
     /// The scan may stop once its outputs are done unless stream tables are
