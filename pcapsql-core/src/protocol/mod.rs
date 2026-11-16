@@ -90,6 +90,7 @@ pub use layers::{
 pub use projection::{
     chain_fields_for_protocol, merge_with_chain_fields, FieldSet, ProjectionConfig,
 };
+pub(crate) use projection::{field_list, ParserField};
 pub use pruning::{compute_required_protocols, should_run_parser};
 pub use registry::{
     BuiltinProtocol, Cond, Dispatch, DispatchRule, PayloadMode, Protocol, ProtocolRegistry,
@@ -233,9 +234,9 @@ struct ResolvedScope {
     /// Per parser: may it run (as [`should_run_parser`] decides)? `None`
     /// when nothing is pruned.
     runs: Option<Box<[bool]>>,
-    /// Per parser: its field projection (`None`: all fields). `None` for the
-    /// whole when the scope projects nothing, in which case parsers run
-    /// `parse` rather than `parse_projected`.
+    /// Per parser: the fields it extracts, resolved against its field list
+    /// (`None`: all of them, with `parse` rather than `parse_projected`).
+    /// `None` for the whole when the scope projects nothing.
     projections: Option<Box<[Option<FieldSet>]>>,
 }
 
@@ -256,7 +257,9 @@ impl ParseScope {
         }
     }
 
-    /// Restrict the fields extracted for one protocol.
+    /// Restrict the fields extracted for one protocol to `fields`. With no
+    /// field, the protocol's layers are parsed for what the layers after
+    /// them need and carry no field.
     pub fn with_projection(mut self, protocol: impl Into<String>, fields: HashSet<String>) -> Self {
         self.projections.insert(protocol.into(), fields);
         self.resolved = OnceLock::new();
@@ -297,7 +300,10 @@ impl ParseScope {
             projections: (!self.projections.is_empty()).then(|| {
                 registry
                     .all_parsers()
-                    .map(|p| self.projections.get(p.name()).map(FieldSet::from))
+                    .map(|p| {
+                        let names = self.projections.get(p.name())?;
+                        project(p.field_names(), names)
+                    })
                     .collect()
             }),
         }
@@ -314,6 +320,17 @@ impl ParseScope {
             Cow::Owned(self.resolve(registry))
         }
     }
+}
+
+/// The fields `names` of a parser with the field list `fields`, for its
+/// projected parse; `None` when its full parse gives the same: it has no
+/// projected parse (no list), or every field of the list is asked for.
+fn project(fields: &[&str], names: &HashSet<String>) -> Option<FieldSet> {
+    if fields.is_empty() || fields.len() > FieldSet::CAPACITY {
+        return None;
+    }
+    let set = FieldSet::resolve(fields, names);
+    (set != FieldSet::all_of(fields.len())).then_some(set)
 }
 
 /// Parse a packet through its protocol layers, scoped by `scope`, into the
@@ -411,7 +428,7 @@ fn walk<'a>(
         // the fields it got.
         let projection = match &scope.projections {
             None => None,
-            Some(projections) => projections[index].as_ref(),
+            Some(projections) => projections[index],
         };
         let parsed = out.parse_layer(parser, remaining, &context, projection);
         debug_assert!(

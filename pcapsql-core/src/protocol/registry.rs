@@ -250,25 +250,36 @@ pub trait Protocol: Send + Sync {
         &[] // Default: no dependencies (link layer protocols)
     }
 
-    /// Parse with field projection - only extract requested fields.
+    /// The names of the fields [`parse`](Self::parse) can write: the
+    /// list whose positions a [`FieldSet`] given to
+    /// [`parse_projected`](Self::parse_projected) holds. Empty (the
+    /// default) for a parser without a projected parse.
+    fn field_names(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    /// [`parse`](Self::parse), writing only the fields of `projection`
+    /// (positions in [`field_names`](Self::field_names)).
     ///
-    /// If `projection` is None, extract all fields (default behavior).
-    /// If `projection` is Some, only extract fields in the set.
+    /// Everything else is the full parse's, whatever the projection: the
+    /// same [`Parsed`] (remaining bytes, child hints, status and error),
+    /// and of the fields the full parse writes, those in the projection, in
+    /// the same order. The layers after this one, and the tunnel context
+    /// they are found in, therefore do not depend on the projection. An
+    /// empty projection writes no field: the layer is parsed only for what
+    /// follows it. A parser whose parse can end in
+    /// [`Status::Partial`](super::Status::Partial) has no projected parse:
+    /// with no field written, the walk would drop the layer the full parse
+    /// keeps.
     ///
-    /// Note: `frame_number` and `timestamp` are always available from
-    /// the packet metadata, not from parsing.
-    ///
-    /// The default implementation ignores projection and calls
-    /// [`parse`](Self::parse). Protocols can override this to skip
-    /// expensive field extraction.
+    /// The default ignores the projection and calls [`parse`](Self::parse).
     fn parse_projected<'a>(
         &self,
         data: &'a [u8],
         context: &ParseContext,
-        _projection: Option<&FieldSet>,
+        _projection: FieldSet,
         fields: &mut FieldSink<'_, 'a>,
     ) -> Parsed<'a> {
-        // Default: ignore projection, parse everything
         self.parse(data, context, fields)
     }
 
@@ -416,11 +427,16 @@ impl Protocol for BuiltinProtocol {
     }
 
     #[inline]
+    fn field_names(&self) -> &'static [&'static str] {
+        delegate_protocol!(self, field_names)
+    }
+
+    #[inline]
     fn parse_projected<'a>(
         &self,
         data: &'a [u8],
         context: &ParseContext,
-        projection: Option<&FieldSet>,
+        projection: FieldSet,
         fields: &mut FieldSink<'_, 'a>,
     ) -> Parsed<'a> {
         delegate_protocol!(self, parse_projected, data, context, projection, fields)

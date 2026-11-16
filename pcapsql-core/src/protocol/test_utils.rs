@@ -516,12 +516,25 @@ pub trait ParseLayer: Protocol {
         self.parse_layer_projected(data, context, None)
     }
 
-    /// [`Protocol::parse_projected`] of `data`, with the fields it wrote.
+    /// [`Protocol::parse_projected`] of `data` for the fields called
+    /// `names`, with the fields it wrote.
+    fn parse_layer_fields<'a>(
+        &self,
+        data: &'a [u8],
+        context: &ParseContext,
+        names: &[&str],
+    ) -> ParsedLayer<'a> {
+        let projection = FieldSet::resolve(self.field_names(), names);
+        self.parse_layer_projected(data, context, Some(projection))
+    }
+
+    /// [`Protocol::parse_projected`] of `data` (`None`: [`Protocol::parse`]),
+    /// with the fields it wrote.
     fn parse_layer_projected<'a>(
         &self,
         data: &'a [u8],
         context: &ParseContext,
-        projection: Option<&FieldSet>,
+        projection: Option<FieldSet>,
     ) -> ParsedLayer<'a> {
         // The values may point into the buffer's arena, and the result is
         // handed out without it: a test's buffer is never freed.

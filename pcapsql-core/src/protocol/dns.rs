@@ -3,8 +3,8 @@
 use simple_dns::{rdata::RData, Packet, PacketFlag, OPCODE, RCODE};
 
 use super::{
-    Cond, Dispatch, DispatchRule, FieldSet, FieldSink, FieldValue, HintKey, Hints, ParseContext,
-    Parsed, Protocol,
+    field_list, Cond, Dispatch, DispatchRule, FieldSet, FieldSink, FieldValue, HintKey, Hints,
+    ParseContext, Parsed, Protocol,
 };
 use crate::schema::{DataKind, FieldDescriptor};
 
@@ -31,6 +31,71 @@ fn dns_message<'a>(data: &'a [u8], context: &ParseContext) -> Result<&'a [u8], S
     let len = u16::from_be_bytes([data[0], data[1]]) as usize;
     let body = &data[2..];
     Ok(&body[..body.len().min(len)])
+}
+
+field_list! {
+    /// The fields of a `dns` layer, in the order the parser writes them.
+    enum Field {
+        TransactionId = "transaction_id",
+        IsQuery = "is_query",
+        Opcode = "opcode",
+        IsAuthoritative = "is_authoritative",
+        IsTruncated = "is_truncated",
+        RecursionDesired = "recursion_desired",
+        RecursionAvailable = "recursion_available",
+        ResponseCode = "response_code",
+        QueryCount = "query_count",
+        AnswerCount = "answer_count",
+        AuthorityCount = "authority_count",
+        AdditionalCount = "additional_count",
+        QueryName = "query_name",
+        QueryType = "query_type",
+        QueryClass = "query_class",
+        AnswerIp4s = "answer_ip4s",
+        AnswerIp6s = "answer_ip6s",
+        AnswerCnames = "answer_cnames",
+        AnswerTypes = "answer_types",
+        AnswerTtls = "answer_ttls",
+        HasEdns = "has_edns",
+        EdnsUdpSize = "edns_udp_size",
+    }
+    groups {
+        /// The fields of the answer section, which is walked only for them.
+        ANSWERS = [AnswerIp4s, AnswerIp6s, AnswerCnames, AnswerTypes, AnswerTtls];
+    }
+}
+
+/// The DNS message of `data`: the fields of `want` (all of them for
+/// [`FieldSet::ALL`]) to `fields`. Whether the bytes are a message is
+/// decided whatever `want` is.
+#[inline(always)]
+fn parse_dns<'a>(
+    data: &'a [u8],
+    context: &ParseContext,
+    want: FieldSet,
+    fields: &mut FieldSink<'_, 'a>,
+) -> Parsed<'a> {
+    let message = match dns_message(data, context) {
+        Ok(m) => m,
+        Err(e) => return Parsed::error(fields.text(&e), data),
+    };
+    // Parse using simple-dns
+    let packet = match Packet::parse(message) {
+        Ok(p) => p,
+        Err(e) => {
+            return Parsed::error(fields.text_fmt(format_args!("DNS parse error: {e}")), data)
+        }
+    };
+
+    extract_header_fields(&packet, want, fields);
+    // The first question only
+    extract_question_fields(&packet, want, fields);
+    if want.has_any(Field::ANSWERS) {
+        extract_answer_fields(&packet, want, fields);
+    }
+    extract_edns_fields(&packet, want, fields);
+
+    Parsed::ok(&[], Hints::new())
 }
 
 /// DNS protocol parser.
@@ -79,31 +144,7 @@ impl Protocol for DnsProtocol {
         context: &ParseContext,
         fields: &mut FieldSink<'_, 'a>,
     ) -> Parsed<'a> {
-        let message = match dns_message(data, context) {
-            Ok(m) => m,
-            Err(e) => return Parsed::error(fields.text(&e), data),
-        };
-        // Parse using simple-dns
-        let packet = match Packet::parse(message) {
-            Ok(p) => p,
-            Err(e) => {
-                return Parsed::error(fields.text_fmt(format_args!("DNS parse error: {e}")), data)
-            }
-        };
-
-        // Extract header fields
-        extract_header_fields(&packet, fields);
-
-        // Extract question fields (first question only)
-        extract_question_fields(&packet, fields);
-
-        // Extract answer fields (as lists)
-        extract_answer_fields(&packet, fields);
-
-        // Extract EDNS fields
-        extract_edns_fields(&packet, fields);
-
-        Parsed::ok(&[], Hints::new())
+        parse_dns(data, context, FieldSet::ALL, fields)
     }
 
     fn schema_fields(&self) -> Vec<FieldDescriptor> {
@@ -165,55 +206,18 @@ impl Protocol for DnsProtocol {
         &["udp", "tcp"] // DNS runs over UDP (primarily) and TCP
     }
 
+    fn field_names(&self) -> &'static [&'static str] {
+        Field::NAMES
+    }
+
     fn parse_projected<'a>(
         &self,
         data: &'a [u8],
         context: &ParseContext,
-        requested_fields: Option<&FieldSet>,
+        projection: FieldSet,
         fields: &mut FieldSink<'_, 'a>,
     ) -> Parsed<'a> {
-        // If no projection, use full parse
-        let requested = match requested_fields {
-            None => return self.parse(data, context, fields),
-            Some(f) if f.is_empty() => return self.parse(data, context, fields),
-            Some(f) => f,
-        };
-
-        let message = match dns_message(data, context) {
-            Ok(m) => m,
-            Err(e) => return Parsed::error(fields.text(&e), data),
-        };
-        // Parse using simple-dns
-        let packet = match Packet::parse(message) {
-            Ok(p) => p,
-            Err(e) => {
-                return Parsed::error(fields.text_fmt(format_args!("DNS parse error: {e}")), data)
-            }
-        };
-
-        // Check which field categories are needed
-        let need_header = requested.iter().any(is_header_field);
-        let need_question = requested.iter().any(is_question_field);
-        let need_answers = requested.iter().any(is_answer_field);
-        let need_edns = requested.iter().any(is_edns_field);
-
-        if need_header {
-            extract_header_fields_projected(&packet, fields, requested);
-        }
-
-        if need_question {
-            extract_question_fields_projected(&packet, fields, requested);
-        }
-
-        if need_answers {
-            extract_answer_fields_projected(&packet, fields, requested);
-        }
-
-        if need_edns {
-            extract_edns_fields_projected(&packet, fields, requested);
-        }
-
-        Parsed::ok(&[], Hints::new())
+        parse_dns(data, context, projection, fields)
     }
 
     fn cheap_fields(&self) -> &'static [&'static str] {
@@ -251,43 +255,6 @@ impl Protocol for DnsProtocol {
     }
 }
 
-/// Check if field is a header field.
-fn is_header_field(field: &str) -> bool {
-    matches!(
-        field,
-        "transaction_id"
-            | "is_query"
-            | "opcode"
-            | "is_authoritative"
-            | "is_truncated"
-            | "recursion_desired"
-            | "recursion_available"
-            | "response_code"
-            | "query_count"
-            | "answer_count"
-            | "authority_count"
-            | "additional_count"
-    )
-}
-
-/// Check if field is a question field.
-fn is_question_field(field: &str) -> bool {
-    matches!(field, "query_name" | "query_type" | "query_class")
-}
-
-/// Check if field is an answer field.
-fn is_answer_field(field: &str) -> bool {
-    matches!(
-        field,
-        "answer_ip4s" | "answer_ip6s" | "answer_cnames" | "answer_types" | "answer_ttls"
-    )
-}
-
-/// Check if field is an EDNS field.
-fn is_edns_field(field: &str) -> bool {
-    matches!(field, "has_edns" | "edns_udp_size")
-}
-
 /// Convert OPCODE to u8.
 fn opcode_to_u8(opcode: OPCODE) -> u8 {
     match opcode {
@@ -319,119 +286,69 @@ fn rcode_to_u8(rcode: RCODE) -> u8 {
     }
 }
 
-/// Extract header fields from a DNS packet.
-fn extract_header_fields(packet: &Packet, fields: &mut FieldSink<'_, '_>) {
-    fields.push(("transaction_id", FieldValue::UInt16(packet.id())));
-    fields.push((
-        "is_query",
-        FieldValue::Bool(!packet.has_flags(PacketFlag::RESPONSE)),
-    ));
-    fields.push(("opcode", FieldValue::UInt8(opcode_to_u8(packet.opcode()))));
-    fields.push((
-        "is_authoritative",
-        FieldValue::Bool(packet.has_flags(PacketFlag::AUTHORITATIVE_ANSWER)),
-    ));
-    fields.push((
-        "is_truncated",
-        FieldValue::Bool(packet.has_flags(PacketFlag::TRUNCATION)),
-    ));
-    fields.push((
-        "recursion_desired",
-        FieldValue::Bool(packet.has_flags(PacketFlag::RECURSION_DESIRED)),
-    ));
-    fields.push((
-        "recursion_available",
-        FieldValue::Bool(packet.has_flags(PacketFlag::RECURSION_AVAILABLE)),
-    ));
-    fields.push((
-        "response_code",
-        FieldValue::UInt8(rcode_to_u8(packet.rcode())),
-    ));
-    fields.push((
-        "query_count",
-        FieldValue::UInt16(packet.questions.len() as u16),
-    ));
-    fields.push((
-        "answer_count",
-        FieldValue::UInt16(packet.answers.len() as u16),
-    ));
-    fields.push((
-        "authority_count",
-        FieldValue::UInt16(packet.name_servers.len() as u16),
-    ));
-    fields.push((
-        "additional_count",
-        FieldValue::UInt16(packet.additional_records.len() as u16),
-    ));
-}
-
-/// Extract header fields from a DNS packet (projected).
-fn extract_header_fields_projected(
-    packet: &Packet,
-    fields: &mut FieldSink<'_, '_>,
-    requested: &FieldSet,
-) {
-    if requested.contains("transaction_id") {
+/// The header fields of `want`.
+fn extract_header_fields(packet: &Packet, want: FieldSet, fields: &mut FieldSink<'_, '_>) {
+    if want.has(Field::TransactionId) {
         fields.push(("transaction_id", FieldValue::UInt16(packet.id())));
     }
-    if requested.contains("is_query") {
+    if want.has(Field::IsQuery) {
         fields.push((
             "is_query",
             FieldValue::Bool(!packet.has_flags(PacketFlag::RESPONSE)),
         ));
     }
-    if requested.contains("opcode") {
+    if want.has(Field::Opcode) {
         fields.push(("opcode", FieldValue::UInt8(opcode_to_u8(packet.opcode()))));
     }
-    if requested.contains("is_authoritative") {
+    if want.has(Field::IsAuthoritative) {
         fields.push((
             "is_authoritative",
             FieldValue::Bool(packet.has_flags(PacketFlag::AUTHORITATIVE_ANSWER)),
         ));
     }
-    if requested.contains("is_truncated") {
+    if want.has(Field::IsTruncated) {
         fields.push((
             "is_truncated",
             FieldValue::Bool(packet.has_flags(PacketFlag::TRUNCATION)),
         ));
     }
-    if requested.contains("recursion_desired") {
+    if want.has(Field::RecursionDesired) {
         fields.push((
             "recursion_desired",
             FieldValue::Bool(packet.has_flags(PacketFlag::RECURSION_DESIRED)),
         ));
     }
-    if requested.contains("recursion_available") {
+    if want.has(Field::RecursionAvailable) {
         fields.push((
             "recursion_available",
             FieldValue::Bool(packet.has_flags(PacketFlag::RECURSION_AVAILABLE)),
         ));
     }
-    if requested.contains("response_code") {
+    if want.has(Field::ResponseCode) {
         fields.push((
             "response_code",
             FieldValue::UInt8(rcode_to_u8(packet.rcode())),
         ));
     }
-    if requested.contains("query_count") {
+    if want.has(Field::QueryCount) {
         fields.push((
             "query_count",
             FieldValue::UInt16(packet.questions.len() as u16),
         ));
     }
-    if requested.contains("answer_count") {
+    if want.has(Field::AnswerCount) {
         fields.push((
             "answer_count",
             FieldValue::UInt16(packet.answers.len() as u16),
         ));
     }
-    if requested.contains("authority_count") {
+    if want.has(Field::AuthorityCount) {
         fields.push((
             "authority_count",
             FieldValue::UInt16(packet.name_servers.len() as u16),
         ));
     }
-    if requested.contains("additional_count") {
+    if want.has(Field::AdditionalCount) {
         fields.push((
             "additional_count",
             FieldValue::UInt16(packet.additional_records.len() as u16),
@@ -439,107 +356,34 @@ fn extract_header_fields_projected(
     }
 }
 
-/// Extract question fields from a DNS packet.
-fn extract_question_fields(packet: &Packet, fields: &mut FieldSink<'_, '_>) {
-    if let Some(question) = packet.questions.first() {
-        fields.push((
-            "query_name",
-            fields.format(format_args!("{}", question.qname)),
-        ));
-        fields.push(("query_type", FieldValue::UInt16(question.qtype.into())));
-        fields.push(("query_class", FieldValue::UInt16(question.qclass.into())));
-    } else {
-        fields.push(("query_name", FieldValue::Null));
-        fields.push(("query_type", FieldValue::Null));
-        fields.push(("query_class", FieldValue::Null));
+/// The question fields of `want`, from the first question (NULL without
+/// one).
+fn extract_question_fields(packet: &Packet, want: FieldSet, fields: &mut FieldSink<'_, '_>) {
+    let question = packet.questions.first();
+    if want.has(Field::QueryName) {
+        let name = match question {
+            Some(question) => fields.format(format_args!("{}", question.qname)),
+            None => FieldValue::Null,
+        };
+        fields.push(("query_name", name));
+    }
+    if want.has(Field::QueryType) {
+        let qtype = question.map_or(FieldValue::Null, |q| FieldValue::UInt16(q.qtype.into()));
+        fields.push(("query_type", qtype));
+    }
+    if want.has(Field::QueryClass) {
+        let qclass = question.map_or(FieldValue::Null, |q| FieldValue::UInt16(q.qclass.into()));
+        fields.push(("query_class", qclass));
     }
 }
 
-/// Extract question fields from a DNS packet (projected).
-fn extract_question_fields_projected(
-    packet: &Packet,
-    fields: &mut FieldSink<'_, '_>,
-    requested: &FieldSet,
-) {
-    if let Some(question) = packet.questions.first() {
-        if requested.contains("query_name") {
-            fields.push((
-                "query_name",
-                fields.format(format_args!("{}", question.qname)),
-            ));
-        }
-        if requested.contains("query_type") {
-            fields.push(("query_type", FieldValue::UInt16(question.qtype.into())));
-        }
-        if requested.contains("query_class") {
-            fields.push(("query_class", FieldValue::UInt16(question.qclass.into())));
-        }
-    } else {
-        if requested.contains("query_name") {
-            fields.push(("query_name", FieldValue::Null));
-        }
-        if requested.contains("query_type") {
-            fields.push(("query_type", FieldValue::Null));
-        }
-        if requested.contains("query_class") {
-            fields.push(("query_class", FieldValue::Null));
-        }
-    }
-}
-
-/// Extract answer fields from a DNS packet as lists.
-fn extract_answer_fields(packet: &Packet, fields: &mut FieldSink<'_, '_>) {
-    let mut ip4s = fields.list_builder();
-    let mut ip6s = fields.list_builder();
-    let mut cnames = fields.list_builder();
-    let mut types = fields.list_builder();
-    let mut ttls = fields.list_builder();
-
-    for answer in &packet.answers {
-        // Record type
-        let rtype: u16 = answer.rdata.type_code().into();
-        types.push(FieldValue::UInt16(rtype));
-
-        // TTL
-        ttls.push(FieldValue::UInt32(answer.ttl));
-
-        // Extract type-specific data
-        match &answer.rdata {
-            RData::A(a) => {
-                ip4s.push(FieldValue::UInt32(a.address));
-            }
-            RData::AAAA(aaaa) => {
-                // Use IpAddr to avoid heap allocation for IPv6 address
-                ip6s.push(FieldValue::IpAddr(std::net::IpAddr::V6(
-                    std::net::Ipv6Addr::from(aaaa.address),
-                )));
-            }
-            RData::CNAME(cname) => {
-                cnames.push(fields.format(format_args!("{}", cname.0)));
-            }
-            _ => {}
-        }
-    }
-
-    // Push list fields
-    fields.push(("answer_ip4s", ip4s.finish()));
-    fields.push(("answer_ip6s", ip6s.finish()));
-    fields.push(("answer_cnames", cnames.finish()));
-    fields.push(("answer_types", types.finish()));
-    fields.push(("answer_ttls", ttls.finish()));
-}
-
-/// Extract answer fields from a DNS packet (projected).
-fn extract_answer_fields_projected(
-    packet: &Packet,
-    fields: &mut FieldSink<'_, '_>,
-    requested: &FieldSet,
-) {
-    let need_ip4s = requested.contains("answer_ip4s");
-    let need_ip6s = requested.contains("answer_ip6s");
-    let need_cnames = requested.contains("answer_cnames");
-    let need_types = requested.contains("answer_types");
-    let need_ttls = requested.contains("answer_ttls");
+/// The answer fields of `want`, as lists.
+fn extract_answer_fields(packet: &Packet, want: FieldSet, fields: &mut FieldSink<'_, '_>) {
+    let need_ip4s = want.has(Field::AnswerIp4s);
+    let need_ip6s = want.has(Field::AnswerIp6s);
+    let need_cnames = want.has(Field::AnswerCnames);
+    let need_types = want.has(Field::AnswerTypes);
+    let need_ttls = want.has(Field::AnswerTtls);
 
     let mut ip4s = fields.list_builder();
     let mut ip6s = fields.list_builder();
@@ -557,6 +401,7 @@ fn extract_answer_fields_projected(
             ttls.push(FieldValue::UInt32(answer.ttl));
         }
 
+        // Extract type-specific data
         match &answer.rdata {
             RData::A(a) if need_ip4s => {
                 ip4s.push(FieldValue::UInt32(a.address));
@@ -591,35 +436,17 @@ fn extract_answer_fields_projected(
     }
 }
 
-/// Extract EDNS fields from a DNS packet.
-fn extract_edns_fields(packet: &Packet, fields: &mut FieldSink<'_, '_>) {
-    if let Some(opt) = packet.opt() {
-        fields.push(("has_edns", FieldValue::Bool(true)));
-        fields.push(("edns_udp_size", FieldValue::UInt16(opt.udp_packet_size)));
-    } else {
-        fields.push(("has_edns", FieldValue::Bool(false)));
-        fields.push(("edns_udp_size", FieldValue::Null));
+/// The EDNS fields of `want`.
+fn extract_edns_fields(packet: &Packet, want: FieldSet, fields: &mut FieldSink<'_, '_>) {
+    let opt = packet.opt();
+    if want.has(Field::HasEdns) {
+        fields.push(("has_edns", FieldValue::Bool(opt.is_some())));
     }
-}
-
-/// Extract EDNS fields from a DNS packet (projected).
-fn extract_edns_fields_projected(
-    packet: &Packet,
-    fields: &mut FieldSink<'_, '_>,
-    requested: &FieldSet,
-) {
-    let has_edns = packet.opt().is_some();
-
-    if requested.contains("has_edns") {
-        fields.push(("has_edns", FieldValue::Bool(has_edns)));
-    }
-
-    if requested.contains("edns_udp_size") {
-        if let Some(opt) = packet.opt() {
-            fields.push(("edns_udp_size", FieldValue::UInt16(opt.udp_packet_size)));
-        } else {
-            fields.push(("edns_udp_size", FieldValue::Null));
-        }
+    if want.has(Field::EdnsUdpSize) {
+        let size = opt.map_or(FieldValue::Null, |opt| {
+            FieldValue::UInt16(opt.udp_packet_size)
+        });
+        fields.push(("edns_udp_size", size));
     }
 }
 
@@ -900,13 +727,21 @@ mod tests {
         );
 
         // Projection goes through the same prefix handling.
-        let fields: FieldSet = ["transaction_id"].iter().map(|s| s.to_string()).collect();
-        let projected = parser.parse_layer_projected(&segment, &tcp, Some(&fields));
+        let projected = parser.parse_layer_fields(&segment, &tcp, &["transaction_id"]);
         assert!(projected.is_ok(), "{:?}", projected.error);
         assert_eq!(
             projected.get("transaction_id"),
             Some(&FieldValue::UInt16(0x1234))
         );
+        assert!(projected.get("query_name").is_none());
+
+        // A projection of no field (a row count) extracts none; whether the
+        // bytes are a message is still decided.
+        let none = parser.parse_layer_projected(&segment, &tcp, Some(FieldSet::NONE));
+        assert!(none.is_ok(), "{:?}", none.error);
+        assert!(none.fields.is_empty());
+        let broken = parser.parse_layer_projected(&segment[..5], &tcp, Some(FieldSet::NONE));
+        assert!(!broken.is_ok());
 
         // Over UDP the same bytes are not a message (no prefix expected).
         let mut udp = ParseContext::new(1);
@@ -966,11 +801,11 @@ mod tests {
         context.insert_hint(HintKey::DstPort, 53);
 
         // Only request header fields - skip expensive parsing
-        let fields: FieldSet = ["transaction_id", "is_query", "response_code"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        let result = parser.parse_layer_projected(&packet, &context, Some(&fields));
+        let result = parser.parse_layer_fields(
+            &packet,
+            &context,
+            &["transaction_id", "is_query", "response_code"],
+        );
 
         assert!(result.is_ok());
         // Requested fields are present

@@ -434,14 +434,14 @@ impl<'a> PacketLayers<'_, 'a> {
     /// that ends in [`Status::Error`] leaves no layer and no field; one that
     /// ends in [`Status::Partial`] leaves a layer if it wrote a field.
     /// `projection` limits the fields a parser that supports it extracts
-    /// ([`Protocol::parse_projected`]).
+    /// ([`Protocol::parse_projected`]); `None` extracts all.
     #[inline]
     pub fn parse_layer<P: Protocol + ?Sized>(
         &mut self,
         parser: &P,
         data: &'a [u8],
         context: &ParseContext,
-        projection: Option<&FieldSet>,
+        projection: Option<FieldSet>,
     ) -> Parsed<'a> {
         let start = self.fields.len();
         let mut sink = FieldSink {
@@ -451,8 +451,23 @@ impl<'a> PacketLayers<'_, 'a> {
         };
         let parsed = match projection {
             None => parser.parse(data, context, &mut sink),
-            Some(_) => parser.parse_projected(data, context, projection, &mut sink),
+            Some(projection) => parser.parse_projected(data, context, projection, &mut sink),
         };
+        debug_assert!(
+            projection.is_none_or(|projection| {
+                let names = parser.field_names();
+                names.is_empty()
+                    || self.fields[start..].iter().all(|(name, _)| {
+                        names
+                            .iter()
+                            .position(|n| n == name)
+                            .is_some_and(|position| projection.contains(position))
+                    })
+            }),
+            "{} wrote a field outside its projection {projection:?}: {:?}",
+            parser.name(),
+            &self.fields[start..]
+        );
         let error = match parsed.status {
             Status::Ok => None,
             Status::Partial(error) if self.fields.len() > start => Some(error),
