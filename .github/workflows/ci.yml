@@ -3,8 +3,8 @@ name: CI
 on:
   push:
     branches: [main]
+  # Every pull request, whatever its base, so each PR of a stack is checked.
   pull_request:
-    branches: [main]
 
 env:
   CARGO_TERM_COLOR: always
