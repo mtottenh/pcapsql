@@ -5,8 +5,8 @@ use smallvec::SmallVec;
 use etherparse::{TcpHeaderSlice, TcpOptionElement};
 
 use super::{
-    http, FieldSet, FieldValue, HintEntry, ParseContext, ParseGate, ParseResult, PayloadMode,
-    Protocol,
+    http, Cond, Dispatch, DispatchRule, FieldSet, FieldValue, HintKey, Hints, ParseContext,
+    ParseResult, PayloadMode, Protocol,
 };
 use crate::schema::{DataKind, FieldDescriptor};
 
@@ -149,13 +149,13 @@ fn parse_tcp_options(tcp: &TcpHeaderSlice<'_>) -> ParsedTcpOptions {
 /// Child hints for the layer above TCP: the ports, the transport, and
 /// whether the payload starts an HTTP/1.x message (a prefix test that lets
 /// the `http` parser match only message starts, not continuation segments).
-fn child_hints(src_port: u16, dst_port: u16, payload: &[u8]) -> SmallVec<[HintEntry; 4]> {
-    let mut child_hints = SmallVec::new();
-    child_hints.push(("src_port", src_port as u64));
-    child_hints.push(("dst_port", dst_port as u64));
-    child_hints.push(("transport", IP_PROTO_TCP as u64));
+fn child_hints(src_port: u16, dst_port: u16, payload: &[u8]) -> Hints {
+    let mut child_hints = Hints::new();
+    child_hints.insert(HintKey::SrcPort, src_port as u64);
+    child_hints.insert(HintKey::DstPort, dst_port as u64);
+    child_hints.insert(HintKey::Transport, IP_PROTO_TCP as u64);
     if http::starts_http_message(payload) {
-        child_hints.push((http::PAYLOAD_HINT, 1));
+        child_hints.insert(http::PAYLOAD_HINT, 1);
     }
     child_hints
 }
@@ -173,16 +173,25 @@ impl Protocol for TcpProtocol {
         "TCP"
     }
 
-    fn parse_gates(&self) -> &'static [ParseGate] {
-        &[ParseGate::Hint("ip_protocol")]
+    fn dispatch(&self) -> Dispatch {
+        const RULES: &[DispatchRule] = &[DispatchRule::hints(
+            &[Cond::Hint(HintKey::IpProtocol, &[IP_PROTO_TCP as u64])],
+            100,
+        )];
+        Dispatch::Exact(RULES)
     }
 
-    fn child_hint_keys(&self) -> Option<&'static [&'static str]> {
-        Some(&["src_port", "dst_port", "transport", http::PAYLOAD_HINT])
+    fn child_hint_keys(&self) -> Option<&'static [HintKey]> {
+        Some(&[
+            HintKey::SrcPort,
+            HintKey::DstPort,
+            HintKey::Transport,
+            HintKey::HttpPayload,
+        ])
     }
 
     fn can_parse(&self, context: &ParseContext) -> Option<u32> {
-        match context.hint("ip_protocol") {
+        match context.hint(HintKey::IpProtocol) {
             Some(proto) if proto == IP_PROTO_TCP as u64 => Some(100),
             _ => None,
         }
@@ -728,7 +737,7 @@ mod tests {
 
         let parser = TcpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 6);
+        context.insert_hint(HintKey::IpProtocol, 6);
 
         let result = parser.parse(&header, &context);
 
@@ -756,7 +765,7 @@ mod tests {
 
         let parser = TcpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 6);
+        context.insert_hint(HintKey::IpProtocol, 6);
 
         let result = parser.parse(&header, &context);
 
@@ -787,7 +796,7 @@ mod tests {
 
         let parser = TcpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 6);
+        context.insert_hint(HintKey::IpProtocol, 6);
 
         let result = parser.parse(&header, &context);
 
@@ -813,7 +822,7 @@ mod tests {
 
         let parser = TcpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 6);
+        context.insert_hint(HintKey::IpProtocol, 6);
 
         let result = parser.parse(&header, &context);
 
@@ -840,7 +849,7 @@ mod tests {
 
         let parser = TcpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 6);
+        context.insert_hint(HintKey::IpProtocol, 6);
 
         let result = parser.parse(&header, &context);
 
@@ -862,12 +871,12 @@ mod tests {
 
         // With wrong protocol
         let mut ctx2 = ParseContext::new(1);
-        ctx2.insert_hint("ip_protocol", 17); // UDP
+        ctx2.insert_hint(HintKey::IpProtocol, 17); // UDP
         assert!(parser.can_parse(&ctx2).is_none());
 
         // With TCP protocol
         let mut ctx3 = ParseContext::new(1);
-        ctx3.insert_hint("ip_protocol", 6);
+        ctx3.insert_hint(HintKey::IpProtocol, 6);
         assert!(parser.can_parse(&ctx3).is_some());
     }
 
@@ -877,7 +886,7 @@ mod tests {
 
         let parser = TcpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 6);
+        context.insert_hint(HintKey::IpProtocol, 6);
 
         let result = parser.parse(&short_header, &context);
 
@@ -901,14 +910,14 @@ mod tests {
 
         let parser = TcpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 6);
+        context.insert_hint(HintKey::IpProtocol, 6);
 
         let result = parser.parse(&header, &context);
 
         assert!(result.is_ok());
-        assert_eq!(result.hint("src_port"), Some(443u64));
-        assert_eq!(result.hint("dst_port"), Some(80u64));
-        assert_eq!(result.hint("transport"), Some(6u64));
+        assert_eq!(result.hint(HintKey::SrcPort), Some(443u64));
+        assert_eq!(result.hint(HintKey::DstPort), Some(80u64));
+        assert_eq!(result.hint(HintKey::Transport), Some(6u64));
     }
 
     #[test]
@@ -927,7 +936,7 @@ mod tests {
 
         let parser = TcpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 6);
+        context.insert_hint(HintKey::IpProtocol, 6);
 
         // Project to only ports
         let fields: FieldSet = ["src_port", "dst_port"]
@@ -946,8 +955,8 @@ mod tests {
         assert!(result.get("flags").is_none());
         assert!(result.get("flag_syn").is_none());
         // Child hints are still populated
-        assert_eq!(result.hint("src_port"), Some(80u64));
-        assert_eq!(result.hint("dst_port"), Some(8080u64));
+        assert_eq!(result.hint(HintKey::SrcPort), Some(80u64));
+        assert_eq!(result.hint(HintKey::DstPort), Some(8080u64));
     }
 
     #[test]
@@ -966,7 +975,7 @@ mod tests {
 
         let parser = TcpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 6);
+        context.insert_hint(HintKey::IpProtocol, 6);
 
         // Project to ports and specific flags
         let fields: FieldSet = ["src_port", "flag_syn", "flag_ack"]
@@ -1002,7 +1011,7 @@ mod tests {
 
         let parser = TcpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 6);
+        context.insert_hint(HintKey::IpProtocol, 6);
 
         // No projection - should return all fields
         let result = parser.parse_projected(&header, &context, None);
@@ -1043,7 +1052,7 @@ mod tests {
 
         let parser = TcpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 6);
+        context.insert_hint(HintKey::IpProtocol, 6);
 
         let result = parser.parse(&header, &context);
 
@@ -1070,7 +1079,7 @@ mod tests {
 
         let parser = TcpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 6);
+        context.insert_hint(HintKey::IpProtocol, 6);
 
         let result = parser.parse(&header, &context);
 
@@ -1100,7 +1109,7 @@ mod tests {
 
         let parser = TcpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 6);
+        context.insert_hint(HintKey::IpProtocol, 6);
 
         let result = parser.parse(&header, &context);
 
@@ -1136,7 +1145,7 @@ mod tests {
 
         let parser = TcpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 6);
+        context.insert_hint(HintKey::IpProtocol, 6);
 
         let result = parser.parse(&header, &context);
 
@@ -1165,7 +1174,7 @@ mod tests {
 
         let parser = TcpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 6);
+        context.insert_hint(HintKey::IpProtocol, 6);
 
         let result = parser.parse(&header, &context);
 
@@ -1198,7 +1207,7 @@ mod tests {
 
         let parser = TcpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 6);
+        context.insert_hint(HintKey::IpProtocol, 6);
 
         let result = parser.parse(&header, &context);
 
@@ -1246,7 +1255,7 @@ mod tests {
 
         let parser = TcpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 6);
+        context.insert_hint(HintKey::IpProtocol, 6);
 
         let result = parser.parse(&header, &context);
 
@@ -1309,7 +1318,7 @@ mod tests {
 
         let parser = TcpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ip_protocol", 6);
+        context.insert_hint(HintKey::IpProtocol, 6);
 
         // Project to only timestamp fields
         let fields: FieldSet = ["ts_val", "ts_ecr"].iter().map(|s| s.to_string()).collect();

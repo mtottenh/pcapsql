@@ -3,7 +3,9 @@
 use smallvec::SmallVec;
 
 use super::ethernet::ethertype;
-use super::{FieldValue, ParseContext, ParseGate, ParseResult, Protocol};
+use super::{
+    Cond, Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult, Protocol,
+};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// ARP operation codes.
@@ -25,16 +27,20 @@ impl Protocol for ArpProtocol {
         "ARP"
     }
 
-    fn parse_gates(&self) -> &'static [ParseGate] {
-        &[ParseGate::Hint("ethertype")]
+    fn dispatch(&self) -> Dispatch {
+        const RULES: &[DispatchRule] = &[DispatchRule::hints(
+            &[Cond::Hint(HintKey::EtherType, &[ethertype::ARP as u64])],
+            100,
+        )];
+        Dispatch::Exact(RULES)
     }
 
-    fn child_hint_keys(&self) -> Option<&'static [&'static str]> {
+    fn child_hint_keys(&self) -> Option<&'static [HintKey]> {
         Some(&[])
     }
 
     fn can_parse(&self, context: &ParseContext) -> Option<u32> {
-        match context.hint("ethertype") {
+        match context.hint(HintKey::EtherType) {
             Some(et) if et == ethertype::ARP as u64 => Some(100),
             _ => None,
         }
@@ -81,7 +87,7 @@ impl Protocol for ArpProtocol {
         }
 
         // ARP doesn't have payload protocols
-        ParseResult::success(fields, &data[28..], SmallVec::new())
+        ParseResult::success(fields, &data[28..], Hints::new())
     }
 
     fn schema_fields(&self) -> Vec<FieldDescriptor> {
@@ -126,7 +132,7 @@ mod tests {
 
         let parser = ArpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", ethertype::ARP as u64);
+        context.insert_hint(HintKey::EtherType, ethertype::ARP as u64);
 
         let result = parser.parse(&packet, &context);
 
@@ -160,7 +166,7 @@ mod tests {
 
         let parser = ArpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", ethertype::ARP as u64);
+        context.insert_hint(HintKey::EtherType, ethertype::ARP as u64);
 
         let result = parser.parse(&packet, &context);
 
@@ -193,12 +199,12 @@ mod tests {
 
         // With IPv4 ethertype
         let mut ctx2 = ParseContext::new(1);
-        ctx2.insert_hint("ethertype", ethertype::IPV4 as u64);
+        ctx2.insert_hint(HintKey::EtherType, ethertype::IPV4 as u64);
         assert!(parser.can_parse(&ctx2).is_none());
 
         // With ARP ethertype
         let mut ctx3 = ParseContext::new(1);
-        ctx3.insert_hint("ethertype", ethertype::ARP as u64);
+        ctx3.insert_hint(HintKey::EtherType, ethertype::ARP as u64);
         assert!(parser.can_parse(&ctx3).is_some());
     }
 
@@ -208,7 +214,7 @@ mod tests {
 
         let parser = ArpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", ethertype::ARP as u64);
+        context.insert_hint(HintKey::EtherType, ethertype::ARP as u64);
 
         let result = parser.parse(&short_packet, &context);
 
@@ -232,7 +238,7 @@ mod tests {
 
         let parser = ArpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", ethertype::ARP as u64);
+        context.insert_hint(HintKey::EtherType, ethertype::ARP as u64);
 
         let result = parser.parse(&packet, &context);
 
@@ -262,7 +268,7 @@ mod tests {
 
         let parser = ArpProtocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", ethertype::ARP as u64);
+        context.insert_hint(HintKey::EtherType, ethertype::ARP as u64);
 
         let result = parser.parse(&packet, &context);
 

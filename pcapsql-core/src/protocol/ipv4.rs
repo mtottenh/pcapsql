@@ -5,7 +5,10 @@ use smallvec::SmallVec;
 use etherparse::Ipv4HeaderSlice;
 
 use super::ethernet::ethertype;
-use super::{FieldValue, ParseContext, ParseGate, ParseResult, Protocol, TunnelType};
+use super::{
+    Cond, Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult, Protocol,
+    TunnelType,
+};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// IP protocol numbers for IP-in-IP encapsulation.
@@ -145,16 +148,25 @@ impl Protocol for Ipv4Protocol {
         "IPv4"
     }
 
-    fn parse_gates(&self) -> &'static [ParseGate] {
-        &[ParseGate::Hint("ethertype")]
+    fn dispatch(&self) -> Dispatch {
+        const RULES: &[DispatchRule] = &[DispatchRule::hints(
+            &[Cond::Hint(HintKey::EtherType, &[ethertype::IPV4 as u64])],
+            100,
+        )];
+        Dispatch::Exact(RULES)
     }
 
-    fn child_hint_keys(&self) -> Option<&'static [&'static str]> {
-        Some(&["ethertype", "ip_protocol", "ip_version", "tunnel_type"])
+    fn child_hint_keys(&self) -> Option<&'static [HintKey]> {
+        Some(&[
+            HintKey::EtherType,
+            HintKey::IpProtocol,
+            HintKey::IpVersion,
+            HintKey::TunnelType,
+        ])
     }
 
     fn can_parse(&self, context: &ParseContext) -> Option<u32> {
-        match context.hint("ethertype") {
+        match context.hint(HintKey::EtherType) {
             Some(et) if et == ethertype::IPV4 as u64 => Some(100),
             _ => None,
         }
@@ -183,22 +195,22 @@ impl Protocol for Ipv4Protocol {
                 fields.push(("src_ip", FieldValue::ipv4(&ipv4.source())));
                 fields.push(("dst_ip", FieldValue::ipv4(&ipv4.destination())));
 
-                let mut child_hints = SmallVec::new();
+                let mut child_hints = Hints::new();
                 let protocol = ipv4.protocol().0;
-                child_hints.push(("ip_protocol", protocol as u64));
-                child_hints.push(("ip_version", 4));
+                child_hints.insert(HintKey::IpProtocol, protocol as u64);
+                child_hints.insert(HintKey::IpVersion, 4);
 
                 // Check for IP-in-IP encapsulation
                 if protocol == ip_in_ip_protocol::IPIP {
                     // IPv4 encapsulated in IPv4 - signal tunnel boundary
-                    child_hints.push(("tunnel_type", TunnelType::IpInIp as u64));
+                    child_hints.insert(HintKey::TunnelType, TunnelType::IpInIp as u64);
                     // Also set ethertype hint so inner IPv4 can be parsed
-                    child_hints.push(("ethertype", ethertype::IPV4 as u64));
+                    child_hints.insert(HintKey::EtherType, ethertype::IPV4 as u64);
                 } else if protocol == ip_in_ip_protocol::IPV6_IN_IP {
                     // IPv6 encapsulated in IPv4 - signal tunnel boundary
-                    child_hints.push(("tunnel_type", TunnelType::Ip6InIp as u64));
+                    child_hints.insert(HintKey::TunnelType, TunnelType::Ip6InIp as u64);
                     // Also set ethertype hint so inner IPv6 can be parsed
-                    child_hints.push(("ethertype", ethertype::IPV6 as u64));
+                    child_hints.insert(HintKey::EtherType, ethertype::IPV6 as u64);
                 }
 
                 // The payload ends where the IP datagram ends: frames shorter
@@ -284,14 +296,14 @@ mod tests {
 
         let parser = Ipv4Protocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", ethertype::IPV4 as u64);
+        context.insert_hint(HintKey::EtherType, ethertype::IPV4 as u64);
 
         let result = parser.parse(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("ttl"), Some(&FieldValue::UInt8(64)));
         assert_eq!(result.get("protocol"), Some(&FieldValue::UInt8(6)));
-        assert_eq!(result.hint("ip_protocol"), Some(6u64));
+        assert_eq!(result.hint(HintKey::IpProtocol), Some(6u64));
     }
 
     #[test]
@@ -311,7 +323,7 @@ mod tests {
 
         let parser = Ipv4Protocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", ethertype::IPV4 as u64);
+        context.insert_hint(HintKey::EtherType, ethertype::IPV4 as u64);
 
         let result = parser.parse(&header, &context);
 
@@ -319,7 +331,7 @@ mod tests {
         assert_eq!(result.get("ttl"), Some(&FieldValue::UInt8(128)));
         assert_eq!(result.get("protocol"), Some(&FieldValue::UInt8(17)));
         assert_eq!(result.get("dont_fragment"), Some(&FieldValue::Bool(true)));
-        assert_eq!(result.hint("ip_protocol"), Some(17u64));
+        assert_eq!(result.hint(HintKey::IpProtocol), Some(17u64));
     }
 
     #[test]
@@ -339,13 +351,13 @@ mod tests {
 
         let parser = Ipv4Protocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", ethertype::IPV4 as u64);
+        context.insert_hint(HintKey::EtherType, ethertype::IPV4 as u64);
 
         let result = parser.parse(&header, &context);
 
         assert!(result.is_ok());
         assert_eq!(result.get("protocol"), Some(&FieldValue::UInt8(1)));
-        assert_eq!(result.hint("ip_protocol"), Some(1u64));
+        assert_eq!(result.hint(HintKey::IpProtocol), Some(1u64));
     }
 
     #[test]
@@ -367,7 +379,7 @@ mod tests {
 
         let parser = Ipv4Protocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", ethertype::IPV4 as u64);
+        context.insert_hint(HintKey::EtherType, ethertype::IPV4 as u64);
 
         let result = parser.parse(&packet, &context);
 
@@ -385,12 +397,12 @@ mod tests {
 
         // With IPv6 ethertype
         let mut ctx2 = ParseContext::new(1);
-        ctx2.insert_hint("ethertype", ethertype::IPV6 as u64);
+        ctx2.insert_hint(HintKey::EtherType, ethertype::IPV6 as u64);
         assert!(parser.can_parse(&ctx2).is_none());
 
         // With IPv4 ethertype
         let mut ctx3 = ParseContext::new(1);
-        ctx3.insert_hint("ethertype", ethertype::IPV4 as u64);
+        ctx3.insert_hint(HintKey::EtherType, ethertype::IPV4 as u64);
         assert!(parser.can_parse(&ctx3).is_some());
     }
 
@@ -400,7 +412,7 @@ mod tests {
 
         let parser = Ipv4Protocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", ethertype::IPV4 as u64);
+        context.insert_hint(HintKey::EtherType, ethertype::IPV4 as u64);
 
         let result = parser.parse(&short_header, &context);
 
@@ -420,7 +432,7 @@ mod tests {
 
         let parser = Ipv4Protocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", ethertype::IPV4 as u64);
+        context.insert_hint(HintKey::EtherType, ethertype::IPV4 as u64);
 
         let result = parser.parse(&header, &context);
 
@@ -452,7 +464,7 @@ mod tests {
 
         let parser = Ipv4Protocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", ethertype::IPV4 as u64);
+        context.insert_hint(HintKey::EtherType, ethertype::IPV4 as u64);
 
         let result = parser.parse(&header, &context);
 
@@ -475,12 +487,12 @@ mod tests {
 
         let parser = Ipv4Protocol;
         let mut context = ParseContext::new(1);
-        context.insert_hint("ethertype", ethertype::IPV4 as u64);
+        context.insert_hint(HintKey::EtherType, ethertype::IPV4 as u64);
 
         let result = parser.parse(&header, &context);
 
         assert!(result.is_ok());
-        assert_eq!(result.hint("ip_protocol"), Some(6u64));
-        assert_eq!(result.hint("ip_version"), Some(4u64));
+        assert_eq!(result.hint(HintKey::IpProtocol), Some(6u64));
+        assert_eq!(result.hint(HintKey::IpVersion), Some(4u64));
     }
 }

@@ -7,7 +7,9 @@
 use compact_str::CompactString;
 use smallvec::SmallVec;
 
-use super::{FieldValue, ParseContext, ParseGate, ParseResult, Protocol};
+use super::{
+    Cond, Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult, Protocol,
+};
 use crate::schema::{DataKind, FieldDescriptor};
 
 /// QUIC versions.
@@ -41,11 +43,16 @@ impl Protocol for QuicProtocol {
         "QUIC"
     }
 
-    fn parse_gates(&self) -> &'static [ParseGate] {
-        &[ParseGate::Hint("src_port"), ParseGate::Hint("dst_port")]
+    fn dispatch(&self) -> Dispatch {
+        const RULES: &[DispatchRule] = &[DispatchRule::Hints {
+            after: &["udp"],
+            all: &[Cond::Port(&[443, 8443])],
+            priority: 40,
+        }];
+        Dispatch::Exact(RULES)
     }
 
-    fn child_hint_keys(&self) -> Option<&'static [&'static str]> {
+    fn child_hint_keys(&self) -> Option<&'static [HintKey]> {
         Some(&[])
     }
 
@@ -57,8 +64,8 @@ impl Protocol for QuicProtocol {
         }
 
         // Common QUIC ports
-        let src_port = context.hint("src_port");
-        let dst_port = context.hint("dst_port");
+        let src_port = context.hint(HintKey::SrcPort);
+        let dst_port = context.hint(HintKey::DstPort);
 
         match (src_port, dst_port) {
             (Some(443), _) | (_, Some(443)) => Some(40),
@@ -221,7 +228,7 @@ fn parse_long_header<'a>(
         parse_initial_packet(&data[offset..], fields);
     }
 
-    ParseResult::success(fields.clone(), &[], SmallVec::new())
+    ParseResult::success(fields.clone(), &[], Hints::new())
 }
 
 /// Parse QUIC short header.
@@ -261,7 +268,7 @@ fn parse_short_header<'a>(
     // Note: DCID length is not in the short header - it must be known from context
     // For now, we can only note that this is a short header packet
 
-    ParseResult::success(fields.clone(), &[], SmallVec::new())
+    ParseResult::success(fields.clone(), &[], Hints::new())
 }
 
 /// Parse Initial packet payload to extract token and potentially SNI.
@@ -548,13 +555,13 @@ mod tests {
         // UDP but wrong port
         let mut ctx2 = ParseContext::new(1);
         ctx2.parent_protocol = Some("udp");
-        ctx2.insert_hint("dst_port", 80);
+        ctx2.insert_hint(HintKey::DstPort, 80);
         assert!(parser.can_parse(&ctx2).is_none());
 
         // UDP on port 443
         let mut ctx3 = ParseContext::new(1);
         ctx3.parent_protocol = Some("udp");
-        ctx3.insert_hint("dst_port", 443);
+        ctx3.insert_hint(HintKey::DstPort, 443);
         assert!(parser.can_parse(&ctx3).is_some());
     }
 
@@ -567,7 +574,7 @@ mod tests {
         let parser = QuicProtocol;
         let mut context = ParseContext::new(1);
         context.parent_protocol = Some("udp");
-        context.insert_hint("dst_port", 443);
+        context.insert_hint(HintKey::DstPort, 443);
 
         let result = parser.parse(&packet, &context);
 
@@ -583,7 +590,7 @@ mod tests {
         let parser = QuicProtocol;
         let mut context = ParseContext::new(1);
         context.parent_protocol = Some("udp");
-        context.insert_hint("dst_port", 443);
+        context.insert_hint(HintKey::DstPort, 443);
 
         let result = parser.parse(&packet, &context);
 

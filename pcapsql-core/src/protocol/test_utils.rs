@@ -4,7 +4,7 @@
 //! for validating parse results.
 
 use super::ethernet::ethertype;
-use super::{FieldValue, ParseContext, ParseResult};
+use super::{FieldValue, HintKey, ParseContext, ParseResult};
 
 /// Builder for constructing Ethernet frames.
 #[derive(Debug, Clone)]
@@ -513,7 +513,7 @@ pub fn ethernet_context() -> ParseContext {
 /// Create a parse context with IPv4 hint.
 pub fn ipv4_context() -> ParseContext {
     let mut ctx = ParseContext::new(1);
-    ctx.insert_hint("ethertype", ethertype::IPV4 as u64);
+    ctx.insert_hint(HintKey::EtherType, ethertype::IPV4 as u64);
     ctx.parent_protocol = Some("ethernet");
     ctx
 }
@@ -521,7 +521,7 @@ pub fn ipv4_context() -> ParseContext {
 /// Create a parse context with TCP hint.
 pub fn tcp_context() -> ParseContext {
     let mut ctx = ParseContext::new(1);
-    ctx.insert_hint("ip_protocol", 6);
+    ctx.insert_hint(HintKey::IpProtocol, 6);
     ctx.parent_protocol = Some("ipv4");
     ctx
 }
@@ -529,7 +529,7 @@ pub fn tcp_context() -> ParseContext {
 /// Create a parse context with UDP hint.
 pub fn udp_context() -> ParseContext {
     let mut ctx = ParseContext::new(1);
-    ctx.insert_hint("ip_protocol", 17);
+    ctx.insert_hint(HintKey::IpProtocol, 17);
     ctx.parent_protocol = Some("ipv4");
     ctx
 }
@@ -537,7 +537,7 @@ pub fn udp_context() -> ParseContext {
 /// Create a parse context with ICMP hint.
 pub fn icmp_context() -> ParseContext {
     let mut ctx = ParseContext::new(1);
-    ctx.insert_hint("ip_protocol", 1);
+    ctx.insert_hint(HintKey::IpProtocol, 1);
     ctx.parent_protocol = Some("ipv4");
     ctx
 }

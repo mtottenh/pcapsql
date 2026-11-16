@@ -416,7 +416,7 @@ mod tests {
         ParseResult {
             fields: SmallVec::from_vec(fields),
             remaining: &[],
-            child_hints: SmallVec::new(),
+            child_hints: crate::protocol::Hints::new(),
             error: None,
             encap_depth: 0,
             tunnel_type: TunnelType::None,

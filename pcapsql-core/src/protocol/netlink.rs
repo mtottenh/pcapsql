@@ -6,7 +6,9 @@
 
 use smallvec::SmallVec;
 
-use super::{FieldValue, ParseContext, ParseGate, ParseResult, Protocol};
+use super::{
+    Cond, Dispatch, DispatchRule, FieldValue, HintKey, Hints, ParseContext, ParseResult, Protocol,
+};
 use crate::schema::{DataKind, FieldDescriptor};
 
 // Re-export constants from netlink-packet-core for use elsewhere
@@ -100,12 +102,23 @@ impl Protocol for NetlinkProtocol {
         "Netlink"
     }
 
-    fn parse_gates(&self) -> &'static [ParseGate] {
-        &[ParseGate::Root, ParseGate::Hint("is_netlink")]
+    fn dispatch(&self) -> Dispatch {
+        const RULES: &[DispatchRule] = &[
+            DispatchRule::Root {
+                link_type: LINKTYPE_NETLINK,
+                priority: 100,
+            },
+            DispatchRule::Hints {
+                after: &["linux_sll", "sll2"],
+                all: &[Cond::Hint(HintKey::IsNetlink, &[1])],
+                priority: 100,
+            },
+        ];
+        Dispatch::Exact(RULES)
     }
 
-    fn child_hint_keys(&self) -> Option<&'static [&'static str]> {
-        Some(&["netlink_family", "netlink_msg_type"])
+    fn child_hint_keys(&self) -> Option<&'static [HintKey]> {
+        Some(&[HintKey::NetlinkFamily, HintKey::NetlinkMsgType])
     }
 
     fn can_parse(&self, context: &ParseContext) -> Option<u32> {
@@ -117,7 +130,7 @@ impl Protocol for NetlinkProtocol {
         // Also parse when parent is a Linux cooked-capture header (SLL or
         // SLL2) with ARPHRD_NETLINK
         if matches!(context.parent_protocol, Some("linux_sll") | Some("sll2"))
-            && context.hint("is_netlink") == Some(1)
+            && context.hint(HintKey::IsNetlink) == Some(1)
         {
             return Some(100);
         }
@@ -166,7 +179,7 @@ impl Protocol for NetlinkProtocol {
         // Get the netlink family from context hint (set by PCAP reader or cooked header)
         // Default to ROUTE if not specified
         let nl_family = context
-            .hint("netlink_family")
+            .hint(HintKey::NetlinkFamily)
             .map(|f| f as u8)
             .unwrap_or(family::ROUTE);
 
@@ -183,9 +196,9 @@ impl Protocol for NetlinkProtocol {
         };
 
         // Set hints for child protocols
-        let mut child_hints = SmallVec::new();
-        child_hints.push(("netlink_family", nl_family as u64));
-        child_hints.push(("netlink_msg_type", msg_type as u64));
+        let mut child_hints = Hints::new();
+        child_hints.insert(HintKey::NetlinkFamily, nl_family as u64);
+        child_hints.insert(HintKey::NetlinkMsgType, msg_type as u64);
 
         ParseResult::success(fields, remaining, child_hints)
     }
@@ -386,7 +399,7 @@ mod tests {
         let header = create_netlink_header(32, 16, 0, 1, 0);
         let parser = NetlinkProtocol;
         let mut ctx = ParseContext::new(LINKTYPE_NETLINK);
-        ctx.insert_hint("netlink_family", family::ROUTE as u64);
+        ctx.insert_hint(HintKey::NetlinkFamily, family::ROUTE as u64);
 
         let result = parser.parse(&header, &ctx);
 
@@ -395,11 +408,11 @@ mod tests {
         assert!(result
             .child_hints
             .iter()
-            .any(|(k, v)| *k == "netlink_family" && *v == family::ROUTE as u64));
+            .any(|(k, v)| k == HintKey::NetlinkFamily && v == family::ROUTE as u64));
         assert!(result
             .child_hints
             .iter()
-            .any(|(k, v)| *k == "netlink_msg_type" && *v == 16));
+            .any(|(k, v)| k == HintKey::NetlinkMsgType && v == 16));
     }
 
     // ==========================================================================
@@ -410,7 +423,7 @@ mod tests {
         let header = create_netlink_header(16, 16, 0, 1, 0);
         let parser = NetlinkProtocol;
         let mut ctx = ParseContext::new(LINKTYPE_NETLINK);
-        ctx.insert_hint("netlink_family", family::ROUTE as u64);
+        ctx.insert_hint(HintKey::NetlinkFamily, family::ROUTE as u64);
 
         let result = parser.parse(&header, &ctx);
 

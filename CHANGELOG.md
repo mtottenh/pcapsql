@@ -72,6 +72,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Performance: a SQL function with a constant argument, for example
   `ip_in_cidr(src_ip, '10.0.0.0/8')`, parses the constant once per query.
   In the CLI, `ip_in_cidr` went from 30 to 0.6 ns per row.
+- Performance: the parser finds the next protocol of a packet with a table
+  lookup. A `udp` scan uses about 25% fewer instructions.
+- `pcapsql-core`: breaking change. Parse hints use the `HintKey` enum, not
+  string keys. `ParseContext::hint`, `insert_hint` and `set_hint` take a
+  `HintKey`. `ParseContext.hints` is a `Hints` value. `HintEntry` is
+  removed.
 
 ### Removed
 

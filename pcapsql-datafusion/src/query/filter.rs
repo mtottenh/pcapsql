@@ -302,7 +302,7 @@ mod tests {
         let layer = ParseResult {
             fields,
             remaining: &[],
-            child_hints: SmallVec::new(),
+            child_hints: pcapsql_core::protocol::Hints::new(),
             error: None,
             encap_depth: 0,
             tunnel_type: TunnelType::None,
