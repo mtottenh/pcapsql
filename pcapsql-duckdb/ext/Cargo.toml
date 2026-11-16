@@ -1,0 +1,23 @@
+[package]
+name = "pcapsql-duckdb-ext"
+version.workspace = true
+edition.workspace = true
+rust-version = "1.88"
+authors.workspace = true
+license.workspace = true
+description = "Loadable DuckDB extension for pcapsql: the C API v2 entrypoint"
+publish = false
+
+[lib]
+# extension-ci-tools looks for lib<extension name>.so in the target directory.
+name = "pcapsql"
+crate-type = ["cdylib"]
+# Only the entrypoint lives here; it is tested by loading the built artifact. Its rustdoc would
+# also land in the directory of the CLI's `pcapsql` binary.
+test = false
+doctest = false
+doc = false
+
+[dependencies]
+pcapsql-duckdb = { path = "..", features = ["loadable"] }
+duckdb-neo = { version = "=0.20000.2", default-features = false, features = ["build-extension"] }

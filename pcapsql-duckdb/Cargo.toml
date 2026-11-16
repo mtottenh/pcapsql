@@ -2,32 +2,30 @@
 name = "pcapsql-duckdb"
 version.workspace = true
 edition.workspace = true
+rust-version = "1.88"
 authors.workspace = true
 license.workspace = true
-description = "DuckDB extension for PCAP analysis using pcapsql"
+description = "DuckDB engine glue for pcapsql, on the DuckDB C API v2"
 publish = false
 
-[lib]
-crate-type = ["cdylib"]
+[features]
+# How the artifact that links this crate reaches DuckDB. `duckdb-neo` makes the two mutually
+# exclusive, and exactly one must be on in any binary that calls into DuckDB:
+#   loadable  calls go through the function table DuckDB hands a LOADed extension (ext/)
+#   static    calls bind to a linked libduckdb (itest/)
+# `loadable` is the default because cargo unifies features across the packages of one invocation:
+# with it, `cargo build|check|test|clippy --workspace` and `cargo test -p pcapsql-duckdb` need no
+# DuckDB library and never see both features. itest/ is outside the workspace and turns the
+# default off.
+default = ["loadable"]
+loadable = ["duckdb-neo/build-extension"]
+static = ["duckdb-neo/build-extension-static"]
 
 [dependencies]
-# Our core library
 pcapsql-core = { path = "../pcapsql-core" }
 
-# DuckDB extension support
-duckdb = { version = "1.4", features = ["vtab-loadable", "vscalar"] }
-duckdb-loadable-macros = "0.1"
-libduckdb-sys = { version = "1.4", features = ["loadable-extension"] }
+# Pinned exactly: every V2 function is unstable, so a build only loads in the DuckDB release this
+# version targets (2.0.0). Bump together with TARGET_DUCKDB_VERSION in the Makefile.
+duckdb-neo = { version = "=0.20000.2", default-features = false }
 
-# Hex encoding/decoding
-hex = "0.4"
-
-# Error handling
-anyhow.workspace = true
-thiserror.workspace = true
-
-# Synchronization
-parking_lot.workspace = true
-
-# Logging (optional but useful for debugging)
-tracing.workspace = true
+hex.workspace = true

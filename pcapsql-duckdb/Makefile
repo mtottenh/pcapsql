@@ -1,58 +1,74 @@
-.PHONY: all debug release test clean info extension
+# Builds and tests the pcapsql DuckDB extension.
+#
+#   make configure          one-time: Python venv with DuckDB and its SQL test runner
+#   make release            build/release/pcapsql.duckdb_extension
+#   make test_release       run test/sql against it (DuckDB's Python package)
+#   make load_test_release  LOAD it in the stock DuckDB command-line shell
+#   make itest              in-process tests (itest/) against a linked libduckdb
+#   make check              duckdb_neo containment, and fmt and clippy for itest/
+#
+# `debug`, `test_debug` and `load_test_debug` do the same for an unoptimised build.
 
-EXTENSION_NAME = pcapsql
-LIB_NAME = pcapsql_duckdb
-DUCKDB = /home/mtottenh/.duckdb/cli/latest/duckdb
-DUCKDB_VERSION = v1.4.2
-PLATFORM = linux_amd64
-EXT_VERSION = 0.1.0
+.PHONY: all configure debug release test test_debug test_release load_test load_test_debug load_test_release
+.PHONY: itest lint_itest check_containment check clean clean_all
 
-# Workspace target directory (relative to workspace root)
-TARGET_DIR = ../target
+PROJ_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
-all: extension
+EXTENSION_NAME=pcapsql
 
-# Build debug version
-debug:
-	cargo build -p pcapsql-duckdb
+# Every function of the DuckDB C API v2 is unstable, so the binary is stamped C_STRUCT_UNSTABLE
+# and loads only in exactly TARGET_DUCKDB_VERSION. This version, the `duckdb-neo` pin in the
+# Cargo.toml files and scripts/duckdb-release.sha256 change together.
+USE_UNSTABLE_C_API=1
+CAPI_VERSION=2
+TARGET_DUCKDB_VERSION=v2.0.0
 
-# Build release version
-release:
-	cargo build -p pcapsql-duckdb --release
+# The extension version is the workspace version.
+EXTENSION_VERSION ?= v$(shell sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' $(PROJ_DIR)../Cargo.toml)
 
-# Build extension with metadata (release)
-extension: release
-	python3 scripts/append_metadata.py \
-		$(TARGET_DIR)/release/lib$(LIB_NAME).so \
-		$(TARGET_DIR)/release/$(EXTENSION_NAME).duckdb_extension \
-		--name $(EXTENSION_NAME) \
-		--duckdb-version $(DUCKDB_VERSION) \
-		--ext-version $(EXT_VERSION) \
-		--platform $(PLATFORM) \
-		--abi-type C_STRUCT_UNSTABLE
+all: configure debug
 
-# Run tests
-test: debug
-	cargo test -p pcapsql-duckdb
+include extension-ci-tools/makefiles/c_api_extensions/base.Makefile
+include extension-ci-tools/makefiles/c_api_extensions/rust.Makefile
 
-# Test loading in DuckDB
-test_load: extension
-	$(DUCKDB) -unsigned -c "LOAD '$(TARGET_DIR)/release/$(EXTENSION_NAME).duckdb_extension'; SELECT 'Extension loaded successfully!' AS status;"
+# The cdylib is one package of the repository's cargo workspace, and cargo puts its artifacts in
+# the workspace's target directory, one level up, where the included makefile expects ./target.
+TARGET_INFO += --package pcapsql-duckdb-ext
+CARGO_TARGET_DIR ?= $(abspath $(PROJ_DIR)../target)
+TARGET_PATH := $(patsubst ./target%,$(CARGO_TARGET_DIR)%,$(TARGET_PATH))
 
-# Clean build artifacts
-clean:
-	cargo clean -p pcapsql-duckdb
-	rm -f $(TARGET_DIR)/release/$(EXTENSION_NAME).duckdb_extension
-	rm -f $(TARGET_DIR)/debug/$(EXTENSION_NAME).duckdb_extension
+configure: venv platform extension_version
 
-# Show extension info
-info:
-	@echo "Extension: $(EXTENSION_NAME)"
-	@echo "Library: $(TARGET_DIR)/release/lib$(LIB_NAME).so"
-	@echo "Extension file: $(TARGET_DIR)/release/$(EXTENSION_NAME).duckdb_extension"
-	@echo "DuckDB version: $(DUCKDB_VERSION)"
-	@echo "Platform: $(PLATFORM)"
+debug: build_extension_library_debug build_extension_with_metadata_debug
+release: build_extension_library_release build_extension_with_metadata_release
 
-# Check exported symbols
-symbols: release
-	nm -D $(TARGET_DIR)/release/lib$(LIB_NAME).so | grep -i init
+test: test_debug
+test_debug: test_extension_debug
+test_release: test_extension_release
+
+load_test: load_test_debug
+load_test_debug:
+	scripts/load-test.sh build/debug/$(EXTENSION_FILENAME) $(TARGET_DUCKDB_VERSION) $(EXTENSION_VERSION)
+load_test_release:
+	scripts/load-test.sh build/release/$(EXTENSION_FILENAME) $(TARGET_DUCKDB_VERSION) $(EXTENSION_VERSION)
+
+# itest/ is its own cargo workspace (see its Cargo.toml) and links the libduckdb of the release.
+ITEST_CARGO = lib=$$(DUCKDB_VERSION=$(TARGET_DUCKDB_VERSION) scripts/fetch-duckdb.sh lib) && \
+	DUCKDB_LIB_DIR="$$lib" DUCKDB_DOWNLOAD_LIB=0 cargo
+itest:
+	$(ITEST_CARGO) test --manifest-path itest/Cargo.toml $(ITEST_ARGS)
+
+# The workspace-wide `cargo fmt` and `cargo clippy` runs do not reach itest/.
+lint_itest:
+	cargo fmt --manifest-path itest/Cargo.toml -- --check
+	$(ITEST_CARGO) clippy --manifest-path itest/Cargo.toml --all-targets -- -D warnings
+
+check_containment:
+	scripts/check-neo-containment.sh
+
+check: check_containment lint_itest
+
+clean: clean_build
+	cargo clean --package pcapsql-duckdb-ext --package pcapsql-duckdb
+	cargo clean --manifest-path itest/Cargo.toml
+clean_all: clean_configure clean

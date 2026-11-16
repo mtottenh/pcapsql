@@ -8,3 +8,9 @@
 # Editor / OS
 *.swp
 .DS_Store
+
+# DuckDB extension: build output, Python venv and downloaded DuckDB releases
+/pcapsql-duckdb/build/
+/pcapsql-duckdb/configure/
+/pcapsql-duckdb/.duckdb-release/
+/pcapsql-duckdb/duckdb_unittest_tempdir/

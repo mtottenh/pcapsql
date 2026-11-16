@@ -23,6 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a capture and write the rows to any `scan::RowSink`. The CLI now uses
   them. Query results do not change.
 
+### Changed
+
+- The DuckDB extension is rebuilt for DuckDB 2.0.0 and its C API v2. It
+  does not load in DuckDB 1.x.
+
 ## [0.4.1] - 2026-10-24
 
 The three limitations listed with continuous mode in 0.4.0 are gone: the
