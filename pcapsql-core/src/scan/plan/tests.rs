@@ -904,3 +904,44 @@ fn malformed_computed_columns_and_filters_are_errors() {
     );
     assert!(compile(&filtered(1, col("tcp", "dst_port"))).is_ok());
 }
+
+/// A projection of more than half of a table's fields is not applied: the
+/// parser extracts every field, which costs less than asking a long list
+/// about each of them.
+#[test]
+fn a_projection_of_most_of_a_tables_fields_is_not_applied() {
+    for table in ["tcp", "udp", "dns", "ipv4"] {
+        let (_, def) = catalog().table(table).unwrap();
+        let fields: Vec<ColId> = def
+            .columns()
+            .filter(|(_, column)| matches!(column.source, ColumnSource::Field(_)))
+            .map(|(col, _)| col)
+            .collect();
+        let other: Vec<ColId> = def
+            .columns()
+            .filter(|(_, column)| !matches!(column.source, ColumnSource::Field(_)))
+            .map(|(col, _)| col)
+            .collect();
+        assert!(!other.is_empty(), "{table}");
+        // The fields the parser of `table` is asked for with the first
+        // `count` field columns, and every column that is not a field.
+        let projected = |count: usize| {
+            let mut columns = fields[..count].to_vec();
+            columns.extend(&other);
+            let plan = ScanPlan {
+                tables: vec![TableScan::new(id(table), columns)],
+                ..ScanPlan::default()
+            };
+            let compiled = compile(&plan).unwrap();
+            compiled.scope().projections().get(table).map(HashSet::len)
+        };
+        let half = fields.len() / 2;
+        for count in 0..=fields.len() {
+            let expected = (count <= fields.len() - count).then_some(count);
+            assert_eq!(projected(count), expected, "{table}: {count} fields");
+        }
+        assert_eq!(projected(0), Some(0), "{table}");
+        assert_eq!(projected(half), Some(half), "{table}");
+        assert_eq!(projected(fields.len() - half + 1), None, "{table}");
+    }
+}

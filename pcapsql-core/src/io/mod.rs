@@ -41,8 +41,8 @@ pub use decompress::{decompress_header, Compression, DecompressReader, FileDecod
 #[cfg(feature = "mmap")]
 pub use decompress::{AnyDecoder, MmapSlice};
 pub use index::{
-    build_boundary_index, header_hash, sidecar_path, BoundaryIndex, Checkpoint,
-    DEFAULT_CHECKPOINT_STRIDE, SIDECAR_MIN_SOURCE_BYTES,
+    build_boundary_index, build_boundary_index_to, header_hash, sidecar_path, BoundaryIndex,
+    Checkpoint, DEFAULT_CHECKPOINT_STRIDE, SIDECAR_MIN_SOURCE_BYTES,
 };
 #[cfg(feature = "mmap")]
 pub use mmap::{MmapPacketReader, MmapPacketSource};

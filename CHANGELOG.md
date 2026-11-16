@@ -561,6 +561,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Scan costs found by the benchmark run of the DuckDB extension**
+  (`docs/duckdb-v2-extension-roadmap.md`, section 8.2; the run's script is
+  `pcapsql-duckdb/scripts/bench.py`). Four changes, none to the rows of a
+  query.
+  - *A row count parses no field.* `SELECT count(*) FROM tcp` (or of `udp`,
+    `dns`, or any query that reads only `frame_number` and `timestamp` of
+    them) projects no field of the table, and the three parsers that honour
+    a projection read an empty one as "every field". They now extract none:
+    3,196 to 2,645 instructions per packet for a count of TCP segments with
+    options, 3,336 to 3,089 for DNS (measured in the DuckDB extension; the
+    parsers are those of both engines). `Protocol::parse_projected`
+    with `Some` of an empty `FieldSet` is the parse without fields, as its
+    documentation said.
+  - *A projection of most of a table's fields is not applied.* A parser asks
+    its projection about every field of every packet, which takes longer the
+    more names it holds: 23 of the 24 fields of `tcp` cost 7,256
+    instructions per packet where all 24 cost 5,338. A scan plan now
+    projects a table only when it reads at most half of its fields
+    (`ScanPlan::compile`); the same query is 5,087.
+  - *DuckDB: several files are not split when they keep the threads busy.*
+    A capture is split for its share of DuckDB's threads (its share of the
+    bytes of the call's files, rounded) instead of for all of them, so four
+    captures of one size on four threads are four partitions, with no pass
+    over each for the places to split it at. That pass runs on one thread
+    before the scan and made a scan of four files slower with the default
+    settings than with `pcapsql_parallel_scan = false`.
+  - *DuckDB: the pass that finds the places to split a capture at ends at an
+    upper bound on `frame_number`.* `WHERE frame_number <= 100000` on a
+    capture of 10 million frames read the whole capture first when DuckDB
+    had more than one thread (0.65 s against 0.03 s on one thread).
+    `pcapsql_core::io::build_boundary_index_to` and
+    `FramePredicate::last_frame` are new. Not with `strict := true`, which
+    looks at the end of the capture.
+
 - **`pcapsql-core`: `StreamParseResult::Transform` carries every message.**
   Its `metadata: Option<ParsedMessage>` is `messages: Vec<ParsedMessage>`,
   and the stream manager keeps what the child parser does not consume of

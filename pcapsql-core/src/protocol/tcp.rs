@@ -433,7 +433,6 @@ impl Protocol for TcpProtocol {
         // If no projection, use full parse
         let fields = match fields {
             None => return self.parse(data, _context, result_fields),
-            Some(f) if f.is_empty() => return self.parse(data, _context, result_fields),
             Some(f) => f,
         };
 
@@ -1021,6 +1020,19 @@ mod tests {
 
         // No projection - should return all fields
         let result = parser.parse_layer_projected(&header, &context, None);
+
+        // A projection of no field (a row count) extracts none, and is
+        // otherwise the same parse.
+        let none = parser.parse_layer_projected(&header, &context, Some(&FieldSet::default()));
+        assert!(none.is_ok());
+        for field in [
+            "src_port", "dst_port", "seq", "flags", "window", "options", "mss",
+        ] {
+            assert!(none.get(field).is_none(), "{field}");
+        }
+        assert_eq!(none.remaining, result.remaining);
+        assert_eq!(none.hint(HintKey::DstPort), result.hint(HintKey::DstPort));
+        assert!(none.hint(HintKey::DstPort).is_some());
 
         assert!(result.is_ok());
         // All fields present

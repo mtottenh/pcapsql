@@ -80,13 +80,25 @@
 //!   (a compressed stream has no place to start reading but its beginning), when DuckDB's file
 //!   system reads it over a network (the pass that finds the record boundaries would read all
 //!   of it first), when it is smaller than `pcapsql_parallel_min_file_size`, when DuckDB has one
-//!   thread, or when `pcapsql_parallel_scan` is off. This is the scan as it was before there
-//!   were partitions.
-//! - Otherwise as many partitions as DuckDB has threads (`partition_target`), cut at the
+//!   thread, when `pcapsql_parallel_scan` is off, or when the scan has other files that keep
+//!   the threads busy (below). This is the scan as it was before there were partitions.
+//! - Otherwise as many partitions as the file has threads (`partition_target`), cut at the
 //!   checkpoints of a `BoundaryIndex` that one pass over the record headers of the capture
-//!   builds (`build_boundary_index`). If that pass fails (a damaged record), the capture is read
-//!   as one partition and the scan reports the damage where it reads it, after the rows before
-//!   it, as it always did.
+//!   builds (`build_boundary_index_to`). If that pass fails (a damaged record), the capture is
+//!   read as one partition and the scan reports the damage where it reads it, after the rows
+//!   before it, as it always did.
+//!
+//! The pass reads the capture on one thread before any worker starts, and nothing of it is
+//! kept for the next statement. It costs about what counting the capture's frames costs
+//! (roadmap, section 8.2), so it is avoided where it buys nothing:
+//!
+//! - A file is split for its share of DuckDB's threads: its share of the bytes of the scan's
+//!   files, rounded. Four captures of one size on four threads are four partitions and no
+//!   pass; one large capture among small ones is split for nearly all threads.
+//! - With an upper bound on `frame_number` (below) the pass ends at the last frame the bound
+//!   admits, unless the scan is `strict` (which looks at the capture's end). The index is then
+//!   that of the capture's beginning, which `plan_ranges` and the scan treat as the index of a
+//!   capture that has grown since.
 //!
 //! The partitions of all files are in one `PartitionQueue`, those of the first file first and
 //! each file's in capture order ([`Shared::owners`] says which file a partition is of). A
@@ -506,7 +518,14 @@ impl TableFunctionCallbacks for PcapScan {
             let layout = if plan.requires_single_partition() {
                 Layout::in_order()
             } else {
-                self.layout(context, &settings, path, bound.strict, &frames)?
+                self.layout(
+                    context,
+                    &settings,
+                    path,
+                    bound.total_size,
+                    bound.strict,
+                    &frames,
+                )?
             };
             // What the scan will do, for whoever asks DuckDB's log (`enable_logging`) why a
             // query is slow. As for the truncation warning, the log is not worth failing a

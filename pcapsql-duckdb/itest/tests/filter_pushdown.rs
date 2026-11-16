@@ -966,20 +966,35 @@ fn a_time_window_reads_the_partitions_it_overlaps() -> Result<()> {
     assert_eq!(scan.layouts, [layout(2, 1500, 8)]);
     assert_eq!(scan.partitions, [(1, 1000, 0), (19_501, 500, 500)]);
 
-    // With an upper bound on the frame number the end of the capture is ruled out too.
+    // With an upper bound on the frame number the end of the capture is ruled out too, and
+    // the pass that finds the places to split at does not go past the bound: what it splits
+    // are the first 6,000 frames.
     let (rows, scan) = count(&format!(
         "timestamp BETWEEN {} AND {} AND frame_number <= 6000",
         at(5001),
         at(6000)
     ));
     assert_eq!(rows, "1000");
-    assert_eq!(scan.layouts, [layout(1, 1000, 8)]);
+    assert_eq!(
+        scan.layouts,
+        [
+            "1 (of the first 6000 frames, cut at checkpoints 500 frames apart; the filter \
+          leaves 1000 frames in 1 of 8 partitions)"
+        ]
+    );
     assert_eq!(scan.partitions, [(5001, 1000, 0)]);
 
-    // A range of frame numbers: the one window it is in, read as far as its last frame.
+    // A range of frame numbers: the one window it is in, read as far as its last frame,
+    // which is also as far as the capture was looked at for places to split at.
     let (rows, scan) = count("frame_number BETWEEN 5100 AND 5200");
     assert_eq!(rows, "101");
-    assert_eq!(scan.layouts, [layout(1, 500, 8)]);
+    assert_eq!(
+        scan.layouts,
+        [
+            "1 (of the first 5200 frames, cut at checkpoints 500 frames apart; the filter \
+          leaves 200 frames in 1 of 8 partitions)"
+        ]
+    );
     assert_eq!(scan.partitions, [(5001, 200, 99)]);
     let (rows, scan) = count("frame_number > 19990");
     assert_eq!(rows, "10");
@@ -1189,8 +1204,9 @@ fn a_frame_number_filter_applies_to_each_of_several_files() -> Result<()> {
         );
     }
 
-    // What is read of each file: the first frames of each, and of the split one the window
-    // they are in.
+    // What is read of each file: the first frames of each. No file is split: the small one
+    // is not a thread's worth of the scan's bytes, and of the large one the pass that looks
+    // for places to split at stops at the third frame.
     partitioned(&connection, 4, 100);
     pushdown(&connection, true);
     let sql = format!("SELECT count(*) FROM read_frames({files}) WHERE frame_number <= 3");
@@ -1199,9 +1215,9 @@ fn a_frame_number_filter_applies_to_each_of_several_files() -> Result<()> {
     assert_eq!(
         scan.layouts,
         [
-            "1 (40 frames give no place to split at, with a checkpoint every 100 frames)",
-            "1 (of 2000 frames, cut at checkpoints 100 frames apart; the filter leaves 100 \
-             frames in 1 of 4 partitions)",
+            "1 (the other files of the scan keep DuckDB's 4 threads busy)",
+            "1 (the first 3 frames give no place to split at, with a checkpoint every 100 \
+             frames)",
             "1 (a compressed capture cannot be split)",
         ]
     );

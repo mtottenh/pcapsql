@@ -26,8 +26,40 @@ pub fn build_boundary_index<R: Read>(
     source_mtime: Option<SystemTime>,
     header_hash: u64,
 ) -> Result<BoundaryIndex, Error> {
+    build_boundary_index_to(
+        source,
+        format,
+        stride,
+        source_len,
+        source_mtime,
+        header_hash,
+        None,
+    )
+}
+
+/// [`build_boundary_index`] that reads no further than frame `last_frame`
+/// when one is given: for a caller that will not read past that frame, so
+/// that a scan of a capture's first frames does not start with a pass over
+/// all of it.
+///
+/// The result is the index the capture had when frame `last_frame` was its
+/// last ([`BoundaryIndex::packet_count`] is at most `last_frame`), with
+/// `source_len` as given. A range to the end of the capture cut from it
+/// delivers the later frames as it delivers frames appended to a capture
+/// after its index was built, so nothing but
+/// [`packet_count`](BoundaryIndex::packet_count) tells the two apart.
+pub fn build_boundary_index_to<R: Read>(
+    source: R,
+    format: PcapFormat,
+    stride: u64,
+    source_len: u64,
+    source_mtime: Option<SystemTime>,
+    header_hash: u64,
+    last_frame: Option<u64>,
+) -> Result<BoundaryIndex, Error> {
     let stride = stride.max(1);
     let mut builder = IndexBuilder::new(stride);
+    builder.last_frame = last_frame.unwrap_or(u64::MAX);
     if format.is_pcapng() {
         let mut reader = PcapNGReader::new(262144, source)
             .map_err(|e| invalid(&format!("PCAPNG index init: {e:?}")))?;
@@ -62,6 +94,8 @@ struct IndexBuilder {
     big_endian: bool,
     checkpoints: Vec<Checkpoint>,
     cur: Option<usize>,
+    /// The frame the scan ends with, if the capture has that many.
+    last_frame: u64,
 }
 
 impl IndexBuilder {
@@ -75,7 +109,13 @@ impl IndexBuilder {
             big_endian: false,
             checkpoints: Vec::new(),
             cur: None,
+            last_frame: u64::MAX,
         }
+    }
+
+    /// Whether the frame the scan is to end with has been seen.
+    fn done(&self) -> bool {
+        self.frame_number >= self.last_frame
     }
 
     /// Record a packet at `byte_offset` with timestamp `ts_ns`, deciding whether
@@ -133,6 +173,9 @@ fn scan_legacy<S: Read>(
                     _ => {}
                 }
                 reader.consume(offset);
+                if builder.done() {
+                    break;
+                }
             }
             Err(PcapParserError::Eof) | Err(PcapParserError::UnexpectedEof) => break,
             Err(PcapParserError::Incomplete(_)) => {
@@ -193,6 +236,9 @@ fn scan_pcapng<S: Read>(
                     }
                 }
                 reader.consume(offset);
+                if builder.done() {
+                    break;
+                }
             }
             Err(PcapParserError::Eof) | Err(PcapParserError::UnexpectedEof) => break,
             Err(PcapParserError::Incomplete(_)) => {

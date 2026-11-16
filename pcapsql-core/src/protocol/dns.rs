@@ -175,7 +175,6 @@ impl Protocol for DnsProtocol {
         // If no projection, use full parse
         let requested = match requested_fields {
             None => return self.parse(data, context, fields),
-            Some(f) if f.is_empty() => return self.parse(data, context, fields),
             Some(f) => f,
         };
 
@@ -907,6 +906,16 @@ mod tests {
             projected.get("transaction_id"),
             Some(&FieldValue::UInt16(0x1234))
         );
+        assert!(projected.get("query_name").is_none());
+
+        // A projection of no field (a row count) extracts none; whether the
+        // bytes are a message is still decided.
+        let none = parser.parse_layer_projected(&segment, &tcp, Some(&FieldSet::default()));
+        assert!(none.is_ok(), "{:?}", none.error);
+        assert!(none.get("transaction_id").is_none());
+        assert!(none.get("query_name").is_none());
+        let broken = parser.parse_layer_projected(&segment[..5], &tcp, Some(&FieldSet::default()));
+        assert!(!broken.is_ok());
 
         // Over UDP the same bytes are not a message (no prefix expected).
         let mut udp = ParseContext::new(1);
