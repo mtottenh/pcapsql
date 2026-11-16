@@ -77,6 +77,8 @@
 //! - `compress-bzip2` - Bzip2 decompression support
 //! - `compress-xz` - XZ decompression support
 //! - `compress-all` - All compression formats
+//! - `histogram` - `format::histogram`, the kernels of the `hdr_*` SQL
+//!   functions (needs Rust 1.88, for the `hdrhistogram` crate)
 //!
 //! ## Supported Protocols
 //!

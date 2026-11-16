@@ -231,7 +231,7 @@ wrapped lookup. String parameters take any string type.
 
 | Function | Description |
 |----------|-------------|
-| `hdr_histogram(value)` | Build histogram (aggregate function) |
+| `hdr_histogram(value [, sigfigs])` | Build histogram (aggregate function); `sigfigs` is the significant digits kept, a constant 0-5, default 2 |
 | `hdr_percentile(hist, 0.99)` | Extract percentile from histogram |
 | `hdr_count/min/max/mean(hist)` | Extract statistics from histogram |
 | `hdr_buckets(hist)` | Distribution as log-scale bucket rows (explode with `UNNEST`) |
@@ -560,7 +560,15 @@ What it offers:
 - Forty scalar functions and six macros for addresses, TCP flags and
   protocol numbers (`ip4_to_string`, `ip_in_cidr`, `is_private_ip`,
   `icmp_type_name`, `format_mac`, ...).
-
+- The histogram functions: the aggregate `hdr_histogram(value [, sigfigs])` and
+  `hdr_percentile`, `hdr_count`, `hdr_min`, `hdr_max`, `hdr_mean`,
+  `hdr_stdev`, `hdr_buckets` and `hdr_ascii`, which read what it returns. A
+  histogram made here is one the command-line tool reads, and the other way
+  round.
+- `pcap_time_range(files)`: the first and last timestamp and the number of
+  frames of each capture, from one pass over its records; and over it the
+  time functions of the command-line tool with the capture as an argument,
+  `start_time(files)`, `end_time(files)` and `relative_time(ts, files)`.
 - The stream tables (`read_tcp_connections`, `read_tls_sessions`,
   `read_http_messages`, `read_http2`), and TLS decryption with a key log:
   `read_http2('capture.pcap', keylog := 'keys.log')`, or
@@ -570,10 +578,11 @@ What it offers:
   written as a classic pcap file, with nanosecond timestamps unless
   `PRECISION 'us'` is given. Not pcapng, and not compressed.
 
-What it does not have yet, of the SQL functions of the command-line tool:
-the capture-relative time functions (`start_time`, `end_time`,
-`relative_time`) and the `hdr_*` histogram functions. For its date and time
-functions (`epoch`, `strftime`, ...) DuckDB has its own.
+Of the SQL functions of the command-line tool it has all but the six date
+and time helpers (`strftime`, `datetime`, `date`, `time`, `epoch`,
+`epoch_ms`), which DuckDB has of its own; the
+[function reference](docs/duckdb-extension-reference.md) lists the
+equivalents.
 
 **Requirements.** DuckDB 2.0.0, on Linux (x86-64, arm64) or macOS (arm64).
 The extension uses DuckDB's C API v2, which is not stable yet, so a build

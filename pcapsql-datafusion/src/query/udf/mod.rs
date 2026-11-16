@@ -367,7 +367,8 @@ pub fn register_datetime_udfs(ctx: &SessionContext) -> Result<(), Error> {
 /// Register HdrHistogram UDAFs and UDFs with the DataFusion context.
 ///
 /// Provides streaming histogram aggregation with constant memory footprint:
-/// - `hdr_histogram(value)` - UDAF that builds histogram from streamed values
+/// - `hdr_histogram(value [, sigfigs])` - UDAF that builds histogram from streamed
+///   values, keeping `sigfigs` (0-5, default 2) significant digits
 /// - `hdr_percentile(hist, p)` - Extract percentile from histogram
 /// - `hdr_count/min/max/mean/stdev(hist)` - Extract statistics
 /// - `hdr_buckets(hist)` - Distribution as bucket rows (explode with UNNEST)

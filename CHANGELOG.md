@@ -57,6 +57,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `pcapsql-core`: `io::PcapWriter` writes classic pcap files.
 - Decrypted HTTP/1.x traffic now appears in `http_messages`.
 - Captures with raw IP link types (228 and 229) are parsed.
+- DuckDB extension: `pcap_time_range(files)` returns the first and last
+  timestamp of each file. The macros `start_time(files)`, `end_time(files)`
+  and `relative_time(ts, files)` use it.
+- DuckDB extension: the `hdr_histogram(value [, sigfigs])` aggregate and the
+  functions `hdr_count`, `hdr_min`, `hdr_max`, `hdr_mean`, `hdr_stdev`,
+  `hdr_percentile`, `hdr_buckets` and `hdr_ascii`. `sigfigs` sets the
+  precision, from 0 to 5 significant figures (default 2). A histogram from
+  the extension can be read by the CLI, and the reverse.
+- `pcapsql-core`: the histogram functions are in `format::histogram`, behind
+  the `histogram` feature.
 
 ### Changed
 
@@ -133,6 +143,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The `tls` table has a row for each encrypted record. Before, these
   records caused parse errors.
 - `tls_sessions.cipher_suite` shows the IANA name for all known suites.
+- Behaviour change (CLI): the second argument of `hdr_histogram` now sets
+  the number of significant figures, from 0 to 5. Before, it was ignored and
+  the histogram always used 2. Other values give an error.
+- Behaviour change (CLI): `hdr_histogram` now records `DECIMAL` values (the
+  integer part) and gives an error for a value that is not a number. Before,
+  it returned an empty histogram for both.
 
 ### Removed
 

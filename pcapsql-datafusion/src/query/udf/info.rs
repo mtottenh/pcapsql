@@ -364,7 +364,8 @@ pub fn all_udfs() -> Vec<UdfInfo> {
         // === Histogram Functions ===
         UdfInfo {
             name: "hdr_histogram",
-            description: "Build histogram from values (aggregate)",
+            description: "Build histogram from numeric values (aggregate); sigfigs: \
+                          significant digits kept, constant 0-5, default 2",
             signature: "hdr_histogram(numeric [, sigfigs])",
             return_type: "Binary",
             example: "hdr_histogram(length) or hdr_histogram(length, 3)",

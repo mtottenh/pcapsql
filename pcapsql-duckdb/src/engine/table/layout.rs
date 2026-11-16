@@ -7,7 +7,7 @@ use pcapsql_core::io::{
 };
 use pcapsql_core::scan::{partition_target, plan_ranges, FramePredicate, PartitionPolicy};
 
-use super::{PcapScan, PACKETS_PER_STEP};
+use super::{function::CaptureFunction, PcapScan, PACKETS_PER_STEP};
 use crate::engine::{
     fs::{self, DuckFile},
     settings::{self, ScanSettings},

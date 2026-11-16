@@ -21,6 +21,8 @@
 //! - [`cidr`]: IP address parsing, CIDR membership, address classes
 //! - [`mac`]: MAC address parsing and classes
 //! - [`hex`]: hex encoding and decoding
+//! - [`histogram`]: the histogram behind the `hdr_*` functions (with the
+//!   crate feature `histogram`)
 //!
 //! A kernel takes one value (a scalar or a byte slice) and returns a scalar,
 //! a [`Name`] (a name of a table or text made of the number, without
@@ -34,6 +36,8 @@ pub(crate) mod address;
 pub mod cidr;
 pub mod flags;
 pub mod hex;
+#[cfg(feature = "histogram")]
+pub mod histogram;
 pub mod mac;
 pub mod names;
 

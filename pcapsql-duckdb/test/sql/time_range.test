@@ -1,0 +1,102 @@
+# name: test/sql/time_range.test
+# description: pcap_time_range(files) and the macros start_time, end_time and relative_time
+# group: [pcapsql]
+
+# The in-process tests (itest/tests/time_range.rs) cover this in depth, and
+# itest/tests/golden_differential.rs compares the macros with the functions of the command-line
+# tool; this file checks the built artifact. The captures are the seeds of the reader fuzzer,
+# relative to pcapsql-duckdb/.
+
+require pcapsql
+
+query TTTIRII
+SELECT parse_filename(filename), start_time, end_time, frames, duration, link_type, truncated
+FROM pcap_time_range('../fuzz/corpus/fuzz_pcap_reader/dns.cap');
+----
+dns.cap	2005-03-30 08:47:46.496046	2005-03-30 08:52:25.375359	38	278.879313	1	false
+
+query TT
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM pcap_time_range('../fuzz/corpus/fuzz_pcap_reader/dns.cap'));
+----
+filename	VARCHAR
+start_time	TIMESTAMP_NS
+end_time	TIMESTAMP_NS
+frames	UBIGINT
+duration	DOUBLE
+link_type	UINTEGER
+truncated	BOOLEAN
+
+# What a scan of the frames finds
+query TTI
+SELECT min(timestamp), max(timestamp), count(*) FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dns.cap');
+----
+2005-03-30 08:47:46.496046	2005-03-30 08:52:25.375359	38
+
+# A row per file: a pattern, a list, legacy and pcapng
+query TTTI
+SELECT parse_filename(filename), start_time, end_time, frames
+FROM pcap_time_range(['../fuzz/corpus/fuzz_pcap_reader/v6*', '../fuzz/corpus/fuzz_pcap_reader/ldap-ssl.pcapng'])
+ORDER BY filename;
+----
+ldap-ssl.pcapng	2015-01-31 03:05:32.664962	2015-01-31 03:05:58.484474	36
+v6-http.cap	2007-08-05 19:11:19.15906	2007-08-05 19:16:44.219461	55
+v6.pcap	1999-03-11 13:45:02.141757	1999-03-11 13:46:06.755968	161
+
+statement ok
+SET threads = 4;
+
+query II
+SELECT count(*), sum(frames) = (SELECT count(*) FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/*'))
+FROM pcap_time_range('../fuzz/corpus/fuzz_pcap_reader/*');
+----
+25	true
+
+statement ok
+RESET threads;
+
+# The macros: one capture, and the smallest start and largest end of several
+query TTT
+SELECT start_time('../fuzz/corpus/fuzz_pcap_reader/dns.cap'), end_time('../fuzz/corpus/fuzz_pcap_reader/dns.cap'),
+       typeof(start_time('../fuzz/corpus/fuzz_pcap_reader/dns.cap'));
+----
+2005-03-30 08:47:46.496046	2005-03-30 08:52:25.375359	TIMESTAMP_NS
+
+query TT
+SELECT start_time('../fuzz/corpus/fuzz_pcap_reader/v6*'), end_time('../fuzz/corpus/fuzz_pcap_reader/v6*');
+----
+1999-03-11 13:45:02.141757	2007-08-05 19:16:44.219461
+
+# Seconds since the start, in a projection and a filter
+query IR
+SELECT frame_number, relative_time(timestamp, '../fuzz/corpus/fuzz_pcap_reader/dns.cap')
+FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dns.cap')
+WHERE relative_time(timestamp, '../fuzz/corpus/fuzz_pcap_reader/dns.cap') < 5
+ORDER BY frame_number;
+----
+1	0.0
+2	0.00053
+3	4.005222
+4	4.837355
+
+query TT
+SELECT typeof(relative_time(timestamp, '../fuzz/corpus/fuzz_pcap_reader/dns.cap')),
+       max(relative_time(timestamp, '../fuzz/corpus/fuzz_pcap_reader/dns.cap'))
+FROM read_dns('../fuzz/corpus/fuzz_pcap_reader/dns.cap') GROUP BY ALL;
+----
+DOUBLE	278.879313
+
+# The files are a constant, as for a scan
+statement error
+SELECT relative_time(timestamp, filename) FROM read_frames('../fuzz/corpus/fuzz_pcap_reader/dns.cap', filename := true);
+----
+does not support lateral join column parameters
+
+statement error
+SELECT * FROM pcap_time_range('test/sql/time_range.test');
+----
+is not a capture file pcapsql can read
+
+statement error
+SELECT start_time('../fuzz/corpus/fuzz_pcap_reader/*.nothing');
+----
+pcap_time_range: no file matches the pattern

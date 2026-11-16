@@ -31,7 +31,7 @@ use std::sync::Arc;
 use duckdb_neo::{bind_arguments::BindArgument, connection::Context, Error, Result};
 use pcapsql_core::{KeyLog, KeyLogError};
 
-use super::{PcapScan, KEYLOG};
+use super::{function::CaptureFunction, PcapScan, KEYLOG};
 use crate::engine::{fs::DuckFile, relation::Relation, settings};
 
 /// The key log of a call, parsed.

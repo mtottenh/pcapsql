@@ -1,8 +1,8 @@
 # pcapsql DuckDB extension: function reference
 
 Everything the `pcapsql` extension registers in DuckDB: table functions and
-their parameters, scalar functions, macros, settings, the replacement scan,
-and the copy format.
+their parameters, scalar functions, an aggregate function, macros, settings,
+the replacement scan, and the copy format.
 
 This page describes the extension as built from this tree, for DuckDB 2.0.0.
 `make check_reference_release` in `pcapsql-duckdb/` compares it with what the
@@ -23,8 +23,10 @@ is described in
 |---|---|---|
 | Scan table functions | 54 | `read_pcap`, `read_<table>` for each of the 32 tables (28 of packets, 4 of TCP streams), and `read_<view>` for each of the 21 `*_packets` views |
 | Listing table functions | 3 | `pcap_protocols`, `pcap_views`, `pcap_schema` |
-| Scalar functions | 40 | `ip4`, `ip4_to_string`, `ip6`, `ip6_to_string`, `mac`, `mac_to_string`, `is_private_ip`, `is_loopback_ip`, `is_multicast_ip`, `is_multicast_ip6`, `is_link_local_ip6`, `mac_is_broadcast`, `mac_is_multicast`, `mac_is_local`, `ip_in_cidr`, `ip6_in_cidr`, `tcp_flags_str`, `has_tcp_flag`, `ethertype_name`, `ip_proto_name`, `dscp_name`, `ecn_name`, `icmp_type_name`, `icmp_code_name`, `icmpv6_type_name`, `icmpv6_code_name`, `dns_type_name`, `dns_class_name`, `dns_rcode_name`, `bgp_message_type_name`, `bgp_origin_name`, `ospf_packet_type_name`, `ospf_lsa_type_name`, `gtp_message_type_name`, `ntp_mode_name`, `ntp_stratum_name`, `tls_record_type_name`, `tls_version_name`, `pcap_hex`, `pcap_unhex` |
-| Macros | 6 | `format_ip4`, `format_ip6`, `format_mac`, `format_ip4_list`, `format_ip6_list`, `format_mac_list` |
+| Capture summary table function | 1 | `pcap_time_range` |
+| Scalar functions | 48 | `ip4`, `ip4_to_string`, `ip6`, `ip6_to_string`, `mac`, `mac_to_string`, `is_private_ip`, `is_loopback_ip`, `is_multicast_ip`, `is_multicast_ip6`, `is_link_local_ip6`, `mac_is_broadcast`, `mac_is_multicast`, `mac_is_local`, `ip_in_cidr`, `ip6_in_cidr`, `tcp_flags_str`, `has_tcp_flag`, `ethertype_name`, `ip_proto_name`, `dscp_name`, `ecn_name`, `icmp_type_name`, `icmp_code_name`, `icmpv6_type_name`, `icmpv6_code_name`, `dns_type_name`, `dns_class_name`, `dns_rcode_name`, `bgp_message_type_name`, `bgp_origin_name`, `ospf_packet_type_name`, `ospf_lsa_type_name`, `gtp_message_type_name`, `ntp_mode_name`, `ntp_stratum_name`, `tls_record_type_name`, `tls_version_name`, `pcap_hex`, `pcap_unhex`, `hdr_count`, `hdr_min`, `hdr_max`, `hdr_mean`, `hdr_stdev`, `hdr_percentile`, `hdr_buckets`, `hdr_ascii` |
+| Aggregate functions | 1 | `hdr_histogram` |
+| Macros | 9 | `format_ip4`, `format_ip6`, `format_mac`, `format_ip4_list`, `format_ip6_list`, `format_mac_list`, `start_time`, `end_time`, `relative_time` |
 | Settings | 5 | `pcapsql_parallel_scan`, `pcapsql_parallel_min_file_size`, `pcapsql_index_stride`, `pcapsql_filter_pushdown`, `pcapsql_keylog` |
 | Replacement scan | 1 | `FROM 'capture.pcap'` |
 | Copy format | 1 | `FORMAT pcap`, for `COPY ... TO`, with the options `LINKTYPE`, `SNAPLEN` and `PRECISION` |
@@ -249,9 +251,9 @@ SELECT method, authority, path FROM http2 WHERE method IS NOT NULL;
 
 | Parameter | Type | Default | On | Meaning |
 |---|---|---|---|---|
-| `files` | `VARCHAR` or `VARCHAR[]` | required | all | The only positional argument: a path, a glob pattern (`*`, `?`, `[...]`, `**`), or a list of paths and patterns. Files are opened through DuckDB's file system |
+| `files` | `VARCHAR` or `VARCHAR[]` | required | all, and `pcap_time_range` | The only positional argument: a path, a glob pattern (`*`, `?`, `[...]`, `**`), or a list of paths and patterns. Files are opened through DuckDB's file system |
 | `protocol` | `VARCHAR` | `'frames'` | `read_pcap` | The table to read, in any case. An unknown name is an error |
-| `strict` | `BOOLEAN` | `false` | all | `true` makes a capture that ends inside a record an error, also when a `frame_number` filter ends the read before the end (not a `LIMIT` on one thread). By default the complete packets are returned and a warning is logged |
+| `strict` | `BOOLEAN` | `false` | all, and `pcap_time_range` | `true` makes a capture that ends inside a record an error, also when a `frame_number` filter ends the read before the end (not a `LIMIT` on one thread). By default the complete packets are returned and a warning is logged |
 | `filename` | `BOOLEAN` | `false` | all | `true` adds a `filename VARCHAR` column after the table's columns, with the path of the file each row is from |
 | `keylog` | `VARCHAR` | `NULL` | `read_pcap`, `read_tcp_connections`, `read_tls_sessions`, `read_http_messages`, `read_http2` | The path of a TLS key log to decrypt with. NULL or not given: the setting `pcapsql_keylog`. Empty: none. See "TLS decryption" |
 
@@ -354,6 +356,85 @@ SELECT name, description FROM pcap_protocols();
 SELECT * FROM pcap_schema('dns');
 ```
 
+## Capture time
+
+### `pcap_time_range(files, strict := false)`
+
+One row per capture file: when it begins and ends, and how many frames it
+has. `files` is the argument of the scan functions (a path, a pattern, or a
+list of them; see "Parameters" and "Input files").
+
+| Column | Type | Meaning |
+|---|---|---|
+| `filename` | `VARCHAR` | The path of the file, as `files` expanded to it |
+| `start_time` | `TIMESTAMP_NS` | The smallest timestamp of a frame. NULL for a capture without frames |
+| `end_time` | `TIMESTAMP_NS` | The largest timestamp of a frame. NULL for a capture without frames |
+| `frames` | `UBIGINT` | The number of complete frames |
+| `duration` | `DOUBLE` | Seconds from `start_time` to `end_time`. NULL for a capture without frames |
+| `link_type` | `UINTEGER` | The link-layer type the capture's header declares; for pcapng, that of its first interface |
+| `truncated` | `BOOLEAN` | Whether the capture ends inside a record |
+
+- The timestamps have the type of `read_frames.timestamp`. They are the
+  smallest and the largest of all frames, which are not the first and the
+  last frame's when the frames are not in time order.
+- A row costs one pass over the records of its file: every record is read
+  (a compressed capture is decompressed), none is parsed. The extension keeps
+  no index of a capture between statements, so no call is answered without
+  that pass. Several files are read on several threads, and the rows come
+  back in no particular order.
+- A capture that ends inside a record gives the row of its complete frames,
+  with `truncated` true; nothing is logged. With `strict := true` the
+  statement fails instead, as a scan does. The pass reads to the end of the
+  file, so it always finds a broken tail.
+- Every file is opened and probed when the statement is bound, as for a scan.
+
+```sql
+SELECT * FROM pcap_time_range('capture.pcap');
+SELECT min(start_time), max(end_time), sum(frames) FROM pcap_time_range('logs/*.pcap.gz');
+```
+
+### `start_time(files)`, `end_time(files)`, `relative_time(ts, files)`
+
+The command-line tool's `start_time()`, `end_time()` and `relative_time(ts)`,
+with the capture as an argument: that tool has one capture per session,
+DuckDB has none. They are macros over `pcap_time_range` (see "Macros").
+
+| Macro | Returns | Result |
+|---|---|---|
+| `start_time(files)` | `TIMESTAMP_NS` | The smallest timestamp of a frame of the files |
+| `end_time(files)` | `TIMESTAMP_NS` | The largest timestamp of a frame of the files |
+| `relative_time(ts, files)` | `DOUBLE` | Seconds from `start_time(files)` to `ts`; negative for a `ts` before it |
+
+- With several files the start is the smallest of theirs and the end the
+  largest. Without a frame in the files all three are NULL (the command-line
+  tool answers the Unix epoch there). A NULL `ts` gives NULL.
+- `ts` is a `TIMESTAMP_NS`, as the tables have it, or any other timestamp
+  type `epoch_ns` takes (`TIMESTAMP`, `TIMESTAMPTZ`, ...).
+- `relative_time` is the difference in nanoseconds divided by 1e9. The
+  command-line tool divides a difference in microseconds by 1e6: the two are
+  equal to the last bit on a capture with microsecond timestamps whose
+  difference is below 2^53 ns (104 days), and this one keeps the nanoseconds
+  of a capture that has them.
+- `files` must be a constant (a literal, a prepared statement's parameter,
+  `getvariable(...)`): a column is refused, as for a scan.
+- The macro is a scalar subquery that does not depend on the row. DuckDB
+  2.0.0 runs it once per statement, also when it is written several times
+  with the same files, in the projection and in the filter (`EXPLAIN` shows
+  one `PCAP_TIME_RANGE` under a common subplan), so the files are read once
+  for the range, whatever the number of rows.
+- A filter on `relative_time` is applied by DuckDB to the rows of the scan;
+  it is not a filter on `timestamp` the scan takes over ("Pushdown").
+- DuckDB 2.0.0 does not let another item of the same `SELECT` list refer to
+  the alias of an expression that has a subquery, which these macros have:
+  `SELECT relative_time(timestamp, 'x.pcap') AS rel, rel * 1000` is refused.
+  Use a subquery or a common table expression.
+
+```sql
+SELECT frame_number, relative_time(timestamp, 'capture.pcap') AS seconds
+FROM read_tcp('capture.pcap')
+WHERE relative_time(timestamp, 'capture.pcap') < 10;
+```
+
 ## Scalar functions
 
 A NULL argument gives NULL, and so does an argument the function cannot use
@@ -373,6 +454,10 @@ A function that names a number has text for every number: the name, or text
 made of the number, as the table says. The name columns of the tables
 (`type_name` of `read_icmp`, `message_type_name` of `read_bgp`, ...) hold
 the same text.
+
+The eight functions that read a histogram (`hdr_count`, `hdr_percentile`,
+...) are scalar functions too, and follow the first rule: NULL for NULL and
+for a `BLOB` that is not a histogram. They are described under "Histograms".
 
 | Function | Returns | Result |
 |---|---|---|
@@ -429,6 +514,145 @@ FROM read_icmp('capture.pcap') JOIN read_ipv4('capture.pcap') USING (frame_numbe
 WHERE NOT is_private_ip(src_ip);
 ```
 
+## Histograms
+
+A histogram of the values of a column, built by an aggregate function and
+read by scalar functions. They are the `hdr_*` functions of the command-line
+tool, on the same code (`pcapsql_core::format::histogram`, an
+[HdrHistogram](https://hdrhistogram.org)): a histogram one of the two made
+is one the other reads, and for the same values both give the same answers.
+
+A histogram keeps its values to a number of significant decimal digits,
+two (within 1 %) unless the call asks for another, whatever their number,
+and grows with the largest of them. Its memory is per group while the
+aggregation runs, and grows steeply with the digits; the result is a compact
+encoding of the counts:
+
+| Significant digits | Memory for values up to | Each doubling of the largest value after that | The whole range of a `UBIGINT` |
+|---|---|---|---|
+| 0 | 3: 24 bytes | 8 bytes | 0.5 KiB |
+| 1 | 31: 256 bytes | 128 bytes | 7.6 KiB |
+| 2 (default) | 255: 2 KiB | 1 KiB | 58 KiB |
+| 3 | 2047: 16 KiB | 8 KiB | 440 KiB |
+| 4 | 32767: 256 KiB | 128 KiB | 6.4 MiB |
+| 5 | 262143: 2 MiB | 1 MiB | 48 MiB |
+
+So a grouped `hdr_histogram(value, 5)` over 1,000 groups needs at least
+2 GiB, and `hdr_histogram(value, 4)` of values up to a million nearly 1 GiB.
+
+### `hdr_histogram(value [, sigfigs])`
+
+An aggregate function. Returns the histogram of the values of its group as a
+`BLOB`: HdrHistogram's V2 encoding, which other HdrHistogram implementations
+read too.
+
+- `value` is a number: any integer type (`TINYINT` to `HUGEINT`, `UTINYINT`
+  to `UHUGEINT`), `FLOAT`, `DOUBLE` or `DECIMAL`. Any other type is refused
+  when the statement is bound. A column is read as it is stored, without a
+  cast in between.
+- `sigfigs`, optional, is the number of significant decimal digits the
+  histogram keeps of a value: an integer from 0 to 5, 2 when it is left
+  out. A histogram of `sigfigs` digits holds every value below
+  `2 * 10^sigfigs` exactly and a larger one to within one part in
+  `10^sigfigs` (0 digits: within a factor of two), so more digits give
+  closer percentiles, minimums and maximums, at the cost in memory above.
+  It is passed by position (`hdr_histogram(rtt, 3)`) or by name
+  (`hdr_histogram(rtt, sigfigs := 3)`), must be a constant
+  of an integer type (`3`, `1 + 2`, `3::UTINYINT`), and is the same for
+  every group of the call. NULL, a number outside 0 to 5, a value of
+  another type (`2.5`, `'3'`) and an expression that is not a constant (a
+  column, a subquery) are refused when the statement is bound:
+  `hdr_histogram: the number of significant figures (the second argument)
+  must be a constant integer from 0 to 5, not ...`. A parameter of a
+  prepared statement is a constant (`hdr_histogram(rtt, ?)`), without a
+  cast. The digits are stored in the histogram, so the functions that read
+  it need not be told.
+- What is recorded is an unsigned 64-bit integer. NULL is not recorded, nor
+  is a negative number, nor NaN. Of a number with a fraction the integer
+  part is recorded, so scale a column of fractions first
+  (`hdr_histogram(seconds * 1000)`). A number above 18446744073709551615
+  (a `HUGEINT`, a large `DOUBLE`, infinity) is recorded as that.
+- A group without a value to record, and an aggregate without `GROUP BY`
+  over no rows, is an empty histogram, not NULL: its `hdr_count` is 0.
+- `FILTER`, `DISTINCT` and `OVER` (a window) work as for DuckDB's own
+  aggregate functions. An `ORDER BY` in the call changes nothing.
+- DuckDB aggregates on several threads and combines their partial
+  histograms. The answers do not depend on that. The bytes of the `BLOB`
+  can: one field of the encoding's header (the highest value the histogram
+  has room for) depends on how the values were split into partial
+  histograms and in which order those were combined. Equal values give
+  equal bytes when one worker recorded them all (a capture read as one
+  partition, or `SET threads = 1`, without `GROUP BY`), and always when they
+  are below those the table above gives the first memory for (up to 255
+  for two digits); those
+  are the bytes the command-line tool returns for them. Compare histograms
+  by what the functions below say of them.
+- DuckDB 2.0.0 frees the histogram of a group when it returns the group. The
+  histograms of groups a statement never returns stay allocated until the
+  process ends: a grouped `hdr_histogram` under a `LIMIT` without an
+  `ORDER BY`, and a statement that fails while it returns its groups. An
+  `ORDER BY` before the `LIMIT`, or reading the result to its end, frees
+  them all. (This is DuckDB's handling of every aggregate function that
+  owns memory, see `pcapsql-duckdb/README.md`.)
+
+The command-line tool's `hdr_histogram` takes the same arguments (`sigfigs`
+by position only), accepts and refuses the same `sigfigs` with the same
+message, and with the same values and `sigfigs` gives the same answers.
+
+### Reading a histogram
+
+| Function | Returns | Result |
+|---|---|---|
+| `hdr_count(histogram BLOB)` | `UBIGINT` | The number of values recorded |
+| `hdr_min(histogram BLOB)` | `UBIGINT` | The smallest value recorded, to the histogram's digits: the lowest value the histogram cannot tell from it. 0 for an empty histogram |
+| `hdr_max(histogram BLOB)` | `UBIGINT` | The largest value recorded, to the histogram's digits: the highest value the histogram cannot tell from it, which is at least the value. 0 for an empty histogram |
+| `hdr_mean(histogram BLOB)` | `DOUBLE` | The mean of the values, each to the histogram's digits. 0 for an empty histogram |
+| `hdr_stdev(histogram BLOB)` | `DOUBLE` | Their standard deviation. 0 for an empty histogram |
+| `hdr_percentile(histogram BLOB, percentile DOUBLE)` | `DOUBLE` | The value at a percentile, given as a fraction (`0.99`) or, above 1, as a percentage (`99`). 0 for an empty histogram |
+| `hdr_buckets(histogram BLOB)` | `STRUCT(lo UBIGINT, hi UBIGINT, count UBIGINT)[]` | The recorded range in buckets on a logarithmic scale, each with its bounds (both included) and the number of values in it. Powers of two (`1-1`, `2-3`, `4-7`, ...) from the smallest value to the largest, empty buckets between them included; at most 64, and powers of ten when powers of two would be more. The counts add up to `hdr_count`. The empty list for an empty histogram |
+| `hdr_ascii(histogram BLOB)` | `VARCHAR` | The histogram drawn as text: a line of statistics, a header, and a line per bucket with its count, its share, the cumulative share and a bar. `(empty histogram)` for an empty one |
+
+NULL gives NULL, and so does a `BLOB` that is not a histogram: none of these
+raises an error for its input.
+
+```sql
+SELECT hdr_count(h), hdr_percentile(h, 0.5), hdr_percentile(h, 0.99), hdr_max(h)
+FROM (SELECT hdr_histogram(length) AS h FROM read_frames('capture.pcap'));
+
+-- Three significant digits: percentiles within 0.1 %
+SELECT hdr_percentile(hdr_histogram(length, 3), 0.99) FROM read_frames('capture.pcap');
+
+-- A histogram per group, and its buckets as rows
+SELECT dst_port, unnest(hdr_buckets(hdr_histogram(length)), recursive := true)
+FROM read_tcp('capture.pcap') GROUP BY dst_port;
+
+-- The picture, in the DuckDB shell: .mode list
+SELECT hdr_ascii(hdr_histogram(length)) FROM read_frames('capture.pcap');
+```
+
+## Functions of the command-line tool that DuckDB has
+
+The command-line tool's SQL functions are all here, under the same names,
+except those DuckDB provides itself. Of its capture time functions the three
+take the capture as an argument here ("Capture time"). Its six date and time
+helpers are not registered: DuckDB's own functions do the same, on the
+`TIMESTAMP_NS` of the tables, with these spellings (`ts` is a timestamp
+column):
+
+| Command-line tool | In DuckDB | Result |
+|---|---|---|
+| `strftime`, called with the format first | `strftime(ts, '%Y-%m-%d %H:%M')` | Text in a format. The timestamp comes first. `%f` is microseconds and `%n` nanoseconds |
+| `datetime` | `strftime(ts, '%Y-%m-%dT%H:%M:%S.%f')` | ISO 8601 text with microseconds |
+| `date` | `strftime(ts, '%Y-%m-%d')`, or `ts::DATE` for a `DATE` | The date |
+| `time` | `strftime(ts, '%H:%M:%S.%f')`, or `ts::TIME` for a `TIME` | The time of day |
+| `epoch` | `epoch(ts)` | Seconds since 1970 as a `DOUBLE` |
+| `epoch_ms` | `epoch_ms(ts)` | Milliseconds since 1970 as a `BIGINT` |
+
+On a capture with microsecond timestamps each returns what the command-line
+tool's function returns. The tool's window table functions (`tumble`, `hop`,
+`session`) are table functions, not among these, and the extension does not
+have them.
+
 ## Macros
 
 Registered by the extension, not stored in a database file.
@@ -441,6 +665,11 @@ Registered by the extension, not stored in a database file.
 | `format_ip4_list(ips)` | `list_transform(ips, lambda x: ip4_to_string(x))` |
 | `format_ip6_list(ips)` | `list_transform(ips, lambda x: ip6_to_string(x))` |
 | `format_mac_list(macs)` | `list_transform(macs, lambda x: mac_to_string(x))` |
+| `start_time(files)` | `(SELECT min(start_time) FROM pcap_time_range(files))` |
+| `end_time(files)` | `(SELECT max(end_time) FROM pcap_time_range(files))` |
+| `relative_time(ts, files)` | `(epoch_ns(ts) - epoch_ns((SELECT min(start_time) FROM pcap_time_range(files)))) / 1e9` |
+
+The last three are described under "Capture time".
 
 ## Settings
 
