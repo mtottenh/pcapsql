@@ -3,8 +3,8 @@
 use etherparse::Ethernet2HeaderSlice;
 
 use super::{
-    Cond, Dispatch, DispatchRule, FieldSink, FieldValue, HintKey, Hints, ParseContext, Parsed,
-    Protocol,
+    field_list, Cond, Dispatch, DispatchRule, FieldSet, FieldSink, FieldValue, HintKey, Hints,
+    ParseContext, Parsed, Protocol,
 };
 use crate::schema::{DataKind, FieldDescriptor};
 
@@ -96,6 +96,52 @@ pub mod ethertype {
     pub const VERITAS_LLT: u16 = 0xCAFE;
 }
 
+field_list! {
+    /// The fields of an `ethernet` layer, in the order the parser writes
+    /// them.
+    enum Field {
+        SrcMac = "src_mac",
+        DstMac = "dst_mac",
+        Ethertype = "ethertype",
+    }
+}
+
+/// The Ethernet II header at the start of `data`: the fields of `want` (all
+/// of them for [`FieldSet::ALL`]) to `fields`, the payload and the hints for
+/// the layer above.
+#[inline(always)]
+fn parse_ethernet<'a>(
+    data: &'a [u8],
+    want: FieldSet,
+    fields: &mut FieldSink<'_, 'a>,
+) -> Parsed<'a> {
+    let eth = match Ethernet2HeaderSlice::from_slice(data) {
+        Ok(eth) => eth,
+        Err(e) => {
+            return Parsed::error(
+                fields.text_fmt(format_args!("Ethernet parse error: {e}")),
+                data,
+            )
+        }
+    };
+    let ether_type = eth.ether_type().0;
+    if want.has(Field::SrcMac) {
+        fields.push(("src_mac", FieldValue::mac(&eth.source())));
+    }
+    if want.has(Field::DstMac) {
+        fields.push(("dst_mac", FieldValue::mac(&eth.destination())));
+    }
+    if want.has(Field::Ethertype) {
+        fields.push(("ethertype", FieldValue::UInt16(ether_type)));
+    }
+
+    let mut child_hints = Hints::new();
+    child_hints.insert(HintKey::EtherType, ether_type as u64);
+
+    let header_len = eth.slice().len();
+    Parsed::ok(&data[header_len..], child_hints)
+}
+
 /// Ethernet II protocol parser.
 #[derive(Debug, Clone, Copy)]
 pub struct EthernetProtocol;
@@ -150,23 +196,7 @@ impl Protocol for EthernetProtocol {
         _context: &ParseContext,
         fields: &mut FieldSink<'_, 'a>,
     ) -> Parsed<'a> {
-        match Ethernet2HeaderSlice::from_slice(data) {
-            Ok(eth) => {
-                fields.push(("src_mac", FieldValue::mac(&eth.source())));
-                fields.push(("dst_mac", FieldValue::mac(&eth.destination())));
-                fields.push(("ethertype", FieldValue::UInt16(eth.ether_type().0)));
-
-                let mut child_hints = Hints::new();
-                child_hints.insert(HintKey::EtherType, eth.ether_type().0 as u64);
-
-                let header_len = eth.slice().len();
-                Parsed::ok(&data[header_len..], child_hints)
-            }
-            Err(e) => Parsed::error(
-                fields.text_fmt(format_args!("Ethernet parse error: {e}")),
-                data,
-            ),
-        }
+        parse_ethernet(data, FieldSet::ALL, fields)
     }
 
     fn schema_fields(&self) -> Vec<FieldDescriptor> {
@@ -187,6 +217,20 @@ impl Protocol for EthernetProtocol {
     /// the inner frame.
     fn dependencies(&self) -> &'static [&'static str] {
         &["vxlan", "gre"]
+    }
+
+    fn field_names(&self) -> &'static [&'static str] {
+        Field::NAMES
+    }
+
+    fn parse_projected<'a>(
+        &self,
+        data: &'a [u8],
+        _context: &ParseContext,
+        projection: FieldSet,
+        fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
+        parse_ethernet(data, projection, fields)
     }
 }
 

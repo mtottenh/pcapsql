@@ -20,7 +20,8 @@
 
 use super::linux_sll::{arphrd, arphrd_name, packet_type_name};
 use super::{
-    Dispatch, DispatchRule, FieldSink, FieldValue, HintKey, Hints, ParseContext, Parsed, Protocol,
+    field_list, Dispatch, DispatchRule, FieldSet, FieldSink, FieldValue, HintKey, Hints,
+    ParseContext, Parsed, Protocol,
 };
 use crate::schema::{DataKind, FieldDescriptor};
 
@@ -29,6 +30,97 @@ pub const LINKTYPE_LINUX_SLL2: u16 = 276;
 
 /// Linux SLL2 header length in bytes.
 pub const LINUX_SLL2_HEADER_LEN: usize = 20;
+
+field_list! {
+    /// The fields of an `sll2` layer, in the order the parser writes them.
+    enum Field {
+        Protocol = "protocol",
+        InterfaceIndex = "interface_index",
+        ArphrdType = "arphrd_type",
+        ArphrdName = "arphrd_name",
+        PacketType = "packet_type",
+        PacketTypeName = "packet_type_name",
+        AddrLen = "addr_len",
+        Addr = "addr",
+    }
+}
+
+/// The Linux cooked capture v2 header at the start of `data`: the fields of
+/// `want` (all of them for [`FieldSet::ALL`]) to `fields`, the payload and
+/// the hints for the layer above.
+#[inline(always)]
+fn parse_sll2<'a>(data: &'a [u8], want: FieldSet, fields: &mut FieldSink<'_, 'a>) -> Parsed<'a> {
+    if data.len() < LINUX_SLL2_HEADER_LEN {
+        return Parsed::error(
+            fields.text_fmt(format_args!(
+                "Linux SLL2 header too short: {} bytes",
+                data.len()
+            )),
+            data,
+        );
+    }
+
+    let protocol = u16::from_be_bytes([data[0], data[1]]);
+    let interface_index = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
+    let arphrd_type = u16::from_be_bytes([data[8], data[9]]);
+    let pkt_type = data[10];
+    let addr_len = data[11];
+
+    if want.has(Field::Protocol) {
+        fields.push(("protocol", FieldValue::UInt16(protocol)));
+    }
+    if want.has(Field::InterfaceIndex) {
+        fields.push(("interface_index", FieldValue::UInt32(interface_index)));
+    }
+    if want.has(Field::ArphrdType) {
+        fields.push(("arphrd_type", FieldValue::UInt16(arphrd_type)));
+    }
+    if want.has(Field::ArphrdName) {
+        fields.push(("arphrd_name", FieldValue::Str(arphrd_name(arphrd_type))));
+    }
+    if want.has(Field::PacketType) {
+        fields.push(("packet_type", FieldValue::UInt8(pkt_type)));
+    }
+    if want.has(Field::PacketTypeName) {
+        fields.push((
+            "packet_type_name",
+            FieldValue::Str(packet_type_name(pkt_type as u16)),
+        ));
+    }
+    if want.has(Field::AddrLen) {
+        fields.push(("addr_len", FieldValue::UInt8(addr_len)));
+    }
+
+    let valid_addr_len = (addr_len as usize).min(8);
+    if valid_addr_len > 0 && want.has(Field::Addr) {
+        fields.push(("addr", FieldValue::Bytes(&data[12..12 + valid_addr_len])));
+    }
+
+    let remaining = &data[LINUX_SLL2_HEADER_LEN..];
+
+    // Per the LINKTYPE_LINUX_SLL2 spec the protocol field is an ethertype
+    // for every ARPHRD type except NETLINK (netlink family), IPGRE (GRE
+    // protocol type), IEEE80211_RADIOTAP and FRAD (field not meaningful).
+    // `tcpdump -i any` hosts routinely carry tun/ppp/sit interfaces
+    // (ARPHRD_NONE, PPP, SIT, RAWIP, ...), so the default arm must route
+    // to IP.
+    let mut child_hints = Hints::new();
+    child_hints.insert(HintKey::SllArphrd, arphrd_type as u64);
+    match arphrd_type {
+        arphrd::NETLINK => {
+            child_hints.insert(HintKey::NetlinkFamily, protocol as u64);
+            child_hints.insert(HintKey::IsNetlink, 1u64);
+        }
+        arphrd::IPGRE | arphrd::IEEE80211_RADIOTAP | arphrd::FRAD => {
+            child_hints.insert(HintKey::SllProtocol, protocol as u64);
+        }
+        _ => {
+            child_hints.insert(HintKey::EtherType, protocol as u64);
+        }
+    }
+
+    Parsed::ok(remaining, child_hints)
+}
 
 /// Linux SLL2 protocol parser.
 ///
@@ -78,62 +170,7 @@ impl Protocol for Sll2Protocol {
         _context: &ParseContext,
         fields: &mut FieldSink<'_, 'a>,
     ) -> Parsed<'a> {
-        if data.len() < LINUX_SLL2_HEADER_LEN {
-            return Parsed::error(
-                fields.text_fmt(format_args!(
-                    "Linux SLL2 header too short: {} bytes",
-                    data.len()
-                )),
-                data,
-            );
-        }
-
-        let protocol = u16::from_be_bytes([data[0], data[1]]);
-        let interface_index = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
-        let arphrd_type = u16::from_be_bytes([data[8], data[9]]);
-        let pkt_type = data[10];
-        let addr_len = data[11];
-
-        fields.push(("protocol", FieldValue::UInt16(protocol)));
-        fields.push(("interface_index", FieldValue::UInt32(interface_index)));
-        fields.push(("arphrd_type", FieldValue::UInt16(arphrd_type)));
-        fields.push(("arphrd_name", FieldValue::Str(arphrd_name(arphrd_type))));
-        fields.push(("packet_type", FieldValue::UInt8(pkt_type)));
-        fields.push((
-            "packet_type_name",
-            FieldValue::Str(packet_type_name(pkt_type as u16)),
-        ));
-        fields.push(("addr_len", FieldValue::UInt8(addr_len)));
-
-        let valid_addr_len = (addr_len as usize).min(8);
-        if valid_addr_len > 0 {
-            fields.push(("addr", FieldValue::Bytes(&data[12..12 + valid_addr_len])));
-        }
-
-        let remaining = &data[LINUX_SLL2_HEADER_LEN..];
-
-        // Per the LINKTYPE_LINUX_SLL2 spec the protocol field is an ethertype
-        // for every ARPHRD type except NETLINK (netlink family), IPGRE (GRE
-        // protocol type), IEEE80211_RADIOTAP and FRAD (field not meaningful).
-        // `tcpdump -i any` hosts routinely carry tun/ppp/sit interfaces
-        // (ARPHRD_NONE, PPP, SIT, RAWIP, ...), so the default arm must route
-        // to IP.
-        let mut child_hints = Hints::new();
-        child_hints.insert(HintKey::SllArphrd, arphrd_type as u64);
-        match arphrd_type {
-            arphrd::NETLINK => {
-                child_hints.insert(HintKey::NetlinkFamily, protocol as u64);
-                child_hints.insert(HintKey::IsNetlink, 1u64);
-            }
-            arphrd::IPGRE | arphrd::IEEE80211_RADIOTAP | arphrd::FRAD => {
-                child_hints.insert(HintKey::SllProtocol, protocol as u64);
-            }
-            _ => {
-                child_hints.insert(HintKey::EtherType, protocol as u64);
-            }
-        }
-
-        Parsed::ok(remaining, child_hints)
+        parse_sll2(data, FieldSet::ALL, fields)
     }
 
     fn schema_fields(&self) -> Vec<FieldDescriptor> {
@@ -157,6 +194,20 @@ impl Protocol for Sll2Protocol {
 
     fn dependencies(&self) -> &'static [&'static str] {
         &[] // Root protocol - no dependencies
+    }
+
+    fn field_names(&self) -> &'static [&'static str] {
+        Field::NAMES
+    }
+
+    fn parse_projected<'a>(
+        &self,
+        data: &'a [u8],
+        _context: &ParseContext,
+        projection: FieldSet,
+        fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
+        parse_sll2(data, projection, fields)
     }
 }
 

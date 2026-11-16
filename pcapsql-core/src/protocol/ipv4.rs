@@ -4,8 +4,8 @@ use etherparse::Ipv4HeaderSlice;
 
 use super::ethernet::ethertype;
 use super::{
-    Cond, Dispatch, DispatchRule, FieldSink, FieldValue, HintKey, Hints, ParseContext, Parsed,
-    Protocol, TunnelType,
+    field_list, Cond, Dispatch, DispatchRule, FieldSet, FieldSink, FieldValue, HintKey, Hints,
+    ParseContext, Parsed, Protocol, TunnelType,
 };
 use crate::schema::{DataKind, FieldDescriptor};
 
@@ -133,6 +133,115 @@ pub mod ecn {
     }
 }
 
+field_list! {
+    /// The fields of an `ipv4` layer, in the order the parser writes them.
+    enum Field {
+        Version = "version",
+        Ihl = "ihl",
+        Dscp = "dscp",
+        Ecn = "ecn",
+        TotalLength = "total_length",
+        Identification = "identification",
+        DontFragment = "dont_fragment",
+        MoreFragments = "more_fragments",
+        FragmentOffset = "fragment_offset",
+        Ttl = "ttl",
+        Protocol = "protocol",
+        Checksum = "checksum",
+        SrcIp = "src_ip",
+        DstIp = "dst_ip",
+    }
+}
+
+/// The IPv4 header at the start of `data`: the fields of `want` (all of
+/// them for [`FieldSet::ALL`]) to `fields`, the payload and the hints for
+/// the layer above.
+#[inline(always)]
+fn parse_ipv4<'a>(data: &'a [u8], want: FieldSet, fields: &mut FieldSink<'_, 'a>) -> Parsed<'a> {
+    let ipv4 = match Ipv4HeaderSlice::from_slice(data) {
+        Ok(ipv4) => ipv4,
+        Err(e) => {
+            return Parsed::error(fields.text_fmt(format_args!("IPv4 parse error: {e}")), data)
+        }
+    };
+    let protocol = ipv4.protocol().0;
+    if want.has(Field::Version) {
+        fields.push(("version", FieldValue::UInt8(4)));
+    }
+    if want.has(Field::Ihl) {
+        fields.push(("ihl", FieldValue::UInt8(ipv4.ihl())));
+    }
+    if want.has(Field::Dscp) {
+        fields.push(("dscp", FieldValue::UInt8(ipv4.dcp().value())));
+    }
+    if want.has(Field::Ecn) {
+        fields.push(("ecn", FieldValue::UInt8(ipv4.ecn().value())));
+    }
+    if want.has(Field::TotalLength) {
+        fields.push(("total_length", FieldValue::UInt16(ipv4.total_len())));
+    }
+    if want.has(Field::Identification) {
+        fields.push(("identification", FieldValue::UInt16(ipv4.identification())));
+    }
+    if want.has(Field::DontFragment) {
+        fields.push(("dont_fragment", FieldValue::Bool(ipv4.dont_fragment())));
+    }
+    if want.has(Field::MoreFragments) {
+        fields.push(("more_fragments", FieldValue::Bool(ipv4.more_fragments())));
+    }
+    if want.has(Field::FragmentOffset) {
+        fields.push((
+            "fragment_offset",
+            FieldValue::UInt16(ipv4.fragments_offset().value()),
+        ));
+    }
+    if want.has(Field::Ttl) {
+        fields.push(("ttl", FieldValue::UInt8(ipv4.ttl())));
+    }
+    if want.has(Field::Protocol) {
+        fields.push(("protocol", FieldValue::UInt8(protocol)));
+    }
+    if want.has(Field::Checksum) {
+        fields.push(("checksum", FieldValue::UInt16(ipv4.header_checksum())));
+    }
+    if want.has(Field::SrcIp) {
+        fields.push(("src_ip", FieldValue::ipv4(&ipv4.source())));
+    }
+    if want.has(Field::DstIp) {
+        fields.push(("dst_ip", FieldValue::ipv4(&ipv4.destination())));
+    }
+
+    let mut child_hints = Hints::new();
+    child_hints.insert(HintKey::IpProtocol, protocol as u64);
+    child_hints.insert(HintKey::IpVersion, 4);
+
+    // Check for IP-in-IP encapsulation
+    if protocol == ip_in_ip_protocol::IPIP {
+        // IPv4 encapsulated in IPv4 - signal tunnel boundary
+        child_hints.insert(HintKey::TunnelType, TunnelType::IpInIp as u64);
+        // Also set ethertype hint so inner IPv4 can be parsed
+        child_hints.insert(HintKey::EtherType, ethertype::IPV4 as u64);
+    } else if protocol == ip_in_ip_protocol::IPV6_IN_IP {
+        // IPv6 encapsulated in IPv4 - signal tunnel boundary
+        child_hints.insert(HintKey::TunnelType, TunnelType::Ip6InIp as u64);
+        // Also set ethertype hint so inner IPv6 can be parsed
+        child_hints.insert(HintKey::EtherType, ethertype::IPV6 as u64);
+    }
+
+    // The payload ends where the IP datagram ends: frames shorter than the
+    // Ethernet minimum carry trailer padding that is not payload (it would
+    // corrupt TCP reassembly). A zero total length (segmentation offload
+    // captures) means "unknown", so the frame length is kept.
+    let header_len = ipv4.slice().len();
+    let total_len = ipv4.total_len() as usize;
+    let end = if total_len >= header_len && total_len < data.len() {
+        total_len
+    } else {
+        data.len()
+    };
+    Parsed::ok(&data[header_len..end], child_hints)
+}
+
 /// IPv4 protocol parser.
 #[derive(Debug, Clone, Copy)]
 pub struct Ipv4Protocol;
@@ -176,60 +285,7 @@ impl Protocol for Ipv4Protocol {
         _context: &ParseContext,
         fields: &mut FieldSink<'_, 'a>,
     ) -> Parsed<'a> {
-        match Ipv4HeaderSlice::from_slice(data) {
-            Ok(ipv4) => {
-                fields.push(("version", FieldValue::UInt8(4)));
-                fields.push(("ihl", FieldValue::UInt8(ipv4.ihl())));
-                fields.push(("dscp", FieldValue::UInt8(ipv4.dcp().value())));
-                fields.push(("ecn", FieldValue::UInt8(ipv4.ecn().value())));
-                fields.push(("total_length", FieldValue::UInt16(ipv4.total_len())));
-                fields.push(("identification", FieldValue::UInt16(ipv4.identification())));
-                fields.push(("dont_fragment", FieldValue::Bool(ipv4.dont_fragment())));
-                fields.push(("more_fragments", FieldValue::Bool(ipv4.more_fragments())));
-                fields.push((
-                    "fragment_offset",
-                    FieldValue::UInt16(ipv4.fragments_offset().value()),
-                ));
-                fields.push(("ttl", FieldValue::UInt8(ipv4.ttl())));
-                fields.push(("protocol", FieldValue::UInt8(ipv4.protocol().0)));
-                fields.push(("checksum", FieldValue::UInt16(ipv4.header_checksum())));
-                fields.push(("src_ip", FieldValue::ipv4(&ipv4.source())));
-                fields.push(("dst_ip", FieldValue::ipv4(&ipv4.destination())));
-
-                let mut child_hints = Hints::new();
-                let protocol = ipv4.protocol().0;
-                child_hints.insert(HintKey::IpProtocol, protocol as u64);
-                child_hints.insert(HintKey::IpVersion, 4);
-
-                // Check for IP-in-IP encapsulation
-                if protocol == ip_in_ip_protocol::IPIP {
-                    // IPv4 encapsulated in IPv4 - signal tunnel boundary
-                    child_hints.insert(HintKey::TunnelType, TunnelType::IpInIp as u64);
-                    // Also set ethertype hint so inner IPv4 can be parsed
-                    child_hints.insert(HintKey::EtherType, ethertype::IPV4 as u64);
-                } else if protocol == ip_in_ip_protocol::IPV6_IN_IP {
-                    // IPv6 encapsulated in IPv4 - signal tunnel boundary
-                    child_hints.insert(HintKey::TunnelType, TunnelType::Ip6InIp as u64);
-                    // Also set ethertype hint so inner IPv6 can be parsed
-                    child_hints.insert(HintKey::EtherType, ethertype::IPV6 as u64);
-                }
-
-                // The payload ends where the IP datagram ends: frames shorter
-                // than the Ethernet minimum carry trailer padding that is not
-                // payload (it would corrupt TCP reassembly). A zero total
-                // length (segmentation offload captures) means "unknown", so
-                // the frame length is kept.
-                let header_len = ipv4.slice().len();
-                let total_len = ipv4.total_len() as usize;
-                let end = if total_len >= header_len && total_len < data.len() {
-                    total_len
-                } else {
-                    data.len()
-                };
-                Parsed::ok(&data[header_len..end], child_hints)
-            }
-            Err(e) => Parsed::error(fields.text_fmt(format_args!("IPv4 parse error: {e}")), data),
-        }
+        parse_ipv4(data, FieldSet::ALL, fields)
     }
 
     fn schema_fields(&self) -> Vec<FieldDescriptor> {
@@ -271,6 +327,20 @@ impl Protocol for Ipv4Protocol {
             "ipv4",
             "ipv6",
         ]
+    }
+
+    fn field_names(&self) -> &'static [&'static str] {
+        Field::NAMES
+    }
+
+    fn parse_projected<'a>(
+        &self,
+        data: &'a [u8],
+        _context: &ParseContext,
+        projection: FieldSet,
+        fields: &mut FieldSink<'_, 'a>,
+    ) -> Parsed<'a> {
+        parse_ipv4(data, projection, fields)
     }
 }
 
