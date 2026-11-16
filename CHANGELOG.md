@@ -80,6 +80,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   removed.
 - The CLI error for a failed stream reassembly no longer starts with
   `I/O error:`.
+- Performance (DuckDB extension): `ip_in_cidr` and `has_tcp_flag` with a
+  constant pattern are faster on columns that contain NULLs.
 
 ### Removed
 
