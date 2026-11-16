@@ -34,6 +34,12 @@ pub struct ReadPacketReader<R: Read> {
     inner: GenericPcapReader<Stack<R>>,
     link_type: u32,
     end_frame: Option<u64>,
+    /// Where in the source the stream the parser reads begins: the offset of
+    /// the first byte of `read` and the length of the prefix put before it
+    /// that is not of the source (a synthesized header). Both are 0 when the
+    /// stream is the source from its first byte.
+    origin: u64,
+    synthesized: u64,
 }
 
 impl<R: Read> ReadPacketReader<R> {
@@ -82,7 +88,7 @@ impl<R: Read> ReadPacketReader<R> {
         }
         let header = synth_header_for(index, range.start.frame_number, format)?;
         let first_read = header.len();
-        let reader = Self::open(
+        let mut reader = Self::open(
             header,
             read,
             Compression::None,
@@ -90,6 +96,8 @@ impl<R: Read> ReadPacketReader<R> {
             first_read,
             Some(range.start.frame_number),
         )?;
+        reader.origin = range.start.byte_offset;
+        reader.synthesized = first_read as u64;
         Ok(reader.with_end_frame(end_frame))
     }
 
@@ -128,7 +136,24 @@ impl<R: Read> ReadPacketReader<R> {
             inner,
             link_type,
             end_frame: None,
+            origin: 0,
+            synthesized: 0,
         })
+    }
+
+    /// The byte offset in the source of what the reader reads next: the
+    /// record after the last one it delivered, or a block between records.
+    ///
+    /// Unlike [`PacketReader::position`], whose `byte_offset` counts the
+    /// bytes of the reader's own stream (for a reader made by [`at`](Self::at)
+    /// that is the synthesized header and what follows the range's start),
+    /// this is an offset into the capture, so a caller can compare it with
+    /// the offsets of a [`BoundaryIndex`]. For a compressed capture read
+    /// [`sequential`](Self::sequential)ly it is an offset into the
+    /// decompressed stream.
+    pub fn source_offset(&self) -> u64 {
+        let consumed = self.inner.consumed_bytes();
+        self.origin + consumed.saturating_sub(self.synthesized)
     }
 }
 
@@ -410,6 +435,122 @@ mod tests {
             assert_eq!(frames.last(), Some(&(end.frame_number - 2)));
             assert!(reader.truncated());
         }
+    }
+
+    /// A range reader that read its range to the end is where the next range
+    /// starts, in the capture's offsets; a sequential reader is at the end of
+    /// the capture.
+    #[test]
+    fn a_range_reader_ends_at_the_offset_of_the_next_range() {
+        for bytes in [legacy(), ng()] {
+            let readers = ranged(&bytes, 4);
+            let starts: Vec<u64> = readers
+                .iter()
+                .map(|(range, _)| range.start.byte_offset)
+                .collect();
+            for (ordinal, (range, mut reader)) in readers.into_iter().enumerate() {
+                assert_eq!(reader.source_offset(), range.start.byte_offset);
+                drain(&mut reader);
+                let end = range
+                    .end
+                    .as_ref()
+                    .map_or(bytes.len() as u64, |end| end.byte_offset);
+                assert_eq!(reader.source_offset(), end, "{range:?}");
+                if let Some(next) = starts.get(ordinal + 1) {
+                    assert_eq!(end, *next);
+                }
+            }
+            let mut reader = sequential(&bytes);
+            drain(&mut reader);
+            assert_eq!(reader.source_offset(), bytes.len() as u64);
+        }
+    }
+
+    /// A pcapng block of `block_type` with `body`, padded, little-endian.
+    fn block(block_type: u32, body: &[u8]) -> Vec<u8> {
+        let padded = body.len().div_ceil(4) * 4;
+        let total = (12 + padded) as u32;
+        let mut block = Vec::new();
+        block.extend_from_slice(&block_type.to_le_bytes());
+        block.extend_from_slice(&total.to_le_bytes());
+        block.extend_from_slice(body);
+        block.resize(8 + padded, 0);
+        block.extend_from_slice(&total.to_le_bytes());
+        block
+    }
+
+    /// The blocks of a little-endian pcapng capture: (offset, type).
+    fn blocks_of(bytes: &[u8]) -> Vec<(usize, u32)> {
+        let mut blocks = Vec::new();
+        let mut at = 0;
+        while at + 8 <= bytes.len() {
+            let word = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+            blocks.push((at, word(at)));
+            at += word(at + 4) as usize;
+        }
+        assert_eq!(at, bytes.len());
+        blocks
+    }
+
+    /// The reader numbers the blocks of the types of `PCAPNG_FRAME_BLOCK_TYPES` and no
+    /// others, and so does the index pass: a Simple Packet Block is a frame, an obsolete
+    /// Packet Block (type 2), a custom block and a block of an unknown type are not.
+    #[test]
+    fn the_frames_of_a_pcapng_capture_are_the_blocks_of_the_frame_types() {
+        use crate::io::PCAPNG_FRAME_BLOCK_TYPES;
+
+        let plain = ng();
+        let epbs: Vec<usize> = blocks_of(&plain)
+            .into_iter()
+            .filter(|(_, kind)| *kind == 6)
+            .map(|(at, _)| at)
+            .collect();
+        // After the 10th, 20th, 30th and 40th packet.
+        let mut extra = vec![
+            // An obsolete Packet Block: interface, drops, timestamp, lengths, data.
+            block(
+                2,
+                &[
+                    0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 4, 0, 0, 0, 4, 0, 0, 0, 9, 9, 9, 9,
+                ],
+            ),
+            // A Simple Packet Block of four bytes.
+            block(3, &[4, 0, 0, 0, 7, 7, 7, 7]),
+            // A custom block: a private enterprise number and data.
+            block(0x0000_0BAD, &[1, 2, 3, 4, 5, 6]),
+            // A block type nothing defines.
+            block(0x0000_0101, &[1, 2, 3]),
+        ];
+        let mut bytes = Vec::new();
+        let mut from = 0;
+        for (n, at) in epbs.iter().enumerate().skip(1) {
+            if n % 10 == 0 && !extra.is_empty() {
+                bytes.extend_from_slice(&plain[from..*at]);
+                bytes.extend_from_slice(&extra.remove(0));
+                from = *at;
+            }
+        }
+        bytes.extend_from_slice(&plain[from..]);
+        let framed = blocks_of(&bytes)
+            .iter()
+            .filter(|(_, kind)| PCAPNG_FRAME_BLOCK_TYPES.contains(kind))
+            .count();
+        // The packets of the capture and the Simple Packet Block.
+        assert_eq!(framed, FRAMES as usize + 1);
+
+        let all: Vec<u64> = (1..=framed as u64).collect();
+        assert_eq!(drain(&mut sequential(&bytes)), all);
+        let format = PcapFormat::detect(&bytes).unwrap();
+        let len = bytes.len() as u64;
+        let index =
+            build_boundary_index(Cursor::new(&bytes[..]), format, STRIDE, len, None, 0).unwrap();
+        assert_eq!(index.packet_count, framed as u64);
+        let mut frames = Vec::new();
+        for (range, mut reader) in ranged(&bytes, 4) {
+            frames.extend(drain(&mut reader));
+            assert!(!reader.truncated(), "{range:?}");
+        }
+        assert_eq!(frames, all);
     }
 
     /// The default of the trait: a reader that cannot tell says no.

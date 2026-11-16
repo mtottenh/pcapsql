@@ -48,6 +48,7 @@ pub use index::{
 pub use mmap::{MmapPacketReader, MmapPacketSource};
 pub use pcap_stream::{
     Delivered, GenericPcapReader, InterfaceInfo, InterfaceState, Pause, PcapFormat,
+    PCAPNG_FRAME_BLOCK_TYPES,
 };
 pub use pcap_write::{
     link_type_from_name, PcapWriteError, PcapWriteOptions, PcapWriter, TimestampPrecision,
