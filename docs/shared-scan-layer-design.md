@@ -788,16 +788,19 @@ projection, read or not: its layers carry every field.
 
 A parser with a projected parse declares its field list (`field_list!` in
 `protocol/projection.rs`, `Protocol::field_names`): an enum with a variant
-per field, in the order the parser writes them, whose names are the
-schema's. When a scope is resolved against a registry, each parser's field
-names become a `FieldSet`, a 64-bit set of positions in that list, and a
-projection of every field becomes no projection. In the packet loop a
-parser asks `projection.has(Field::DstPort)`, one bit test, where it used to
-compare the name with each requested name of its length. The full parse and
-the projected parse are one function (`parse_tcp(data, want, fields)`):
-`parse` passes `FieldSet::ALL`, a constant, so after inlining the full parse
-has no test left. A group of fields that costs work to decode (the TCP
-options, the DNS answers) is skipped when the projection has none of them.
+per field of the schema, each once. A variant's position is only its bit
+in a projection and says nothing of the order the fields are written in
+(`ipv6` lists its extension header flags before the fragment and routing
+fields and writes them after). When a scope is resolved against a
+registry, each parser's field names become a `FieldSet`, a 64-bit set of
+positions in that list, and a projection of every field becomes no
+projection. In the packet loop a parser asks `projection.has(Field::DstPort)`,
+one bit test, where it used to compare the name with each requested name of
+its length. The full parse and the projected parse are one function
+(`parse_tcp(data, want, fields)`): `parse` passes `FieldSet::ALL`, a
+constant, so after inlining the full parse has no test left. A group of
+fields that costs work to decode (the TCP options, the DNS answers) is
+skipped when the projection has none of them.
 
 `ethernet`, `linux_sll`, `sll2`, `vlan`, `ipv4`, `ipv6`, `tcp`, `udp` and
 `dns` have a projected parse. Whatever the projection, it returns the full
