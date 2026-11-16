@@ -6,7 +6,7 @@
 //!                    SharedParseState (ONE parse pass)
 //!              ┌──────────────┬───┴───┬──────────────┐   parallel partitions
 //!              ▼              ▼        ▼              ▼   (seekable sources)
-//!         per-protocol Arrow builders (NormalizedBatchSet fan-out)
+//!      a PartitionScan each, fanning out to an ArrowSink per table
 //!              │              │        │              │
 //!              ▼              ▼        ▼              ▼
 //!        frames table    ipv4 table  tcp table   dns table   ...
@@ -30,9 +30,9 @@ pub use protocol_provider::{
 pub use scan_exec::ProtocolScanExec;
 pub use shared::{
     auto_target_partitions, run_shared_parse, run_shared_parse_sequential, run_streaming_parse,
-    run_streaming_parse_sequential, FusedSubscription, ParseStats, ParseSubscription,
-    PartitionStat, ProgressFn, ServedFrom, SharedParseState, StreamingHandle, TableData,
-    TableSubscription,
+    run_streaming_parse_sequential, CompiledSubscription, FusedSubscription, ParseStats,
+    ParseSubscription, PartitionStat, ProgressFn, ServedFrom, SharedParseState, StreamingHandle,
+    SubscribedOutput, TableData, TableSubscription,
 };
 
 use std::sync::Arc;

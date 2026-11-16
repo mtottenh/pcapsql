@@ -259,6 +259,19 @@ impl ParseScope {
         self
     }
 
+    /// The protocols that are parsed, their dependency closure included
+    /// (and the pseudo-protocol `frames`). `None` when every matching
+    /// protocol is parsed.
+    pub fn required(&self) -> Option<&HashSet<String>> {
+        self.required.as_ref()
+    }
+
+    /// The field projections, by protocol. A protocol without an entry is
+    /// parsed with all its fields.
+    pub fn projections(&self) -> &HashMap<String, HashSet<String>> {
+        &self.projections
+    }
+
     /// True when nothing is pruned or projected.
     pub fn is_full(&self) -> bool {
         self.required.is_none() && self.projections.is_empty()

@@ -1,20 +1,34 @@
-//! Subscription-scoped batch set builder.
+//! What one partition of a parse pass does with its rows, in DataFusion's
+//! terms.
 //!
-//! Routes parsed packets into Arrow builders for exactly the tables (and
-//! columns) a parse pass subscribes to, applying parse-time predicates and
-//! row caps before any Arrow materialization happens.
+//! Reading the capture, parsing each packet and deciding which rows it adds
+//! to `frames` and the protocol tables is the scan layer's
+//! (`pcapsql_core::scan::PartitionScan`), which writes those rows into one
+//! [`ArrowSink`] per table. [`NormalizedBatchSet`] owns the rest:
+//!
+//! - where a table's completed batch goes (accumulated for the cache, or
+//!   sent to the plan through a bounded exchange), with the backpressure
+//!   rules that keep one producer feeding several tables from deadlocking;
+//! - the fused joins, which the scan layer does not build yet: their rows
+//!   come from [`FusedBatchBuilder`]s fed once per frame;
+//! - the stream subscriber (TCP reassembly, TLS, HTTP), fed the same way.
+//!
+//! It is the scan's [`FrameObserver`]: the scan shows it every frame once,
+//! and the push loop (`providers::shared`) reaches it between steps to
+//! deliver the batches the scan asks to have taken.
 
 use std::collections::HashMap;
 
 use super::fused::FusedBatchBuilder;
-use super::protocol::ProtocolBatchBuilder;
-use crate::error::{Error, QueryError};
-use crate::query::filter::FilterEvaluator;
+use super::sink::ArrowSink;
+use crate::error::Error;
 use arrow::record_batch::RecordBatch;
 use std::sync::Arc;
 
-use crate::query::providers::{BatchSender, OverflowStats, Pacer, ParseSubscription};
+use crate::query::providers::{BatchSender, CompiledSubscription, OverflowStats, Pacer};
+use crate::query::stream_tables::StreamSubscriber;
 use pcapsql_core::io::PacketRef;
+use pcapsql_core::scan::{FrameObserver, OutputId, ScanStats};
 use pcapsql_core::ParseResult;
 
 /// Where a table's completed batches go.
@@ -40,180 +54,138 @@ impl BatchSink {
     }
 }
 
-/// The rows of one output table: a protocol table's, or a fused join's.
-enum RowBuilder {
-    Protocol(ProtocolBatchBuilder),
-    Fused(FusedBatchBuilder),
-}
-
-impl RowBuilder {
-    fn try_build(&mut self) -> Result<Option<RecordBatch>, Error> {
-        match self {
-            RowBuilder::Protocol(b) => b.try_build(),
-            RowBuilder::Fused(b) => b.try_build(),
-        }
-    }
-
-    fn finish(&mut self) -> Result<Option<RecordBatch>, Error> {
-        match self {
-            RowBuilder::Protocol(b) => b.finish(),
-            RowBuilder::Fused(b) => b.finish(),
-        }
-    }
-}
-
-/// Per-table build state within one parse pass.
-struct TableSlot {
-    name: String,
-    builder: RowBuilder,
-    sink: BatchSink,
-    predicate: Option<FilterEvaluator>,
+/// The rows of a fused join, which are not routed by the scan layer yet:
+/// its builder, row cap and row count.
+struct FusedRows {
+    builder: FusedBatchBuilder,
     fetch: Option<usize>,
     rows_added: usize,
-    /// The streaming consumer dropped its receiver; nothing more is wanted.
-    consumer_gone: bool,
 }
 
-impl TableSlot {
+impl FusedRows {
     fn capped(&self) -> bool {
         self.fetch.is_some_and(|f| self.rows_added >= f)
     }
-
-    /// Nothing further this slot produces can be observed.
-    fn done(&self) -> bool {
-        self.capped() || self.consumer_gone
-    }
-
-    fn emit(&mut self, batch: RecordBatch) {
-        if self.sink.emit(batch) {
-            self.consumer_gone = true;
-        }
-    }
 }
 
-/// Routes each packet's parsed layers into the subscribed tables' builders.
+/// Per-table delivery state within one parse pass.
+struct TableSlot {
+    name: String,
+    sink: BatchSink,
+    /// The streaming consumer dropped its receiver; nothing more is wanted.
+    consumer_gone: bool,
+    /// `Some` for a fused join. A protocol table's rows are in its
+    /// [`ArrowSink`], and its row cap and count with the scan.
+    fused: Option<FusedRows>,
+}
+
+/// Delivers the batches of one partition of a parse pass, and builds what
+/// the scan layer does not: fused joins and stream tables. See the
+/// [module](self) documentation.
 ///
-/// Usage:
-/// ```ignore
-/// let mut batch_set = NormalizedBatchSet::new(1000, &subscription)?;
-///
-/// // For each packet (borrowed, zero-copy):
-/// batch_set.add_packet_from_ref(packet_ref, &parsed_results)?;
-///
-/// // Get the per-table batches when done:
-/// let batches = batch_set.finish()?;
-/// ```
+/// `slots[i]` is output `i` of the compiled plan ([`OutputId`]): the
+/// protocol tables, then the fused joins.
 pub struct NormalizedBatchSet {
-    /// Every subscribed table. Indexed rather than keyed by name: a packet
-    /// touches several of them, and resolving names per packet showed up
-    /// in profiles.
+    /// Every subscribed table, in the order of the compiled plan's outputs.
     slots: Vec<TableSlot>,
-    /// Index of the `frames` slot, if subscribed.
-    frames: Option<usize>,
-    /// Indices of the slots that are fused joins (in name order), fed after
-    /// the protocol tables.
+    /// Indices of the slots that are fused joins (in name order).
     fused: Vec<usize>,
-    /// The slot (if any) for each layer name seen so far. Layer names are
-    /// the parsers' `&'static str`s, so a pointer compare finds the entry.
-    layer_slots: Vec<(&'static str, Option<usize>)>,
     /// Streaming only: wakes the producer when a consumer takes a batch.
     pacer: Option<Arc<Pacer>>,
+    /// Builds the stream tables of a pass that has any.
+    subscriber: Option<StreamSubscriber>,
 }
 
 impl NormalizedBatchSet {
-    /// Create builders for exactly the subscribed tables (materialize mode:
-    /// completed batches accumulate in memory).
-    pub fn new(batch_size: usize, subscription: &ParseSubscription) -> Result<Self, Error> {
+    /// Delivery for exactly the subscribed tables (materialize mode:
+    /// completed batches accumulate in memory), and the [`ArrowSink`]s the
+    /// scan writes the protocol tables' rows to: `sinks[i]` is output `i`.
+    pub fn new(batch_size: usize, subscription: &CompiledSubscription) -> (Self, Vec<ArrowSink>) {
         Self::build(batch_size, subscription, |_| {
             BatchSink::Accumulate(Vec::new())
         })
     }
 
-    /// Create builders that stream each table's completed batches to the
-    /// matching sender (streaming mode), taking ownership of the senders. A
-    /// table without a sender accumulates (and is dropped on finish).
+    /// [`new`](Self::new) for a pass that streams each table's completed
+    /// batches to the matching sender (streaming mode), taking ownership of
+    /// the senders. A table without a sender accumulates (and is dropped on
+    /// finish).
     pub fn new_streaming(
         batch_size: usize,
-        subscription: &ParseSubscription,
+        subscription: &CompiledSubscription,
         mut senders: HashMap<String, BatchSender>,
         pacer: Arc<Pacer>,
-    ) -> Result<Self, Error> {
-        let mut set = Self::build(batch_size, subscription, |name| {
+    ) -> (Self, Vec<ArrowSink>) {
+        let (mut set, sinks) = Self::build(batch_size, subscription, |name| {
             match senders.remove(name) {
                 Some(tx) => BatchSink::Stream(tx),
                 None => BatchSink::Accumulate(Vec::new()),
             }
-        })?;
+        });
         set.pacer = Some(pacer);
-        Ok(set)
+        (set, sinks)
+    }
+
+    /// Feed `subscriber` every frame of the pass. A set with a subscriber
+    /// wants every frame: stream tables are complete only at end of capture.
+    pub fn with_stream_subscriber(mut self, subscriber: Option<StreamSubscriber>) -> Self {
+        self.subscriber = subscriber;
+        self
     }
 
     fn build(
         batch_size: usize,
-        subscription: &ParseSubscription,
+        subscription: &CompiledSubscription,
         mut sink_for: impl FnMut(&str) -> BatchSink,
-    ) -> Result<Self, Error> {
-        let mut slots = Vec::with_capacity(subscription.tables.len() + subscription.fused.len());
-        for (name, sub) in &subscription.tables {
-            let schema = subscription.table_schema(name).ok_or_else(|| {
-                Error::Query(QueryError::Execution(format!("Unknown table: {name}")))
-            })?;
+    ) -> (Self, Vec<ArrowSink>) {
+        let mut slots = Vec::new();
+        let mut sinks = Vec::new();
+        let mut fused = Vec::new();
+        // The protocol tables, then the fused joins. A protocol table's
+        // predicate and row cap are the scan's, from the compiled plan.
+        for (output, plan) in subscription.outputs() {
+            let fused_rows = match &output.spec {
+                Some(spec) => {
+                    fused.push(slots.len());
+                    Some(FusedRows {
+                        builder: FusedBatchBuilder::new(Arc::clone(spec), batch_size),
+                        fetch: plan
+                            .fetch()
+                            .map(|rows| usize::try_from(rows).unwrap_or(usize::MAX)),
+                        rows_added: 0,
+                    })
+                }
+                None => {
+                    debug_assert_eq!(sinks.len(), slots.len(), "tables precede fused joins");
+                    sinks.push(ArrowSink::with_schema(
+                        Arc::clone(&output.schema),
+                        &plan.columns,
+                        batch_size,
+                    ));
+                    None
+                }
+            };
             slots.push(TableSlot {
-                name: name.clone(),
-                builder: RowBuilder::Protocol(ProtocolBatchBuilder::with_schema(
-                    name.clone(),
-                    schema,
-                    batch_size,
-                )),
-                sink: sink_for(name),
-                predicate: sub.predicate.clone(),
-                fetch: sub.fetch,
-                rows_added: 0,
+                name: output.name.clone(),
+                sink: sink_for(&output.name),
                 consumer_gone: false,
+                fused: fused_rows,
             });
         }
-        let mut fused_names: Vec<&String> = subscription.fused.keys().collect();
-        fused_names.sort();
-        let mut fused = Vec::with_capacity(fused_names.len());
-        for name in fused_names {
-            let sub = &subscription.fused[name];
-            fused.push(slots.len());
-            slots.push(TableSlot {
-                name: name.clone(),
-                builder: RowBuilder::Fused(FusedBatchBuilder::new(
-                    Arc::clone(&sub.spec),
-                    batch_size,
-                )),
-                sink: sink_for(name),
-                predicate: None,
-                fetch: sub.fetch,
-                rows_added: 0,
-                consumer_gone: false,
-            });
-        }
-        let frames = slots.iter().position(|s| s.name == "frames");
-        Ok(Self {
+        let set = Self {
             slots,
-            frames,
             fused,
-            layer_slots: Vec::new(),
             pacer: None,
-        })
+            subscriber: None,
+        };
+        (set, sinks)
     }
 
-    /// The slot of the table a parsed layer named `layer` goes to.
-    #[inline]
-    fn slot_for_layer(&mut self, layer: &'static str) -> Option<usize> {
-        if let Some((_, slot)) = self
-            .layer_slots
-            .iter()
-            .find(|(name, _)| std::ptr::eq(*name, layer))
-        {
-            return *slot;
-        }
-        let slot = self.slots.iter().position(|s| s.name == layer);
-        self.layer_slots.push((layer, slot));
-        slot
+    /// Nothing further the fused join at `index` produces can be observed:
+    /// it reached its row cap, or its consumer is gone.
+    fn fused_done(&self, index: usize) -> bool {
+        let slot = &self.slots[index];
+        slot.consumer_gone || slot.fused.as_ref().is_some_and(FusedRows::capped)
     }
 
     /// Streaming: the producer may proceed with a batch for `name` when that
@@ -235,169 +207,134 @@ impl NormalizedBatchSet {
         })
     }
 
-    /// Deliver a completed batch for `name`, applying backpressure first:
+    /// Deliver a completed batch of `output`, applying backpressure first:
     /// while this table is backlogged and the consumer is not parked on
     /// another table, the consumer is merely slower than the parse, so wait
     /// for it. Otherwise the batch is offered and, if the channel is still
     /// full, goes to the table's accounted overflow queue rather than
     /// stalling the pass.
-    fn deliver(&mut self, index: usize, batch: RecordBatch) {
+    ///
+    /// Returns `true` when the table's consumer is gone: nothing more is
+    /// wanted for it (the caller closes a protocol table's output in the
+    /// scan).
+    pub fn deliver(&mut self, output: OutputId, batch: RecordBatch) -> bool {
+        let index = usize::from(output.0);
         if let Some(pacer) = &self.pacer {
             if !Self::may_proceed(&self.slots, index) {
                 let slots = &self.slots;
                 pacer.wait_until(|| Self::may_proceed(slots, index));
             }
         }
-        self.slots[index].emit(batch);
+        let slot = &mut self.slots[index];
+        if slot.sink.emit(batch) {
+            slot.consumer_gone = true;
+        }
+        slot.consumer_gone
     }
 
-    /// Add a packet to the subscribed tables.
-    ///
-    /// `packet` is a borrowed (zero-copy) reference to the packet data.
-    /// `parsed` is the chain of parsed protocol layers from `parse_packet`.
-    pub fn add_packet_from_ref(
+    /// The frame's rows in every fused join, from its parsed layers.
+    fn feed_fused(
         &mut self,
-        packet: PacketRef<'_>,
+        packet: &PacketRef<'_>,
         parsed: &[(&'static str, ParseResult<'_>)],
     ) -> Result<(), Error> {
-        let frame_number = packet.frame_number;
-
-        // The frames table is fed from packet metadata, not parse results.
-        if let Some(index) = self.frames {
-            let slot = &mut self.slots[index];
-            // Predicates on frames are never pushed down (metadata fields are
-            // not parse fields); only the row cap applies.
-            if !slot.done() {
-                if let RowBuilder::Protocol(builder) = &mut slot.builder {
-                    builder.add_frame_from_raw(
-                        packet.frame_number,
-                        packet.timestamp_ns,
-                        packet.captured_len,
-                        packet.original_len,
-                        packet.data,
-                        packet.link_type,
-                    );
-                }
-                slot.rows_added += 1;
-                // A full batch goes out; so does a partial one the moment the
-                // row cap is reached, since nothing will be added to it (a
-                // LIMIT on a live pipe would otherwise wait for input that
-                // is not wanted).
-                let batch = if slot.capped() {
-                    slot.builder.finish()?
-                } else {
-                    slot.builder.try_build()?
-                };
-                if let Some(batch) = batch {
-                    self.deliver(index, batch);
-                }
-            }
-        }
-
-        // Route each parsed protocol layer to its table, if subscribed.
-        for (proto_name, result) in parsed {
-            if let Some(index) = self.slot_for_layer(proto_name) {
-                let slot = &mut self.slots[index];
-                if slot.done() {
-                    continue;
-                }
-                if let Some(predicate) = &slot.predicate {
-                    // Conservative: only a positively-false comparison drops
-                    // the row; DataFusion re-checks everything kept.
-                    if !predicate.matches_result(result) {
-                        continue;
-                    }
-                }
-                if let RowBuilder::Protocol(builder) = &mut slot.builder {
-                    builder.add_parsed_row(frame_number, result);
-                }
-                slot.rows_added += 1;
-                let batch = if slot.capped() {
-                    slot.builder.finish()?
-                } else {
-                    slot.builder.try_build()?
-                };
-                if let Some(batch) = batch {
-                    self.deliver(index, batch);
-                }
-            }
-        }
-
-        // Fused joins: the frame's joined rows, from the same layers.
         for i in 0..self.fused.len() {
             let index = self.fused[i];
-            let slot = &mut self.slots[index];
-            if slot.done() {
+            if self.fused_done(index) {
                 continue;
             }
-            let RowBuilder::Fused(builder) = &mut slot.builder else {
+            let Some(rows) = &mut self.slots[index].fused else {
                 continue;
             };
-            let added = builder.add_packet(&packet, parsed);
+            let added = rows.builder.add_packet(packet, parsed);
             if added == 0 {
                 continue;
             }
-            slot.rows_added += added;
-            let batch = if slot.capped() {
-                slot.builder.finish()?
+            rows.rows_added += added;
+            // A full batch goes out; so does a partial one the moment the
+            // row cap is reached, since nothing will be added to it (a
+            // LIMIT on a live pipe would otherwise wait for input that is
+            // not wanted).
+            let batch = if rows.capped() {
+                rows.builder.finish()?
             } else {
-                slot.builder.try_build()?
+                rows.builder.try_build()?
             };
             if let Some(batch) = batch {
-                self.deliver(index, batch);
+                self.deliver(OutputId(index as u16), batch);
             }
         }
-
         Ok(())
     }
 
-    /// Streaming: deliver every table's partially filled batch now (a
-    /// continuous engine's time-based flush), leaving the builders empty.
-    pub fn flush_partial(&mut self) -> Result<(), Error> {
-        let mut pending = Vec::new();
-        for (index, slot) in self.slots.iter_mut().enumerate() {
-            if slot.done() {
+    /// The partially filled batch of every fused join that is not done,
+    /// appended to `pending` (a continuous engine's time-based flush),
+    /// leaving the builders empty.
+    pub fn take_fused_pending(
+        &mut self,
+        pending: &mut Vec<(OutputId, RecordBatch)>,
+    ) -> Result<(), Error> {
+        for i in 0..self.fused.len() {
+            let index = self.fused[i];
+            if self.fused_done(index) {
                 continue;
             }
-            if let Some(batch) = slot.builder.finish()? {
-                pending.push((index, batch));
+            let Some(rows) = &mut self.slots[index].fused else {
+                continue;
+            };
+            if let Some(batch) = rows.builder.finish()? {
+                pending.push((OutputId(index as u16), batch));
             }
-        }
-        for (index, batch) in pending {
-            self.deliver(index, batch);
         }
         Ok(())
     }
 
-    /// True when nothing this pass produces can still be observed: every
-    /// subscribed table has reached its row cap, or (streaming) every consumer
-    /// has dropped its receiver because the query finished — e.g. a `LIMIT`
-    /// above a filter that could not be pushed to the scan — or was cancelled.
-    /// The parse loop can stop reading the source.
-    pub fn all_capped(&self) -> bool {
-        !self.slots.is_empty() && self.slots.iter().all(TableSlot::done)
+    /// Rows added to each table so far (pending and built): a protocol
+    /// table's from the scan's statistics, a fused join's from its builder.
+    pub fn rows_built(&self, stats: &ScanStats) -> HashMap<String, usize> {
+        self.slots
+            .iter()
+            .enumerate()
+            .map(|(index, slot)| {
+                let rows = match &slot.fused {
+                    Some(rows) => rows.rows_added,
+                    None => usize::try_from(stats.rows[index]).unwrap_or(usize::MAX),
+                };
+                (slot.name.clone(), rows)
+            })
+            .collect()
     }
 
-    /// Finish building. Flushes each table's final partial batch into its
-    /// sink and returns the accumulated batches per table (empty for tables
-    /// in streaming mode — those went to their exchanges, which are closed
-    /// here).
-    pub fn finish(self) -> Result<HashMap<String, Vec<RecordBatch>>, Error> {
-        let (batches, _) = self.finish_inner()?;
+    /// The stream subscriber, to build its tables at the end of the pass.
+    pub fn take_stream_subscriber(&mut self) -> Option<StreamSubscriber> {
+        self.subscriber.take()
+    }
+
+    /// Finish the partition. Takes each table's final partial batch (a
+    /// protocol table's out of `sinks`, the ones [`new`](Self::new)
+    /// returned) and returns the accumulated batches per table (empty for
+    /// tables in streaming mode — those went to their exchanges, which are
+    /// closed here).
+    pub fn finish(self, sinks: Vec<ArrowSink>) -> Result<HashMap<String, Vec<RecordBatch>>, Error> {
+        let (batches, _) = self.finish_inner(sinks)?;
         Ok(batches)
     }
 
-    /// Finish a streaming batch set: flush final batches, close every
+    /// Finish a streaming partition: flush final batches, close every
     /// exchange and return, per streamed table, what went through its
     /// overflow buffer because the consumer was not draining it.
-    pub fn finish_streaming(self) -> Result<HashMap<String, OverflowStats>, Error> {
-        let (_, overflowed) = self.finish_inner()?;
+    pub fn finish_streaming(
+        self,
+        sinks: Vec<ArrowSink>,
+    ) -> Result<HashMap<String, OverflowStats>, Error> {
+        let (_, overflowed) = self.finish_inner(sinks)?;
         Ok(overflowed)
     }
 
     #[allow(clippy::type_complexity)]
     fn finish_inner(
         self,
+        mut sinks: Vec<ArrowSink>,
     ) -> Result<
         (
             HashMap<String, Vec<RecordBatch>>,
@@ -407,9 +344,13 @@ impl NormalizedBatchSet {
     > {
         let mut out = HashMap::with_capacity(self.slots.len());
         let mut overflowed = HashMap::new();
-        for mut slot in self.slots {
-            if let Some(batch) = slot.builder.finish()? {
-                slot.emit(batch);
+        for (index, mut slot) in self.slots.into_iter().enumerate() {
+            let last = match &mut slot.fused {
+                Some(rows) => rows.builder.finish()?,
+                None => sinks[index].take_batch()?,
+            };
+            if let Some(batch) = last {
+                slot.sink.emit(batch);
             }
             let batches = match slot.sink {
                 BatchSink::Accumulate(v) => v,
@@ -422,193 +363,35 @@ impl NormalizedBatchSet {
         }
         Ok((out, overflowed))
     }
-
-    /// Rows added to a table so far (pending and built).
-    pub fn row_count(&self, table_name: &str) -> usize {
-        self.slots
-            .iter()
-            .find(|s| s.name == table_name)
-            .map(|s| s.rows_added)
-            .unwrap_or(0)
-    }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use compact_str::CompactString;
-    use datafusion::logical_expr::col;
-    use datafusion::prelude::lit;
-    use pcapsql_core::{FieldValue, TunnelType};
-    use smallvec::SmallVec;
-    use std::collections::HashSet;
-
-    const TEST_DATA: [u8; 100] = [0u8; 100];
-
-    fn create_test_packet(frame_number: u64) -> PacketRef<'static> {
-        PacketRef {
-            frame_number,
-            timestamp_ns: 1_000_000_000 * frame_number as i64,
-            captured_len: 100,
-            original_len: 100,
-            link_type: 1,
-            data: &TEST_DATA,
+impl FrameObserver for NormalizedBatchSet {
+    /// Feed the stream subscriber and the fused joins. Called by the scan
+    /// once per frame, before the frame's rows are routed to the protocol
+    /// tables. A fused join's completed batch is delivered from here, which
+    /// may wait for its consumer.
+    #[inline]
+    fn observe(
+        &mut self,
+        packet: &PacketRef<'_>,
+        layers: &[(&'static str, ParseResult<'_>)],
+    ) -> Result<(), pcapsql_core::Error> {
+        if let Some(subscriber) = self.subscriber.as_mut() {
+            subscriber.observe(packet, layers)?;
         }
-    }
-
-    fn create_ethernet_result<'a>() -> ParseResult<'a> {
-        let mut fields = SmallVec::new();
-        fields.push((
-            "src_mac",
-            FieldValue::MacAddr([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
-        ));
-        fields.push((
-            "dst_mac",
-            FieldValue::MacAddr([0xff, 0xff, 0xff, 0xff, 0xff, 0xff]),
-        ));
-        fields.push(("ethertype", FieldValue::UInt16(0x0800)));
-
-        ParseResult {
-            fields,
-            remaining: &[],
-            child_hints: SmallVec::new(),
-            error: None,
-            encap_depth: 0,
-            tunnel_type: TunnelType::None,
-            tunnel_id: None,
+        if !self.fused.is_empty() {
+            self.feed_fused(packet, layers)?;
         }
+        Ok(())
     }
 
-    fn create_tcp_result<'a>(dst_port: u16) -> ParseResult<'a> {
-        let mut fields = SmallVec::new();
-        fields.push(("src_port", FieldValue::UInt16(12345)));
-        fields.push(("dst_port", FieldValue::UInt16(dst_port)));
-        fields.push(("seq", FieldValue::UInt32(100)));
-
-        ParseResult {
-            fields,
-            remaining: &[],
-            child_hints: SmallVec::new(),
-            error: None,
-            encap_depth: 0,
-            tunnel_type: TunnelType::None,
-            tunnel_id: None,
-        }
-    }
-
-    fn create_dns_result<'a>() -> ParseResult<'a> {
-        let mut fields = SmallVec::new();
-        fields.push((
-            "query_name",
-            FieldValue::OwnedString(CompactString::new("example.com")),
-        ));
-        fields.push(("is_query", FieldValue::Bool(true)));
-        ParseResult {
-            fields,
-            remaining: &[],
-            child_hints: SmallVec::new(),
-            error: None,
-            encap_depth: 0,
-            tunnel_type: TunnelType::None,
-            tunnel_id: None,
-        }
-    }
-
-    fn sub_full(names: &[&str]) -> ParseSubscription {
-        ParseSubscription::tables_full(names.iter().map(|s| s.to_string()))
-    }
-
-    #[test]
-    fn builds_only_subscribed_tables() {
-        let mut bs = NormalizedBatchSet::new(1000, &sub_full(&["frames", "tcp"])).unwrap();
-        let parsed = vec![
-            ("ethernet", create_ethernet_result()),
-            ("tcp", create_tcp_result(80)),
-            ("dns", create_dns_result()),
-        ];
-        bs.add_packet_from_ref(create_test_packet(1), &parsed)
-            .unwrap();
-
-        assert_eq!(bs.row_count("frames"), 1);
-        assert_eq!(bs.row_count("tcp"), 1);
-        // Unsubscribed layers are dropped, not built.
-        assert_eq!(bs.row_count("ethernet"), 0);
-        assert_eq!(bs.row_count("dns"), 0);
-
-        let batches = bs.finish().unwrap();
-        assert_eq!(batches.len(), 2);
-        assert!(batches.contains_key("frames"));
-        assert!(batches.contains_key("tcp"));
-    }
-
-    #[test]
-    fn column_subset_schema_is_materialized() {
-        let mut sub = sub_full(&["tcp"]);
-        sub.tables.get_mut("tcp").unwrap().columns = Some(HashSet::from([
-            "frame_number".to_string(),
-            "dst_port".to_string(),
-        ]));
-
-        let mut bs = NormalizedBatchSet::new(1000, &sub).unwrap();
-        let parsed = vec![("tcp", create_tcp_result(80))];
-        bs.add_packet_from_ref(create_test_packet(1), &parsed)
-            .unwrap();
-
-        let batches = bs.finish().unwrap();
-        let tcp = &batches["tcp"];
-        assert_eq!(tcp.len(), 1);
-        let schema = tcp[0].schema();
-        assert_eq!(schema.fields().len(), 2);
-        assert!(schema.field_with_name("frame_number").is_ok());
-        assert!(schema.field_with_name("dst_port").is_ok());
-        assert!(schema.field_with_name("src_port").is_err());
-    }
-
-    #[test]
-    fn predicate_drops_only_positively_false_rows() {
-        let mut sub = sub_full(&["tcp"]);
-        sub.tables.get_mut("tcp").unwrap().predicate =
-            FilterEvaluator::try_from_exprs(&[col("dst_port").eq(lit(443i32))]);
-
-        let mut bs = NormalizedBatchSet::new(1000, &sub).unwrap();
-        bs.add_packet_from_ref(create_test_packet(1), &[("tcp", create_tcp_result(80))])
-            .unwrap();
-        bs.add_packet_from_ref(create_test_packet(2), &[("tcp", create_tcp_result(443))])
-            .unwrap();
-
-        assert_eq!(bs.row_count("tcp"), 1);
-    }
-
-    #[test]
-    fn fetch_caps_rows_and_reports_all_capped() {
-        let mut sub = sub_full(&["frames"]);
-        sub.tables.get_mut("frames").unwrap().fetch = Some(2);
-
-        let mut bs = NormalizedBatchSet::new(1000, &sub).unwrap();
-        for i in 1..=5 {
-            bs.add_packet_from_ref(create_test_packet(i), &[]).unwrap();
-        }
-        assert_eq!(bs.row_count("frames"), 2);
-        assert!(bs.all_capped());
-    }
-
-    #[test]
-    fn batch_size_triggers_intermediate_batches() {
-        let mut bs = NormalizedBatchSet::new(2, &sub_full(&["frames"])).unwrap();
-        for i in 1..=5 {
-            bs.add_packet_from_ref(create_test_packet(i), &[]).unwrap();
-        }
-        let batches = bs.finish().unwrap();
-        let frames = &batches["frames"];
-        // 5 rows at batch size 2 -> 2 full batches + 1 partial.
-        assert_eq!(frames.len(), 3);
-        let total: usize = frames.iter().map(|b| b.num_rows()).sum();
-        assert_eq!(total, 5);
-    }
-
-    #[test]
-    fn unknown_table_errors() {
-        let result = NormalizedBatchSet::new(1000, &sub_full(&["nonexistent"]));
-        assert!(result.is_err());
+    /// The scan may stop once the protocol tables are done unless a fused
+    /// join can still take rows or stream tables are being built (they are
+    /// complete only at end of capture). A pass that delivers no table at
+    /// all reads the whole capture.
+    fn wants_frames(&self) -> bool {
+        self.subscriber.is_some()
+            || self.slots.is_empty()
+            || self.fused.iter().any(|&index| !self.fused_done(index))
     }
 }

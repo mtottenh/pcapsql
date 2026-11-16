@@ -37,10 +37,11 @@ pub mod windowing;
 
 pub use arrow_schema::{descriptors_to_arrow_schema, protocol_to_arrow_schema, to_arrow_field};
 pub use builders::NormalizedBatchSet;
-pub use filter::FilterEvaluator;
+pub use filter::{is_pushable, row_predicate};
 pub use providers::{
-    auto_target_partitions, merge_ordered_partitions, ParseStats, ParseSubscription, ProgressFn,
-    ProtocolScanExec, ProtocolTableProvider, ServedFrom, TableSubscription,
+    auto_target_partitions, merge_ordered_partitions, CompiledSubscription, ParseStats,
+    ParseSubscription, ProgressFn, ProtocolScanExec, ProtocolTableProvider, ServedFrom,
+    TableSubscription,
 };
 pub use streaming::MemoryLimitPolicy;
 pub use udf::CaptureTimeRange;
@@ -1210,14 +1211,14 @@ impl QueryEngine {
             return Ok(ParseStats::default());
         }
         let mut subscription = ParseSubscription::default();
-        subscription.tables.insert(
-            "frames".to_string(),
+        subscription.subscribe_table(
+            "frames",
             TableSubscription {
                 columns: Some(["timestamp".to_string()].into_iter().collect()),
                 predicate: None,
                 fetch: None,
             },
-        );
+        )?;
         let (_, stats) = self.parse_source.materialize(&subscription)?.into_tables();
         if stats.packets_scanned > 0 {
             self.time_range.record(stats.start_ts_us, stats.end_ts_us);
@@ -1707,11 +1708,13 @@ impl QueryEngine {
         // stream can be consumed once. Such queries take the materialize path
         // for this one query — still a single parse pass.
         let any_multi_scan = needs.values().any(|n| n.scan_count > 1);
-        let (mut subscription, hits) = self.build_subscription(needs);
+        let (mut subscription, hits) = self.build_subscription(needs)?;
         for (name, data) in hits {
             tables.insert_batches(name, data);
         }
-        subscription.stream_tables = stream_needed;
+        for name in &stream_needed {
+            subscription.subscribe_stream_table(name)?;
+        }
 
         // CacheOnTouch materializes (so the cache can serve any later query);
         // RetentionPolicy::None streams — producers hand batches to DataFusion
@@ -1720,8 +1723,8 @@ impl QueryEngine {
         // subscription means every referenced table is served from the cache
         // or the fast path — nothing to parse.
         let streaming = self.retention == RetentionPolicy::None
-            && (!subscription.tables.is_empty() || !subscription.fused.is_empty())
-            && subscription.stream_tables.is_empty()
+            && subscription.has_packet_tables()
+            && !subscription.has_stream_tables()
             && !any_multi_scan;
 
         let mut producers: Vec<JoinHandle<Result<PartitionStat, Error>>> = Vec::new();
@@ -1786,7 +1789,7 @@ impl QueryEngine {
     fn build_subscription(
         &self,
         needs: HashMap<String, TableNeeds>,
-    ) -> (ParseSubscription, HashMap<String, Arc<TableData>>) {
+    ) -> Result<(ParseSubscription, HashMap<String, Arc<TableData>>), Error> {
         let mut subscription = ParseSubscription::default();
         let mut hits = HashMap::new();
         match self.retention {
@@ -1810,36 +1813,35 @@ impl QueryEngine {
                     // Subscribe the union of cached and needed columns so the
                     // rebuilt entry is a superset (no churn / loss).
                     let columns = column_union(cached_columns, needed);
-                    subscription.tables.insert(
-                        name,
+                    subscription.subscribe_table(
+                        &name,
                         TableSubscription {
                             columns,
                             predicate: None,
                             fetch: None,
                         },
-                    );
+                    )?;
                 }
             }
             RetentionPolicy::None => {
                 for (name, table_needs) in needs {
                     if let Some(spec) = table_needs.fused {
-                        subscription.fused.insert(
-                            name,
-                            providers::FusedSubscription {
-                                spec,
-                                fetch: table_needs.fetch,
-                            },
-                        );
+                        subscription.subscribe_fused(providers::FusedSubscription {
+                            spec,
+                            fetch: table_needs.fetch,
+                        })?;
                         continue;
                     }
                     let multi_scan = table_needs.scan_count > 1;
                     let predicate = if multi_scan || name == "frames" {
                         None
                     } else {
-                        FilterEvaluator::try_from_exprs(&table_needs.filters)
+                        pcapsql_core::scan::Catalog::builtin()
+                            .table(&name)
+                            .and_then(|(_, table)| row_predicate(&table_needs.filters, table))
                     };
-                    subscription.tables.insert(
-                        name,
+                    subscription.subscribe_table(
+                        &name,
                         TableSubscription {
                             columns: if multi_scan {
                                 None
@@ -1849,11 +1851,11 @@ impl QueryEngine {
                             predicate,
                             fetch: if multi_scan { None } else { table_needs.fetch },
                         },
-                    );
+                    )?;
                 }
             }
         }
-        (subscription, hits)
+        Ok((subscription, hits))
     }
 
     /// Instrumentation of the most recently *completed* query on this engine:

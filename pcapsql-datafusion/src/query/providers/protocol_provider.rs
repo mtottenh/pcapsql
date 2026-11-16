@@ -28,7 +28,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use super::exchange::BatchReceiver;
 use super::shared::{StreamingHandle, TableData};
 use super::ProtocolScanExec;
-use crate::query::filter::FilterEvaluator;
+use crate::query::filter;
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use datafusion::catalog::Session;
@@ -371,12 +371,17 @@ impl TableProvider for ProtocolTableProvider {
         &self,
         filters: &[&Expr],
     ) -> DFResult<Vec<TableProviderFilterPushDown>> {
+        // frames columns are packet metadata, not parse fields — the
+        // parse-time predicate cannot see them. A table the catalogue does
+        // not know (a fused join's scan) takes no filters either.
+        let table = (self.table_name != "frames")
+            .then(|| pcapsql_core::scan::Catalog::builtin().table(&self.table_name))
+            .flatten()
+            .map(|(_, table)| table);
         Ok(filters
             .iter()
             .map(|expr| {
-                // frames columns are packet metadata, not parse fields — the
-                // parse-time evaluator cannot see them.
-                if self.table_name != "frames" && FilterEvaluator::expr_is_pushable(expr) {
+                if table.is_some_and(|table| filter::is_pushable(expr, table)) {
                     // Inexact: rows may be pre-dropped at parse time;
                     // DataFusion re-applies the filter to whatever is kept.
                     TableProviderFilterPushDown::Inexact
