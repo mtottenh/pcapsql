@@ -17,7 +17,9 @@
 //!    versions and both record layouts; without it, or with a suite it does
 //!    not have, or with the wrong secrets, no row;
 //! 3. the rows carry the `connection_id` of `tcp_connections`;
-//! 4. a capture from the field (`tls12-dsb.pcapng`: Wireshark's TLS 1.2
+//! 4. in the packet table `tls`, an encrypted TLS 1.2 `Finished` is a row
+//!    with its record header only, whatever its explicit nonce;
+//! 5. a capture from the field (`tls12-dsb.pcapng`: Wireshark's TLS 1.2
 //!    sample with its secrets in Decryption Secrets Blocks) decrypts.
 
 use std::io::Cursor;
@@ -28,14 +30,16 @@ use pcapsql_core::scan::testing::{Cell, RecordingSink};
 use pcapsql_core::scan::{Catalog, CompiledScan, PartitionScan, ScanPlan, Step, TableScan};
 use pcapsql_core::{default_registry, KeyLog};
 use pcapsql_testgen::tls::{
-    Application, Layout, Scenario, Version, FIXTURES, TLS12_HTTP1, TLS12_HTTP1_CAPTURE,
-    TLS12_HTTP1_KEYLOG, TLS12_HTTP2, TLS12_HTTP2_CAPTURE, TLS12_HTTP2_KEYLOG, TLS13_HTTP2,
-    TLS13_HTTP2_CAPTURE, TLS13_HTTP2_KEYLOG,
+    Application, ExplicitNonce, Layout, Scenario, Version, FIXTURES, TLS12_HTTP1,
+    TLS12_HTTP1_CAPTURE, TLS12_HTTP1_KEYLOG, TLS12_HTTP2, TLS12_HTTP2_CAPTURE, TLS12_HTTP2_KEYLOG,
+    TLS13_HTTP2, TLS13_HTTP2_CAPTURE, TLS13_HTTP2_KEYLOG,
 };
 
 /// The record protection of TLS 1.2 (AEAD suites) and TLS 1.3, sealing.
 mod seal {
-    use pcapsql_testgen::tls::{Record, Scenario, Sender, Version, MASTER_SECRET, SERVER_RANDOM};
+    use pcapsql_testgen::tls::{
+        ExplicitNonce, Record, Scenario, Sender, Version, MASTER_SECRET, SERVER_RANDOM,
+    };
     use ring::aead::{self, Aad, LessSafeKey, Nonce, UnboundKey};
     use ring::hmac;
 
@@ -170,10 +174,14 @@ mod seal {
                 let write_key = &block[side * cipher.key_len()..][..cipher.key_len()];
                 let iv = &block[2 * cipher.key_len() + side * iv_len..][..iv_len];
                 // The explicit part of an AES-GCM nonce is the sender's
-                // choice, as long as it does not repeat: a counter that
-                // does not start at the sequence number, as OpenSSL's.
-                let explicit = (0x7063_6170_7371_6c00_u64 + side as u64 * 0x100 + record.sequence)
-                    .to_be_bytes();
+                // choice, as long as it does not repeat.
+                let explicit = match scenario.explicit_nonce {
+                    ExplicitNonce::Sequence => record.sequence,
+                    ExplicitNonce::Counter => {
+                        0x7063_6170_7371_6c00_u64 + side as u64 * 0x100 + record.sequence
+                    }
+                }
+                .to_be_bytes();
                 let (nonce, explicit) = if chacha {
                     (xor_sequence(iv, record.sequence), &explicit[..0])
                 } else {
@@ -518,10 +526,15 @@ fn every_suite_with_an_aead_decrypts() {
         .map(|suite| (Version::Tls12, "TLS 1.2", suite))
         .into_iter()
         .chain(seal::TLS13_SUITES.map(|suite| (Version::Tls13, "TLS 1.3", suite)));
-    for (version, version_name, cipher_suite) in suites {
+    let nonces = [ExplicitNonce::Sequence, ExplicitNonce::Counter];
+    for ((version, version_name, cipher_suite), explicit_nonce) in suites
+        .flat_map(|suite| nonces.map(|nonce| (suite, nonce)))
+        .filter(|((version, ..), nonce)| *version == Version::Tls12 || *nonce == nonces[0])
+    {
         for scenario in layouts(Scenario {
             version,
             cipher_suite,
+            explicit_nonce,
             ..TLS13_HTTP2
         }) {
             let what = format!("{scenario:x?}");
@@ -545,6 +558,88 @@ fn every_suite_with_an_aead_decrypts() {
             );
         }
     }
+}
+
+/// `record_type` and `handshake_type` of each row of the packet table `tls`.
+fn tls_rows(capture: &[u8]) -> Vec<(Cell, Cell)> {
+    let registry = Arc::new(default_registry());
+    let (id, def) = Catalog::builtin().table("tls").unwrap();
+    let plan = ScanPlan {
+        tables: vec![TableScan::new(
+            id,
+            def.default_columns().map(|(c, _)| c).collect(),
+        )],
+        ..Default::default()
+    };
+    let plan = Arc::new(plan.compile(Catalog::builtin(), &registry).unwrap());
+    let mut read = Cursor::new(capture);
+    let (header, head) = StreamHeader::probe(&mut read).unwrap();
+    let reader = ReadPacketReader::sequential(read, &header, head).unwrap();
+    let mut scan = PartitionScan::new(reader, plan.clone(), registry);
+    let mut sinks: Vec<RecordingSink> = plan
+        .outputs()
+        .iter()
+        .map(|output| RecordingSink::new(&output.columns, None))
+        .collect();
+    while scan.step(&mut sinks, 4).unwrap() != Step::End {}
+    let scanned = (
+        plan,
+        sinks.iter_mut().map(RecordingSink::take_rows).collect(),
+    );
+    column(&scanned, 0, "record_type")
+        .into_iter()
+        .zip(column(&scanned, 0, "handshake_type"))
+        .collect()
+}
+
+/// An encrypted TLS 1.2 `Finished` is not handshake messages, though with
+/// the sequence number as its explicit nonce (0, as Go, NSS and BoringSSL
+/// send it) it starts with the bytes of two empty HelloRequests.
+#[test]
+fn an_encrypted_finished_is_a_tls_row_with_its_header_only() {
+    let nonces = [ExplicitNonce::Sequence, ExplicitNonce::Counter];
+    let scenarios = [TLS12_HTTP1, TLS12_HTTP2]
+        .into_iter()
+        .flat_map(|scenario| {
+            nonces.map(|explicit_nonce| Scenario {
+                explicit_nonce,
+                ..scenario
+            })
+        })
+        .flat_map(layouts);
+    for scenario in scenarios {
+        let what = format!("{scenario:x?}");
+        let rows = tls_rows(&capture(&scenario));
+        let handshake_types: Vec<&Cell> = rows.iter().map(|(_, h)| h).collect();
+        assert!(
+            !handshake_types.contains(&&Cell::U8(0)),
+            "{what}: {handshake_types:?}"
+        );
+        // With one record per segment, the two `Finished` start theirs,
+        // after the ClientHello, the server's four plaintext messages and
+        // the ClientKeyExchange.
+        if scenario.layout == Layout::Separate {
+            let handshakes: Vec<&Cell> = rows
+                .iter()
+                .filter(|(record_type, _)| *record_type == Cell::U8(22))
+                .map(|(_, handshake_type)| handshake_type)
+                .collect();
+            assert_eq!(
+                handshakes,
+                [1, 2, 11, 12, 14, 16]
+                    .map(Cell::U8)
+                    .iter()
+                    .chain(&[Cell::Null, Cell::Null])
+                    .collect::<Vec<_>>(),
+                "{what}"
+            );
+        }
+    }
+    // The fixture with sequence numbers as nonces, and its HTTP exchange.
+    assert_eq!(TLS12_HTTP1.explicit_nonce, ExplicitNonce::Sequence);
+    assert!(!tls_rows(TLS12_HTTP1_CAPTURE).is_empty());
+    let scanned = scan(TLS12_HTTP1_CAPTURE, Some(TLS12_HTTP1_KEYLOG));
+    assert_http1_exchange(&scanned, "tls12_http1");
 }
 
 #[test]

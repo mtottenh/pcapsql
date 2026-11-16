@@ -205,6 +205,16 @@ impl Protocol for TlsProtocol {
 
         // Use tls-parser for zero-copy parsing
         match parse_tls_plaintext(data) {
+            // tls-parser takes the messages a handshake record starts with and
+            // stops at the first that is not one; an encrypted record can start
+            // with some (see `are_handshake_messages`). It is its header only.
+            Ok((remaining, record))
+                if record_type == record_type::HANDSHAKE
+                    && !are_handshake_messages(&payload[..length], record.msg.len()) =>
+            {
+                header(fields);
+                Parsed::ok(remaining, Hints::new())
+            }
             Ok((remaining, record)) => {
                 header(fields);
 
@@ -315,6 +325,47 @@ impl Protocol for TlsProtocol {
 
     fn dependencies(&self) -> &'static [&'static str] {
         &["tcp"]
+    }
+}
+
+/// Whether the body of a handshake record, of which tls-parser took the
+/// first `parsed` messages, is plaintext handshake messages.
+///
+/// tls-parser accepts a record whose first messages parse and ignores the
+/// rest, which an encrypted record can pass: the `Finished` of TLS 1.2 with
+/// AES-GCM starts with its 8-byte explicit nonce, which Go, NSS and BoringSSL
+/// make the sequence number, 0 for that record. Its first four bytes are then
+/// an empty HelloRequest, and so are the next four for a sequence number
+/// below 2^24. Hence:
+///
+/// - a HelloRequest (type 0, empty) is a record of its own: one that is not
+///   is a nonce;
+/// - after the messages taken, the record is either done or holds the start
+///   of one message that continues in the next record (its length is more
+///   than what is left, or its header is cut): a handshake message may be
+///   fragmented over records. Anything else is not handshake messages.
+fn are_handshake_messages(body: &[u8], parsed: usize) -> bool {
+    let mut rest = body;
+    for _ in 0..parsed {
+        let [message_type, high, middle, low, tail @ ..] = rest else {
+            return false;
+        };
+        let length = u32::from_be_bytes([0, *high, *middle, *low]) as usize;
+        if *message_type == 0 && (length != 0 || body.len() != 4) {
+            return false;
+        }
+        let Some(next) = tail.get(length..) else {
+            return false;
+        };
+        rest = next;
+    }
+    match rest {
+        [_, high, middle, low, tail @ ..] => {
+            let length = u32::from_be_bytes([0, *high, *middle, *low]) as usize;
+            length > tail.len()
+        }
+        // Nothing left, or a header cut by the end of the record.
+        _ => true,
     }
 }
 
@@ -1039,6 +1090,95 @@ mod tests {
         assert!(result.remaining.is_empty());
         assert_eq!(names(&result), RECORD_HEADER);
         assert_eq!(result.get("record_type"), Some(&FieldValue::UInt8(22)));
+    }
+
+    #[test]
+    fn an_encrypted_handshake_record_with_a_sequence_number_nonce_is_its_header() {
+        // A TLS 1.2 AES-GCM `Finished` as Go, NSS and BoringSSL send it: the
+        // explicit nonce is the sequence number, 0, which tls-parser reads
+        // as two empty HelloRequests followed by bytes it stops at. The same
+        // for later sequence numbers (a renegotiation's handshake records).
+        for sequence in [0_u64, 1, 5, 0x00ff_ffff, 0x0100_0000] {
+            for ciphertext in [[0xf7_u8; 32], [0x00; 32], [0x10; 32]] {
+                let mut payload = sequence.to_be_bytes().to_vec();
+                payload.extend_from_slice(&ciphertext);
+                let packet = record(22, &payload);
+                let result = TlsProtocol.parse_layer(&packet, &ParseContext::new(1));
+
+                assert!(result.is_ok(), "{sequence}");
+                assert!(result.remaining.is_empty(), "{sequence}");
+                assert_eq!(names(&result), RECORD_HEADER, "{sequence} {ciphertext:?}");
+            }
+        }
+        // What follows it in the segment is left.
+        let mut packet = record(22, &[0; 40]);
+        packet.extend(record(23, &[0xcd; 4]));
+        let result = TlsProtocol.parse_layer(&packet, &ParseContext::new(1));
+        assert_eq!(names(&result), RECORD_HEADER);
+        assert_eq!(result.remaining.len(), 9);
+    }
+
+    #[test]
+    fn a_hello_request_on_its_own_is_one() {
+        let packet = record(22, &[0, 0, 0, 0]);
+        let result = TlsProtocol.parse_layer(&packet, &ParseContext::new(1));
+
+        assert!(result.is_ok());
+        assert_eq!(result.get("handshake_type"), Some(&FieldValue::UInt8(0)));
+    }
+
+    /// The handshake messages of a ServerHello record, without its header.
+    fn server_hello_messages() -> Vec<u8> {
+        create_tls_server_hello()[5..].to_vec()
+    }
+
+    #[test]
+    fn a_handshake_message_fragmented_over_records_is_still_parsed() {
+        // A ServerHello and the start of a Certificate that continues in
+        // the next record, as a stack that fills its records sends them.
+        let mut payload = server_hello_messages();
+        payload.extend_from_slice(&[11, 0x00, 0x10, 0x00]);
+        payload.extend_from_slice(&[0x30; 100]);
+        let packet = record(22, &payload);
+        let result = TlsProtocol.parse_layer(&packet, &ParseContext::new(1));
+        assert!(result.is_ok());
+        assert_eq!(result.get("handshake_type"), Some(&FieldValue::UInt8(2)));
+        assert_eq!(
+            result.get("selected_cipher_id"),
+            Some(&FieldValue::UInt16(0xC02F))
+        );
+
+        // Or with the record ending inside the next message's header.
+        for cut in 1..4 {
+            let mut payload = server_hello_messages();
+            payload.extend_from_slice(&[11, 0x00, 0x10, 0x00][..cut]);
+            let packet = record(22, &payload);
+            let result = TlsProtocol.parse_layer(&packet, &ParseContext::new(1));
+            assert_eq!(
+                result.get("handshake_type"),
+                Some(&FieldValue::UInt8(2)),
+                "{cut}"
+            );
+        }
+
+        // The record that has the rest of the Certificate starts inside it,
+        // which is not handshake messages: its header only, as before.
+        let packet = record(22, &[0x30; 64]);
+        let result = TlsProtocol.parse_layer(&packet, &ParseContext::new(1));
+        assert!(result.is_ok());
+        assert_eq!(names(&result), RECORD_HEADER);
+    }
+
+    #[test]
+    fn a_record_with_bytes_after_its_messages_is_its_header() {
+        // A complete message, then four bytes that tls-parser does not take
+        // and that are not the start of a longer message.
+        let mut payload = server_hello_messages();
+        payload.extend_from_slice(&[0xf7, 0x00, 0x00, 0x00]);
+        let packet = record(22, &payload);
+        let result = TlsProtocol.parse_layer(&packet, &ParseContext::new(1));
+        assert!(result.is_ok());
+        assert_eq!(names(&result), RECORD_HEADER);
     }
 
     #[test]

@@ -53,6 +53,19 @@ pub enum Layout {
     Batched,
 }
 
+/// How a TLS 1.2 sender of an AES-GCM suite chooses the explicit part of
+/// each record's nonce (RFC 5288: 8 bytes, sent before the ciphertext).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExplicitNonce {
+    /// The record's sequence number, so 0 for the `Finished` of each side:
+    /// what Go's crypto/tls, NSS and BoringSSL send.
+    Sequence,
+    /// A counter that does not start at the sequence number (`pcapsql\0`
+    /// and up, a different one for each side), so that a decryption that
+    /// used the sequence number instead of the bytes in the record fails.
+    Counter,
+}
+
 /// One connection to describe: see the [module](self).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Scenario {
@@ -63,6 +76,8 @@ pub struct Scenario {
     pub layout: Layout,
     /// Whether the handshake negotiates the application protocol (ALPN).
     pub alpn: bool,
+    /// The explicit nonces of the records of a TLS 1.2 AES-GCM suite.
+    pub explicit_nonce: ExplicitNonce,
 }
 
 /// HTTP/2 over TLS 1.3 with `TLS_AES_128_GCM_SHA256`.
@@ -72,6 +87,7 @@ pub const TLS13_HTTP2: Scenario = Scenario {
     application: Application::Http2,
     layout: Layout::Separate,
     alpn: true,
+    explicit_nonce: ExplicitNonce::Sequence,
 };
 
 /// HTTP/2 over TLS 1.2 with `TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256`.
@@ -81,15 +97,18 @@ pub const TLS12_HTTP2: Scenario = Scenario {
     application: Application::Http2,
     layout: Layout::Batched,
     alpn: true,
+    explicit_nonce: ExplicitNonce::Counter,
 };
 
-/// HTTP/1.1 over TLS 1.2 with `TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256`.
+/// HTTP/1.1 over TLS 1.2 with `TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256`,
+/// with the sequence numbers as explicit nonces.
 pub const TLS12_HTTP1: Scenario = Scenario {
     version: Version::Tls12,
     cipher_suite: 0xc02f,
     application: Application::Http1,
     layout: Layout::Batched,
     alpn: true,
+    explicit_nonce: ExplicitNonce::Sequence,
 };
 
 /// The capture of [`TLS13_HTTP2`], as `fixtures/tls13_http2.pcap` holds it.
