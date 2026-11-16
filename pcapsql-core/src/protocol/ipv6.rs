@@ -9,6 +9,10 @@ use super::{
 };
 use crate::schema::{DataKind, FieldDescriptor};
 
+/// The link type of a capture of raw IPv6 datagrams, with no link-layer
+/// header (`LINKTYPE_IPV6`).
+pub const LINKTYPE_IPV6: u16 = 229;
+
 /// IPv6 Next Header values for extension headers and encapsulation.
 pub mod next_header {
     pub const HOP_BY_HOP: u8 = 0;
@@ -157,10 +161,16 @@ impl Protocol for Ipv6Protocol {
     }
 
     fn dispatch(&self) -> Dispatch {
-        const RULES: &[DispatchRule] = &[DispatchRule::hints(
-            &[Cond::Hint(HintKey::EtherType, &[ethertype::IPV6 as u64])],
-            100,
-        )];
+        const RULES: &[DispatchRule] = &[
+            DispatchRule::Root {
+                link_type: LINKTYPE_IPV6,
+                priority: 100,
+            },
+            DispatchRule::hints(
+                &[Cond::Hint(HintKey::EtherType, &[ethertype::IPV6 as u64])],
+                100,
+            ),
+        ];
         Dispatch::Exact(RULES)
     }
 
@@ -174,6 +184,10 @@ impl Protocol for Ipv6Protocol {
     }
 
     fn can_parse(&self, context: &ParseContext) -> Option<u32> {
+        // A capture without a link layer: every frame is an IPv6 datagram.
+        if context.is_root() && context.link_type == LINKTYPE_IPV6 {
+            return Some(100);
+        }
         match context.hint(HintKey::EtherType) {
             Some(et) if et == ethertype::IPV6 as u64 => Some(100),
             _ => None,
@@ -842,6 +856,36 @@ mod tests {
         assert_eq!(
             result.hint(HintKey::TunnelType),
             Some(TunnelType::Ip6InIp6 as u64)
+        );
+    }
+
+    /// A capture of raw IPv6 datagrams (`LINKTYPE_IPV6`) has no link layer:
+    /// the frame is the datagram, whatever the tables asked for.
+    #[test]
+    fn a_raw_ipv6_capture_starts_with_ipv6() {
+        use super::super::{default_registry, parse_packet, ParseBuf, ParseScope};
+        let udp = [0x9C, 0x40, 0x00, 0x35, 0x00, 0x08, 0x00, 0x00]; // 40000 -> 53, len 8
+                                                                    // Payload length 8, next header UDP, hop limit 64.
+        let mut datagram = vec![0x60, 0, 0, 0, 0, 8, 17, 64];
+        datagram.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        datagram.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
+        datagram.extend_from_slice(&udp);
+        let registry = default_registry();
+        for scope in [
+            ParseScope::full(),
+            ParseScope::for_tables(&["udp"], &registry),
+        ] {
+            let mut buf = ParseBuf::new();
+            let layers: Vec<&str> =
+                parse_packet(&registry, LINKTYPE_IPV6, &datagram, &scope, &mut buf)
+                    .names()
+                    .collect();
+            assert_eq!(layers, ["ipv6", "udp"]);
+        }
+        assert_eq!(Ipv6Protocol.can_parse(&ParseContext::new(228)), None);
+        assert_eq!(
+            Ipv6Protocol.can_parse(&ParseContext::new(LINKTYPE_IPV6)),
+            Some(100)
         );
     }
 }

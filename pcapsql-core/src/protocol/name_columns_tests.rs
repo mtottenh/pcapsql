@@ -313,9 +313,15 @@ const NAME_COLUMNS: &[NameColumn] = &[
     NameColumn {
         column: "tls.version",
         codes: U16,
-        // A ChangeCipherSpec record.
+        // A ChangeCipherSpec record. Its version is 3.x (SSL 3.0 to
+        // TLS 1.3 and what comes after): anything else there is not the
+        // start of a record, and not a row.
         layer: |version| tls_record(20, code(version), &[1]),
-        table: |version| text(tls_version_name(code(version))),
+        table: |version| {
+            (version >> 8 == 3)
+                .then(|| tls_version_name(code(version)))
+                .and_then(text)
+        },
     },
     NameColumn {
         column: "tls.alert_description_str",

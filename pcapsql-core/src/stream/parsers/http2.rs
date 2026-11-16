@@ -6,7 +6,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use bytes::{Buf, BytesMut};
 use compact_str::CompactString;
 use hpack::Decoder as HpackDecoder;
 
@@ -278,9 +277,6 @@ struct Http2ConnectionState {
     /// Continuation state: (stream_id, accumulated header block, direction)
     continuation: Option<(u32, Vec<u8>, Direction)>,
 
-    /// Buffer for incomplete frames
-    buffer: BytesMut,
-
     /// Whether we've seen the client preface
     client_preface_seen: bool,
 
@@ -295,7 +291,6 @@ impl Http2ConnectionState {
             server_decoder: HpackDecoder::new(),
             streams: HashMap::new(),
             continuation: None,
-            buffer: BytesMut::new(),
             client_preface_seen: false,
             server_preface_seen: false,
         }
@@ -874,50 +869,39 @@ impl StreamParser for Http2StreamParser {
             .entry(context.connection_id)
             .or_insert_with(Http2ConnectionState::new);
 
-        // Track buffer size before adding new data
-        let buffer_len_before = state.buffer.len();
-
-        // Append new data to buffer
-        state.buffer.extend_from_slice(data);
+        // The caller keeps what is not consumed and gives it again with what
+        // follows, so nothing of the stream is kept here: one buffer for a
+        // connection would mix the bytes of its two directions.
+        let mut rest = data;
 
         // Check for connection preface (client side)
         if context.direction == Direction::ToServer && !state.client_preface_seen {
-            if state.buffer.len() >= CONNECTION_PREFACE.len() {
-                if &state.buffer[..CONNECTION_PREFACE.len()] == CONNECTION_PREFACE {
-                    state.buffer.advance(CONNECTION_PREFACE.len());
-                    state.client_preface_seen = true;
-                } else {
-                    // Not HTTP/2
-                    return StreamParseResult::NotThisProtocol;
-                }
-            } else {
+            if let Some(after) = rest.strip_prefix(CONNECTION_PREFACE) {
+                rest = after;
+                state.client_preface_seen = true;
+            } else if CONNECTION_PREFACE.starts_with(rest) {
                 // Need more data
                 return StreamParseResult::NeedMore {
                     minimum_bytes: Some(CONNECTION_PREFACE.len()),
                 };
+            } else {
+                // Not HTTP/2
+                return StreamParseResult::NotThisProtocol;
             }
         }
 
         let mut messages = Vec::new();
-        // Calculate bytes consumed: (old buffer + new data) - remaining buffer
-        // This is computed at the end after processing frames
-        let total_input = buffer_len_before + data.len();
 
         // Parse complete frames
-        loop {
-            if state.buffer.len() < FrameHeader::SIZE {
-                break; // Need more data for header
-            }
-
-            let header = FrameHeader::parse(&state.buffer).unwrap();
+        while let Some(header) = FrameHeader::parse(rest) {
             let total_frame_len = FrameHeader::SIZE + header.length as usize;
 
-            if state.buffer.len() < total_frame_len {
+            if rest.len() < total_frame_len {
                 break; // Need more data for payload
             }
 
-            let payload = state.buffer[FrameHeader::SIZE..total_frame_len].to_vec();
-            state.buffer.advance(total_frame_len);
+            let payload = &rest[FrameHeader::SIZE..total_frame_len];
+            rest = &rest[total_frame_len..];
 
             // Track server preface (first SETTINGS frame from server)
             if context.direction == Direction::ToClient
@@ -928,7 +912,7 @@ impl StreamParser for Http2StreamParser {
             }
 
             // Parse the frame
-            let fields = Self::parse_frame(state, &header, &payload, context.direction, 0);
+            let fields = Self::parse_frame(state, &header, payload, context.direction, 0);
 
             let message = ParsedMessage {
                 protocol: "http2",
@@ -941,8 +925,7 @@ impl StreamParser for Http2StreamParser {
             messages.push(message);
         }
 
-        // Calculate total bytes consumed: (old buffer + new data) - remaining buffer
-        let total_consumed = total_input - state.buffer.len();
+        let total_consumed = data.len() - rest.len();
 
         if !messages.is_empty() {
             StreamParseResult::Complete {
@@ -1418,6 +1401,65 @@ mod tests {
                 );
             }
             _ => panic!("Expected Complete"),
+        }
+    }
+
+    /// What is not a complete frame is not consumed, and not kept either:
+    /// the caller gives it again, and the other direction's bytes do not
+    /// end up between its halves.
+    #[test]
+    fn test_incomplete_frame_is_left_to_the_caller() {
+        let parser = Http2StreamParser::new();
+        let mut to_client = test_context();
+        to_client.direction = Direction::ToClient;
+        let mut to_server = test_context();
+        to_server.direction = Direction::ToServer;
+
+        // SETTINGS ACK, then a PING without its last four bytes.
+        let settings = [0x00, 0x00, 0x00, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00];
+        let mut ping = vec![0x00, 0x00, 0x08, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00];
+        ping.extend_from_slice(&[7u8; 8]);
+        let first = [settings.as_slice(), &ping[..13]].concat();
+
+        let consumed = match parser.parse_stream(&first, &to_client) {
+            StreamParseResult::Complete {
+                messages,
+                bytes_consumed,
+            } => {
+                assert_eq!(messages.len(), 1);
+                bytes_consumed
+            }
+            other => panic!("Expected Complete, got {other:?}"),
+        };
+        assert_eq!(consumed, settings.len());
+
+        // The client's preface and SETTINGS in between.
+        let mut client = CONNECTION_PREFACE.to_vec();
+        client.extend_from_slice(&[0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        match parser.parse_stream(&client, &to_server) {
+            StreamParseResult::Complete {
+                messages,
+                bytes_consumed,
+            } => {
+                assert_eq!(messages.len(), 1);
+                assert_eq!(bytes_consumed, client.len());
+            }
+            other => panic!("Expected Complete, got {other:?}"),
+        }
+
+        // The rest of the server's stream: what was left, and the end.
+        match parser.parse_stream(&ping, &to_client) {
+            StreamParseResult::Complete {
+                messages,
+                bytes_consumed,
+            } => {
+                assert_eq!(bytes_consumed, ping.len());
+                assert_eq!(
+                    messages[0].fields.get("frame_type"),
+                    Some(&OwnedFieldValue::Str("PING"))
+                );
+            }
+            other => panic!("Expected Complete, got {other:?}"),
         }
     }
 }

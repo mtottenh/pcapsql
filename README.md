@@ -107,8 +107,15 @@ Automatic parsing of tunneled traffic with inner protocol extraction:
 Decrypt TLS traffic using SSLKEYLOGFILE (NSS format):
 - TLS 1.2 (`CLIENT_RANDOM`) and TLS 1.3 (traffic secrets); entries with other
   labels (e.g. `ECH_SECRET`) are skipped, as in Wireshark
-- AES-128-GCM, AES-256-GCM, ChaCha20-Poly1305
+- The cipher suites with AES-128-GCM, AES-256-GCM or ChaCha20-Poly1305; a
+  session with another suite (CBC, AES-CCM) is listed in `tls_sessions`
+  with `is_decrypted = false`
+- What a session carries is parsed as HTTP/2 (`http2`) or HTTP/1.x
+  (`http_messages`), by its ALPN protocol
 - SNI and ALPN extraction
+- Not decrypted: TLS 1.3 early data (0-RTT), records after a `KeyUpdate`,
+  and a TLS 1.3 session whose key log lacks the handshake secrets. The
+  secrets inside a pcapng capture (Decryption Secrets Blocks) are not read
 
 ### HTTP/2 Analysis
 Full HTTP/2 frame parsing from decrypted TLS:
@@ -168,7 +175,7 @@ SELECT window_start, count(*) FROM tumble(frames, INTERVAL '10' SECOND) GROUP BY
 | `dns`, `dhcp`, `ntp` | Application protocols |
 | `http` | HTTP/1.x request/status line and headers, per packet (the segment that starts a message) |
 | `tls` | TLS records and handshakes |
-| `tcp_connections`, `tls_sessions`, `http_messages` | Reassembled TCP streams: one row per connection, TLS handshake, HTTP/1.x message |
+| `tcp_connections`, `tls_sessions`, `http_messages` | Reassembled TCP streams: one row per connection, TLS handshake, HTTP/1.x message (in the clear, or inside TLS with `--keylog`) |
 | `http2` | HTTP/2 frames (requires TLS decryption) |
 | `vxlan`, `gre`, `gtp`, `ipsec` | Tunnel headers (inner layers get `encap_depth` > 0 and a `tunnel_type`); `gtp` includes the GTPv1 N-PDU number and extension header chain and the GTPv2-C flags |
 | `mpls` | Label stacks (label switching, not counted as a tunnel) |

@@ -55,6 +55,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rows of a query as a pcap file. The query needs the columns `raw_data`
   and `timestamp`. The options are `LINKTYPE`, `SNAPLEN` and `PRECISION`.
 - `pcapsql-core`: `io::PcapWriter` writes classic pcap files.
+- Decrypted HTTP/1.x traffic now appears in `http_messages`.
+- Captures with raw IP link types (228 and 229) are parsed.
 
 ### Changed
 
@@ -128,6 +130,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `query::stream_tables` module and `NormalizedBatchSet` are removed.
 - Performance (CLI): writing fixed-width columns to Arrow uses 4% to 12%
   fewer instructions per packet.
+- The `tls` table has a row for each encrypted record. Before, these
+  records caused parse errors.
+- `tls_sessions.cipher_suite` shows the IANA name for all known suites.
 
 ### Removed
 
@@ -145,6 +150,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   connection, so it joins with `tcp_connections`.
 - With a key log, `tls_sessions.version` showed `TLS 1.2` for a TLS 1.3
   session.
+- TLS 1.2 was never decrypted.
+- TLS 1.2 with ChaCha20-Poly1305 used the wrong nonce.
+- `tls_sessions.is_decrypted` was true only for TLS 1.3.
+- Decryption stopped at a TLS record or HTTP/2 frame that continued in the
+  next TCP segment.
+- TLS 1.3: decryption failed when the server sent several handshake
+  messages in one record.
+- Only the first of several TLS records in one TCP segment was reported.
 
 ## [0.4.1] - 2026-10-24
 
