@@ -11,7 +11,7 @@ use datafusion::common::Result as DFResult;
 use datafusion::logical_expr::{
     ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
 };
-use pcapsql_core::protocol::{bgp_message_type as message_type, bgp_origin_type as origin_type};
+use pcapsql_core::format::{bgp_message_type_name, bgp_origin_name};
 
 /// Create the `bgp_message_type_name()` UDF.
 ///
@@ -78,20 +78,9 @@ impl ScalarUDFImpl for BgpMessageTypeNameUdf {
 
         let result: StringArray = values
             .iter()
-            .map(|opt| opt.map(bgp_message_type_to_name))
+            .map(|opt| opt.map(bgp_message_type_name))
             .collect();
         Ok(ColumnarValue::Array(Arc::new(result)))
-    }
-}
-
-fn bgp_message_type_to_name(msg_type: u8) -> String {
-    match msg_type {
-        message_type::OPEN => "OPEN".to_string(),
-        message_type::UPDATE => "UPDATE".to_string(),
-        message_type::NOTIFICATION => "NOTIFICATION".to_string(),
-        message_type::KEEPALIVE => "KEEPALIVE".to_string(),
-        message_type::ROUTE_REFRESH => "ROUTE-REFRESH".to_string(),
-        _ => format!("Unknown ({msg_type})"),
     }
 }
 
@@ -136,51 +125,7 @@ impl ScalarUDFImpl for BgpOriginNameUdf {
             .downcast_ref::<UInt8Array>()
             .expect("bgp_origin_name: expected uint8 array");
 
-        let result: StringArray = values
-            .iter()
-            .map(|opt| opt.map(bgp_origin_to_name))
-            .collect();
+        let result: StringArray = values.iter().map(|opt| opt.map(bgp_origin_name)).collect();
         Ok(ColumnarValue::Array(Arc::new(result)))
-    }
-}
-
-fn bgp_origin_to_name(origin: u8) -> String {
-    match origin {
-        origin_type::IGP => "IGP".to_string(),
-        origin_type::EGP => "EGP".to_string(),
-        origin_type::INCOMPLETE => "INCOMPLETE".to_string(),
-        _ => format!("Unknown ({origin})"),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_bgp_message_type_name() {
-        assert_eq!(bgp_message_type_to_name(message_type::OPEN), "OPEN");
-        assert_eq!(bgp_message_type_to_name(message_type::UPDATE), "UPDATE");
-        assert_eq!(
-            bgp_message_type_to_name(message_type::NOTIFICATION),
-            "NOTIFICATION"
-        );
-        assert_eq!(
-            bgp_message_type_to_name(message_type::KEEPALIVE),
-            "KEEPALIVE"
-        );
-        assert_eq!(
-            bgp_message_type_to_name(message_type::ROUTE_REFRESH),
-            "ROUTE-REFRESH"
-        );
-        assert_eq!(bgp_message_type_to_name(99), "Unknown (99)");
-    }
-
-    #[test]
-    fn test_bgp_origin_name() {
-        assert_eq!(bgp_origin_to_name(origin_type::IGP), "IGP");
-        assert_eq!(bgp_origin_to_name(origin_type::EGP), "EGP");
-        assert_eq!(bgp_origin_to_name(origin_type::INCOMPLETE), "INCOMPLETE");
-        assert_eq!(bgp_origin_to_name(3), "Unknown (3)");
     }
 }

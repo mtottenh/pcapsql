@@ -16,6 +16,7 @@
 
 use std::fs::File;
 use std::io::{Chain, Cursor, Read};
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
@@ -26,7 +27,8 @@ use crate::error::{Error, PcapError};
 
 use super::decompress::{Compression, DecompressReader, MmapSlice};
 use super::index::{self, BoundaryIndex};
-use super::pcap_stream::{GenericPcapReader, PcapFormat};
+use super::pcap_stream::{Delivered, GenericPcapReader, Pause, PcapFormat};
+use super::read_source::process_bounded;
 use super::source::{starts_at_header, synth_header_for};
 use super::{
     PacketPosition, PacketRange, PacketReader, PacketRef, PacketSource, PacketSourceMetadata,
@@ -362,25 +364,14 @@ impl MmapPacketReader {
 }
 
 impl PacketReader for MmapPacketReader {
-    fn process_packets<F>(&mut self, max: usize, f: F) -> Result<usize, Error>
+    #[inline]
+    fn process_packets_flow<F>(&mut self, max: usize, f: F) -> Result<Delivered, Error>
     where
-        F: FnMut(PacketRef<'_>) -> Result<(), Error>,
+        F: FnMut(PacketRef<'_>) -> ControlFlow<Pause>,
     {
-        // `end_frame` is exclusive: emit frames with number < end_frame.
-        let effective_max = match self.end_frame {
-            Some(end) => {
-                let current = self.inner.frame_count();
-                let remaining = end.saturating_sub(current).saturating_sub(1);
-                if remaining == 0 {
-                    return Ok(0);
-                }
-                max.min(remaining as usize)
-            }
-            None => max,
-        };
-        let count = self.inner.process_packets(effective_max, f)?;
+        let delivered = process_bounded(&mut self.inner, self.end_frame, max, f)?;
         self.link_type = self.inner.link_type();
-        Ok(count)
+        Ok(delivered)
     }
 
     fn position(&self) -> PacketPosition {

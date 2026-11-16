@@ -31,6 +31,7 @@
 //! this process or another — partition immediately with no full download.
 
 use std::io::{self, Chain, Cursor, Read};
+use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -140,6 +141,8 @@ fn index_cache_path(location: &CloudLocation) -> Option<PathBuf> {
     index_cache_dir().map(|d| d.join(format!("{:016x}.idx", index::header_hash(key.as_bytes()))))
 }
 use super::index::{self, BoundaryIndex};
+use super::pcap_stream::{Delivered, Pause};
+use super::read_source::process_bounded;
 use super::source::{starts_at_header, synth_header_for};
 use crate::io::{
     decompress_header, Compression, DecompressReader, GenericPcapReader, PacketPosition,
@@ -1060,25 +1063,14 @@ impl CloudPacketReader {
 }
 
 impl PacketReader for CloudPacketReader {
-    fn process_packets<F>(&mut self, max: usize, f: F) -> Result<usize, Error>
+    #[inline]
+    fn process_packets_flow<F>(&mut self, max: usize, f: F) -> Result<Delivered, Error>
     where
-        F: FnMut(PacketRef<'_>) -> Result<(), Error>,
+        F: FnMut(PacketRef<'_>) -> ControlFlow<Pause>,
     {
-        // `end_frame` is exclusive: emit frames with number < end_frame.
-        let effective_max = match self.end_frame {
-            Some(end) => {
-                let current = self.inner.frame_count();
-                let remaining = end.saturating_sub(current).saturating_sub(1);
-                if remaining == 0 {
-                    return Ok(0);
-                }
-                max.min(remaining as usize)
-            }
-            None => max,
-        };
-        let count = self.inner.process_packets(effective_max, f)?;
+        let delivered = process_bounded(&mut self.inner, self.end_frame, max, f)?;
         self.link_type = self.inner.link_type();
-        Ok(count)
+        Ok(delivered)
     }
 
     fn position(&self) -> PacketPosition {

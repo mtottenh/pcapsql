@@ -14,15 +14,17 @@
 //! compile-time impossibility — there is no runtime `seekable` flag to lie.
 
 use std::fs::File;
-use std::io::{Chain, Cursor, Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom};
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use crate::error::{Error, PcapError};
-use crate::io::decompress::{decompress_header, Compression, DecompressReader};
+use crate::io::decompress::{decompress_header, Compression};
 use crate::io::index::{self, BoundaryIndex};
-use crate::io::pcap_stream::{GenericPcapReader, PcapFormat};
+use crate::io::pcap_stream::{Delivered, Pause, PcapFormat};
+use crate::io::read_source::ReadPacketReader;
 
 /// Borrowed packet reference - zero-copy view into the parser buffer.
 ///
@@ -204,10 +206,40 @@ pub trait SeekablePacketSource: PacketSource {
 /// stream). The starting frame number is honored so frame numbers are globally
 /// correct without cross-partition coordination.
 pub trait PacketReader: Send + Unpin {
-    /// Process up to `max` packets with borrowed data via callback.
-    fn process_packets<F>(&mut self, max: usize, f: F) -> Result<usize, Error>
+    /// Process up to `max` packets with borrowed data via callback, letting
+    /// the callback stop the loop: `Break(Pause::After)` consumes the packet
+    /// it was shown, `Break(Pause::Before)` leaves it to be delivered again
+    /// by the next call, with the same frame number and bytes.
+    ///
+    /// [`Delivered::consumed`] of 0 with no pause (and `max > 0`) means the
+    /// reader has nothing more: the end of the capture, or of its range.
+    fn process_packets_flow<F>(&mut self, max: usize, f: F) -> Result<Delivered, Error>
     where
-        F: FnMut(PacketRef<'_>) -> Result<(), Error>;
+        F: FnMut(PacketRef<'_>) -> ControlFlow<Pause>;
+
+    /// Process up to `max` packets with borrowed data via callback.
+    ///
+    /// Returns the number of packets delivered. An error from the callback
+    /// stops the loop and is returned, and the packet the callback was shown
+    /// counts as consumed: the next call starts at the following record.
+    #[inline]
+    fn process_packets<F>(&mut self, max: usize, mut f: F) -> Result<usize, Error>
+    where
+        F: FnMut(PacketRef<'_>) -> Result<(), Error>,
+    {
+        let mut failed = None;
+        let delivered = self.process_packets_flow(max, |packet| match f(packet) {
+            Ok(()) => ControlFlow::Continue(()),
+            Err(e) => {
+                failed = Some(e);
+                ControlFlow::Break(Pause::After)
+            }
+        })?;
+        match failed {
+            Some(e) => Err(e),
+            None => Ok(delivered.consumed),
+        }
+    }
 
     /// Current position in the source.
     fn position(&self) -> PacketPosition;
@@ -241,11 +273,6 @@ pub trait PacketReader: Send + Unpin {
     /// Get the link type for packets from this reader.
     fn link_type(&self) -> u32;
 }
-
-/// The concrete `Read` stack used by file readers: an optional synthesized header
-/// (empty for sequential reads) chained before the (possibly seeked) file,
-/// wrapped in decompression.
-type FileInner = GenericPcapReader<DecompressReader<Chain<Cursor<Vec<u8>>, File>>>;
 
 /// Packet source backed by a PCAP/PCAPNG file on the local filesystem.
 #[derive(Clone)]
@@ -372,7 +399,15 @@ impl PacketSource for FilePacketSource {
     }
 
     fn sequential_reader(&self) -> Result<Self::Reader, Error> {
-        FilePacketReader::sequential(&self.path, self.compression, self.pcap_format)
+        let file = File::open(&self.path).map_err(Error::Io)?;
+        ReadPacketReader::open(
+            Vec::new(),
+            file,
+            self.compression,
+            self.pcap_format,
+            0,
+            None,
+        )
     }
 }
 
@@ -392,20 +427,13 @@ impl SeekablePacketSource for FilePacketSource {
         // at byte 0 begins with the file's own header, so it is read
         // sequentially too (never a synthesized header on top of the real one).
         if self.compression.is_compressed() || starts_at_header(range) {
-            let mut reader = self.sequential_reader()?;
-            reader.end_frame = end_frame;
-            return Ok(reader);
+            return Ok(self.sequential_reader()?.with_end_frame(end_frame));
         }
         let idx = self.ensure_index()?;
-        let header = synth_header_for(&idx, range.start.frame_number, self.pcap_format)?;
-        FilePacketReader::at(
-            &self.path,
-            self.pcap_format,
-            header,
-            range.start.byte_offset,
-            range.start.frame_number,
-            end_frame,
-        )
+        let mut file = File::open(&self.path).map_err(Error::Io)?;
+        file.seek(SeekFrom::Start(range.start.byte_offset))
+            .map_err(Error::Io)?;
+        ReadPacketReader::at(file, self.pcap_format, &idx, range)
     }
 
     fn partitions(&self, max: usize) -> Result<Vec<PacketRange>, Error> {
@@ -425,99 +453,8 @@ impl SeekablePacketSource for FilePacketSource {
     }
 }
 
-/// Sequential packet reader for PCAP files.
-pub struct FilePacketReader {
-    inner: FileInner,
-    link_type: u32,
-    end_frame: Option<u64>,
-}
-
-impl FilePacketReader {
-    /// Open a sequential reader over the whole file (honors compression).
-    fn sequential(
-        path: &Path,
-        compression: Compression,
-        format: PcapFormat,
-    ) -> Result<Self, Error> {
-        let file = File::open(path).map_err(Error::Io)?;
-        let chain = Cursor::new(Vec::new()).chain(file);
-        let decode = DecompressReader::new(chain, compression).map_err(|e| {
-            Error::Pcap(PcapError::InvalidFormat {
-                reason: format!("decompressor: {e}"),
-            })
-        })?;
-        let inner = GenericPcapReader::with_format(decode, format)?;
-        let link_type = inner.link_type();
-        Ok(Self {
-            inner,
-            link_type,
-            end_frame: None,
-        })
-    }
-
-    /// Open a reader at a byte offset, prepending a synthesized header so the
-    /// parser establishes link type / interface state without a real header at
-    /// the offset. Uncompressed sources only.
-    fn at(
-        path: &Path,
-        format: PcapFormat,
-        synth_header: Vec<u8>,
-        byte_offset: u64,
-        start_frame: u64,
-        end_frame: Option<u64>,
-    ) -> Result<Self, Error> {
-        let mut file = File::open(path).map_err(Error::Io)?;
-        file.seek(SeekFrom::Start(byte_offset)).map_err(Error::Io)?;
-        let chain = Cursor::new(synth_header).chain(file);
-        let decode = DecompressReader::new(chain, Compression::None).map_err(|e| {
-            Error::Pcap(PcapError::InvalidFormat {
-                reason: format!("decompressor: {e}"),
-            })
-        })?;
-        let inner = GenericPcapReader::with_format_starting_at(decode, format, start_frame)?;
-        let link_type = inner.link_type();
-        Ok(Self {
-            inner,
-            link_type,
-            end_frame,
-        })
-    }
-}
-
-impl PacketReader for FilePacketReader {
-    fn process_packets<F>(&mut self, max: usize, f: F) -> Result<usize, Error>
-    where
-        F: FnMut(PacketRef<'_>) -> Result<(), Error>,
-    {
-        // `end_frame` is exclusive: emit frames with number < end_frame.
-        let effective_max = match self.end_frame {
-            Some(end) => {
-                let current = self.inner.frame_count();
-                let remaining = end.saturating_sub(current).saturating_sub(1);
-                if remaining == 0 {
-                    return Ok(0);
-                }
-                max.min(remaining as usize)
-            }
-            None => max,
-        };
-        let count = self.inner.process_packets(effective_max, f)?;
-        self.link_type = self.inner.link_type();
-        Ok(count)
-    }
-
-    #[inline]
-    fn position(&self) -> PacketPosition {
-        PacketPosition {
-            byte_offset: self.inner.consumed_bytes(),
-            frame_number: self.inner.frame_count(),
-        }
-    }
-
-    fn link_type(&self) -> u32 {
-        self.link_type
-    }
-}
+/// Packet reader for PCAP files on the local filesystem.
+pub type FilePacketReader = ReadPacketReader<File>;
 
 /// Does this range begin at the source's own header (byte 0)? Such a range —
 /// [`PacketRange::whole`], or a caller-built range from byte 0 — must be read

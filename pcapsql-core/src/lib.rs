@@ -60,7 +60,7 @@
 //! |                boundary index + sidecar                             |
 //! |  stream/     - TCP reassembly, HTTP/TLS stream parsing              |
 //! |  tls/        - TLS key derivation and decryption                    |
-//! |  format/     - Address formatting utilities                         |
+//! |  format/     - Address formatting, SQL scalar function kernels      |
 //! |  error/      - Error types                                          |
 //! +---------------------------------------------------------------------+
 //! ```
@@ -91,6 +91,7 @@ pub mod format;
 pub mod io;
 pub mod prelude;
 pub mod protocol;
+pub mod scan;
 pub mod schema;
 pub mod stream;
 pub mod tls;

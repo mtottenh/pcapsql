@@ -126,3 +126,7 @@ assets = [
 [[bench]]
 name = "baseline"
 harness = false
+
+[[bench]]
+name = "scan"
+harness = false

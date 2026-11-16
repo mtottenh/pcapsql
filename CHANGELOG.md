@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   escaping, columns separated by tabs, one row per line. A multi-line text
   value such as `hdr_ascii(...)` output prints as rendered, and a row that
   already ends in a newline gets no second one.
+- `pcapsql-core`: `ReadPacketReader` reads packets from any `Read`. Use it
+  when your program opens the capture file itself.
+- `pcapsql-core`: `scan::Catalog::builtin()` lists every table and its
+  columns, without Arrow types. The `scan` module is not yet a stable API.
+- `pcapsql-core`: the logic of the SQL scalar functions (protocol names,
+  TCP flags, IP and MAC addresses, CIDR, hex) is in `pcapsql_core::format`.
 
 ## [0.4.1] - 2026-10-24
 
